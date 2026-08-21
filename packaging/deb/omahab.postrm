@@ -1,0 +1,19 @@
+#!/bin/sh
+# omahab postrm — reload systemd after removal and forget the unit state on
+# purge. State is deliberately preserved: /var/lib/omahab holds the control
+# database, encrypted secrets, instance identity, and the install journal;
+# /srv/omahab holds application data and backups. Destroying appliance state
+# is a documented manual step, never a package operation (same policy as
+# docker.io preserving /var/lib/docker).
+set -e
+
+if [ "$1" = remove ] && [ -d /run/systemd/system ]; then
+    systemctl --system daemon-reload >/dev/null || true
+fi
+
+if [ "$1" = purge ] && command -v deb-systemd-helper >/dev/null 2>&1; then
+    deb-systemd-helper purge omahabd.service >/dev/null || true
+    deb-systemd-helper unmask omahabd.service >/dev/null || true
+fi
+
+exit 0

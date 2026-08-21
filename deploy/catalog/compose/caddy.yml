@@ -1,0 +1,42 @@
+# Caddy edge — curated Omahab bundle
+# Pinned digest is REQUIRED: substituted from signed release manifest via ${CADDY_DIGEST}
+# omahabd validates image matches ^[^@]+@sha256:[a-f0-9]{64}$ after envsubst and refuses to pull otherwise.
+# No mutable tags are allowed.
+name: omahab-caddy
+networks:
+  omahab:
+    name: omahab
+    external: true
+services:
+  caddy:
+    image: docker.io/library/caddy@sha256:${CADDY_DIGEST:?pinned digest required - release substitution missing}
+    restart: unless-stopped
+    # Edge is the only bundle that publishes host ports. All other bundles use `expose` and are reachable via Caddy.
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+      - /etc/omahab/Caddyfile:/etc/caddy/Caddyfile:ro
+      - /var/lib/omahab/caddy:/var/lib/caddy:ro
+    networks:
+      - omahab
+    healthcheck:
+      test: ["CMD-SHELL", "caddy version >/dev/null 2>&1 && wget --no-verbose --tries=1 --spider http://127.0.0.1:2019/config/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # NO Docker socket mount. Never mount docker socket into applications.
+volumes:
+  caddy_data:
+    name: caddy_data
+  caddy_config:
+    name: caddy_config

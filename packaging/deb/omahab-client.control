@@ -1,0 +1,14 @@
+Package: omahab-client
+Version: @VERSION@
+Architecture: @ARCH@
+Section: admin
+Priority: optional
+Maintainer: Omahab Release <release@omahab.org>
+Homepage: https://get.omahab.org
+Description: Omahab companion daemon for desktop machines
+ omahab-clientd is the user-level companion service: it authenticates with
+ an Omahab server, verifies Tailscale state and instance identity, tracks
+ projects and remote runners, enrolls Syncthing folders, serves the shell
+ plugin over a local Unix socket, and launches Hermes Desktop and
+ terminals. Install this package on the desktop machine, not on the
+ server.

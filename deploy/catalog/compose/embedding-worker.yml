@@ -1,0 +1,53 @@
+# Embedding worker — curated Omahab bundle (OPTIONAL, off by default)
+# Isolated Python ONNX Runtime worker. MUST remain a separate failure domain from omahabd.
+# omahabd controls model selection + indexing jobs; worker does inference only.
+# Worker receives NO provider credentials and NO Docker socket.
+name: omahab-embedding-worker
+networks:
+  omahab:
+    name: omahab
+    external: true
+services:
+  embedding-worker:
+    image: ghcr.io/omahab/embedding-worker@sha256:${EMBEDDING_WORKER_DIGEST:?pinned digest required}
+    restart: unless-stopped
+    expose:
+      - "8090"
+    environment:
+      EMBEDDING_MODEL_ID: "${EMBEDDING_MODEL_ID:-omahab-embed-english}"
+      EMBEDDING_MODEL_PATH: /models/${EMBEDDING_MODEL_ID}
+      EMBEDDING_WORKER_BIND: "0.0.0.0:8090"
+      OMP_EMBEDDING_WORKER_TOKEN_FILE: /run/secrets/embedding_worker_token
+    secrets:
+      - embedding_worker_token
+    volumes:
+      - embedding_models:/models:ro
+      - /srv/omahab/derived-indexes:/data/indexes
+    networks:
+      - omahab
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:8090/health || wget --no-verbose --tries=1 --spider http://127.0.0.1:8090/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2.0"
+        reservations:
+          memory: 512M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # CRITICAL: No Docker socket mount. No provider credential env/file.
+
+secrets:
+  embedding_worker_token:
+    file: /var/lib/omahab/secrets/embedding_worker_token
+volumes:
+  embedding_models:
+    name: embedding_models

@@ -1,0 +1,36 @@
+# Omahab Email Worker — Cloudflare Email Routing (Worker)
+# Minimal transport adapter: validates envelope, enforces size, HMACs raw+metadata,
+# and forwards to the narrow /api/v1/email/ingest endpoint. No MIME parsing.
+name = "omahab-email-worker"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat"]
+
+# --- Non-secret configuration (inspectable) ---
+# The allowed recipient is the AI address, e.g. ai@example.com.
+# This is not a secret but is intentionally single-valued: the worker
+# enforces exact recipient matching and rejects all other RCPT TO.
+[vars]
+INGEST_URL = "https://api.example.com/api/v1/email/ingest"
+ALLOWED_RECIPIENT = "ai@example.com"
+MAX_RAW_BYTES = "26214400"
+
+# --- Secrets (never in vars, never in logs) ---
+# Set via: wrangler secret put HMAC_SECRET
+# And optionally: wrangler secret put HMAC_KEY_ID
+# HMAC_SECRET must be >=16 chars, high-entropy.
+# INGEST_URL and ALLOWED_RECIPIENT can also be set as secrets if
+# you prefer, but vars above is the paved road.
+
+# Email routing: bind this worker to your Cloudflare Email Routing rule.
+# Example (uncomment and adjust after `wrangler deploy` or via dashboard):
+#
+# [[email]]
+# address = "ai@example.com"
+#
+# Or via Cloudflare dashboard: Email Routing -> Routing rules -> Catch-all or specific
+# address -> Send to Worker -> omahab-email-worker
+
+[observability]
+enabled = true
+head_sampling_rate = 1

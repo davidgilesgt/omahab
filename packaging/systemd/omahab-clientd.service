@@ -1,0 +1,17 @@
+[Unit]
+Description=Omahab companion daemon (omahab-clientd)
+Documentation=https://get.omahab.org/docs/companion
+# The daemon exposes the shell-plugin Unix socket (precedence handled by the
+# daemon itself: OMAHAB_CLIENTD_SOCKET, then $XDG_RUNTIME_DIR, then
+# /run/user/<uid>) and launches desktop surfaces, so it runs as a user unit
+# and waits for the graphical session.
+After=graphical-session.target
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/omahab-clientd
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target

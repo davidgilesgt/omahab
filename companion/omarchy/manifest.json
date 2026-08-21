@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "id": "omahab.status",
+  "name": "Omahab Status",
+  "version": "1.0.0",
+  "author": "Omahab",
+  "license": "MIT",
+  "description": "Private Omahab server, runner, agent, synchronization, and event status with clientd-routed actions.",
+  "kinds": ["bar-widget"],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Omahab",
+    "description": "Server state, active runners, waiting agents, sync conflicts, unread events, and common companion actions.",
+    "category": "System",
+    "aliases": ["omahab", "home-server", "runners"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 15
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 5,
+        "max": 300,
+        "step": 5,
+        "defaultValue": 15
+      }
+    ]
+  }
+}

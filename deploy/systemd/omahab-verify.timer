@@ -1,0 +1,11 @@
+[Unit]
+Description=Omahab restore verification timer — weekly
+
+[Timer]
+OnCalendar=weekly
+RandomizedDelaySec=6h
+Persistent=true
+Unit=omahab-verify.service
+
+[Install]
+WantedBy=timers.target

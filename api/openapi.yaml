@@ -1,0 +1,1158 @@
+openapi: 3.1.0
+info:
+  title: Omahab Control API
+  description: |
+    Authenticated control-plane API for omahabd. All routes are under /api/v1 except
+    /up. Bearer authentication is required except for /up and the email webhook which
+    uses a separate HMAC authentication path. Mutating requests require Content-Type
+    application/json. Unknown JSON fields are rejected. Request bodies are limited
+    (1 MiB JSON, 5 MiB email webhook) and per-request timeouts are enforced. SSE
+    streaming at /api/v1/events/stream supports Last-Event-ID replay and heartbeat
+    comments. Secret and provider-credential reads return metadata only.
+  version: 0.1.0
+  contact:
+    name: Omahab
+servers:
+  - url: http://localhost:8484
+    description: omahabd default listen address
+security:
+  - bearerAuth: []
+paths:
+  /up:
+    get:
+      summary: Liveness probe
+      description: Unauthenticated liveness check.
+      operationId: getUp
+      security: []
+      responses:
+        '200':
+          description: Service is up
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, example: up }
+                  version: { type: string }
+        '500':
+          $ref: '#/components/responses/Error'
+
+  /api/v1/status:
+    get:
+      summary: Get control-plane status
+      operationId: getStatus
+      responses:
+        '200':
+          description: Status
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Status' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/Error' }
+
+  /api/v1/instance:
+    get:
+      summary: Get instance identity
+      operationId: getInstance
+      responses:
+        '200':
+          description: Instance
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Instance' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/Error' }
+
+  /api/v1/catalog:
+    get:
+      summary: List installable curated bundles
+      description: Runtime catalog shipped with signed releases. Empty when no release catalog is present; installs then fail closed.
+      operationId: listCatalog
+      responses:
+        '200':
+          description: Catalog bundles
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/CatalogBundle' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/Error' }
+
+  /api/v1/applications:
+    get:
+      summary: List applications
+      operationId: listApplications
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+      responses:
+        '200':
+          description: Applications
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Application' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/Error' }
+    post:
+      summary: Install a curated bundle
+      description: Installs a catalog bundle by id with digest-pinned images. Non-private exposure requires a hostname.
+      operationId: installApplication
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/InstallApplicationRequest' }
+      responses:
+        '201': { description: Installed, content: { application/json: { schema: { $ref: '#/components/schemas/Application' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+
+  /api/v1/applications/{id}:
+    get:
+      summary: Get application
+      operationId: getApplication
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      responses:
+        '200': { description: Application, content: { application/json: { schema: { $ref: '#/components/schemas/Application' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/Error' }
+    patch:
+      summary: Update application
+      operationId: updateApplication
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateApplicationRequest' }
+      responses:
+        '200': { description: Updated, content: { application/json: { schema: { $ref: '#/components/schemas/Application' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/Error' }
+
+  /api/v1/applications/{id}/actions:
+    post:
+      summary: Perform application action
+      description: Lifecycle actions (start, stop, restart, update, rollback). Installing a bundle is POST /api/v1/applications.
+      operationId: doApplicationAction
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ApplicationActionRequest' }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/Application' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/Error' }
+
+  /api/v1/applications/{id}/exposure:
+    get:
+      summary: Get application exposure
+      operationId: getApplicationExposure
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      responses:
+        '200': { description: Exposure, content: { application/json: { schema: { $ref: '#/components/schemas/ExposureState' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      summary: Update application exposure
+      operationId: updateApplicationExposure
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/UpdateExposureRequest' } } } }
+      responses:
+        '200': { description: Updated, content: { application/json: { schema: { $ref: '#/components/schemas/ExposureState' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/exposure:
+    get:
+      summary: List all exposure states
+      operationId: listExposure
+      responses:
+        '200':
+          description: Exposure list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties: { items: { type: array, items: { $ref: '#/components/schemas/ExposureState' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/exposure/{kind}/{id}:
+    parameters:
+      - name: kind
+        in: path
+        required: true
+        schema: { type: string, enum: [application, project] }
+      - $ref: '#/components/parameters/IdPath'
+    get:
+      summary: Get exposure by kind
+      operationId: getExposure
+      responses:
+        '200': { description: Exposure, content: { application/json: { schema: { $ref: '#/components/schemas/ExposureState' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      summary: Update exposure by kind
+      operationId: updateExposure
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/UpdateExposureRequest' } } } }
+      responses:
+        '200': { description: Updated, content: { application/json: { schema: { $ref: '#/components/schemas/ExposureState' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/projects:
+    get:
+      summary: List projects
+      operationId: listProjects
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+      responses:
+        '200':
+          description: Projects
+          content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/Project' } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      summary: Create project
+      operationId: createProject
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CreateProjectRequest' } } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Project' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/projects/{id}:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    get:
+      summary: Get project
+      operationId: getProject
+      responses:
+        '200': { description: Project, content: { application/json: { schema: { $ref: '#/components/schemas/Project' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      summary: Update project
+      operationId: updateProject
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/UpdateProjectRequest' } } } }
+      responses:
+        '200': { description: Updated, content: { application/json: { schema: { $ref: '#/components/schemas/Project' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      summary: Delete project
+      operationId: deleteProject
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/projects/{id}/exposure:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    get:
+      summary: Get project exposure
+      operationId: getProjectExposure
+      responses:
+        '200': { description: Exposure, content: { application/json: { schema: { $ref: '#/components/schemas/ExposureState' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      summary: Update project exposure
+      operationId: updateProjectExposure
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/UpdateExposureRequest' } } } }
+      responses:
+        '200': { description: Updated, content: { application/json: { schema: { $ref: '#/components/schemas/ExposureState' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/v1/projects/{id}/releases:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    get:
+      summary: List releases
+      operationId: listReleases
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+      responses:
+        '200': { description: Releases, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/Release' } } } } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      summary: Create release
+      operationId: createRelease
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CreateReleaseRequest' } } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Release' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/v1/projects/{id}/releases/{releaseID}:
+    parameters:
+      - $ref: '#/components/parameters/IdPath'
+      - name: releaseID
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      summary: Get release
+      operationId: getRelease
+      responses:
+        '200': { description: Release, content: { application/json: { schema: { $ref: '#/components/schemas/Release' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/projects/{id}/releases/{releaseID}/rollback:
+    post:
+      summary: Rollback to release
+      operationId: rollbackRelease
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+        - name: releaseID
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Rolled back, content: { application/json: { schema: { $ref: '#/components/schemas/Release' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/secrets:
+    get:
+      summary: List secrets (metadata only)
+      description: Secret values are never returned. Each entry is metadata.
+      operationId: listSecrets
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+        - name: scope
+          in: query
+          schema: { type: string }
+          description: Filter by scope
+      responses:
+        '200': { description: Secrets, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/Secret' } } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      summary: Create secret
+      operationId: createSecret
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CreateSecretRequest' } } } }
+      responses:
+        '201': { description: Created metadata, content: { application/json: { schema: { $ref: '#/components/schemas/Secret' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/secrets/{id}:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    get:
+      summary: Get secret metadata
+      operationId: getSecret
+      responses:
+        '200': { description: Metadata, content: { application/json: { schema: { $ref: '#/components/schemas/Secret' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      summary: Rotate secret value
+      operationId: updateSecret
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/UpdateSecretRequest' } } } }
+      responses:
+        '200': { description: Updated metadata, content: { application/json: { schema: { $ref: '#/components/schemas/Secret' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      summary: Delete secret
+      operationId: deleteSecret
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/backups:
+    get:
+      summary: List backups
+      operationId: listBackups
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+      responses:
+        '200': { description: Backups, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/Backup' } } } } } } }
+    post:
+      summary: Trigger backup
+      operationId: createBackup
+      requestBody:
+        required: false
+        content: { application/json: { schema: { $ref: '#/components/schemas/CreateBackupRequest' } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Backup' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/v1/backups/{id}:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    get:
+      summary: Get backup
+      operationId: getBackup
+      responses:
+        '200': { description: Backup, content: { application/json: { schema: { $ref: '#/components/schemas/Backup' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/backups/{id}/restore:
+    post:
+      summary: Restore backup
+      operationId: restoreBackup
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      responses:
+        '200': { description: Restoring, content: { application/json: { schema: { $ref: '#/components/schemas/Backup' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/backups/{id}/verify:
+    post:
+      summary: Verify backup
+      operationId: verifyBackup
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      responses:
+        '200': { description: Verified, content: { application/json: { schema: { $ref: '#/components/schemas/Backup' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/events:
+    get:
+      summary: List events
+      operationId: listEvents
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+        - name: type
+          in: query
+          schema: { type: string }
+        - name: severity
+          in: query
+          schema: { type: string }
+        - name: unread
+          in: query
+          schema: { type: boolean }
+      responses:
+        '200': { description: Events, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/Event' } } } } } } }
+
+  /api/v1/events/stream:
+    get:
+      summary: Stream events via SSE
+      description: |
+        Server-Sent Events stream. Honors Last-Event-ID header (or ?lastEventId query) for replay.
+        Sends heartbeat comments every 15s. Respects client cancellation and server shutdown.
+      operationId: streamEvents
+      parameters:
+        - name: lastEventId
+          in: query
+          schema: { type: string }
+          required: false
+        - name: Last-Event-ID
+          in: header
+          schema: { type: string }
+          required: false
+      responses:
+        '200':
+          description: Event stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/events/{id}:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    get:
+      summary: Get event
+      operationId: getEvent
+      responses:
+        '200': { description: Event, content: { application/json: { schema: { $ref: '#/components/schemas/Event' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/events/{id}/read:
+    post:
+      summary: Mark event read
+      operationId: markEventRead
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      responses:
+        '200': { description: Updated, content: { application/json: { schema: { $ref: '#/components/schemas/Event' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/events/read-all:
+    post:
+      summary: Mark all events read
+      operationId: markAllEventsRead
+      responses:
+        '204': { description: All marked read }
+
+  /api/v1/sync/folders:
+    get:
+      summary: List sync folders
+      operationId: listSyncFolders
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+      responses:
+        '200': { description: Folders, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/SyncFolder' } } } } } } }
+    post:
+      summary: Create sync folder
+      operationId: createSyncFolder
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CreateSyncFolderRequest' } } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/SyncFolder' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/v1/sync/folders/{id}:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    get:
+      summary: Get sync folder
+      operationId: getSyncFolder
+      responses:
+        '200': { description: Folder, content: { application/json: { schema: { $ref: '#/components/schemas/SyncFolder' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      summary: Update sync folder
+      operationId: updateSyncFolder
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/UpdateSyncFolderRequest' } } } }
+      responses:
+        '200': { description: Updated, content: { application/json: { schema: { $ref: '#/components/schemas/SyncFolder' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      summary: Delete sync folder
+      operationId: deleteSyncFolder
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/workspaces:
+    get:
+      summary: List workspaces
+      operationId: listWorkspaces
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+      responses:
+        '200': { description: Workspaces, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/Workspace' } } } } } } }
+    post:
+      summary: Create workspace
+      operationId: createWorkspace
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CreateWorkspaceRequest' } } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Workspace' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/v1/workspaces/{id}:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    get:
+      summary: Get workspace
+      operationId: getWorkspace
+      responses:
+        '200': { description: Workspace, content: { application/json: { schema: { $ref: '#/components/schemas/Workspace' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      summary: Delete workspace
+      operationId: deleteWorkspace
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/workspaces/{id}/stop:
+    post:
+      summary: Stop workspace
+      operationId: stopWorkspace
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      responses:
+        '200': { description: Stopped, content: { application/json: { schema: { $ref: '#/components/schemas/Workspace' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/users:
+    get:
+      summary: List users
+      operationId: listUsers
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+      responses:
+        '200': { description: Users, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/User' } } } } } } }
+    post:
+      summary: Create user
+      operationId: createUser
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CreateUserRequest' } } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/v1/users/{id}:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    get:
+      summary: Get user
+      operationId: getUser
+      responses:
+        '200': { description: User, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      summary: Update user
+      operationId: updateUser
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/UpdateUserRequest' } } } }
+      responses:
+        '200': { description: Updated, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      summary: Delete user
+      operationId: deleteUser
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/users/{id}/recovery:
+    post:
+      summary: Create recovery session for user
+      operationId: createUserRecovery
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      responses:
+        '201': { description: Recovery session, content: { application/json: { schema: { $ref: '#/components/schemas/RecoverySession' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/identity/recover:
+    post:
+      summary: Recover identity by email (requires local root via CLI, exposed as API for completeness)
+      operationId: identityRecover
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [email], properties: { email: { type: string, format: email } } } } } }
+      responses:
+        '201': { description: Recovery session, content: { application/json: { schema: { $ref: '#/components/schemas/RecoverySession' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/v1/provider-credentials:
+    get:
+      summary: List provider credentials (metadata)
+      operationId: listProviderCredentials
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+      responses:
+        '200': { description: Credentials, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/ProviderCredential' } } } } } } }
+    post:
+      summary: Create provider credential
+      operationId: createProviderCredential
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CreateProviderCredentialRequest' } } } }
+      responses:
+        '201': { description: Created metadata, content: { application/json: { schema: { $ref: '#/components/schemas/ProviderCredential' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/v1/provider-credentials/{id}:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    get:
+      summary: Get provider credential metadata
+      operationId: getProviderCredential
+      responses:
+        '200': { description: Credential, content: { application/json: { schema: { $ref: '#/components/schemas/ProviderCredential' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      summary: Delete provider credential
+      operationId: deleteProviderCredential
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/email/ingest:
+    post:
+      summary: Ingest email from Email Worker (HMAC auth)
+      description: |
+        Separate HMAC auth path for the Cloudflare Email Worker. X-Omahab-Signature
+        is HMAC-SHA256 over `v1\n<timestamp>\n<nonce>\n<from>\n<to>\n<raw-size>\n`
+        followed by the decoded raw bytes. X-Omahab-Timestamp, X-Omahab-Nonce,
+        X-Omahab-From, and X-Omahab-To must exactly match the JSON payload.
+        Bearer auth is not accepted here.
+      operationId: ingestEmail
+      security: [{ hmacAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EmailIngestRequest' }
+      responses:
+        '201': { description: Ingested, content: { application/json: { schema: { $ref: '#/components/schemas/EmailMessage' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/email/messages:
+    get:
+      summary: List ingested email messages
+      operationId: listEmailMessages
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+      responses:
+        '200': { description: Messages, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/EmailMessage' } } } } } } }
+
+  /api/v1/email/messages/{id}:
+    get:
+      summary: Get email message
+      operationId: getEmailMessage
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      responses:
+        '200': { description: Message, content: { application/json: { schema: { $ref: '#/components/schemas/EmailMessage' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: Bearer token verified via constant-time SHA256 comparison. Required for all /api/v1 routes except /up and /api/v1/email/ingest.
+    hmacAuth:
+      type: apiKey
+      in: header
+      name: X-Omahab-Signature
+      description: Worker v1 canonical HMAC-SHA256, optionally prefixed with sha256=. Metadata mirror headers are also required.
+
+  parameters:
+    IdPath:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+      description: Opaque control-plane ID
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 0, maximum: 100, default: 50 }
+      description: Item limit for pagination (alternative to per_page)
+    Offset:
+      name: offset
+      in: query
+      schema: { type: integer, minimum: 0 }
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1 }
+    PerPage:
+      name: per_page
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100 }
+
+  responses:
+    BadRequest:
+      description: Bad request
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } }
+      headers:
+        X-Request-ID: { schema: { type: string } }
+    Unauthorized:
+      description: Unauthorized
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } }
+      headers:
+        X-Request-ID: { schema: { type: string } }
+    NotFound:
+      description: Not found
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } }
+    Conflict:
+      description: Conflict
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } }
+    Error:
+      description: Error
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } }
+
+  headers:
+    RequestID:
+      description: Echoed / generated request identifier
+      schema: { type: string }
+
+  schemas:
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, example: not_found }
+            message: { type: string }
+
+    ID: { type: string, description: Opaque stable identifier }
+
+    Health: { type: string, enum: [unknown, healthy, degraded, unhealthy] }
+    Exposure: { type: string, enum: [private, shared, public] }
+
+    Instance:
+      type: object
+      required: [id, domain, tailnet, tailscale_ip, assistant_name, assistant_slug, created_at]
+      properties:
+        id: { $ref: '#/components/schemas/ID' }
+        domain: { type: string }
+        tailnet: { type: string }
+        tailscale_ip: { type: string }
+        assistant_name: { type: string }
+        assistant_slug: { type: string }
+        created_at: { type: string, format: date-time }
+
+    Status:
+      type: object
+      required: [instance_id, version, health, started_at, now]
+      properties:
+        instance_id: { type: string }
+        version: { type: string }
+        health: { $ref: '#/components/schemas/Health' }
+        started_at: { type: string, format: date-time }
+        now: { type: string, format: date-time }
+
+    Application:
+      type: object
+      required: [id, name, image, digest, hostname, exposure, health, desired_state, observed_state, updated_at]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        bundle_id: { type: string }
+        image: { type: string }
+        digest: { type: string }
+        hostname: { type: string }
+        exposure: { $ref: '#/components/schemas/Exposure' }
+        health: { $ref: '#/components/schemas/Health' }
+        desired_state: { type: string }
+        observed_state: { type: string }
+        installed_at: { type: string, format: date-time, nullable: true }
+        updated_at: { type: string, format: date-time }
+
+    CatalogBundle:
+      type: object
+      required: [id, name, image, architectures, default_exposure, max_exposure, installed]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        image: { type: string }
+        architectures: { type: array, items: { type: string, enum: [amd64, arm64] } }
+        default_exposure: { $ref: '#/components/schemas/Exposure' }
+        max_exposure: { $ref: '#/components/schemas/Exposure' }
+        memory_mb: { type: integer }
+        installed: { type: boolean }
+
+    Project:
+      type: object
+      required: [id, slug, name, repository_url, bot_profile_id, exposure, hostname, created_at, updated_at]
+      properties:
+        id: { type: string }
+        slug: { type: string }
+        name: { type: string }
+        repository_url: { type: string, format: uri }
+        bot_profile_id: { type: string }
+        exposure: { $ref: '#/components/schemas/Exposure' }
+        hostname: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    Release:
+      type: object
+      required: [id, project_id, commit, digest, status, active, created_at, updated_at]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        commit: { type: string }
+        digest: { type: string }
+        status: { type: string }
+        active: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    Secret:
+      type: object
+      description: Metadata only; value never returned.
+      required: [id, scope, name, version, created_at, updated_at]
+      properties:
+        id: { type: string }
+        scope: { type: string }
+        name: { type: string }
+        version: { type: integer }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    Backup:
+      type: object
+      required: [id, repository, status, started_at]
+      properties:
+        id: { type: string }
+        repository: { type: string }
+        snapshot_id: { type: string }
+        status: { type: string }
+        verified_at: { type: string, format: date-time, nullable: true }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time, nullable: true }
+        error: { type: string }
+
+    Event:
+      type: object
+      required: [id, type, severity, message, created_at]
+      properties:
+        id: { type: string }
+        type: { type: string }
+        severity: { type: string }
+        resource_id: { type: string }
+        message: { type: string }
+        data: { type: object, additionalProperties: true }
+        read_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    SyncFolder:
+      type: object
+      required: [id, name, server_path, share_with_ai, health, created_at, updated_at]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        server_path: { type: string }
+        share_with_ai: { type: boolean }
+        health: { $ref: '#/components/schemas/Health' }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    Workspace:
+      type: object
+      required: [id, project_id, branch, agent, status, last_active_at, created_at]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        branch: { type: string }
+        agent: { type: string }
+        status: { type: string }
+        last_active_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    User:
+      type: object
+      required: [id, email, name, groups, disabled, created_at, updated_at]
+      properties:
+        id: { type: string }
+        email: { type: string, format: email }
+        name: { type: string }
+        groups: { type: array, items: { type: string } }
+        disabled: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    ProviderCredential:
+      type: object
+      description: Metadata only; value never returned.
+      required: [id, provider, name, kind, status, configured, updated_at]
+      properties:
+        id: { type: string }
+        provider: { type: string }
+        name: { type: string }
+        kind: { type: string }
+        status: { type: string }
+        configured: { type: boolean }
+        entitlement: { type: string, nullable: true }
+        expires_at: { type: string, format: date-time, nullable: true }
+        updated_at: { type: string, format: date-time }
+
+    RecoverySession:
+      type: object
+      required: [expires_at]
+      properties:
+        expires_at: { type: string, format: date-time }
+        login_url: { type: string, nullable: true }
+        code: { type: string, nullable: true }
+
+    EmailMessage:
+      type: object
+      required: [id, envelope_from, header_from, recipient, subject, authentication, status, received_at]
+      properties:
+        id: { type: string }
+        envelope_from: { type: string }
+        header_from: { type: string }
+        recipient: { type: string }
+        subject: { type: string }
+        authentication: { type: string }
+        status: { type: string }
+        received_at: { type: string, format: date-time }
+
+    ExposureState:
+      type: object
+      required: [resource_type, resource_id, hostname, exposure, updated_at]
+      properties:
+        resource_type: { type: string, enum: [application, project] }
+        resource_id: { type: string }
+        hostname: { type: string }
+        exposure: { $ref: '#/components/schemas/Exposure' }
+        updated_at: { type: string, format: date-time }
+
+    CreateProjectRequest:
+      type: object
+      required: [slug, name]
+      properties:
+        slug: { type: string, pattern: '^[a-z0-9-]+$' }
+        name: { type: string }
+        repository_url: { type: string, format: uri }
+        exposure: { $ref: '#/components/schemas/Exposure' }
+        hostname: { type: string }
+      additionalProperties: false
+
+    UpdateProjectRequest:
+      type: object
+      properties:
+        name: { type: string }
+        exposure: { $ref: '#/components/schemas/Exposure' }
+        hostname: { type: string }
+      additionalProperties: false
+
+    CreateReleaseRequest:
+      type: object
+      required: [commit, digest]
+      properties:
+        commit: { type: string }
+        digest: { type: string }
+      additionalProperties: false
+
+    UpdateApplicationRequest:
+      type: object
+      properties:
+        exposure: { $ref: '#/components/schemas/Exposure' }
+        desired_state: { type: string }
+      additionalProperties: false
+
+    ApplicationActionRequest:
+      type: object
+      required: [action]
+      properties:
+        action: { type: string, enum: [start, stop, restart, update, rollback] }
+      additionalProperties: false
+
+    InstallApplicationRequest:
+      type: object
+      required: [bundle_id]
+      properties:
+        bundle_id: { type: string }
+        name: { type: string }
+        hostname: { type: string }
+        exposure: { $ref: '#/components/schemas/Exposure' }
+      additionalProperties: false
+
+    UpdateExposureRequest:
+      type: object
+      required: [exposure]
+      properties:
+        exposure: { $ref: '#/components/schemas/Exposure' }
+        confirmation:
+          type: string
+          description: |
+            Required when exposure=public. The caller must repeat the exact
+            hostname being made public (case-insensitive). Requests without a
+            matching confirmation are rejected with 400 code confirmation_required.
+            Optional and ignored for private/shared targets.
+      additionalProperties: false
+
+    CreateSecretRequest:
+      type: object
+      required: [scope, name, value]
+      properties:
+        scope: { type: string }
+        name: { type: string }
+        value: { type: string, description: Never returned in reads }
+      additionalProperties: false
+
+    UpdateSecretRequest:
+      type: object
+      required: [value]
+      properties:
+        value: { type: string }
+      additionalProperties: false
+
+    CreateBackupRequest:
+      type: object
+      properties:
+        repository: { type: string }
+      additionalProperties: false
+
+    CreateSyncFolderRequest:
+      type: object
+      required: [name, server_path]
+      properties:
+        name: { type: string }
+        server_path: { type: string }
+        share_with_ai: { type: boolean }
+      additionalProperties: false
+
+    UpdateSyncFolderRequest:
+      type: object
+      properties:
+        name: { type: string }
+        share_with_ai: { type: boolean }
+      additionalProperties: false
+
+    CreateWorkspaceRequest:
+      type: object
+      required: [project_id]
+      properties:
+        project_id: { type: string }
+        branch: { type: string }
+        agent: { type: string }
+      additionalProperties: false
+
+    CreateUserRequest:
+      type: object
+      required: [email]
+      properties:
+        email: { type: string, format: email }
+        name: { type: string }
+        groups: { type: array, items: { type: string } }
+      additionalProperties: false
+
+    UpdateUserRequest:
+      type: object
+      properties:
+        name: { type: string }
+        groups: { type: array, items: { type: string } }
+        disabled: { type: boolean }
+      additionalProperties: false
+
+    CreateProviderCredentialRequest:
+      type: object
+      required: [provider, kind, value]
+      properties:
+        provider: { type: string }
+        name: { type: string }
+        kind: { type: string }
+        value: { type: string, description: Secret value, never returned } 
+      additionalProperties: false
+
+    EmailIngestRequest:
+      type: object
+      required: [from, to, timestamp, nonce, raw, rawSize]
+      properties:
+        from: { type: string, description: SMTP envelope sender }
+        to: { type: string, description: SMTP envelope recipient }
+        timestamp: { type: string, pattern: '^[0-9]+$' }
+        nonce: { type: string }
+        raw: { type: string, contentEncoding: base64, description: Base64-encoded raw RFC 5322 message }
+        rawSize: { type: integer, minimum: 1, description: Decoded raw byte length }
+      additionalProperties: false

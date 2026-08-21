@@ -1,0 +1,21 @@
+{
+  "name": "@omahab/email-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Omahab Cloudflare Email Worker — minimal transport adapter with HMAC auth",
+  "main": "src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "devDependencies": {
+    "typescript": "5.9.2",
+    "vitest": "3.2.4",
+    "wrangler": "4.30.0",
+    "@cloudflare/workers-types": "4.20250820.0"
+  }
+}

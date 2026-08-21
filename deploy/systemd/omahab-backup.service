@@ -1,0 +1,27 @@
+[Unit]
+Description=Omahab backup (restic) — oneshot
+Documentation=https://omahab.org/docs/backup
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/srv/omahab
+ConditionPathExists=/etc/omahab
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/omahabd backup run --scheduled
+User=root
+Group=root
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/omahab /srv/omahab
+ReadOnlyPaths=/etc/omahab
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallArchitectures=native

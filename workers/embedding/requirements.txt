@@ -1,0 +1,5 @@
+numpy>=1.24
+# Optional production dependencies — installed separately on host:
+# onnxruntime>=1.17
+# tokenizers>=0.15
+# psutil>=5.9  # for benchmark memory reporting

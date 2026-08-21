@@ -1,0 +1,17 @@
+node_modules
+dist
+coverage
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.env
+.env.*
+.git
+.gitignore
+.DS_Store
+__pycache__
+*.log
+server/dist
+shared/dist
+client/dist
+server/web/dist

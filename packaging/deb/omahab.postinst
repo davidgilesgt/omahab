@@ -1,0 +1,37 @@
+#!/bin/sh
+# omahab postinst — the appliance installer deliberately starts omahabd only
+# after host configuration; a package install or upgrade never starts it on a
+# fresh system. Upgrades restart the daemon only when its unit is enabled.
+set -e
+
+if [ "$1" != configure ]; then
+    exit 0
+fi
+
+# Create /etc/omahab, /var/lib/omahab (0700), /var/lib/omahab/secrets (0700)
+# and /srv/omahab according to the shipped tmpfiles.d fragment so omahabd
+# can start on a fresh system.
+if command -v systemd-tmpfiles >/dev/null 2>&1; then
+    systemd-tmpfiles --create >/dev/null || true
+fi
+
+if [ -d /run/systemd/system ]; then
+    systemctl --system daemon-reload >/dev/null || true
+fi
+
+if command -v deb-systemd-helper >/dev/null 2>&1; then
+    deb-systemd-helper unmask omahabd.service >/dev/null || true
+    # preset, not enable: honor the sysadmin's and installer's policy.
+    deb-systemd-helper preset omahabd.service >/dev/null || true
+fi
+
+# Upgrading an already-enabled unit: restart to pick up the new binaries.
+# omahab-clientd is a user unit; package maintainer scripts never touch it.
+if [ -n "${2:-}" ] &&
+   command -v deb-systemd-invoke >/dev/null 2>&1 &&
+   command -v deb-systemd-helper >/dev/null 2>&1 &&
+   deb-systemd-helper --quiet was-enabled omahabd.service; then
+    deb-systemd-invoke try-restart omahabd.service >/dev/null || true
+fi
+
+exit 0

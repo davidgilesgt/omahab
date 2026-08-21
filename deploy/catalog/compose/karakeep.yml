@@ -1,0 +1,124 @@
+# Karakeep — curated Omahab bundle
+# App + postgres + meilisearch + chrome headless. Native OIDC to Pocket ID.
+name: omahab-karakeep
+networks:
+  omahab:
+    name: omahab
+    external: true
+services:
+  karakeep:
+    image: ghcr.io/karakeep-app/karakeep@sha256:${KARAKEEP_DIGEST:?pinned digest required}
+    restart: unless-stopped
+    depends_on:
+      karakeep-postgres:
+        condition: service_healthy
+      karakeep-meilisearch:
+        condition: service_healthy
+      karakeep-chrome:
+        condition: service_started
+    expose:
+      - "3000"
+    environment:
+      KARAKEEP_VERSION: "${KARAKEEP_DIGEST}"
+      MEILI_ADDR: "http://karakeep-meilisearch:7700"
+      MEILI_MASTER_KEY_FILE: /run/secrets/karakeep_meili_master_key
+      BROWSER_WEB_URL: "http://karakeep-chrome:3000"
+      DATA_DIR: /data
+      NEXTAUTH_URL: "https://save.${DOMAIN:?domain required}/"
+      NEXTAUTH_SECRET_FILE: /run/secrets/karakeep_nextauth_secret
+      KARAKEEP_DB_HOST: karakeep-postgres
+      KARAKEEP_DB_USER: karakeep
+      KARAKEEP_DB_PASSWORD_FILE: /run/secrets/karakeep_db_password
+      KARAKEEP_DB_NAME: karakeep
+      KARAKEEP_OIDC_ISSUER: "https://id.${DOMAIN}/"
+      KARAKEEP_DISABLE_NEW_RELEASE_CHECK: "true"
+    secrets:
+      - karakeep_db_password
+      - karakeep_nextauth_secret
+      - karakeep_meili_master_key
+    volumes:
+      - karakeep_data:/data
+    networks:
+      - omahab
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:3000/api/health || wget --no-verbose --tries=1 --spider http://127.0.0.1:3000/api/trpc/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  karakeep-postgres:
+    image: docker.io/library/postgres@sha256:${POSTGRES_DIGEST:?pinned digest required}
+    restart: unless-stopped
+    expose:
+      - "5432"
+    environment:
+      POSTGRES_DB: karakeep
+      POSTGRES_USER: karakeep
+      POSTGRES_PASSWORD_FILE: /run/secrets/karakeep_db_password
+      PGDATA: /var/lib/postgresql/data/pgdata
+    secrets:
+      - karakeep_db_password
+    volumes:
+      - karakeep_postgres_data:/var/lib/postgresql/data
+    networks:
+      - omahab
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U karakeep -d karakeep || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  karakeep-meilisearch:
+    image: docker.io/getmeili/meilisearch@sha256:${MEILISEARCH_DIGEST:?pinned digest required}
+    restart: unless-stopped
+    expose:
+      - "7700"
+    environment:
+      MEILI_MASTER_KEY_FILE: /run/secrets/karakeep_meili_master_key
+      MEILI_ENV: production
+    secrets:
+      - karakeep_meili_master_key
+    volumes:
+      - karakeep_meili_data:/meili_data
+    networks:
+      - omahab
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:7700/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  karakeep-chrome:
+    image: ghcr.io/browserless/chrome@sha256:${KARAKEEP_CHROME_DIGEST:?pinned digest required}
+    restart: unless-stopped
+    expose:
+      - "3000"
+    networks:
+      - omahab
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:3000/json/version || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+secrets:
+  karakeep_db_password:
+    file: /var/lib/omahab/secrets/karakeep_db_password
+  karakeep_nextauth_secret:
+    file: /var/lib/omahab/secrets/karakeep_nextauth_secret
+  karakeep_meili_master_key:
+    file: /var/lib/omahab/secrets/karakeep_meili_master_key
+volumes:
+  karakeep_data:
+    name: karakeep_data
+  karakeep_postgres_data:
+    name: karakeep_postgres_data
+  karakeep_meili_data:
+    name: karakeep_meili_data

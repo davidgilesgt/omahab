@@ -1,0 +1,134 @@
+# Paperless-ngx — curated Omahab bundle
+# Postgres + redis + gotenberg + tika sidecars. Native OIDC to Pocket ID.
+name: omahab-paperless
+networks:
+  omahab:
+    name: omahab
+    external: true
+services:
+  paperless:
+    image: ghcr.io/paperless-ngx/paperless-ngx@sha256:${PAPERLESS_DIGEST:?pinned digest required}
+    restart: unless-stopped
+    depends_on:
+      paperless-postgres:
+        condition: service_healthy
+      paperless-redis:
+        condition: service_healthy
+      gotenberg:
+        condition: service_started
+      tika:
+        condition: service_started
+    expose:
+      - "8000"
+    environment:
+      PAPERLESS_URL: "https://docs.${DOMAIN:?domain required}/"
+      PAPERLESS_REDIS: "redis://paperless-redis:6379/0"
+      PAPERLESS_DBHOST: paperless-postgres
+      PAPERLESS_DBNAME: paperless
+      PAPERLESS_DBUSER: paperless
+      PAPERLESS_DBPASS_FILE: /run/secrets/paperless_db_password
+      PAPERLESS_SECRET_KEY_FILE: /run/secrets/paperless_secret_key
+      PAPERLESS_OCR_LANGUAGE: eng
+      PAPERLESS_TIKA_ENABLED: "1"
+      PAPERLESS_TIKA_GOTENBERG_ENDPOINT: "http://gotenberg:3000"
+      PAPERLESS_TIKA_ENDPOINT: "http://tika:9998"
+      PAPERLESS_ENABLE_HTTP_REMOTE_USER: "false"
+      PAPERLESS_APPS: allauth.socialaccount.providers.openid_connect
+      PAPERLESS_SOCIALACCOUNT_OIDC_ISSUER: "https://id.${DOMAIN}/"
+    secrets:
+      - paperless_db_password
+      - paperless_secret_key
+    volumes:
+      - /srv/omahab/apps/paperless/data:/usr/src/paperless/data
+      - /srv/omahab/apps/paperless/media:/usr/src/paperless/media
+      - /srv/omahab/apps/paperless/consume:/usr/src/paperless/consume
+      - /srv/omahab/apps/paperless/export:/usr/src/paperless/export
+    networks:
+      - omahab
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:8000/api/ || wget --no-verbose --tries=1 --spider http://127.0.0.1:8000/api/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  paperless-postgres:
+    image: docker.io/library/postgres@sha256:${POSTGRES_DIGEST:?pinned digest required}
+    restart: unless-stopped
+    expose:
+      - "5432"
+    environment:
+      POSTGRES_DB: paperless
+      POSTGRES_USER: paperless
+      POSTGRES_PASSWORD_FILE: /run/secrets/paperless_db_password
+      PGDATA: /var/lib/postgresql/data/pgdata
+    secrets:
+      - paperless_db_password
+    volumes:
+      - paperless_postgres_data:/var/lib/postgresql/data
+    networks:
+      - omahab
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U paperless -d paperless || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  paperless-redis:
+    image: docker.io/library/redis@sha256:${REDIS_DIGEST:?pinned digest required}
+    restart: unless-stopped
+    expose:
+      - "6379"
+    volumes:
+      - paperless_redis_data:/data
+    networks:
+      - omahab
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  gotenberg:
+    image: docker.io/gotenberg/gotenberg@sha256:${GOTENBERG_DIGEST:?pinned digest required}
+    restart: unless-stopped
+    expose:
+      - "3000"
+    command: ["gotenberg", "--api-timeout=30s", "--chromium-disable-javascript=false"]
+    networks:
+      - omahab
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:3000/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  tika:
+    image: docker.io/apache/tika@sha256:${TIKA_DIGEST:?pinned digest required}
+    restart: unless-stopped
+    expose:
+      - "9998"
+    networks:
+      - omahab
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:9998/tika || curl -f http://127.0.0.1:9998/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+secrets:
+  paperless_db_password:
+    file: /var/lib/omahab/secrets/paperless_db_password
+  paperless_secret_key:
+    file: /var/lib/omahab/secrets/paperless_secret_key
+volumes:
+  paperless_postgres_data:
+    name: paperless_postgres_data
+  paperless_redis_data:
+    name: paperless_redis_data

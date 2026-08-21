@@ -1,0 +1,1125 @@
+{
+  "specVersion": "1",
+  "generated": "DO NOT EDIT MANUALLY - curated platform bundle catalog managed by omahabd release tooling. Image digests are required and validated at install/update time; any ${VAR:?} placeholder must be substituted from the signed release manifest.",
+  "releaseSubstitution": {
+    "mode": "required",
+    "description": "All image references use pinned digests via ${BUNDLE_DIGEST:?error} variables. The installer and omahabd validate that no placeholder remains and that each image is pinned to sha256:... before any container is pulled. Mutable tags (e.g. :latest, :2.10) are forbidden.",
+    "validation": "omahabd refuses to reconcile any bundle whose image does not match ^[^@]+@sha256:[a-f0-9]{64}$ after envsubst; compose templates are rendered with envsubst and fail closed if any digest variable is unset."
+  },
+  "networks": {
+    "omahab": {
+      "driver": "bridge",
+      "description": "Single private bridge for platform bundles. No host port publishing for application services; only caddy edge publishes 80/443 and cloudflared uses outbound tunnel."
+    }
+  },
+  "bundles": [
+    {
+      "name": "caddy",
+      "displayName": "Caddy",
+      "description": "Omahab edge reverse proxy. Terminates TLS via Cloudflare DNS-01, routes vanity and .home hostnames to platform services and ONCE proxy (127.0.0.1:8080).",
+      "category": "edge",
+      "enabledByDefault": true,
+      "failureDomain": "edge",
+      "composeFile": "compose/caddy.yml",
+      "supportedArchitectures": ["amd64", "arm64"],
+      "images": {
+        "caddy": "docker.io/library/caddy@sha256:${CADDY_DIGEST:?pinned digest required - substituted from signed release manifest}"
+      },
+      "resources": {
+        "memoryMinMiB": 128,
+        "memoryRecommendedMiB": 256,
+        "cpuMin": "0.1",
+        "diskMinMiB": 512,
+        "notes": "Edge is lightweight; memory scales with number of vhosts and TLS cache."
+      },
+      "persistence": [
+        {
+          "volume": "caddy_data",
+          "mountPath": "/data",
+          "description": "ACME certificates, OCSP, and Caddy storage",
+          "backup": true
+        },
+        {
+          "volume": "caddy_config",
+          "mountPath": "/config",
+          "description": "Caddy runtime config cache",
+          "backup": false
+        }
+      ],
+      "healthCheck": {
+        "test": ["CMD-SHELL", "caddy version >/dev/null 2>&1 && wget --no-verbose --tries=1 --spider http://127.0.0.1:2019/config/ || exit 1"],
+        "interval": "30s",
+        "timeout": "5s",
+        "retries": 3,
+        "startPeriod": "10s",
+        "endpoint": "http://127.0.0.1:2019/config/"
+      },
+      "backup": {
+        "strategy": "volume-snapshot",
+        "preHooks": [],
+        "postHooks": [],
+        "volumes": ["caddy_data"],
+        "notes": "Certificates are re-issuable via DNS-01; backup primarily preserves OCSP and avoids re-issuance storms."
+      },
+      "restore": {
+        "hooks": ["systemctl reload caddy || docker compose -f {{.ComposeFile}} exec caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile || true"],
+        "notes": "Restore volumes then reload Caddy. Certificates will re-issue automatically if missing."
+      },
+      "secrets": {
+        "secretFilesSupported": false,
+        "envFiles": [],
+        "notes": "Caddy itself holds no long-lived secret; Cloudflare DNS-01 token is projected via secret file into caddy env through omahabd-templated Caddyfile (not Docker labels)."
+      },
+      "oidc": {
+        "supported": false,
+        "mode": "none",
+        "notes": "Caddy is not OIDC-protected; it forwards Authorization headers to backends."
+      },
+      "exposure": {
+        "default": "public",
+        "allowed": ["public"],
+        "caddyRoute": "edge",
+        "internalPort": null,
+        "capabilities": "Edge itself is not toggled; downstream services declare private/shared/public and Caddy renders route + Tunnel vs DNS-only accordingly.",
+        "notes": "No application port is published directly; Caddy owns :80/:443 and ONCE proxy sits on 127.0.0.1:8080 behind Caddy."
+      },
+      "update": {
+        "strategy": "recreate",
+        "rollback": "previous digest + volume snapshot"
+      },
+      "dependencies": []
+    },
+    {
+      "name": "pocket-id",
+      "displayName": "Pocket ID",
+      "description": "Passkey-first OIDC identity provider for all native-OIDC applications. Groups: admins, members, guests.",
+      "category": "identity",
+      "enabledByDefault": true,
+      "failureDomain": "identity",
+      "composeFile": "compose/pocket-id.yml",
+      "supportedArchitectures": ["amd64", "arm64"],
+      "images": {
+        "pocket-id": "ghcr.io/pocket-id/pocket-id@sha256:${POCKET_ID_DIGEST:?pinned digest required}"
+      },
+      "resources": {
+        "memoryMinMiB": 128,
+        "memoryRecommendedMiB": 256,
+        "cpuMin": "0.1",
+        "diskMinMiB": 512
+      },
+      "persistence": [
+        {
+          "volume": "pocket_id_data",
+          "mountPath": "/app/backend/data",
+          "description": "SQLite or backend data (when not using external Postgres). Encrypted at rest by host.",
+          "backup": true
+        }
+      ],
+      "healthCheck": {
+        "test": ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:1411/health || exit 1"],
+        "interval": "20s",
+        "timeout": "5s",
+        "retries": 5,
+        "startPeriod": "15s",
+        "endpoint": "http://pocket-id:1411/health"
+      },
+      "backup": {
+        "strategy": "sqlite-dump-or-volume",
+        "preHooks": ["docker compose -f {{.ComposeFile}} exec pocket-id /app/backend/pocket-id backup --out /tmp/pocket-id-backup.db || cp /app/backend/data/data.db /tmp/pocket-id-backup.db"],
+        "postHooks": [],
+        "volumes": ["pocket_id_data"],
+        "notes": "Always use application-aware hook before snapshotting the volume; raw volume copy without dump is invalid for restore."
+      },
+      "restore": {
+        "hooks": ["docker compose -f {{.ComposeFile}} exec pocket-id /app/backend/pocket-id restore --in /tmp/pocket-id-backup.db || cp /tmp/pocket-id-backup.db /app/backend/data/data.db"],
+        "notes": "Restore DB file then restart service."
+      },
+      "secrets": {
+        "secretFilesSupported": true,
+        "secretFiles": [
+          {
+            "source": "pocket_id_encryption_key",
+            "target": "/run/secrets/pocket_id_encryption_key",
+            "env": "ENCRYPTION_KEY_FILE",
+            "description": "Application encryption key projected via file, not env var."
+          }
+        ],
+        "notes": "Upstream supports *_FILE for secrets; omahabd projects via Docker secrets / tmpfs (/run/secrets) with 0400 root ownership."
+      },
+      "oidc": {
+        "supported": true,
+        "mode": "provider",
+        "notes": "Pocket ID IS the provider; other apps consume it. No self-OIDC."
+      },
+      "exposure": {
+        "default": "private",
+        "allowed": ["private", "shared"],
+        "caddyRoute": "id.{{.Domain}}",
+        "internalPort": 1411,
+        "publicWarning": "Pocket ID should never be public without Access gate.",
+        "notes": "Private via CNAME -> home A record (Tailscale IP). Shared via Cloudflare Tunnel + Access gate."
+      },
+      "update": {
+        "strategy": "recreate",
+        "rollback": "previous digest + DB dump"
+      },
+      "dependencies": ["caddy"]
+    },
+    {
+      "name": "forgejo",
+      "displayName": "Forgejo",
+      "description": "Canonical Git forge. Private by default. Forgejo is the source of truth; GitHub mirror is read-only via push mirror.",
+      "category": "platform",
+      "enabledByDefault": true,
+      "failureDomain": "git",
+      "composeFile": "compose/forgejo.yml",
+      "supportedArchitectures": ["amd64", "arm64"],
+      "images": {
+        "forgejo": "codeberg.org/forgejo/forgejo@sha256:${FORGEJO_DIGEST:?pinned digest required}",
+        "postgres": "docker.io/library/postgres@sha256:${POSTGRES_DIGEST:?pinned digest required}",
+        "redis": "docker.io/library/redis@sha256:${REDIS_DIGEST:?pinned digest required}"
+      },
+      "resources": {
+        "memoryMinMiB": 512,
+        "memoryRecommendedMiB": 1024,
+        "cpuMin": "0.2",
+        "diskMinMiB": 5120,
+        "notes": "Scales with repo count and LFS; Postgres dominates."
+      },
+      "persistence": [
+        {
+          "volume": "forgejo_data",
+          "mountPath": "/data",
+          "description": "Repositories, LFS, avatars, attachments",
+          "backup": true
+        },
+        {
+          "volume": "forgejo_postgres_data",
+          "mountPath": "/var/lib/postgresql/data",
+          "description": "Forgejo Postgres database",
+          "backup": true
+        }
+      ],
+      "healthCheck": {
+        "test": ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:3000/-/healthz || curl -f http://127.0.0.1:3000/-/healthz || exit 1"],
+        "interval": "30s",
+        "timeout": "10s",
+        "retries": 5,
+        "startPeriod": "30s",
+        "endpoint": "http://forgejo:3000/-/healthz"
+      },
+      "backup": {
+        "strategy": "database-dump-and-volume",
+        "preHooks": [
+          "docker compose -f {{.ComposeFile}} exec forgejo-postgres pg_dump -U ${POSTGRES_USER:-forgejo} -Fc -d ${POSTGRES_DB:-forgejo} -f /tmp/forgejo.pgdump",
+          "docker compose -f {{.ComposeFile}} exec forgejo forgejo dump --file /tmp/forgejo_app.zip --type zip || true"
+        ],
+        "postHooks": [],
+        "volumes": ["forgejo_data", "forgejo_postgres_data"],
+        "notes": "Database MUST be dumped via pg_dump; raw volume copy alone is NOT a valid backup. Repos on volume + pgdump together are restorable."
+      },
+      "restore": {
+        "hooks": [
+          "docker compose -f {{.ComposeFile}} exec forgejo-postgres pg_restore -U ${POSTGRES_USER:-forgejo} -d ${POSTGRES_DB:-forgejo} --clean --if-exists /tmp/forgejo.pgdump",
+          "docker compose -f {{.ComposeFile}} restart forgejo"
+        ],
+        "notes": "Restore Postgres dump before app start; repos are on forgejo_data volume."
+      },
+      "secrets": {
+        "secretFilesSupported": true,
+        "secretFiles": [
+          {
+            "source": "forgejo_db_password",
+            "target": "/run/secrets/forgejo_db_password",
+            "env": "FORGEJO__database__PASSWD_FILE",
+            "description": "Forgejo supports *_FILE for DB password"
+          },
+          {
+            "source": "forgejo_secret_key",
+            "target": "/run/secrets/forgejo_secret_key",
+            "env": "FORGEJO__security__SECRET_KEY_FILE"
+          }
+        ],
+        "notes": "Prefer *_FILE secrets; fallback env only where upstream lacks file support. Secrets never appear in labels/logs."
+      },
+      "oidc": {
+        "supported": true,
+        "mode": "native",
+        "provider": "pocket-id",
+        "notes": "Forgejo native OIDC client toward Pocket ID. Edge auth not used to avoid breaking API/mobile clients."
+      },
+      "exposure": {
+        "default": "private",
+        "allowed": ["private", "shared", "public"],
+        "caddyRoute": "git.{{.Domain}}",
+        "internalPort": 3000,
+        "notes": "Private = DNS-only -> Tailscale IP. Shared/Public via Tunnel (shared adds Access gate). Warn before making unauthenticated Forgejo public."
+      },
+      "update": {
+        "strategy": "recreate-with-migrations",
+        "rollback": "previous digest + pg_restore + volume snapshot",
+        "notes": "Forgejo runs DB migrations on start; rollback restores previous DB dump."
+      },
+      "dependencies": ["caddy", "pocket-id"]
+    },
+    {
+      "name": "woodpecker",
+      "displayName": "Woodpecker CI",
+      "description": "CI for Forgejo. Single runner family; isolated server + agent. Forgejo Actions disabled to avoid dual pipeline systems.",
+      "category": "platform",
+      "enabledByDefault": true,
+      "failureDomain": "ci",
+      "composeFile": "compose/woodpecker.yml",
+      "supportedArchitectures": ["amd64", "arm64"],
+      "images": {
+        "woodpecker-server": "docker.io/woodpeckerci/woodpecker-server@sha256:${WOODPECKER_SERVER_DIGEST:?pinned digest required}",
+        "woodpecker-agent": "docker.io/woodpeckerci/woodpecker-agent@sha256:${WOODPECKER_AGENT_DIGEST:?pinned digest required}",
+        "postgres": "docker.io/library/postgres@sha256:${POSTGRES_DIGEST:?pinned digest required}"
+      },
+      "resources": {
+        "memoryMinMiB": 256,
+        "memoryRecommendedMiB": 512,
+        "cpuMin": "0.2",
+        "diskMinMiB": 2048
+      },
+      "persistence": [
+        {
+          "volume": "woodpecker_data",
+          "mountPath": "/var/lib/woodpecker",
+          "description": "Woodpecker server state (if non-Postgres) - backup only when used",
+          "backup": true
+        },
+        {
+          "volume": "woodpecker_postgres_data",
+          "mountPath": "/var/lib/postgresql/data",
+          "description": "Woodpecker Postgres database",
+          "backup": true
+        }
+      ],
+      "healthCheck": {
+        "test": ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8000/healthz || curl -f http://127.0.0.1:8000/healthz || exit 1"],
+        "interval": "20s",
+        "timeout": "5s",
+        "retries": 5,
+        "startPeriod": "20s",
+        "endpoint": "http://woodpecker-server:8000/healthz"
+      },
+      "backup": {
+        "strategy": "database-dump-and-volume",
+        "preHooks": [
+          "docker compose -f {{.ComposeFile}} exec woodpecker-postgres pg_dump -U ${WOODPECKER_POSTGRES_USER:-woodpecker} -Fc -d ${WOODPECKER_POSTGRES_DB:-woodpecker} -f /tmp/woodpecker.pgdump"
+        ],
+        "postHooks": [],
+        "volumes": ["woodpecker_postgres_data"],
+        "notes": "Consistent Postgres dump required; do not snapshot live DB files alone."
+      },
+      "restore": {
+        "hooks": [
+          "docker compose -f {{.ComposeFile}} exec woodpecker-postgres pg_restore -U ${WOODPECKER_POSTGRES_USER:-woodpecker} -d ${WOODPECKER_POSTGRES_DB:-woodpecker} --clean --if-exists /tmp/woodpecker.pgdump",
+          "docker compose -f {{.ComposeFile}} restart woodpecker-server woodpecker-agent"
+        ]
+      },
+      "secrets": {
+        "secretFilesSupported": true,
+        "secretFiles": [
+          {
+            "source": "woodpecker_forgejo_client_secret",
+            "target": "/run/secrets/woodpecker_forgejo_client_secret",
+            "env": "WOODPECKER_FORGEJO_CLIENT_SECRET_FILE"
+          },
+          {
+            "source": "woodpecker_agent_secret",
+            "target": "/run/secrets/woodpecker_agent_secret",
+            "env": "WOODPECKER_AGENT_SECRET_FILE"
+          },
+          {
+            "source": "woodpecker_db_password",
+            "target": "/run/secrets/woodpecker_db_password",
+            "env": "WOODPECKER_DATABASE_PASSWORD_FILE"
+          }
+        ],
+        "notes": "Woodpecker supports secret files for Forgejo OAuth and agent GRPC secret; prefer files over env."
+      },
+      "oidc": {
+        "supported": false,
+        "mode": "forgejo-oauth",
+        "notes": "Auth delegated to Forgejo; Pocket ID is not Woodpecker's direct IdP. Users authenticate via Forgejo which itself uses Pocket ID."
+      },
+      "exposure": {
+        "default": "private",
+        "allowed": ["private", "shared"],
+        "caddyRoute": "ci.{{.Domain}}",
+        "internalPort": 8000,
+        "notes": "Woodpecker UI is private/shared only; public CI UI is discouraged."
+      },
+      "update": {
+        "strategy": "recreate",
+        "rollback": "previous digest + pg_restore"
+      },
+      "dependencies": ["caddy", "forgejo"]
+    },
+    {
+      "name": "hermes",
+      "displayName": "Hermes",
+      "description": "Default AI assistant backend and project bots. Stable profile 'default' mapped to user-chosen display name (default AI). Remote gateway for WebSocket/JSON-RPC.",
+      "category": "platform",
+      "enabledByDefault": true,
+      "failureDomain": "hermes",
+      "composeFile": "compose/hermes.yml",
+      "supportedArchitectures": ["amd64", "arm64"],
+      "images": {
+        "hermes": "ghcr.io/omahab/hermes@sha256:${HERMES_DIGEST:?pinned digest required}",
+        "postgres": "docker.io/library/postgres@sha256:${POSTGRES_DIGEST:?pinned digest required}"
+      },
+      "resources": {
+        "memoryMinMiB": 1024,
+        "memoryRecommendedMiB": 2048,
+        "cpuMin": "0.5",
+        "diskMinMiB": 5120,
+        "notes": "Memory scales with conversation history and tool use; embedding worker is SEPARATE failure domain (see worker)."
+      },
+      "persistence": [
+        {
+          "volume": "hermes_data",
+          "mountPath": "/data",
+          "description": "Hermes profiles, bot definitions, conversations, tool approvals",
+          "backup": true
+        },
+        {
+          "volume": "hermes_postgres_data",
+          "mountPath": "/var/lib/postgresql/data",
+          "description": "Hermes Postgres database",
+          "backup": true
+        }
+      ],
+      "healthCheck": {
+        "test": ["CMD-SHELL", "curl -f http://127.0.0.1:8080/api/health || wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/api/health || exit 1"],
+        "interval": "20s",
+        "timeout": "10s",
+        "retries": 5,
+        "startPeriod": "30s",
+        "endpoint": "http://hermes:8080/api/health"
+      },
+      "backup": {
+        "strategy": "database-dump-and-volume",
+        "preHooks": [
+          "docker compose -f {{.ComposeFile}} exec hermes-postgres pg_dump -U ${HERMES_POSTGRES_USER:-hermes} -Fc -d ${HERMES_POSTGRES_DB:-hermes} -f /tmp/hermes.pgdump"
+        ],
+        "postHooks": [],
+        "volumes": ["hermes_postgres_data", "hermes_data"],
+        "notes": "Database dump is authoritative; vector/index derived data follows Paperless backup policy, not dumped here."
+      },
+      "restore": {
+        "hooks": [
+          "docker compose -f {{.ComposeFile}} exec hermes-postgres pg_restore -U ${HERMES_POSTGRES_USER:-hermes} -d ${HERMES_POSTGRES_DB:-hermes} --clean --if-exists /tmp/hermes.pgdump",
+          "docker compose -f {{.ComposeFile}} restart hermes"
+        ]
+      },
+      "secrets": {
+        "secretFilesSupported": true,
+        "secretFiles": [
+          {
+            "source": "hermes_db_password",
+            "target": "/run/secrets/hermes_db_password",
+            "env": "HERMES_DATABASE_PASSWORD_FILE"
+          },
+          {
+            "source": "hermes_jwt_secret",
+            "target": "/run/secrets/hermes_jwt_secret",
+            "env": "HERMES_JWT_SECRET_FILE"
+          }
+        ],
+        "notes": "Model gateway credentials are supplied via LiteLLM virtual keys, not upstream provider tokens directly to Hermes."
+      },
+      "oidc": {
+        "supported": true,
+        "mode": "native",
+        "provider": "pocket-id",
+        "notes": "Hermes web and API authenticate via Pocket ID OIDC; bot scopes isolated per project."
+      },
+      "exposure": {
+        "default": "private",
+        "allowed": ["private", "shared"],
+        "caddyRoute": "ai.{{.Domain}}",
+        "internalPort": 8080,
+        "notes": "Default assistant at ai.<domain> via Pocket ID. Private tailnet-only by default; shared via Tunnel+Access."
+      },
+      "update": {
+        "strategy": "recreate",
+        "rollback": "previous digest + pg_restore"
+      },
+      "dependencies": ["caddy", "pocket-id"]
+    },
+    {
+      "name": "immich",
+      "displayName": "Immich",
+      "description": "Private photo and video management. Mobile clients via Pocket ID / native auth; machine-learning via separate Immich ML container (isolated failure boundary).",
+      "category": "platform",
+      "enabledByDefault": true,
+      "failureDomain": "immich",
+      "composeFile": "compose/immich.yml",
+      "supportedArchitectures": ["amd64", "arm64"],
+      "images": {
+        "immich-server": "ghcr.io/immich-app/immich-server@sha256:${IMMICH_SERVER_DIGEST:?pinned digest required}",
+        "immich-machine-learning": "ghcr.io/immich-app/immich-machine-learning@sha256:${IMMICH_ML_DIGEST:?pinned digest required}",
+        "postgres": "ghcr.io/tensorchord/pgvecto-rs@sha256:${IMMICH_PGVECTO_DIGEST:?pinned digest required}",
+        "redis": "docker.io/library/redis@sha256:${REDIS_DIGEST:?pinned digest required}"
+      },
+      "resources": {
+        "memoryMinMiB": 2048,
+        "memoryRecommendedMiB": 4096,
+        "cpuMin": "1.0",
+        "diskMinMiB": 20480,
+        "notes": "Immich ML is CPU-heavy; arm64 uses smaller model footprint. Disk scales with media library under /srv/omahab/apps/immich/library."
+      },
+      "persistence": [
+        {
+          "volume": "immich_postgres_data",
+          "mountPath": "/var/lib/postgresql/data",
+          "description": "Immich Postgres + pgvecto.rs vectors",
+          "backup": true
+        },
+        {
+          "hostPath": "/srv/omahab/apps/immich/library",
+          "mountPath": "/usr/src/app/upload",
+          "description": "Original uploaded media (host bind)",
+          "backup": true
+        },
+        {
+          "volume": "immich_redis_data",
+          "mountPath": "/data",
+          "description": "Redis AOF (ephemeral - not critical backup)",
+          "backup": false
+        },
+        {
+          "volume": "immich_model_cache",
+          "mountPath": "/cache",
+          "description": "Immich ML model cache",
+          "backup": false
+        }
+      ],
+      "healthCheck": {
+        "test": ["CMD-SHELL", "curl -f http://127.0.0.1:2283/api/server/ping || wget --no-verbose --tries=1 --spider http://127.0.0.1:2283/api/server/ping || exit 1"],
+        "interval": "30s",
+        "timeout": "10s",
+        "retries": 5,
+        "startPeriod": "60s",
+        "endpoint": "http://immich-server:2283/api/server/ping"
+      },
+      "backup": {
+        "strategy": "database-dump-and-library",
+        "preHooks": [
+          "docker compose -f {{.ComposeFile}} exec immich-postgres pg_dump -U ${IMMICH_POSTGRES_USER:-postgres} -Fc -d ${IMMICH_POSTGRES_DB:-immich} -f /tmp/immich.pgdump",
+          "docker compose -f {{.ComposeFile}} exec immich-server immich backup --out /tmp/immich_library_manifest.json || echo 'library manifest hook placeholder'"
+        ],
+        "postHooks": [],
+        "volumes": ["immich_postgres_data"],
+        "hostPaths": ["/srv/omahab/apps/immich/library"],
+        "notes": "Per https://docs.immich.app/administration/backup-and-restore/ : database dump + upload folder are both required and must be consistent. Raw DB files alone are invalid."
+      },
+      "restore": {
+        "hooks": [
+          "docker compose -f {{.ComposeFile}} exec immich-postgres pg_restore -U ${IMMICH_POSTGRES_USER:-postgres} -d ${IMMICH_POSTGRES_DB:-immich} --clean --if-exists /tmp/immich.pgdump",
+          "rsync -a /backups/immich/library/ /srv/omahab/apps/immich/library/ || cp -a /tmp/immich_library/* /srv/omahab/apps/immich/library/",
+          "docker compose -f {{.ComposeFile}} restart immich-server"
+        ],
+        "notes": "Restore DB dump, then restore library files, then restart. Verify with `immich admin` check."
+      },
+      "secrets": {
+        "secretFilesSupported": true,
+        "secretFiles": [
+          {
+            "source": "immich_db_password",
+            "target": "/run/secrets/immich_db_password",
+            "env": "DB_PASSWORD_FILE",
+            "description": "Immich server supports DB_PASSWORD_FILE"
+          }
+        ],
+        "notes": "Immich supports *_FILE for DB password; other secrets via env files projected from omahabd."
+      },
+      "oidc": {
+        "supported": true,
+        "mode": "native",
+        "provider": "pocket-id",
+        "notes": "Immich native OIDC toward Pocket ID. Mobile clients use OIDC tokens; fallback local auth disabled by default."
+      },
+      "exposure": {
+        "default": "private",
+        "allowed": ["private", "shared"],
+        "caddyRoute": "photos.{{.Domain}}",
+        "internalPort": 2283,
+        "notes": "Private recommended; shared via Access gate protects album links. Public not recommended for private media."
+      },
+      "update": {
+        "strategy": "recreate",
+        "rollback": "previous digests + pg_restore + library snapshot",
+        "notes": "Immich requires matching server + ML image versions from same release; both pinned together."
+      },
+      "dependencies": ["caddy", "pocket-id"]
+    },
+    {
+      "name": "paperless-ngx",
+      "displayName": "Paperless-ngx",
+      "description": "Document management system of record. REST API for retrieval. Supports native OIDC and local embedding indexing via separate worker (failure-isolated).",
+      "category": "platform",
+      "enabledByDefault": true,
+      "failureDomain": "paperless",
+      "composeFile": "compose/paperless.yml",
+      "supportedArchitectures": ["amd64", "arm64"],
+      "images": {
+        "paperless-ngx": "ghcr.io/paperless-ngx/paperless-ngx@sha256:${PAPERLESS_DIGEST:?pinned digest required}",
+        "postgres": "docker.io/library/postgres@sha256:${POSTGRES_DIGEST:?pinned digest required}",
+        "redis": "docker.io/library/redis@sha256:${REDIS_DIGEST:?pinned digest required}",
+        "gotenberg": "docker.io/gotenberg/gotenberg@sha256:${GOTENBERG_DIGEST:?pinned digest required}",
+        "tika": "docker.io/apache/tika@sha256:${TIKA_DIGEST:?pinned digest required}"
+      },
+      "resources": {
+        "memoryMinMiB": 1024,
+        "memoryRecommendedMiB": 2048,
+        "cpuMin": "0.5",
+        "diskMinMiB": 10240,
+        "notes": "Disk scales with document store (/srv/omahab/apps/paperless). Gotenberg+Tika are CPU bursts during ingestion."
+      },
+      "persistence": [
+        {
+          "hostPath": "/srv/omahab/apps/paperless/data",
+          "mountPath": "/usr/src/paperless/data",
+          "description": "Paperless document store",
+          "backup": true
+        },
+        {
+          "hostPath": "/srv/omahab/apps/paperless/media",
+          "mountPath": "/usr/src/paperless/media",
+          "description": "Originals, thumbnails, archive",
+          "backup": true
+        },
+        {
+          "volume": "paperless_postgres_data",
+          "mountPath": "/var/lib/postgresql/data",
+          "description": "Paperless Postgres",
+          "backup": true
+        },
+        {
+          "hostPath": "/srv/omahab/apps/paperless/consume",
+          "mountPath": "/usr/src/paperless/consume",
+          "description": "Consume folder (ephemeral ingest)",
+          "backup": false
+        }
+      ],
+      "healthCheck": {
+        "test": ["CMD-SHELL", "curl -f http://127.0.0.1:8000/api/ || wget --no-verbose --tries=1 --spider http://127.0.0.1:8000/api/ || exit 1"],
+        "interval": "30s",
+        "timeout": "10s",
+        "retries": 5,
+        "startPeriod": "30s",
+        "endpoint": "http://paperless:8000/api/"
+      },
+      "backup": {
+        "strategy": "database-dump-and-volume",
+        "preHooks": [
+          "docker compose -f {{.ComposeFile}} exec paperless-postgres pg_dump -U ${PAPERLESS_POSTGRES_USER:-paperless} -Fc -d ${PAPERLESS_POSTGRES_DB:-paperless} -f /tmp/paperless.pgdump",
+          "docker compose -f {{.ComposeFile}} exec paperless document_exporter --no-progress --zip /tmp/paperless_export.zip || docker compose -f {{.ComposeFile}} exec paperless python3 manage.py document_exporter /tmp/paperless_export --zip --no-progress || true"
+        ],
+        "postHooks": [],
+        "volumes": ["paperless_postgres_data"],
+        "hostPaths": ["/srv/omahab/apps/paperless/data", "/srv/omahab/apps/paperless/media"],
+        "notes": "Consistent DB dump + media/data volume snapshot required; raw DB files alone are invalid. document_exporter provides portable fallback."
+      },
+      "restore": {
+        "hooks": [
+          "docker compose -f {{.ComposeFile}} exec paperless-postgres pg_restore -U ${PAPERLESS_POSTGRES_USER:-paperless} -d ${PAPERLESS_POSTGRES_DB:-paperless} --clean --if-exists /tmp/paperless.pgdump",
+          "docker compose -f {{.ComposeFile}} exec paperless python3 manage.py document_importer /tmp/paperless_export --no-progress || rsync -a /backups/paperless/media/ /srv/omahab/apps/paperless/media/",
+          "docker compose -f {{.ComposeFile}} restart paperless"
+        ]
+      },
+      "secrets": {
+        "secretFilesSupported": true,
+        "secretFiles": [
+          {
+            "source": "paperless_db_password",
+            "target": "/run/secrets/paperless_db_password",
+            "env": "PAPERLESS_DB_PASS_FILE"
+          },
+          {
+            "source": "paperless_secret_key",
+            "target": "/run/secrets/paperless_secret_key",
+            "env": "PAPERLESS_SECRET_KEY_FILE"
+          }
+        ],
+        "notes": "Paperless supports PAPERLESS_*_FILE for file-based secrets; omahabd projects via /run/secrets tmpfs."
+      },
+      "oidc": {
+        "supported": true,
+        "mode": "native",
+        "provider": "pocket-id",
+        "notes": "Paperless native OIDC toward Pocket ID; local search index follows Paperless permissions."
+      },
+      "exposure": {
+        "default": "private",
+        "allowed": ["private", "shared"],
+        "caddyRoute": "docs.{{.Domain}}",
+        "internalPort": 8000,
+        "notes": "Documents are private by default; shared requires Access gate."
+      },
+      "update": {
+        "strategy": "recreate-with-migrations",
+        "rollback": "previous digest + pg_restore + media snapshot"
+      },
+      "dependencies": ["caddy", "pocket-id"]
+    },
+    {
+      "name": "karakeep",
+      "displayName": "Karakeep",
+      "description": "Bookmark, article, video and RSS archiving with full-text and semantic search. Agent skills for Hermes.",
+      "category": "platform",
+      "enabledByDefault": true,
+      "failureDomain": "karakeep",
+      "composeFile": "compose/karakeep.yml",
+      "supportedArchitectures": ["amd64", "arm64"],
+      "images": {
+        "karakeep": "ghcr.io/karakeep-app/karakeep@sha256:${KARAKEEP_DIGEST:?pinned digest required}",
+        "postgres": "docker.io/library/postgres@sha256:${POSTGRES_DIGEST:?pinned digest required}",
+        "meilisearch": "docker.io/getmeili/meilisearch@sha256:${MEILISEARCH_DIGEST:?pinned digest required}",
+        "chrome": "ghcr.io/browserless/chrome@sha256:${KARAKEEP_CHROME_DIGEST:?pinned digest required}"
+      },
+      "resources": {
+        "memoryMinMiB": 512,
+        "memoryRecommendedMiB": 1024,
+        "cpuMin": "0.3",
+        "diskMinMiB": 5120
+      },
+      "persistence": [
+        {
+          "volume": "karakeep_data",
+          "mountPath": "/data",
+          "description": "Karakeep archived pages and assets",
+          "backup": true
+        },
+        {
+          "volume": "karakeep_postgres_data",
+          "mountPath": "/var/lib/postgresql/data",
+          "description": "Karakeep Postgres",
+          "backup": true
+        },
+        {
+          "volume": "karakeep_meili_data",
+          "mountPath": "/meili_data",
+          "description": "Meilisearch index (derivable)",
+          "backup": false
+        }
+      ],
+      "healthCheck": {
+        "test": ["CMD-SHELL", "curl -f http://127.0.0.1:3000/api/health || wget --no-verbose --tries=1 --spider http://127.0.0.1:3000/api/trpc/health || exit 1"],
+        "interval": "30s",
+        "timeout": "10s",
+        "retries": 5,
+        "startPeriod": "30s",
+        "endpoint": "http://karakeep:3000/api/health"
+      },
+      "backup": {
+        "strategy": "database-dump-and-volume",
+        "preHooks": [
+          "docker compose -f {{.ComposeFile}} exec karakeep-postgres pg_dump -U ${KARAKEEP_POSTGRES_USER:-karakeep} -Fc -d ${KARAKEEP_POSTGRES_DB:-karakeep} -f /tmp/karakeep.pgdump"
+        ],
+        "postHooks": [],
+        "volumes": ["karakeep_data", "karakeep_postgres_data"],
+        "notes": "Meilisearch index can be rebuilt from DB+data volume; only DB and data volume are authoritative backups."
+      },
+      "restore": {
+        "hooks": [
+          "docker compose -f {{.ComposeFile}} exec karakeep-postgres pg_restore -U ${KARAKEEP_POSTGRES_USER:-karakeep} -d ${KARAKEEP_POSTGRES_DB:-karakeep} --clean --if-exists /tmp/karakeep.pgdump",
+          "docker compose -f {{.ComposeFile}} restart karakeep karakeep-meilisearch karakeep-chrome"
+        ]
+      },
+      "secrets": {
+        "secretFilesSupported": true,
+        "secretFiles": [
+          {
+            "source": "karakeep_db_password",
+            "target": "/run/secrets/karakeep_db_password",
+            "env": "KARAKEEP_DB_PASSWORD_FILE"
+          },
+          {
+            "source": "karakeep_nextauth_secret",
+            "target": "/run/secrets/karakeep_nextauth_secret",
+            "env": "KARAKEEP_NEXTAUTH_SECRET_FILE"
+          },
+          {
+            "source": "karakeep_meili_master_key",
+            "target": "/run/secrets/karakeep_meili_master_key",
+            "env": "MEILI_MASTER_KEY_FILE"
+          }
+        ]
+      },
+      "oidc": {
+        "supported": true,
+        "mode": "native",
+        "provider": "pocket-id",
+        "notes": "Karakeep native OIDC; API clients use Pocket ID tokens."
+      },
+      "exposure": {
+        "default": "private",
+        "allowed": ["private", "shared"],
+        "caddyRoute": "save.{{.Domain}}",
+        "internalPort": 3000,
+        "notes": "Save-to-Omahab browser action targets this hostname."
+      },
+      "update": {
+        "strategy": "recreate",
+        "rollback": "previous digest + pg_restore"
+      },
+      "dependencies": ["caddy", "pocket-id"]
+    },
+    {
+      "name": "syncthing",
+      "displayName": "Syncthing",
+      "description": "Folder synchronization. Restic is the off-site backup; Syncthing is not the backup mechanism. Never synchronize active .git directories.",
+      "category": "sync",
+      "enabledByDefault": false,
+      "failureDomain": "syncthing",
+      "composeFile": "compose/syncthing.yml",
+      "supportedArchitectures": ["amd64", "arm64"],
+      "images": {
+        "syncthing": "docker.io/syncthing/syncthing@sha256:${SYNCTHING_DIGEST:?pinned digest required}"
+      },
+      "resources": {
+        "memoryMinMiB": 256,
+        "memoryRecommendedMiB": 512,
+        "cpuMin": "0.1",
+        "diskMinMiB": 1024,
+        "notes": "Scales with number of synced folders; host paths under /srv/omahab/sync."
+      },
+      "persistence": [
+        {
+          "hostPath": "/srv/omahab/sync",
+          "mountPath": "/var/syncthing",
+          "description": "Syncthing server-side folder roots",
+          "backup": true
+        },
+        {
+          "volume": "syncthing_config",
+          "mountPath": "/var/syncthing/config",
+          "description": "Syncthing config, keys, and database",
+          "backup": true
+        }
+      ],
+      "healthCheck": {
+        "test": ["CMD-SHELL", "curl -fk https://127.0.0.1:8384/rest/system/ping -H \"X-API-Key: $(cat /run/secrets/syncthing_api_key 2>/dev/null || echo dummy)\" || wget --no-verbose --tries=1 --spider http://127.0.0.1:8384/rest/system/ping || exit 1"],
+        "interval": "30s",
+        "timeout": "10s",
+        "retries": 5,
+        "startPeriod": "20s",
+        "endpoint": "http://syncthing:8384/rest/system/ping"
+      },
+      "backup": {
+        "strategy": "volume-and-hostpath",
+        "preHooks": [
+          "docker compose -f {{.ComposeFile}} exec syncthing syncthing cli --gui-apikey $(cat /run/secrets/syncthing_api_key) operations pause || true",
+          "sleep 2"
+        ],
+        "postHooks": [
+          "docker compose -f {{.ComposeFile}} exec syncthing syncthing cli --gui-apikey $(cat /run/secrets/syncthing_api_key) operations resume || true"
+        ],
+        "volumes": ["syncthing_config"],
+        "hostPaths": ["/srv/omahab/sync"],
+        "notes": "Pause Syncthing briefly for consistent snapshot, then snapshot volumes and host sync roots via restic."
+      },
+      "restore": {
+        "hooks": [
+          "rsync -a /backups/syncthing/sync/ /srv/omahab/sync/",
+          "docker compose -f {{.ComposeFile}} restart syncthing"
+        ]
+      },
+      "secrets": {
+        "secretFilesSupported": true,
+        "secretFiles": [
+          {
+            "source": "syncthing_api_key",
+            "target": "/run/secrets/syncthing_api_key",
+            "env": "SYNCTHING_API_KEY_FILE"
+          },
+          {
+            "source": "syncthing_gui_password",
+            "target": "/run/secrets/syncthing_gui_password",
+            "env": "SYNCTHING_GUI_PASSWORD_FILE"
+          }
+        ]
+      },
+      "oidc": {
+        "supported": false,
+        "mode": "none",
+        "notes": "Syncthing has no native OIDC; access is via private Caddy route or Tailscale IP. Optional edge-auth via Caddy forward_auth to Pocket ID for 8384 GUI (browser only)."
+      },
+      "exposure": {
+        "default": "private",
+        "allowed": ["private"],
+        "caddyRoute": "sync.{{.Domain}}",
+        "internalPort": 8384,
+        "notes": "Syncthing GUI is private-only; never public. Sync protocol ports remain LAN/Tailscale only, not via Caddy."
+      },
+      "update": {
+        "strategy": "recreate",
+        "rollback": "previous digest + volume snapshot"
+      },
+      "dependencies": ["caddy"]
+    },
+    {
+      "name": "litellm",
+      "displayName": "LiteLLM Model Gateway",
+      "description": "OpenAI-compatible model gateway and credential broker for provider API keys and where supported subscription OAuth (ChatGPT, Grok). Projects receive aliases omahab/fast, omahab/balanced, omahab/reasoning, not upstream creds.",
+      "category": "gateway",
+      "enabledByDefault": true,
+      "failureDomain": "gateway",
+      "composeFile": "compose/litellm.yml",
+      "supportedArchitectures": ["amd64", "arm64"],
+      "images": {
+        "litellm": "ghcr.io/berriai/litellm@sha256:${LITELLM_DIGEST:?pinned digest required}",
+        "postgres": "docker.io/library/postgres@sha256:${POSTGRES_DIGEST:?pinned digest required}"
+      },
+      "resources": {
+        "memoryMinMiB": 256,
+        "memoryRecommendedMiB": 512,
+        "cpuMin": "0.1",
+        "diskMinMiB": 1024
+      },
+      "persistence": [
+        {
+          "volume": "litellm_postgres_data",
+          "mountPath": "/var/lib/postgresql/data",
+          "description": "LiteLLM proxy database (virtual keys, usage)",
+          "backup": true
+        },
+        {
+          "volume": "litellm_config",
+          "mountPath": "/app/config",
+          "description": "Generated litellm config (derived, rebuildable)",
+          "backup": false
+        }
+      ],
+      "healthCheck": {
+        "test": ["CMD-SHELL", "curl -f http://127.0.0.1:4000/health/liveliness || wget --no-verbose --tries=1 --spider http://127.0.0.1:4000/health/liveliness || exit 1"],
+        "interval": "20s",
+        "timeout": "5s",
+        "retries": 5,
+        "startPeriod": "20s",
+        "endpoint": "http://litellm:4000/health/liveliness"
+      },
+      "backup": {
+        "strategy": "database-dump",
+        "preHooks": [
+          "docker compose -f {{.ComposeFile}} exec litellm-postgres pg_dump -U ${LITELLM_POSTGRES_USER:-litellm} -Fc -d ${LITELLM_POSTGRES_DB:-litellm} -f /tmp/litellm.pgdump"
+        ],
+        "postHooks": [],
+        "volumes": ["litellm_postgres_data"],
+        "notes": "Credential ciphertext backup is encrypted via omahabd secrets broker; DB dump contains virtual keys and routing."
+      },
+      "restore": {
+        "hooks": [
+          "docker compose -f {{.ComposeFile}} exec litellm-postgres pg_restore -U ${LITELLM_POSTGRES_USER:-litellm} -d ${LITELLM_POSTGRES_DB:-litellm} --clean --if-exists /tmp/litellm.pgdump",
+          "docker compose -f {{.ComposeFile}} restart litellm"
+        ]
+      },
+      "secrets": {
+        "secretFilesSupported": true,
+        "secretFiles": [
+          {
+            "source": "litellm_master_key",
+            "target": "/run/secrets/litellm_master_key",
+            "env": "LITELLM_MASTER_KEY_FILE"
+          },
+          {
+            "source": "litellm_db_password",
+            "target": "/run/secrets/litellm_db_password",
+            "env": "DATABASE_PASSWORD_FILE"
+          },
+          {
+            "source": "litellm_salt_key",
+            "target": "/run/secrets/litellm_salt_key",
+            "env": "LITLLM_SALT_KEY_FILE"
+          }
+        ],
+        "notes": "Provider credentials are stored in omahabd secrets broker and projected as env files into litellm config generation; never in labels/logs."
+      },
+      "oidc": {
+        "supported": false,
+        "mode": "none",
+        "notes": "Gateway is not user-facing OIDC; it issues scoped virtual keys to Hermes and projects."
+      },
+      "exposure": {
+        "default": "private",
+        "allowed": ["private"],
+        "caddyRoute": "models.{{.Domain}}",
+        "internalPort": 4000,
+        "notes": "Private-only; never Tunnel-public. Accessed via Hermes and omahabd, not directly by browsers."
+      },
+      "update": {
+        "strategy": "recreate",
+        "rollback": "previous digest + pg_restore"
+      },
+      "dependencies": ["caddy"]
+    },
+    {
+      "name": "embedding-worker",
+      "displayName": "Embedding Worker",
+      "description": "Isolated Python worker for local embedding inference (ONNX Runtime). Handles tokenization, pooling, normalization, batching. Failure or memory spike must NOT take down omahabd. Consumes only current job content, no provider credentials.",
+      "category": "ml",
+      "enabledByDefault": false,
+      "failureDomain": "ml-worker",
+      "composeFile": "compose/embedding-worker.yml",
+      "supportedArchitectures": ["amd64", "arm64"],
+      "images": {
+        "embedding-worker": "ghcr.io/omahab/embedding-worker@sha256:${EMBEDDING_WORKER_DIGEST:?pinned digest required}"
+      },
+      "resources": {
+        "memoryMinMiB": 512,
+        "memoryRecommendedMiB": 1536,
+        "cpuMin": "0.5",
+        "diskMinMiB": 4096,
+        "notes": "Model dependent: nomic-embed-text 0.6-1.5GB + ONNX cache. Runs CPU-only. Isolated limit prevents host control-plane collapse."
+      },
+      "persistence": [
+        {
+          "volume": "embedding_models",
+          "mountPath": "/models",
+          "description": "Pinned model artifacts (download size, license visible in UI)",
+          "backup": false
+        },
+        {
+          "hostPath": "/srv/omahab/derived-indexes",
+          "mountPath": "/data/indexes",
+          "description": "Derived vector index (Paperless permissions, sensitive derived data)",
+          "backup": true
+        }
+      ],
+      "healthCheck": {
+        "test": ["CMD-SHELL", "curl -f http://127.0.0.1:8090/health || python3 -c \"import http.client; http.client.HTTPConnection('127.0.0.1',8090).request('GET','/health'); assert http.client.HTTPConnection('127.0.0.1',8090).getresponse().status==200\" || exit 1"],
+        "interval": "30s",
+        "timeout": "10s",
+        "retries": 3,
+        "startPeriod": "60s",
+        "endpoint": "http://embedding-worker:8090/health"
+      },
+      "backup": {
+        "strategy": "derived-index",
+        "preHooks": [],
+        "postHooks": [],
+        "volumes": [],
+        "hostPaths": ["/srv/omahab/derived-indexes"],
+        "notes": "Model artifacts are re-downloadable from pinned source; only vector index store is backed up, with Paperless permission coupling."
+      },
+      "restore": {
+        "hooks": ["rsync -a /backups/derived-indexes/ /srv/omahab/derived-indexes/", "docker compose -f {{.ComposeFile}} restart embedding-worker"],
+        "notes": "Previous index remains usable while background re-index runs after model replacement."
+      },
+      "secrets": {
+        "secretFilesSupported": false,
+        "notes": "Worker receives NO provider credentials or general secrets; only scoped job metadata and content for current batch."
+      },
+      "oidc": {
+        "supported": false,
+        "mode": "none"
+      },
+      "exposure": {
+        "default": "private",
+        "allowed": ["private"],
+        "caddyRoute": null,
+        "internalPort": 8090,
+        "notes": "Not externally exposed; only omahabd talks to it over private bridge."
+      },
+      "update": {
+        "strategy": "recreate-with-reindex",
+        "rollback": "previous digest; previous index remains usable during background re-index"
+      },
+      "dependencies": [],
+      "notes": "Preserves failure boundary: omahabd owns model selection, pinned artifact metadata, source permissions, indexing jobs; worker owns inference only."
+    },
+    {
+      "name": "ntfy",
+      "displayName": "ntfy",
+      "description": "Optional push delivery adapter for normalized events (backup.failed, service.unhealthy, etc.). No phone subscription created by default.",
+      "category": "notifications",
+      "enabledByDefault": false,
+      "optional": true,
+      "failureDomain": "notifications",
+      "composeFile": "compose/ntfy.yml",
+      "supportedArchitectures": ["amd64", "arm64"],
+      "images": {
+        "ntfy": "docker.io/binwiederhier/ntfy@sha256:${NTFY_DIGEST:?pinned digest required}"
+      },
+      "resources": {
+        "memoryMinMiB": 128,
+        "memoryRecommendedMiB": 256,
+        "cpuMin": "0.05",
+        "diskMinMiB": 1024
+      },
+      "persistence": [
+        {
+          "volume": "ntfy_cache",
+          "mountPath": "/var/cache/ntfy",
+          "description": "ntfy message cache (ephemeral)",
+          "backup": false
+        },
+        {
+          "volume": "ntfy_config",
+          "mountPath": "/etc/ntfy",
+          "description": "ntfy server config",
+          "backup": true
+        }
+      ],
+      "healthCheck": {
+        "test": ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:80/v1/health || curl -f http://127.0.0.1:80/v1/health || exit 1"],
+        "interval": "30s",
+        "timeout": "5s",
+        "retries": 3,
+        "startPeriod": "10s",
+        "endpoint": "http://ntfy:80/v1/health"
+      },
+      "backup": {
+        "strategy": "volume-snapshot",
+        "preHooks": [],
+        "postHooks": [],
+        "volumes": ["ntfy_config"],
+        "notes": "Cache is ephemeral; only config is backed up."
+      },
+      "restore": {
+        "hooks": ["docker compose -f {{.ComposeFile}} restart ntfy"]
+      },
+      "secrets": {
+        "secretFilesSupported": true,
+        "secretFiles": [
+          {
+            "source": "ntfy_auth_file",
+            "target": "/run/secrets/ntfy_auth_file",
+            "env": "NTFY_AUTH_FILE_FILE"
+          }
+        ]
+      },
+      "oidc": {
+        "supported": false,
+        "mode": "none",
+        "notes": "ntfy auth is token-based; optional Caddy forward_auth to Pocket ID could gate web UI, but push tokens remain ntfy-native."
+      },
+      "exposure": {
+        "default": "private",
+        "allowed": ["private", "shared", "public"],
+        "caddyRoute": "ntfy.{{.Domain}}",
+        "internalPort": 80,
+        "notes": "Optional; when enabled defaults to private. Can be shared via Access gate for phone push."
+      },
+      "update": {
+        "strategy": "recreate",
+        "rollback": "previous digest + config snapshot"
+      },
+      "dependencies": ["caddy"]
+    }
+  ],
+  "invariants": {
+    "noDockerSocketInApps": "No bundle mounts /var/run/docker.sock or docker.sock proxy. Only omahabd and the controlled deployment layer (ONCE proxy on 127.0.0.1:8080) may access the Docker socket.",
+    "noHostPortsForApps": "No application service publishes host ports. Only caddy edge publishes 80/443 (+443/udp). All other services use expose + private bridge (omahab) and are reachable via Caddy reverse_proxy.",
+    "databaseBackupConsistency": "Every Postgres/DB bundle declares a preHooks pg_dump (custom format -Fc) and restore uses pg_restore --clean --if-exists. Raw file copy is explicitly NOT considered valid. This is consistent across forgejo, woodpecker, hermes, immich, paperless-ngx, karakeep, litellm.",
+    "failureBoundaries": "Each bundle has its own Postgres/Redis/Meilisearch where applicable; no shared DB across failure domains except the host control-plane SQLite (/var/lib/omahab/control.db) which is not a bundle store. Embedding worker is isolated Python process; its OOM does not kill omahabd.",
+    "secretHandling": "Secrets projected via Docker secrets / /run/secrets tmpfs (0400) and *_FILE env references where upstream supports it. No secrets in Docker labels, logs, or user-visible config. Audit logs contain secret IDs, never values.",
+    "imagePinning": "All images are content-addressed @sha256: and validated. Release substitution variables (${*_DIGEST:?}) fail closed if unset. No mutable tags are present in any compose file.",
+    "privateByDefault": "All user-data services default to private (DNS-only Tailscale CNAME). Shared/public require explicit inspector-confirmed step showing resulting hostname, auth mechanism, and public route changes."
+  }
+}

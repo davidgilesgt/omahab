@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://get.omahab.org/schemas/release-manifest-1.json",
+  "title": "Omahab release manifest (release.json v1)",
+  "description": "Metadata for one published Omahab release. The document lives in the release channel directory (default https://get.omahab.org/releases/stable) next to the artifacts it describes. Chain of trust: a detached minisign signature SHA256SUMS.sig (produced with `minisign -S -m SHA256SUMS -s <key> -t <comment>`, verified with `minisign -Vm SHA256SUMS -P <key from release/minisign.pub> -x SHA256SUMS.sig`) attests SHA256SUMS, and SHA256SUMS attests the sha256 of every artifact including this release.json. The bootstrap (scripts/install) relies only on SHA256SUMS + SHA256SUMS.sig; omahabd update tooling additionally consumes release.json. Catalog substitution: each key of `images` provides the digest for one distinct image repository referenced by deploy/catalog/catalog.json; the hex part after `sha256:` is substituted into the corresponding ${..._DIGEST} variable listed in that key's description. Digests must be real registry digests resolved at release time; placeholder digests are schema-invalid by design.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "channel",
+    "version",
+    "sourceDateEpoch",
+    "publishedAt",
+    "architectures",
+    "artifacts",
+    "images"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "1",
+      "description": "Release manifest contract version. Bump on any incompatible change and publish a new schema $id."
+    },
+    "channel": {
+      "enum": ["stable", "testing"],
+      "description": "Publication channel this manifest was emitted for."
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?$",
+      "description": "Semver 2.0.0 release version; must match the version embedded in artifact names."
+    },
+    "sourceDateEpoch": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "SOURCE_DATE_EPOCH used for reproducible artifact builds (Unix seconds, UTC)."
+    },
+    "publishedAt": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$",
+      "description": "Publication time, RFC 3339, UTC only (trailing Z enforced by the pattern)."
+    },
+    "architectures": {
+      "type": "array",
+      "items": { "enum": ["amd64", "arm64"] },
+      "uniqueItems": true,
+      "minItems": 1,
+      "description": "CPU architectures this release provides artifacts for."
+    },
+    "artifacts": {
+      "type": "array",
+      "uniqueItems": true,
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*$",
+            "description": "Flat file name inside the release directory; no path components. Must appear in SHA256SUMS with a matching checksum."
+          },
+          "kind": {
+            "enum": ["installer", "server", "client", "catalog", "checksums", "manifest", "verify", "deb"],
+            "description": "Artifact role. installer: signed omahab-installer-<version>-<arch> binary executed by scripts/install."
+          },
+          "arch": {
+            "enum": ["amd64", "arm64", "all"],
+            "description": "Architecture the artifact is specific to; all for architecture-independent files."
+          }
+        }
+      }
+    },
+    "images": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "caddy",
+        "pocket-id",
+        "forgejo",
+        "postgres",
+        "redis",
+        "woodpecker-server",
+        "woodpecker-agent",
+        "hermes",
+        "immich-server",
+        "immich-ml",
+        "immich-pgvecto",
+        "paperless-ngx",
+        "gotenberg",
+        "tika",
+        "karakeep",
+        "meilisearch",
+        "karakeep-chrome",
+        "syncthing",
+        "litellm",
+        "embedding-worker",
+        "ntfy"
+      ],
+      "properties": {
+        "caddy":              { "$ref": "#/$defs/digest", "description": "docker.io/library/caddy; feeds ${CADDY_DIGEST}." },
+        "pocket-id":          { "$ref": "#/$defs/digest", "description": "ghcr.io/pocket-id/pocket-id; feeds ${POCKET_ID_DIGEST}." },
+        "forgejo":            { "$ref": "#/$defs/digest", "description": "codeberg.org/forgejo/forgejo; feeds ${FORGEJO_DIGEST}." },
+        "postgres":           { "$ref": "#/$defs/digest", "description": "docker.io/library/postgres (Forgejo/Woodpecker/Hermes/Paperless/Karakeep/LiteLLM); feeds ${POSTGRES_DIGEST}." },
+        "redis":              { "$ref": "#/$defs/digest", "description": "docker.io/library/redis (Forgejo/Immich/Paperless/Karakeep); feeds ${REDIS_DIGEST}." },
+        "woodpecker-server":  { "$ref": "#/$defs/digest", "description": "docker.io/woodpeckerci/woodpecker-server; feeds ${WOODPECKER_SERVER_DIGEST}." },
+        "woodpecker-agent":   { "$ref": "#/$defs/digest", "description": "docker.io/woodpeckerci/woodpecker-agent; feeds ${WOODPECKER_AGENT_DIGEST}." },
+        "hermes":             { "$ref": "#/$defs/digest", "description": "ghcr.io/omahab/hermes; feeds ${HERMES_DIGEST}." },
+        "immich-server":      { "$ref": "#/$defs/digest", "description": "ghcr.io/immich-app/immich-server; feeds ${IMMICH_SERVER_DIGEST}." },
+        "immich-ml":          { "$ref": "#/$defs/digest", "description": "ghcr.io/immich-app/immich-machine-learning; feeds ${IMMICH_ML_DIGEST}." },
+        "immich-pgvecto":     { "$ref": "#/$defs/digest", "description": "ghcr.io/tensorchord/pgvecto-rs; feeds ${IMMICH_PGVECTO_DIGEST}." },
+        "paperless-ngx":      { "$ref": "#/$defs/digest", "description": "ghcr.io/paperless-ngx/paperless-ngx; feeds ${PAPERLESS_DIGEST}." },
+        "gotenberg":          { "$ref": "#/$defs/digest", "description": "docker.io/gotenberg/gotenberg; feeds ${GOTENBERG_DIGEST}." },
+        "tika":               { "$ref": "#/$defs/digest", "description": "docker.io/apache/tika; feeds ${TIKA_DIGEST}." },
+        "karakeep":           { "$ref": "#/$defs/digest", "description": "ghcr.io/karakeep-app/karakeep; feeds ${KARAKEEP_DIGEST}." },
+        "meilisearch":        { "$ref": "#/$defs/digest", "description": "docker.io/getmeili/meilisearch; feeds ${MEILISEARCH_DIGEST}." },
+        "karakeep-chrome":    { "$ref": "#/$defs/digest", "description": "ghcr.io/browserless/chrome; feeds ${KARAKEEP_CHROME_DIGEST}." },
+        "syncthing":          { "$ref": "#/$defs/digest", "description": "docker.io/syncthing/syncthing; feeds ${SYNCTHING_DIGEST}." },
+        "litellm":            { "$ref": "#/$defs/digest", "description": "ghcr.io/berriai/litellm; feeds ${LITELLM_DIGEST}." },
+        "embedding-worker":   { "$ref": "#/$defs/digest", "description": "ghcr.io/omahab/embedding-worker; feeds ${EMBEDDING_WORKER_DIGEST}." },
+        "ntfy":               { "$ref": "#/$defs/digest", "description": "docker.io/binwiederhier/ntfy; feeds ${NTFY_DIGEST}." }
+      },
+      "description": "Pinned image digests for the curated platform catalog, one entry per distinct image repository. Every catalog ${..._DIGEST} variable must resolve here; a release with unavailable digests must not be published."
+    },
+    "notes": {
+      "type": "string",
+      "description": "Optional human-readable release notes."
+    }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$",
+      "not": { "const": "sha256:0000000000000000000000000000000000000000000000000000000000000000" },
+      "description": "Real OCI digest resolved from the registry at release time; all-zero placeholder digests are invalid."
+    }
+  }
+}

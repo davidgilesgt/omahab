@@ -1,0 +1,28 @@
+{
+  "models": {
+    "omahab-embed-english": {
+      "model_id": "nomic-ai/nomic-embed-text-v1.5",
+      "revision": "e5a65b3c5f5a61234f1234567890abcd",
+      "artifact_path": "/var/lib/omahab/models/nomic-embed-text-v1.5",
+      "artifact_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "dimensions": 768,
+      "max_sequence_length": 8192,
+      "license": "Apache-2.0",
+      "size_bytes": 548000000,
+      "expected_memory_mb": 512
+    },
+    "omahab-embed-worldwide": {
+      "model_id": "Qwen/Qwen3-Embedding-0.6B",
+      "revision": "pinned-revision-abc123",
+      "artifact_path": "/var/lib/omahab/models/qwen3-embedding-0.6b",
+      "artifact_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "dimensions": 1024,
+      "max_sequence_length": 8192,
+      "license": "Apache-2.0",
+      "size_bytes": 1200000000,
+      "expected_memory_mb": 1024
+    }
+  },
+  "models_base_dir": "/var/lib/omahab/models",
+  "allow_test_adapter": false
+}

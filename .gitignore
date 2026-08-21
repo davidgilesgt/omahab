@@ -1,0 +1,13 @@
+node_modules/
+dist/
+coverage/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.env
+.env.*
+__omp_shell(".env.example")
+.DS_Store
+
+# Generated at release time with resolved image digests
+deploy/catalog/apps-catalog.json

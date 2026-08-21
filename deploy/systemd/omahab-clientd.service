@@ -1,0 +1,62 @@
+[Unit]
+Description=Omahab Client Daemon (omahab-clientd) — Omarchy companion
+Documentation=https://omahab.org/docs/companion
+After=network-online.target tailscaled.service
+Wants=network-online.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/omahab-clientd --state-dir %h/.local/share/omahab --socket %t/omahab-clientd.sock
+Restart=on-failure
+RestartSec=3
+
+# Run as the desktop user, NOT root. No Docker socket access from the companion.
+User=%i
+WorkingDirectory=%h
+Environment=XDG_RUNTIME_DIR=%t
+Environment=OMAHAB_CLIENT_STATE_DIR=%h/.local/share/omahab
+EnvironmentFile=-%h/.config/omahab/client.env
+
+# --- Hardening for unprivileged user service ---
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateMounts=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/omahab %h/.config/omahab %t
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RemoveIPC=yes
+MemoryDenyWriteExecute=no
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @raw-io
+CapabilityBoundingSet=
+AmbientCapabilities=
+SecureBits=noroot
+
+# Socket is Unix domain only (%t/omahab-clientd.sock), never TCP. QML plugin talks only to this socket.
+# Credentials are stored via desktop keyring, never in %h/.config/omahab/client.json (that file holds non-secret config only).
+
+LimitNOFILE=16384
+TimeoutStopSec=10
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=omahab-clientd
+
+[Install]
+WantedBy=default.target
+
+# NOTES:
+# - Install as user unit: systemctl --user enable --now omahab-clientd.service
+# - Alternatively templated system unit omahab-clientd@.service with User=%i for per-user instances.
+# - Never writes bearer credentials to client.json; uses CredentialStore abstraction -> libsecret/keyring.

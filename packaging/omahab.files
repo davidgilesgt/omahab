@@ -1,0 +1,13 @@
+dist/@ARCH@/omahabd -> usr/bin/
+dist/@ARCH@/omahab -> usr/bin/
+dist/@ARCH@/omahab-install -> usr/bin/
+dist/@ARCH@/omahab-clientd -> usr/bin/
+deploy/systemd/omahabd.service -> lib/systemd/system/
+deploy/systemd/omahab-backup.service -> lib/systemd/system/
+deploy/systemd/omahab-backup.timer -> lib/systemd/system/
+deploy/systemd/omahab-verify.service -> lib/systemd/system/
+deploy/systemd/omahab-verify.timer -> lib/systemd/system/
+deploy/systemd/cloudflared.service -> lib/systemd/system/
+packaging/tmpfiles.d/omahab.conf -> usr/lib/tmpfiles.d/
+deploy/catalog -> usr/share/omahab/catalog/
+web/dist -> usr/share/omahab/web/
