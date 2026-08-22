@@ -119,7 +119,55 @@ The installer runs 10 steps in order. Each step is journaled and idempotent. Use
 9. `daemon` — enables and restarts `omahabd` (`Type=simple`), polls `http://127.0.0.1:8484/up` until `200`. Writes `/etc/omahab/backup.env` (0600, `OMAHAB_SERVER` + `OMAHAB_TOKEN`) used by the backup and verify units (`omahab backup create` and `omahab backup verify` without an id verifies the latest snapshot).
 10. `manifest` — writes `/var/lib/omahab/install-manifest.json`.
 
-After a full install, the installer prints next steps: `sudo tailscale up` (authorize from any device), `omahab cloudflare setup`, `omahab doctor`.
+After a full install, the installer **guides you interactively** when run on a TTY
+(automation with `--json`/`--non-interactive` prints the same information statically
+and never blocks):
+
+1. **Tailscale — private mesh (loops until satisfied).** The installer checks
+   `tailscale status --json` for `BackendState:"Running"` and `tailscale ip -4`
+   for a `100.x.y.z` address. If not enrolled it runs `tailscale up`, prints
+   the `https://login.tailscale.com/a/<code>` URL, and prompts:
+   `Press Enter after approving at https://login.tailscale.com/admin/machines`
+   (`skip` to defer, `retry` to re-run `tailscale up`). It re-checks until
+   an IP appears; success shows `http://<tailscale-ip>:8484` / MagicDNS.
+
+2. **Cloudflare — domain + scoped API token(s) (loops until satisfied).**
+   Prompts for the apex domain (`example.com` — not `https://…`, not a
+   subdomain) validated with `validateApexDomain` (lower-cased, `^[a-z0-9…]\.[a-z]{2,}$`,
+   no scheme/port/path, at least one dot), then for tokens with
+   `validateCloudflareToken` (`^[A-Za-z0-9_-]{30,200}$`) and **live verification**
+   via `GET https://api.cloudflare.com/client/v4/user/tokens/verify`
+   (`Authorization: Bearer <token>` must return `success && status:"active"`).
+   The terminal prints the exact dashboard path and **minimal permissions**:
+
+```text
+Token A — DNS (zone, required [Omahab-DNS])
+  Zone Resources: Include → Specific zone → example.com
+  Permissions:    Zone → Zone → Read  +  Zone → DNS → Edit
+
+Token B — Tunnel + Access (account+zone, for shared/public [Omahab-Tunnel])
+  Account Resources: Include → Specific account → <your account>
+  Zone Resources:    Include → Specific zone → example.com
+  Permissions:    Account → Cloudflare Tunnel → Edit
+                  Account → Access: Apps and Policies → Edit
+                  Zone    → Zone → Read
+
+Token C — Email (optional): Workers Scripts Edit + Workers Routes Edit
+Never use the Global API Key. Paste tokens in the dashboard at http://<tailscale-ip>:8484
+(Settings → Domain / Secrets) — Token A alone is enough for private DNS.
+```
+
+Non-interactive transcript (also what `--json` callers see as prose when they
+run without `--json`) lists the same dashboard path
+(`https://dash.cloudflare.com` → Profile → API Tokens → Create Custom Token),
+the per-token permissions above (DESIGN.md 7.4, `internal/exposure/clients.go`
+`ScopeDNS|Tunnel|Access`), how to verify (`dig ai.example.com`,
+`sudo systemctl status cloudflared`), and that the control API stays on
+`127.0.0.1:8484` (reach it via Tailscale IP or MagicDNS
+`http://<hostname>.<tailnet>.ts.net:8484`). `cloudflared` and the backup timers
+remain disabled until tunnel enrollment and a backup repository are configured
+— by design. Finish with `omahab doctor`.
+
 
 `omahabd` listens on `127.0.0.1:8484` only.
 
