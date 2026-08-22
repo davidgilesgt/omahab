@@ -448,7 +448,13 @@ func doInstall(cmd *cobra.Command) error {
 				out.printf("Provide keys via --github-user, --key-file, or paste.\n")
 			case installer.StepSSHDHardening:
 				out.printf("\nSSH hardening failed: %s\n", se.Result.Error)
-				out.printf("The rollback timer restores the previous sshd config in 10 minutes if not confirmed.\n")
+				if strings.HasPrefix(se.Result.Error, installer.ErrSSHLockout.Error()) {
+					out.printf("Nothing was changed: no sshd settings were written and no rollback timer was armed.\n")
+					out.printf("Run the installer from a live SSH session, then retry with --resume.\n")
+				} else {
+					out.printf("Any staged sshd changes were rolled back; no rollback timer remains armed.\n")
+					out.printf("Retry with --resume after fixing the reported issue.\n")
+				}
 			default:
 				out.printf("\nStep %s failed: %s\n", se.Step, se.Result.Error)
 				out.printf("Retry with --resume to resume safe steps.\n")

@@ -417,15 +417,106 @@ func liveWriteAuthorizedKeys(_ string, path string, keys []string) error {
 }
 
 func liveActiveSSHSession() (bool, string, error) {
-	sshConn := os.Getenv("SSH_CONNECTION")
-	if sshConn == "" {
-		return false, "", nil
-	}
-	parts := strings.Fields(sshConn)
-	if len(parts) < 1 {
+	// Fast path: an installer started directly from an SSH login shell (no
+	// sudo) inherits SSH_CONNECTION ("client-addr client-port server-addr
+	// server-port").
+	if sshConn := os.Getenv("SSH_CONNECTION"); sshConn != "" {
+		if fields := strings.Fields(sshConn); len(fields) > 0 {
+			return true, fields[0], nil
+		}
 		return true, sshConn, nil
 	}
-	return true, parts[0], nil
+	// sudo's env_reset strips SSH_* variables, so an installer elevated from
+	// an SSH session cannot see them. Fall back to harder evidence.
+	if sshdAncestor() {
+		return true, "", nil
+	}
+	return sshdRemoteLoginSession()
+}
+
+// sshdAncestor reports whether a live sshd process is an ancestor of this
+// process. sudo and exec preserve the parent chain, so this works even when
+// the environment has been reset. Only live ancestors are visited: once the
+// session's sshd exits it disappears from the chain.
+func sshdAncestor() bool {
+	pid := os.Getpid()
+	for i := 0; i < 128 && pid > 1; i++ {
+		name, ppid, err := procNameAndParent(pid)
+		if err != nil {
+			return false
+		}
+		if name == "sshd" || name == "sshd-session" {
+			return true
+		}
+		pid = ppid
+	}
+	return false
+}
+
+// procNameAndParent reads the process name and parent PID from /proc.
+// It returns an error on non-Linux systems or for unreachable processes.
+func procNameAndParent(pid int) (string, int, error) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	if err != nil {
+		return "", 0, err
+	}
+	name, ppid := "", -1
+	for _, line := range strings.Split(string(data), "\n") {
+		switch {
+		case strings.HasPrefix(line, "Name:"):
+			name = strings.TrimSpace(strings.TrimPrefix(line, "Name:"))
+		case strings.HasPrefix(line, "PPid:"):
+			if v, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "PPid:"))); err == nil {
+				ppid = v
+			}
+		}
+		if name != "" && ppid >= 0 {
+			break
+		}
+	}
+	if name == "" || ppid < 0 {
+		return "", 0, fmt.Errorf("unreadable /proc/%d/status", pid)
+	}
+	return name, ppid, nil
+}
+
+// sshdRemoteLoginSession consults logind for an active remote login session.
+// This covers multiplexer panes (tmux/screen) whose parent chain leads to the
+// multiplexer server rather than the sshd the client is currently attached
+// through. Unavailable loginctl is not an error: detection simply reports no
+// session.
+func sshdRemoteLoginSession() (bool, string, error) {
+	out, err := exec.Command("loginctl", "list-sessions", "--no-legend").Output()
+	if err != nil {
+		return false, "", nil
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		props, err := exec.Command("loginctl", "show-session", fields[0],
+			"-p", "State", "-p", "Remote", "-p", "RemoteHost").Output()
+		if err != nil {
+			continue
+		}
+		state, remote, host := "", "", ""
+		for _, pl := range strings.Split(string(props), "\n") {
+			key, value, _ := strings.Cut(pl, "=")
+			switch strings.TrimSpace(key) {
+			case "State":
+				state = strings.TrimSpace(value)
+			case "Remote":
+				remote = strings.TrimSpace(value)
+			case "RemoteHost":
+				host = strings.TrimSpace(value)
+			}
+		}
+		if remote == "yes" && (state == "active" || state == "online") {
+			return true, host, nil
+		}
+	}
+	return false, "", nil
 }
 
 func liveSecondSessionProbe(ctx context.Context) (bool, error) {
