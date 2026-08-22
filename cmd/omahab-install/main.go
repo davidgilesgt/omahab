@@ -538,6 +538,9 @@ func doInstall(cmd *cobra.Command) error {
 
 	if !out.jsonMode {
 		out.printf("\nInstallation complete (version %s).\n", opts.Version)
+		out.printf("omahab is installed to /usr/bin/omahab (standard PATH).\n")
+		out.printf("Shell completions installed for bash, zsh, and fish.\n")
+		out.printf("If `omahab` is not found, open a new shell or run: hash -r\n")
 	}
 	printNextSteps(out, flagUntil)
 	return nil

@@ -200,7 +200,7 @@ have_sha256=$(sha256sum "$installer" | sed 's/[[:space:]].*//')
 [ "$have_sha256" = "$want_sha256" ] ||
     die "checksum mismatch for $installer_name; refusing to continue"
 
-# --- 4. exec the verified installer -----------------------------------------
+# --- 4. exec the verified installer and handle PATH --------------------------
 
 chmod 0700 "$installer"
 
@@ -211,6 +211,28 @@ chmod 0700 "$installer"
 # cleanup of TMPDIR.
 rm -f -- "$sums" "$sig"
 
-exec "$installer" "$@"
-
-die "exec of $installer_name failed"
+# Run the installer without exec so we can report PATH status afterwards.
+# The installer already prints completion/PATH guidance, but the bootstrap
+# also clears the shell hash and verifies `omahab` is on PATH for both root
+# and the invoking user (SUDO_USER) so a stale hash does not hide the new
+# binary.
+set +e
+"$installer" "$@"
+rc=$?
+set -e
+if [ $rc -eq 0 ]; then
+    hash -r 2>/dev/null || true
+    if ! command -v omahab >/dev/null 2>&1; then
+        echo "omahab-install: warning: 'omahab' not found in PATH ($PATH) — binary is at /usr/bin/omahab; open a new shell or run: hash -r" >&2
+    fi
+    # Also check the invoking user's PATH when run via sudo.
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+        if command -v sudo >/dev/null 2>&1; then
+            if ! sudo -u "$SUDO_USER" sh -c 'command -v omahab >/dev/null 2>&1'; then
+                user_path=$(sudo -u "$SUDO_USER" sh -c 'echo $PATH' 2>/dev/null || echo "?")
+                echo "omahab-install: note: 'omahab' not in $SUDO_USER's PATH ($user_path) — ensure /usr/bin is in PATH or open a new shell" >&2
+            fi
+        fi
+    fi
+fi
+exit $rc

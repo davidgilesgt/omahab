@@ -11,6 +11,11 @@ if [ "$1" = remove ] && [ -d /run/systemd/system ]; then
     systemctl --system daemon-reload >/dev/null || true
 fi
 
+# Remove completions that were generated in postinst (not tracked by dpkg).
+if [ "$1" = remove ] || [ "$1" = purge ]; then
+    rm -f /usr/share/bash-completion/completions/omahab /usr/share/zsh/site-functions/_omahab /usr/share/fish/vendor_completions.d/omahab.fish >/dev/null 2>&1 || true
+fi
+
 if [ "$1" = purge ] && command -v deb-systemd-helper >/dev/null 2>&1; then
     deb-systemd-helper purge omahabd.service >/dev/null || true
     deb-systemd-helper unmask omahabd.service >/dev/null || true

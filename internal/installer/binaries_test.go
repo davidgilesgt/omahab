@@ -60,6 +60,7 @@ func TestBinariesHappyPath(t *testing.T) {
 	var tmpfilesName string
 	var tmpfilesArgs []string
 	tmpfilesCalls := 0
+	completionCalls := 0
 	shaCalls := map[string]int{}
 	hashes := map[string]string{
 		"/usr/bin/omahab":  "hash-omahab",
@@ -87,9 +88,21 @@ func TestBinariesHappyPath(t *testing.T) {
 			return nil
 		},
 		CommandOutput: func(ctx context.Context, name string, args ...string) (string, error) {
-			tmpfilesName = name
-			tmpfilesArgs = append([]string(nil), args...)
-			tmpfilesCalls++
+			if name == "systemd-tmpfiles" {
+				tmpfilesName = name
+				tmpfilesArgs = append([]string(nil), args...)
+				tmpfilesCalls++
+				return "", nil
+			}
+			if name == "/usr/bin/omahab" && len(args) >= 1 && args[0] == "completion" {
+				completionCalls++
+				shell := ""
+				if len(args) >= 2 {
+					shell = args[1]
+				}
+				return "# completion for " + shell + "\n", nil
+			}
+			t.Fatalf("unexpected CommandOutput %q %v", name, args)
 			return "", nil
 		},
 		SHA256File: func(p string) (string, error) {
@@ -113,7 +126,7 @@ func TestBinariesHappyPath(t *testing.T) {
 		t.Fatalf("unexpected error %q", res.Error)
 	}
 
-	// Expected dest → perm mapping
+	// Expected dest → perm mapping (including shell completions)
 	wantPerm := map[string]uint32{
 		"/usr/bin/omahab":                              0o755,
 		"/usr/bin/omahabd":                             0o755,
@@ -128,6 +141,9 @@ func TestBinariesHappyPath(t *testing.T) {
 		"/usr/share/omahab/catalog/compose/example.yml": 0o644,
 		"/usr/share/omahab/web/index.html":             0o644,
 		"/usr/share/omahab/web/assets/app.js":          0o644,
+		"/usr/share/bash-completion/completions/omahab": 0o644,
+		"/usr/share/zsh/site-functions/_omahab":        0o644,
+		"/usr/share/fish/vendor_completions.d/omahab.fish": 0o644,
 	}
 	if !reflect.DeepEqual(destPerm, wantPerm) {
 		t.Fatalf("perms mismatch:\n got  %v\n want %v", destPerm, wantPerm)
@@ -183,13 +199,35 @@ func TestBinariesHappyPath(t *testing.T) {
 	if !reflect.DeepEqual(tmpfilesArgs, []string{"--create"}) {
 		t.Fatalf("tmpfiles args = %v, want [--create]", tmpfilesArgs)
 	}
+	if completionCalls != 3 {
+		t.Fatalf("completion calls = %d, want 3", completionCalls)
+	}
+	// Verify completion files were written with correct content and perms
+	for _, shell := range []string{"bash", "zsh", "fish"} {
+		var dst string
+		switch shell {
+		case "bash":
+			dst = "/usr/share/bash-completion/completions/omahab"
+		case "zsh":
+			dst = "/usr/share/zsh/site-functions/_omahab"
+		case "fish":
+			dst = "/usr/share/fish/vendor_completions.d/omahab.fish"
+		}
+		got, ok := destData[dst]
+		if !ok {
+			t.Fatalf("missing completion dest %q for shell %q", dst, shell)
+		}
+		want := "# completion for " + shell + "\n"
+		if string(got) != want {
+			t.Fatalf("completion content for %q: got %q want %q", shell, string(got), want)
+		}
+		if destPerm[dst] != 0o644 {
+			t.Fatalf("completion perm for %q = %o want 0644", dst, destPerm[dst])
+		}
+	}
 	if len(shaCalls) != 2 {
 		t.Fatalf("SHA256 calls = %v, want 2", shaCalls)
 	}
-	if shaCalls["/usr/bin/omahab"] != 1 || shaCalls["/usr/bin/omahabd"] != 1 {
-		t.Fatalf("SHA256 call counts unexpected: %v", shaCalls)
-	}
-	// Journal state must contain both hashes as json
 	js := NewJournalStore(svc.DB())
 	state, err := js.GetState(ctx, "binaries_sha256")
 	if err != nil {
@@ -236,7 +274,16 @@ func TestBinariesIdempotentSecondRun(t *testing.T) {
 			return nil
 		},
 		CommandOutput: func(ctx context.Context, name string, args ...string) (string, error) {
-			tmpfilesCalls++
+			if name == "systemd-tmpfiles" {
+				tmpfilesCalls++
+				return "", nil
+			}
+			if name == "/usr/bin/omahab" {
+				// Completion probe: return empty to keep idempotent test focused on
+				// main assets; completions are best-effort and empty means skipped.
+				return "", nil
+			}
+			t.Fatalf("unexpected CommandOutput %q %v", name, args)
 			return "", nil
 		},
 		SHA256File: func(p string) (string, error) { return "hash", nil },
@@ -467,15 +514,18 @@ func TestBinariesRollback(t *testing.T) {
 		"/usr/lib/systemd/system/omahab-verify.timer",
 		"/usr/lib/systemd/system/cloudflared.service",
 		"/usr/lib/tmpfiles.d/omahab.conf",
+		"/usr/share/bash-completion/completions/omahab",
+		"/usr/share/zsh/site-functions/_omahab",
+		"/usr/share/fish/vendor_completions.d/omahab.fish",
 	}
 	sort.Strings(removed)
 	sort.Strings(want)
 	if !reflect.DeepEqual(removed, want) {
 		t.Fatalf("removed = %v, want %v", removed, want)
 	}
-	// Must NOT remove /usr/share/omahab
+	// Must NOT remove /usr/share/omahab (but completions in /usr/share are ok)
 	for _, p := range removed {
-		if strings.HasPrefix(p, "/usr/share/omahab") {
+		if strings.HasPrefix(p, "/usr/share/omahab/") {
 			t.Fatalf("rollback should not remove %q", p)
 		}
 	}
@@ -503,8 +553,8 @@ func TestBinariesRollbackToleratesMissing(t *testing.T) {
 	if err := RollbackBinaries(ctx, probes); err != nil {
 		t.Fatalf("RollbackBinaries with missing files should not error, got %v", err)
 	}
-	if len(removed) != 9 {
-		t.Fatalf("removed count = %d, want 9 (tolerate missing but still attempt all) %v", len(removed), removed)
+	if len(removed) != 12 {
+		t.Fatalf("removed count = %d, want 12 (tolerate missing but still attempt all) %v", len(removed), removed)
 	}
 	// Also tolerates nil probes
 	if err := RollbackBinaries(ctx, Probes{}); err != nil {

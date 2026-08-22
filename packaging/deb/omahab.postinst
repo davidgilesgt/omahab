@@ -15,6 +15,16 @@ if command -v systemd-tmpfiles >/dev/null 2>&1; then
     systemd-tmpfiles --create >/dev/null || true
 fi
 
+# Best-effort: install shell completions so `omahab` is on PATH and
+# tab-complete works immediately after dpkg -i (the installer also does this
+# via the binaries step, but deb upgrades bypass that path).
+if command -v omahab >/dev/null 2>&1; then
+    mkdir -p /usr/share/bash-completion/completions /usr/share/zsh/site-functions /usr/share/fish/vendor_completions.d >/dev/null 2>&1 || true
+    omahab completion bash > /usr/share/bash-completion/completions/omahab 2>/dev/null || true
+    omahab completion zsh > /usr/share/zsh/site-functions/_omahab 2>/dev/null || true
+    omahab completion fish > /usr/share/fish/vendor_completions.d/omahab.fish 2>/dev/null || true
+fi
+
 if [ -d /run/systemd/system ]; then
     systemctl --system daemon-reload >/dev/null || true
 fi

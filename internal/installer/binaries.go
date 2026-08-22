@@ -205,6 +205,11 @@ func (s *Service) runBinariesStep(ctx context.Context, opts InstallOptions) RunR
 			return RunResult{Step: StepBinaries, Status: JournalFailed, Error: fmt.Sprintf("systemd-tmpfiles --create: %v", err)}
 		}
 	}
+	// Best-effort: install shell completions so `omahab` is immediately
+	// discoverable in the user's shell (bash/zsh/fish). Failures here never
+	// fail the step — the CLI is already in /usr/bin which is on PATH, but
+	// completions make tab-complete work without manual `omahab completion`.
+	installShellCompletions(ctx, s.probes)
 	// Best-effort hash bookkeeping: hash the two binaries on the destination
 	// filesystem and store dest→sha256 json in journal state. Do not fail the
 	// step if hashing fails.
@@ -224,12 +229,54 @@ func (s *Service) runBinariesStep(ctx context.Context, opts InstallOptions) RunR
 	return RunResult{Step: StepBinaries, Status: JournalCompleted}
 }
 
+// completionTarget ties a cobra completion shell to its system location.
+type completionTarget struct {
+	shell string
+	dst   string
+}
+
+var completionTargets = []completionTarget{
+	{"bash", "/usr/share/bash-completion/completions/omahab"},
+	{"zsh", "/usr/share/zsh/site-functions/_omahab"},
+	{"fish", "/usr/share/fish/vendor_completions.d/omahab.fish"},
+}
+
+// installShellCompletions attempts to generate and write shell completions for
+// each target. It shells out to the freshly installed /usr/bin/omahab via
+// probes.CommandOutput so the completion output always matches the installed
+// binary. Any failure is silent — completions are a convenience, not a
+// correctness requirement.
+func installShellCompletions(ctx context.Context, p Probes) {
+	if p.CommandOutput == nil || p.WriteFile == nil {
+		return
+	}
+	for _, t := range completionTargets {
+		out, err := p.CommandOutput(ctx, "/usr/bin/omahab", "completion", t.shell)
+		if err != nil || strings.TrimSpace(out) == "" {
+			continue
+		}
+		dir := path.Dir(t.dst)
+		if p.MkdirAll != nil {
+			_ = p.MkdirAll(dir, 0o755)
+		}
+		// Idempotent write: skip if existing content identical.
+		if p.ReadFile != nil {
+			if existing, err := p.ReadFile(t.dst); err == nil && string(existing) == out {
+				continue
+			}
+		}
+		// Best-effort write; ignore errors (e.g. read-only /usr/share in tests).
+		_ = p.WriteFile(t.dst, []byte(out), 0o644)
+	}
+}
+
 // RollbackBinaries removes the exact files the binaries step installed.
 //
-// It removes /usr/bin/omahab, /usr/bin/omahabd, the six systemd units, and
-// /usr/lib/tmpfiles.d/omahab.conf. It does NOT remove /usr/share/omahab
-// (catalog/web) — those trees may contain data later steps referenced and
-// leaving them is safer on rollback than deleting shared application assets.
+// It removes /usr/bin/omahab, /usr/bin/omahabd, the six systemd units,
+// /usr/lib/tmpfiles.d/omahab.conf, and shell completions. It does NOT remove
+// /usr/share/omahab (catalog/web) — those trees may contain data later steps
+// referenced and leaving them is safer on rollback than deleting shared
+// application assets.
 func RollbackBinaries(ctx context.Context, p Probes) error {
 	paths := []string{
 		"/usr/bin/omahab",
@@ -241,6 +288,9 @@ func RollbackBinaries(ctx context.Context, p Probes) error {
 		"/usr/lib/systemd/system/omahab-verify.timer",
 		"/usr/lib/systemd/system/cloudflared.service",
 		"/usr/lib/tmpfiles.d/omahab.conf",
+		"/usr/share/bash-completion/completions/omahab",
+		"/usr/share/zsh/site-functions/_omahab",
+		"/usr/share/fish/vendor_completions.d/omahab.fish",
 	}
 	for _, dest := range paths {
 		if p.RemoveFile != nil {
