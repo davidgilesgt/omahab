@@ -1,0 +1,58 @@
+#!/bin/sh
+# Omahab setup script: builds from source and starts the installer.
+#
+# Run it as a regular user with sudo permission, right after cloning the
+# repository into a nonroot location:
+#
+#   git clone --depth 1 https://github.com/davidgilesgt/omahab ~/omahab
+#   sh ~/omahab/scripts/setup
+#
+# The script bundles every step that follows the clone:
+#
+#   1. install the build prerequisites with sudo (ca-certificates, golang-go);
+#   2. compile the Omahab binaries into ~/omahab/dist (no root needed);
+#   3. exec the installer with sudo.
+#
+# It must not run as root: the clone and the build stay owned by the user.
+# Host requirements: Debian 13 or Ubuntu 26.04 (apt-get) with sudo.
+#
+# Any remaining arguments are forwarded to the installer, for example
+# `sh scripts/setup preflight` or `sh scripts/setup --non-interactive`.
+
+set -eu
+umask 022
+
+die() {
+    echo "omahab-setup: error: $*" >&2
+    exit 1
+}
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+if [ "$(id -u)" -eq 0 ]; then
+    die "do not run as root; run as a regular user with sudo permission so the repository and the build stay in a nonroot home"
+fi
+command -v sudo >/dev/null 2>&1 ||
+    die "required tool 'sudo' not found; run as a regular user with sudo permission"
+command -v apt-get >/dev/null 2>&1 ||
+    die "required tool 'apt-get' not found; this setup script supports Debian 13 and Ubuntu 26.04"
+
+echo "omahab-setup: installing build prerequisites"
+sudo apt-get update
+sudo apt-get install -y ca-certificates golang-go
+
+echo "omahab-setup: building Omahab in $ROOT (this takes several minutes)"
+cd "$ROOT"
+GOTOOLCHAIN=auto bash scripts/build.sh --version 0.0.0-dev
+
+case $(uname -m) in
+    x86_64) arch=amd64 ;;
+    aarch64 | arm64) arch=arm64 ;;
+    *) die "unsupported CPU architecture $(uname -m); supported: x86_64 (amd64), aarch64 (arm64)" ;;
+esac
+
+installer="$ROOT/dist/$arch/omahab-install"
+[ -x "$installer" ] || die "the build did not produce $installer"
+
+echo "omahab-setup: starting the installer (linux/$arch)"
+exec sudo "$installer" "$@"

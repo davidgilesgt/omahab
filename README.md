@@ -20,28 +20,35 @@ No service is open to the internet by default. Your data stays on your machine.
 | Prior software | None. Docker must not be installed before Omahab |
 | CPU | amd64 (x86_64) or arm64 (aarch64) |
 | Network | Internet access with working DNS |
-| Access | An SSH session (or the local console) with root permission |
+| Access | An SSH session (or the local console) as a regular user with `sudo` permission |
 | Administrator key | One SSH public key for the first user |
 
 The installer does not adopt a machine that already runs Docker or Kubernetes. Install Omahab on a fresh system only.
 
 ## Installation with one command
 
-Log in to the fresh machine. Copy this command and paste it into the terminal:
+Log in to the fresh machine as a regular user with `sudo` permission.
+
+If `git` is not installed yet, install it first:
 
 ```sh
-sudo sh -c 'apt-get update && apt-get install -y git ca-certificates golang-go && git clone --depth 1 https://github.com/davidgilesgt/omahab /root/omahab && cd /root/omahab && GOTOOLCHAIN=auto bash scripts/build.sh --version 0.0.0-dev --out /tmp/dist && exec /tmp/dist/$(uname -m | sed "s/x86_64/amd64/; s/aarch64/arm64/")/omahab-install'
+sudo apt-get update && sudo apt-get install -y git ca-certificates
 ```
 
-If the `sudo` command is not available, log in as root and remove `sudo` from the command.
+Then copy this command and paste it into the terminal. It clones the repository into your home directory and starts the setup script:
 
-The command does these steps:
+```sh
+git clone --depth 1 https://github.com/davidgilesgt/omahab ~/omahab && sh ~/omahab/scripts/setup
+```
 
-1. `apt-get update` gets the current package lists.
-2. `apt-get install` adds `git`, `ca-certificates`, and `golang-go`.
-3. `git clone` copies this repository to `/root/omahab`.
-4. `scripts/build.sh` compiles the installer for your CPU type. `GOTOOLCHAIN=auto` downloads the Go version that the source needs. The build takes several minutes.
-5. The installer starts and guides you through the setup.
+The repository stays in `~/omahab`. It is owned by your user, not by root. Do not run the setup script as root. The script stops when it runs as root.
+
+The setup script bundles these steps:
+
+1. `sudo apt-get update` gets the current package lists.
+2. `sudo apt-get install` adds `ca-certificates` and `golang-go`.
+3. `scripts/build.sh` compiles Omahab into `~/omahab/dist`. `GOTOOLCHAIN=auto` downloads the Go version that the source needs. The build takes several minutes.
+4. The script starts the installer with `sudo`. The installer guides you through the setup.
 
 Run the command from an SSH session. The installer asks for your SSH public key during the setup.
 
@@ -51,10 +58,10 @@ Run the same steps one by one:
 
 ```sh
 sudo apt-get update && sudo apt-get install -y git ca-certificates golang-go
-git clone https://github.com/davidgilesgt/omahab
-cd omahab
-GOTOOLCHAIN=auto bash scripts/build.sh --version 0.0.0-dev --out /tmp/dist
-sudo /tmp/dist/amd64/omahab-install      # use arm64 on an arm64 machine
+git clone --depth 1 https://github.com/davidgilesgt/omahab ~/omahab
+cd ~/omahab
+GOTOOLCHAIN=auto bash scripts/build.sh --version 0.0.0-dev
+sudo dist/amd64/omahab-install      # use arm64 on an arm64 machine
 ```
 
 ### Installation from a signed release
@@ -71,11 +78,13 @@ The command downloads the script to a file first. Then it runs the file. No data
 
 ### Automatic installation
 
-For automation, add flags to the installer:
+For automation, add flags to the installer. The setup script forwards every flag to the installer:
 
 ```sh
-sudo /tmp/dist/amd64/omahab-install --non-interactive --json --github-user <github-user>
+sh ~/omahab/scripts/setup --non-interactive --json --github-user <github-user>
 ```
+
+You can also run the built installer directly, for example `sudo ~/omahab/dist/amd64/omahab-install --non-interactive`.
 
 | Flag or command | Function |
 | --- | --- |
@@ -86,7 +95,7 @@ sudo /tmp/dist/amd64/omahab-install --non-interactive --json --github-user <gith
 | `--json` | Prints output as JSON. This flag sets `--non-interactive` |
 | `--yes` | Answers yes to prompts. This flag needs `--non-interactive` |
 | `--resume` | Continues an installation that stopped |
-| `preflight` | Runs the checks only. Example: `sudo /tmp/dist/amd64/omahab-install preflight` |
+| `preflight` | Runs the checks only. Example: `sudo ~/omahab/dist/amd64/omahab-install preflight` |
 | `manifest` | Shows the install manifest |
 
 If `TERM=dumb`, the installer prints a warning and runs in non-interactive mode.

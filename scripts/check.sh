@@ -9,7 +9,7 @@ pass() { echo "PASS: $*"; }
 fail_check() { echo "FAIL: $*" >&2; fail=1; }
 
 bash -n scripts/build.sh scripts/release.sh scripts/verify-release.sh scripts/check.sh && pass "bash syntax" || fail_check "bash syntax"
-sh -n scripts/install packaging/deb/build.sh && pass "POSIX shell syntax" || fail_check "POSIX shell syntax"
+sh -n scripts/install scripts/setup packaging/deb/build.sh && pass "POSIX shell syntax" || fail_check "POSIX shell syntax"
 grep -q 'DefaultListen.*127\.0\.0\.1' internal/config/config.go && pass "loopback API default" || fail_check "loopback API default"
 grep -q 'SupplementaryGroups=docker' deploy/systemd/omahabd.service && pass "narrow docker group" || fail_check "narrow docker group"
 ! grep -q 'docker.sock' Dockerfile && pass "Dockerfile has no Docker socket" || fail_check "Dockerfile Docker socket mount"
