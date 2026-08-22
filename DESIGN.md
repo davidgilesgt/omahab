@@ -219,7 +219,7 @@ The convenience installation may use a small shell bootstrap, but the real insta
 Recommended documented flow:
 
 ```bash
-curl -fL -o omahab-install https://get.omahab.org/install
+curl -fL -o omahab-install https://raw.githubusercontent.com/davidgilesgt/omahab/master/scripts/install
 less omahab-install
 sudo sh omahab-install
 ```

@@ -3,14 +3,14 @@
 #
 # Reviewed-then-run convenience bootstrap:
 #
-#   curl -fL -o omahab-install https://get.omahab.org/install
+#   curl -fL -o omahab-install https://raw.githubusercontent.com/davidgilesgt/omahab/master/scripts/install
 #   less omahab-install
 #   sudo sh omahab-install
 #
 # Nothing is ever piped from the network into a shell. The bootstrap has
 # exactly four responsibilities:
 #
-#   1. identify Debian version and CPU architecture;
+#   1. identify OS version (Debian 13 or Ubuntu 26.04) and CPU architecture;
 #   2. download the versioned installer plus its signed release metadata;
 #   3. verify the signed metadata (minisign) and the installer checksum;
 #   4. exec the verified installer.
@@ -21,15 +21,16 @@
 # not pass.
 #
 # Host requirements: POSIX sh plus id, uname, sed, tr, grep, chmod, mktemp,
-# rm, sha256sum, minisign, and curl (or wget). On Debian 13:
-#
-#   apt-get install minisign curl
+# rm, sha256sum, minisign, and curl (or wget). On Debian 13 / Ubuntu 26.04:
+
+  apt-get install minisign curl
 #
 # Environment overrides (signature verification stays mandatory regardless;
 # the minisign trust anchor below is not overridable):
 #
 #   OMAHAB_RELEASE_URL  release channel base URL; must be https://
-#                       (default: https://get.omahab.org/releases/stable)
+#                       (default: https://github.com/davidgilesgt/omahab/releases/latest/download,
+#                       the latest non-draft GitHub release of the repository)
 #   OMAHAB_CACERT       CA bundle for a private mirror's TLS certificate;
 #                       must be an absolute path to a readable file
 #
@@ -48,7 +49,7 @@ umask 077
 LC_ALL=C
 export LC_ALL=C
 
-RELEASE_BASE="${OMAHAB_RELEASE_URL:-https://get.omahab.org/releases/stable}"
+RELEASE_BASE="${OMAHAB_RELEASE_URL:-https://github.com/davidgilesgt/omahab/releases/latest/download}"
 
 # Release signing public key (minisign, the base64 line only). This is the
 # trust anchor of the whole installation; it is also published as
@@ -66,7 +67,7 @@ die() {
 
 for tool in id uname sed tr grep chmod mktemp rm sha256sum minisign; do
     command -v "$tool" >/dev/null 2>&1 ||
-        die "required tool '$tool' not found; on Debian 13 run: apt-get install $tool"
+        die "required tool '$tool' not found; on Debian 13 / Ubuntu 26.04 run: apt-get install $tool (on Arch/Omarchy: pacman -S $tool)"
 done
 
 cacert=''
@@ -94,6 +95,10 @@ fetch() {
                 --output "$2" "$1" || die "download failed: $1"
         fi
     elif command -v wget >/dev/null 2>&1; then
+        case $1 in
+            https://*) ;;
+            *) die "download URL must be https:// (got: $1)" ;;
+        esac
         if [ -n "$cacert" ]; then
             wget --no-verbose --output-document="$2" \
                 --ca-certificate="$cacert" "$1" || die "download failed: $1"
@@ -101,33 +106,39 @@ fetch() {
             wget --no-verbose --output-document="$2" "$1" || die "download failed: $1"
         fi
     else
-        die "required tool 'curl' (or 'wget') not found; on Debian 13 run: apt-get install curl"
+        die "required tool 'curl' (or 'wget') not found; on Debian 13 / Ubuntu 26.04 run: apt-get install curl (on Arch/Omarchy: pacman -S curl)"
     fi
 }
 
-# --- 1. identify Debian version and CPU architecture -----------------------
+# --- 1. identify OS version and CPU architecture -----------------------
 
 [ "$(id -u)" -eq 0 ] || die "must run as root (try: sudo sh omahab-install)"
 
 case $RELEASE_BASE in
     https://*) ;;
-    *) die "OMAHAB_RELEASE_URL must be an https:// URL (got: $RELEASE_BASE)" ;;
+    *) die "OMAHAB_RELEASE_URL must be an https:// URL (default https://github.com/davidgilesgt/omahab/releases/latest/download, got: $RELEASE_BASE)" ;;
 esac
 
-[ -r /etc/os-release ] || die "cannot read /etc/os-release; unsupported system (Debian 13 is required)"
+[ -r /etc/os-release ] || die "cannot read /etc/os-release; unsupported system (Debian 13 or Ubuntu 26.04 is required)"
 
 # Parsed, never sourced: os-release must not be executed as shell.
 os_id=$(sed -n 's/^ID=//p' /etc/os-release | tail -n 1 | tr -d '"' | tr -d "'")
 os_version=$(sed -n 's/^VERSION_ID=//p' /etc/os-release | tail -n 1 | tr -d '"' | tr -d "'")
 
 case $os_id in
-    debian) ;;
-    *) die "unsupported operating system (ID=${os_id:-unknown}); this bootstrap supports Debian only" ;;
-esac
-
-case $os_version in
-    13) ;;
-    *) die "unsupported Debian version ${os_version:-unknown}; Debian 13 (trixie) is required" ;;
+    debian)
+        case $os_version in
+            13) ;;
+            *) die "unsupported Debian version ${os_version:-unknown}; Debian 13 (trixie) is required" ;;
+        esac
+        ;;
+    ubuntu)
+        case $os_version in
+            26.04) ;;
+            *) die "unsupported Ubuntu version ${os_version:-unknown}; Ubuntu 26.04 (resolute) is required" ;;
+        esac
+        ;;
+    *) die "unsupported operating system (ID=${os_id:-unknown}); this bootstrap supports Debian 13 and Ubuntu 26.04 only" ;;
 esac
 
 case $(uname -m) in
@@ -180,7 +191,7 @@ MANIFEST_LINE
 [ -n "$want_sha256" ] && [ -n "$installer_name" ] ||
     die "malformed installer entry in SHA256SUMS"
 version=$(printf '%s' "$installer_name" | sed "s/^omahab-installer-//; s/-${arch}\$//")
-echo "omahab-install: Debian $os_version linux/$arch, installer $version" >&2
+echo "omahab-install: $os_id $os_version linux/$arch, installer $version" >&2
 
 installer="$tmpdir/$installer_name"
 fetch "$RELEASE_BASE/$installer_name" "$installer"
@@ -196,7 +207,7 @@ chmod 0700 "$installer"
 # The manifest and signature are no longer needed. The verified installer
 # itself cannot be unlinked before it runs: exec hands this terminal and
 # this process to it, and the remaining root-owned 0700 file inside the
-# 0700 temporary directory is later removed by Debian's age-based tmpfiles
+# 0700 temporary directory is later removed by the system's age-based tmpfiles
 # cleanup of TMPDIR.
 rm -f -- "$sums" "$sig"
 

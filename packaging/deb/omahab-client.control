@@ -3,8 +3,8 @@ Version: @VERSION@
 Architecture: @ARCH@
 Section: admin
 Priority: optional
-Maintainer: Omahab Release <release@omahab.org>
-Homepage: https://get.omahab.org
+Maintainer: Omahab Release <davidgilesgt@users.noreply.github.com>
+Homepage: https://github.com/davidgilesgt/omahab
 Description: Omahab companion daemon for desktop machines
  omahab-clientd is the user-level companion service: it authenticates with
  an Omahab server, verifies Tailscale state and instance identity, tracks

@@ -1,6 +1,6 @@
 [Unit]
 Description=Omahab Client Daemon (omahab-clientd) — Omarchy companion
-Documentation=https://omahab.org/docs/companion
+Documentation=https://github.com/davidgilesgt/omahab
 After=network-online.target tailscaled.service
 Wants=network-online.target
 PartOf=graphical-session.target

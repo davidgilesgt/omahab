@@ -1,6 +1,6 @@
 [Unit]
 Description=Omahab backup (restic) — oneshot
-Documentation=https://omahab.org/docs/backup
+Documentation=https://github.com/davidgilesgt/omahab
 After=network-online.target
 Wants=network-online.target
 RequiresMountsFor=/srv/omahab

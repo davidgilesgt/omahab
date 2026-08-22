@@ -1,6 +1,6 @@
 [Unit]
 Description=Omahab Control Plane (omahabd)
-Documentation=https://omahab.org/docs
+Documentation=https://github.com/davidgilesgt/omahab
 After=network-online.target docker.service tailscaled.service
 Wants=network-online.target
 Requires=docker.service

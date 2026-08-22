@@ -6,4 +6,4 @@ omahab (0.1.0-1) stable; urgency=medium
     packaging/bin wrappers).
   * omahab-client: omahab-clientd user unit for desktop machines.
 
- -- Omahab Release <release@omahab.org>  Thu, 20 Aug 2026 15:00:00 +0000
+ -- Omahab Release <davidgilesgt@users.noreply.github.com>  Thu, 20 Aug 2026 15:00:00 +0000

@@ -1,6 +1,6 @@
 [Unit]
 Description=Omahab companion daemon (omahab-clientd)
-Documentation=https://get.omahab.org/docs/companion
+Documentation=https://github.com/davidgilesgt/omahab
 # The daemon exposes the shell-plugin Unix socket (precedence handled by the
 # daemon itself: OMAHAB_CLIENTD_SOCKET, then $XDG_RUNTIME_DIR, then
 # /run/user/<uid>) and launches desktop surfaces, so it runs as a user unit
