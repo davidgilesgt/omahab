@@ -83,6 +83,20 @@ type Probes struct {
 
 	// GitHub keys
 	FetchGitHubKeys func(ctx context.Context, username string) ([]string, error)
+
+	// APT / package management (packages step)
+	APTRefresh func(ctx context.Context) error
+	APTInstall func(ctx context.Context, packages ...string) error
+
+	// systemd management (firewall/services/daemon steps). Non-zero exit
+	// returns an error carrying the combined output.
+	Systemctl func(ctx context.Context, args ...string) (string, error)
+
+	// Downloads (vendor keyrings). HTTPS only, TLS >= 1.2.
+	DownloadFile func(ctx context.Context, url, destPath string) error
+
+	// SHA256File returns the hex sha256 of a file (asset/binary records).
+	SHA256File func(path string) (string, error)
 }
 
 // AptSource describes one APT source entry.
@@ -146,5 +160,10 @@ func LiveProbes() Probes {
 		CancelRollback:      liveCancelRollback,
 		RollbackActive:      liveRollbackActive,
 		FetchGitHubKeys:     liveFetchGitHubKeys,
+		APTRefresh:          liveAPTRefresh,
+		APTInstall:          liveAPTInstall,
+		Systemctl:           liveSystemctl,
+		DownloadFile:        liveDownloadFile,
+		SHA256File:          liveSHA256File,
 	}
 }

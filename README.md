@@ -64,6 +64,8 @@ GOTOOLCHAIN=auto bash scripts/build.sh --version 0.0.0-dev
 sudo dist/amd64/omahab-install      # use arm64 on an arm64 machine
 ```
 
+`scripts/build.sh` stages the embedded assets before building the installer. The installer binary is larger because it embeds `omahab`, `omahabd`, the catalog, and the systemd units.
+
 ### Installation from a signed release
 
 When a signed release is published on GitHub, use the bootstrap script instead:
@@ -95,6 +97,8 @@ You can also run the built installer directly, for example `sudo ~/omahab/dist/a
 | `--json` | Prints output as JSON. This flag sets `--non-interactive` |
 | `--yes` | Answers yes to prompts. This flag needs `--non-interactive` |
 | `--resume` | Continues an installation that stopped |
+| `--until <step>` | Stops after a named step. Valid: `preflight`, `ssh_keys`, `sshd_hardening`, `system_prepare`, `packages`, `binaries`, `firewall`, `services`, `daemon`, `manifest` |
+| `--asset-dir <dir>` | Dev override for embedded assets. Uses files from `<dir>` instead of the embedded catalog and units |
 | `preflight` | Runs the checks only. Example: `sudo ~/omahab/dist/amd64/omahab-install preflight` |
 | `manifest` | Shows the install manifest |
 
@@ -102,20 +106,44 @@ If `TERM=dumb`, the installer prints a warning and runs in non-interactive mode.
 
 ## What the installer does on the machine
 
-1. The installer runs the preflight checks. It checks the operating system, the CPU, free ports, memory, disk space, the file system, the system time, DNS, and HTTPS access.
-2. The installer adds your SSH public keys. New keys do not remove old keys.
-3. The installer changes the `sshd` settings. Open a second SSH session and log in. This tells the installer that the new settings work. If you do not confirm within 10 minutes, `sshd` goes back to the old settings.
-4. The installer creates the directories, copies the binaries, and enables the systemd units.
-5. `omahabd` starts. It listens on `127.0.0.1:8484` only.
+The installer runs 10 steps in order. Each step is journaled and idempotent. Use `--resume` to continue after a stop. Use `--until <step>` to stop after a named step.
+
+1. `preflight` — checks OS (Debian 13 or Ubuntu 26.04), CPU, `systemd` (`/run/systemd/system` must exist, fails in containers and chroots), ports, memory, disk, filesystem, time, DNS, and HTTPS. Apt check allows only Omahab-managed vendor sources (`/etc/apt/sources.list.d/omahab-tailscale.list` for `pkgs.tailscale.com` and `omahab-cloudflared.list` for `pkg.cloudflare.com`); any other third-party repo fails as dirty.
+2. `ssh_keys` — adds your SSH public keys. New keys do not remove old keys.
+3. `sshd_hardening` — hardens `sshd`. Open a second SSH session and log in to confirm. If you do not confirm within 10 minutes, `sshd` goes back to the old settings.
+4. `system_prepare` — creates directories via `systemd-tmpfiles` from `/usr/lib/tmpfiles.d/omahab.conf`: `/var/lib/omahab/secrets`, `/srv/omahab/{apps,projects,sync,backups,workspaces,derived-indexes}`, `/var/log/omahab`, `/var/cache/omahab`.
+5. `packages` — installs `ca-certificates`, `docker.io`, `docker-compose` (Debian) or `docker-compose-v2` (Ubuntu 26.04), `nftables`, `unattended-upgrades`, `tailscale`, `cloudflared`. Downloads vendor keyrings to `/usr/share/keyrings/{tailscale-archive-keyring,cloudflare-main}.gpg`, writes the two `omahab-*.list` sources, enables `unattended-upgrades` via `/etc/apt/apt.conf.d/20auto-upgrades`.
+6. `binaries` — installs `/usr/bin/{omahab,omahabd}` (0755), six systemd units to `/usr/lib/systemd/system/` (`omahabd.service`, `omahab-backup.{service,timer}`, `omahab-verify.{service,timer}`, `cloudflared.service`), `/usr/lib/tmpfiles.d/omahab.conf`, catalog to `/usr/share/omahab/catalog/`, web assets to `/usr/share/omahab/web/` (when built). Runs `systemd-tmpfiles --create`. Assets are embedded in the installer binary (staged by `scripts/build.sh`); dev builds can pass `--asset-dir`.
+7. `firewall` — writes `/etc/nftables.conf` (`table inet omahab`, default-deny inbound, allows `lo`, `established/related`, `ICMP/ICMPv6`, SSH `22`, Tailscale UDP `41641`). Validates with `nft -c` before applying. Backs up any prior config to `/etc/nftables.conf.pre-omahab`. Enables and starts `nftables.service`. Docker forward rules untouched.
+8. `services` — runs `systemctl daemon-reload`, enables `tailscaled` and `omahabd`. Does not enable `cloudflared` (needs tunnel enrollment), `omahab-backup.timer` / `omahab-verify.timer` (need a backup repository), or `omahab-clientd` (companion-only).
+9. `daemon` — enables and restarts `omahabd` (`Type=simple`), polls `http://127.0.0.1:8484/up` until `200`. Writes `/etc/omahab/backup.env` (0600, `OMAHAB_SERVER` + `OMAHAB_TOKEN`) used by the backup and verify units (`omahab backup create` and `omahab backup verify` without an id verifies the latest snapshot).
+10. `manifest` — writes `/var/lib/omahab/install-manifest.json`.
+
+After a full install, the installer prints next steps: `sudo tailscale up` (authorize from any device), `omahab cloudflare setup`, `omahab doctor`.
+
+`omahabd` listens on `127.0.0.1:8484` only.
 
 Paths on the machine:
 
 | Path | Content |
 | --- | --- |
-| `/var/lib/omahab` | State, mode 0700. Contains `control.db` (journal of all changes) and `install-manifest.json` |
-| `/srv/omahab` | Application data |
+| `/var/lib/omahab` | State, mode 0700. Contains `control.db` (journal) and `install-manifest.json` |
+| `/srv/omahab` | Application data (`apps`, `projects`, `sync`, `backups`, `workspaces`, `derived-indexes`) |
+| `/var/log/omahab` | Logs |
+| `/var/cache/omahab` | Cache |
 | `/etc/omahab` | Configuration |
+| `/etc/omahab/backup.env` | Backup credentials (`OMAHAB_SERVER` + `OMAHAB_TOKEN`), mode 0600, used by backup and verify units |
+| `/etc/nftables.conf` | Firewall rules (`table inet omahab`). Backup at `/etc/nftables.conf.pre-omahab` |
+| `/usr/bin/omahab` | CLI, mode 0755 |
+| `/usr/bin/omahabd` | Daemon, mode 0755 |
+| `/usr/lib/systemd/system/` | Six units: `omahabd.service` (`Type=simple`), `omahab-backup.{service,timer}`, `omahab-verify.{service,timer}`, `cloudflared.service` |
+| `/usr/lib/tmpfiles.d/omahab.conf` | Directory definitions for `systemd-tmpfiles` |
 | `/usr/share/omahab/catalog` | Application catalog |
+| `/usr/share/omahab/web` | Dashboard assets (when built) |
+| `/usr/share/keyrings/tailscale-archive-keyring.gpg` | Tailscale vendor keyring |
+| `/usr/share/keyrings/cloudflare-main.gpg` | Cloudflare vendor keyring |
+| `/etc/apt/sources.list.d/omahab-tailscale.list` | Tailscale apt source (`pkgs.tailscale.com`) |
+| `/etc/apt/sources.list.d/omahab-cloudflared.list` | Cloudflare apt source (`pkg.cloudflare.com`) |
 
 Example output of `preflight` on a clean machine:
 
@@ -221,6 +249,9 @@ When the release is the latest one, the bootstrap command in this document uses 
 | `checksum mismatch` | The download is damaged or was changed. Stop. Download again; if it fails again, open an issue |
 | Preflight reports a container runtime, or `/srv/omahab` exists | The machine is not fresh. Install Omahab on a fresh system |
 | `WARN ssh_keys` during preflight | The session has no SSH key. Add a key with `--github-user` or `--key-file` |
+| `systemd` check failed | Preflight needs `/run/systemd/system`. Containers and chroots are not supported. Run on a real machine or VM with `systemd` |
+| `assets missing` | The installer has no embedded assets. Rebuild with `scripts/build.sh` or pass `--asset-dir <dir>` for a dev build |
+| `omahabd` health check timed out | Check `journalctl -u omahabd -n 50 --no-pager`. The daemon did not return `200` on `http://127.0.0.1:8484/up` |
 
 ## License
 

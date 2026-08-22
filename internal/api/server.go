@@ -180,6 +180,7 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/api/v1/backups/{id}", s.handleGetBackup)
 		r.Post("/api/v1/backups/{id}/restore", s.handleRestoreBackup)
 		r.Post("/api/v1/backups/{id}/verify", s.handleVerifyBackup)
+		r.Post("/api/v1/backups/verify", s.handleVerifyLatestBackup)
 
 		// Events + SSE
 		r.Get("/api/v1/events", s.handleListEvents)

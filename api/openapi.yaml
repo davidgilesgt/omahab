@@ -434,6 +434,15 @@ paths:
         '200': { description: Verified, content: { application/json: { schema: { $ref: '#/components/schemas/Backup' } } } }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /api/v1/backups/verify:
+    post:
+      summary: Verify latest backup
+      description: Verify the latest snapshot when no id is given.
+      operationId: verifyLatestBackup
+      responses:
+        '200': { description: Verified, content: { application/json: { schema: { $ref: '#/components/schemas/Backup' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   /api/v1/events:
     get:
       summary: List events

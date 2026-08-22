@@ -518,6 +518,15 @@ func (s *Server) handleVerifyBackup(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, bk)
 }
 
+func (s *Server) handleVerifyLatestBackup(w http.ResponseWriter, r *http.Request) {
+	bk, err := s.backend.VerifyBackup(r.Context(), "")
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, bk)
+}
+
 // --- events ---
 
 func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {

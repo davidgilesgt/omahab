@@ -7,15 +7,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
-	"github.com/spf13/cobra"
-	_ "modernc.org/sqlite"
-
 	"github.com/omahab/omahab/internal/installer"
+	"github.com/omahab/omahab/internal/installer/assets"
+
+	"github.com/spf13/cobra"
 )
 
 var (
@@ -28,6 +30,8 @@ var (
 	flagKeyFile        string
 	flagResume         bool
 	flagYes            bool
+	flagUntil          string
+	flagAssetDir       string
 )
 
 func main() {
@@ -62,6 +66,8 @@ Use --json for structured output and --non-interactive for automation.`,
 	root.Flags().StringVar(&flagKeyFile, "key-file", "", "import SSH keys from file")
 	root.Flags().BoolVar(&flagResume, "resume", false, "resume an interrupted installation")
 	root.Flags().BoolVar(&flagYes, "yes", false, "assume yes to prompts (requires --non-interactive)")
+	root.Flags().StringVar(&flagUntil, "until", "", "stop after this step (one of: "+strings.Join(installer.OrderedSteps, ", ")+")")
+	root.Flags().StringVar(&flagAssetDir, "asset-dir", "", "load install assets (binaries, units, catalog) from this directory instead of the embedded set")
 
 	// Also add a dedicated preflight subcommand.
 	preflightCmd := &cobra.Command{
@@ -261,6 +267,37 @@ func doInstall(cmd *cobra.Command) error {
 	probes := installer.LiveProbes()
 	svc := installer.NewService(db, probes)
 
+	// Validate --until early so users get the valid step list, not a mystery abort.
+	if flagUntil != "" && !slices.Contains(installer.OrderedSteps, flagUntil) {
+		err := fmt.Errorf("--until must be one of: %s", strings.Join(installer.OrderedSteps, ", "))
+		out.emitError("until", err.Error(), "choose a step from the ordered list", nil)
+		return err
+	}
+
+	// Assets are needed by the binaries step. Resolve them when that step is in
+	// scope: embedded set by default, --asset-dir for development builds.
+	if stepInScope(installer.StepBinaries, flagUntil) {
+		var fsys fs.FS
+		var err error
+		if flagAssetDir != "" {
+			fsys, err = assets.LoadDir(flagAssetDir)
+		} else {
+			fsys, err = assets.Load()
+		}
+		if err == nil {
+			err = assets.Validate(fsys)
+		}
+		if err != nil {
+			remed := "build with scripts/build.sh so assets are embedded, or pass --asset-dir"
+			if flagAssetDir != "" {
+				remed = "check the directory layout: bin/, systemd/, catalog/, tmpfiles.d/ (web/ optional)"
+			}
+			out.emitError("assets", err.Error(), remed, nil)
+			return err
+		}
+		svc.SetAssets(fsys)
+	}
+
 	// Check for resumable state if not explicitly resuming.
 	if !flagResume {
 		needs, step, _ := svc.NeedsResume(ctx)
@@ -318,6 +355,7 @@ func doInstall(cmd *cobra.Command) error {
 		GitHubUsers:          flagGitHubUsers,
 		KeyFile:              flagKeyFile,
 		RequireSecondSession: true,
+		UntilStep:            flagUntil,
 	}
 
 	// If stdin is piped and looks like keys, consume it before any prompt.
@@ -501,7 +539,42 @@ func doInstall(cmd *cobra.Command) error {
 	if !out.jsonMode {
 		out.printf("\nInstallation complete (version %s).\n", opts.Version)
 	}
+	printNextSteps(out, flagUntil)
 	return nil
+}
+
+// stepInScope reports whether step runs given an --until bound (empty = all).
+func stepInScope(step, until string) bool {
+	if until == "" {
+		return true
+	}
+	for _, s := range installer.OrderedSteps {
+		if s == step {
+			return true
+		}
+		if s == until {
+			return false
+		}
+	}
+	return false
+}
+
+// printNextSteps prints the post-install enrollment pointers (DESIGN.md 5.2
+// step 5: browser-based authorization happens from another device).
+func printNextSteps(out output, until string) {
+	if !stepInScope(installer.StepDaemon, until) {
+		return
+	}
+	if out.jsonMode {
+		return // structured consumers get the step list; no trailing prose
+	}
+	out.printf("\nNext steps (from another device, over SSH or the local console):\n")
+	out.printf("  1. Enroll Tailscale:  sudo tailscale up   (opens a URL to authorize on any device)\n")
+	out.printf("  2. Cloudflare tunnel: omahab cloudflare setup\n")
+	out.printf("  3. Check health:      omahab doctor\n")
+	out.printf("The control API listens on 127.0.0.1:8484 only; reach it through Tailscale or the edge.\n")
+	out.printf("cloudflared and the backup/verify timers stay disabled until tunnel enrollment and a\n")
+	out.printf("backup repository are configured.\n")
 }
 
 func checkSecondSessionGate(ctx context.Context, out output, svc *installer.Service, probes installer.Probes) {

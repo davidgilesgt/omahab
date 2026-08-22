@@ -1,0 +1,176 @@
+package installer
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"strings"
+)
+
+const (
+	tailscaleKeyringPath  = "/usr/share/keyrings/tailscale-archive-keyring.gpg"
+	cloudflareKeyringPath = "/usr/share/keyrings/cloudflare-main.gpg"
+	tailscaleSourcePath   = "/etc/apt/sources.list.d/omahab-tailscale.list"
+	cloudflareSourcePath  = "/etc/apt/sources.list.d/omahab-cloudflared.list"
+	autoUpgradesPath      = "/etc/apt/apt.conf.d/20auto-upgrades"
+
+	cloudflareKeyringURL = "https://pkg.cloudflare.com/cloudflare-main.gpg"
+	autoUpgradesContent  = "APT::Periodic::Update-Package-Lists \"1\";\nAPT::Periodic::Unattended-Upgrade \"1\";\n"
+)
+
+// PackagesForOS returns the apt package list for the given OS id.
+// It includes both distro and vendor packages (tailscale, cloudflared) that
+// are installed via the omahab-managed vendor repos. The caller is
+// responsible for ensuring the vendor repos are configured before install.
+func PackagesForOS(osID string) ([]string, error) {
+	switch strings.ToLower(strings.TrimSpace(osID)) {
+	case "debian":
+		return []string{
+			"ca-certificates",
+			"docker.io",
+			"docker-compose",
+			"nftables",
+			"unattended-upgrades",
+			"tailscale",
+			"cloudflared",
+		}, nil
+	case "ubuntu":
+		return []string{
+			"ca-certificates",
+			"docker.io",
+			"docker-compose-v2",
+			"nftables",
+			"unattended-upgrades",
+			"tailscale",
+			"cloudflared",
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported OS %q: need debian or ubuntu", osID)
+	}
+}
+
+func (s *Service) runPackagesStep(ctx context.Context, opts InstallOptions) RunResult {
+	_ = opts
+
+	failed := func(err error) RunResult {
+		return RunResult{Step: StepPackages, Status: JournalFailed, Error: err.Error()}
+	}
+
+	// 1. Resolve OS via probes.OSRelease (fail if unknown os/codename).
+	if s.probes.OSRelease == nil {
+		return failed(fmt.Errorf("os release probe not configured"))
+	}
+	info, err := s.probes.OSRelease()
+	if err != nil {
+		return failed(fmt.Errorf("resolve OS: %w", err))
+	}
+	osID := strings.ToLower(strings.TrimSpace(info.ID))
+	codename := strings.ToLower(strings.TrimSpace(info.Codename))
+
+	switch osID {
+	case "debian":
+		if codename != "trixie" {
+			return failed(fmt.Errorf("unsupported debian codename %q: need trixie", info.Codename))
+		}
+	case "ubuntu":
+		if codename != "resolute" {
+			return failed(fmt.Errorf("unsupported ubuntu codename %q: need resolute", info.Codename))
+		}
+	default:
+		return failed(fmt.Errorf("unsupported OS %q: need debian trixie or ubuntu resolute", info.ID))
+	}
+
+	tailscaleKeyURL := fmt.Sprintf("https://pkgs.tailscale.com/stable/%s/%s.noarmor.gpg", osID, codename)
+	tailscaleSourceLine := fmt.Sprintf("deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/%s %s main", osID, codename)
+	cloudflareSourceLine := "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main"
+
+	// 2. Download keyrings — skip when file already exists.
+	if s.probes.FileExists == nil {
+		return failed(fmt.Errorf("file exists probe not configured"))
+	}
+	if s.probes.DownloadFile == nil {
+		return failed(fmt.Errorf("download file probe not configured"))
+	}
+	if !s.probes.FileExists(tailscaleKeyringPath) {
+		if err := s.probes.DownloadFile(ctx, tailscaleKeyURL, tailscaleKeyringPath); err != nil {
+			return failed(fmt.Errorf("download tailscale keyring: %w", err))
+		}
+	}
+	if !s.probes.FileExists(cloudflareKeyringPath) {
+		if err := s.probes.DownloadFile(ctx, cloudflareKeyringURL, cloudflareKeyringPath); err != nil {
+			return failed(fmt.Errorf("download cloudflare keyring: %w", err))
+		}
+	}
+
+	// 3. Write apt source files — skip when existing content is byte-identical.
+	if s.probes.ReadFile == nil {
+		return failed(fmt.Errorf("read file probe not configured"))
+	}
+	if s.probes.WriteFile == nil {
+		return failed(fmt.Errorf("write file probe not configured"))
+	}
+
+	writeSource := func(path, line string) error {
+		desired := line + "\n"
+		existing, err := s.probes.ReadFile(path)
+		if err == nil && bytes.Equal(existing, []byte(desired)) {
+			return nil
+		}
+		if err := s.probes.WriteFile(path, []byte(desired), 0o644); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	if err := writeSource(tailscaleSourcePath, tailscaleSourceLine); err != nil {
+		return failed(fmt.Errorf("write tailscale source: %w", err))
+	}
+	if err := writeSource(cloudflareSourcePath, cloudflareSourceLine); err != nil {
+		return failed(fmt.Errorf("write cloudflared source: %w", err))
+	}
+
+	// 4. APT refresh.
+	if s.probes.APTRefresh == nil {
+		return failed(fmt.Errorf("apt refresh probe not configured"))
+	}
+	if err := s.probes.APTRefresh(ctx); err != nil {
+		return failed(fmt.Errorf("apt refresh: %w", err))
+	}
+
+	// 5. APT install.
+	if s.probes.APTInstall == nil {
+		return failed(fmt.Errorf("apt install probe not configured"))
+	}
+	pkgs, err := PackagesForOS(osID)
+	if err != nil {
+		return failed(err)
+	}
+	if err := s.probes.APTInstall(ctx, pkgs...); err != nil {
+		return failed(fmt.Errorf("apt install: %w", err))
+	}
+
+	// 6. Write 20auto-upgrades — skip when identical.
+	{
+		desired := autoUpgradesContent
+		existing, err := s.probes.ReadFile(autoUpgradesPath)
+		if err != nil || !bytes.Equal(existing, []byte(desired)) {
+			if s.probes.WriteFile == nil {
+				return failed(fmt.Errorf("write file probe not configured"))
+			}
+			if err := s.probes.WriteFile(autoUpgradesPath, []byte(desired), 0o644); err != nil {
+				return failed(fmt.Errorf("write auto-upgrades config: %w", err))
+			}
+		}
+	}
+
+	return RunResult{Step: StepPackages, Status: JournalCompleted}
+}
+
+// RollbackPackages leaves packages installed; removing Docker or vendor sources
+// on rollback would destroy state and break recovery. It is a documented no-op
+// returning nil.
+func RollbackPackages(ctx context.Context, p Probes) error {
+	_ = ctx
+	_ = p
+	return nil
+}

@@ -1399,9 +1399,9 @@ func newBackupCmd() *cobra.Command {
 	bk.AddCommand(restoreCmd)
 
 	bk.AddCommand(&cobra.Command{
-		Use:   "verify <id>",
+		Use:   "verify [<id>]",
 		Short: "Verify backup integrity",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := newContext()
 			defer cancel()
@@ -1413,7 +1413,12 @@ func newBackupCmd() *cobra.Command {
 				}
 				return err
 			}
-			b, err := c.VerifyBackup(ctx, args[0])
+			var b *domain.Backup
+			if len(args) == 0 {
+				b, err = c.VerifyLatestBackup(ctx)
+			} else {
+				b, err = c.VerifyBackup(ctx, args[0])
+			}
 			if err != nil {
 				if flagJSON {
 					printErrorJSON(err)

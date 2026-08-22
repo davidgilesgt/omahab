@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io/fs"
 	"time"
 )
 
@@ -13,6 +14,11 @@ const (
 	StepSSHKeys       = "ssh_keys"
 	StepSSHDHardening = "sshd_hardening"
 	StepSystemPrepare = "system_prepare"
+	StepPackages      = "packages"
+	StepBinaries      = "binaries"
+	StepFirewall      = "firewall"
+	StepServices      = "services"
+	StepDaemon        = "daemon"
 	StepManifest      = "manifest"
 )
 
@@ -22,6 +28,11 @@ var OrderedSteps = []string{
 	StepSSHKeys,
 	StepSSHDHardening,
 	StepSystemPrepare,
+	StepPackages,
+	StepBinaries,
+	StepFirewall,
+	StepServices,
+	StepDaemon,
 	StepManifest,
 }
 
@@ -32,6 +43,11 @@ var resumable = map[string]bool{
 	StepPreflight:     true,
 	StepSSHKeys:       true,
 	StepSystemPrepare: true,
+	StepPackages:      true, // apt and file writes are idempotent
+	StepBinaries:      true, // file copies are idempotent
+	StepFirewall:      true, // nftables conf is declarative and validated before apply
+	StepServices:      true, // systemctl enable is idempotent
+	StepDaemon:        true, // start + health poll + env write are idempotent
 	StepManifest:      true,
 	StepSSHDHardening: true, // safe to re-run prepare; confirmation gate prevents lockout
 }
@@ -48,6 +64,8 @@ type InstallOptions struct {
 	PastedKeys           string   // multiline pasted keys
 	SkipPreflight        bool     // for resume: skip preflight if already passed
 	RequireSecondSession bool     // if true, sshd step waits for confirmation
+	UntilStep            string   // stop after this step completes (testing/staging); empty = all
+	AssetDir             string   // development override: load install assets from this directory instead of the embedded set
 }
 
 // RunResult is the outcome of a step.
@@ -64,7 +82,16 @@ type Service struct {
 	db      *sql.DB
 	journal *JournalStore
 	probes  Probes
+	assets  fs.FS
 }
+
+// SetAssets supplies the install asset filesystem (binaries, units, catalog,
+// tmpfiles, web) used by the binaries step. The CLI resolves it from the
+// embedded set or InstallOptions.AssetDir before Run.
+func (s *Service) SetAssets(fsys fs.FS) { s.assets = fsys }
+
+// Assets returns the configured asset filesystem (may be nil).
+func (s *Service) Assets() fs.FS { return s.assets }
 
 // NewService constructs a Service. db may be nil for preflight-only usage.
 // probes with nil fields are filled with live defaults (except in tests where
@@ -182,6 +209,16 @@ func (s *Service) Run(ctx context.Context, opts InstallOptions) ([]RunResult, er
 			res = s.runSSHDStep(ctx, opts)
 		case StepSystemPrepare:
 			res = s.runSystemPrepareStep(ctx)
+		case StepPackages:
+			res = s.runPackagesStep(ctx, opts)
+		case StepBinaries:
+			res = s.runBinariesStep(ctx, opts)
+		case StepFirewall:
+			res = s.runFirewallStep(ctx, opts)
+		case StepServices:
+			res = s.runServicesStep(ctx, opts)
+		case StepDaemon:
+			res = s.runDaemonStep(ctx, opts)
 		case StepManifest:
 			res = s.runManifestStep(ctx, opts)
 		default:
@@ -194,6 +231,9 @@ func (s *Service) Run(ctx context.Context, opts InstallOptions) ([]RunResult, er
 		}
 		_ = s.journal.MarkCompleted(ctx, step)
 		results = append(results, res)
+		if opts.UntilStep != "" && step == opts.UntilStep {
+			return results, nil
+		}
 	}
 	return results, nil
 }
@@ -263,36 +303,7 @@ func (s *Service) runSSHKeysStep(ctx context.Context, opts InstallOptions) RunRe
 		}
 		return RunResult{Step: StepSSHKeys, Status: JournalCompleted}
 	}
-
-	user := opts.TargetUser
-	if user == "" {
-		// Prefer SUDO_USER, then existing admin candidates, then current user.
-		if sudoUser := getEnvUser(); sudoUser != "" {
-			if _, keys, err := s.probes.AuthorizedKeys(sudoUser); err == nil && len(keys) > 0 {
-				user = sudoUser
-			} else if sudoUser != "root" {
-				user = sudoUser
-			}
-		}
-		if user == "" || user == "root" {
-			user = "root"
-			if s.probes.AuthorizedKeys != nil {
-				// Prefer real admin users: omahab (Ubuntu), ubuntu, admin, debian.
-				for _, candidate := range []string{"omahab", "ubuntu", "admin", "debian"} {
-					if _, keys, err := s.probes.AuthorizedKeys(candidate); err == nil && len(keys) > 0 {
-						user = candidate
-						break
-					}
-				}
-				// If no candidate had keys but SUDO_USER was set, use it.
-				if user == "root" {
-					if sudoUser := getEnvUser(); sudoUser != "" && sudoUser != "root" {
-						user = sudoUser
-					}
-				}
-			}
-		}
-	}
+	user := s.resolveTargetUser(opts)
 	added, _, err := EnsureAuthorizedKeys(s.probes, user, allKeys)
 	if err != nil {
 		return RunResult{Step: StepSSHKeys, Status: JournalFailed, Error: err.Error()}
@@ -303,6 +314,12 @@ func (s *Service) runSSHKeysStep(ctx context.Context, opts InstallOptions) RunRe
 
 func (s *Service) runSSHDStep(ctx context.Context, opts InstallOptions) RunResult {
 	cfg := DefaultHardenedConfig
+	// Installing keys for root and then refusing root logins entirely would
+	// lock out the very session the design keeps open for confirmation
+	// (DESIGN.md 5.5). Root-target installs get key-only root instead.
+	if s.resolveTargetUser(opts) == "root" {
+		cfg.PermitRootLogin = "prohibit-password"
+	}
 	// In the prepare phase we keep the current connection safe; password auth
 	// is disabled only after second-session confirmation (handled by the CLI gate).
 	// For non-interactive runs without a second session, we leave rollback armed
@@ -318,20 +335,65 @@ func (s *Service) runSSHDStep(ctx context.Context, opts InstallOptions) RunResul
 	return RunResult{Step: StepSSHDHardening, Status: JournalCompleted}
 }
 
+// resolveTargetUser picks the administrator account whose authorized_keys the
+// installer manages: explicit flag, then $SUDO_USER, then known admin
+// candidates with existing keys, then the current user. Falls back to root
+// only when nothing better exists.
+func (s *Service) resolveTargetUser(opts InstallOptions) string {
+	if opts.TargetUser != "" {
+		return opts.TargetUser
+	}
+	user := ""
+	if sudoUser := getEnvUser(); sudoUser != "" && s.probes.AuthorizedKeys != nil {
+		if _, keys, err := s.probes.AuthorizedKeys(sudoUser); err == nil && len(keys) > 0 {
+			user = sudoUser
+		} else if sudoUser != "root" {
+			user = sudoUser
+		}
+	}
+	if user == "" || user == "root" {
+		user = "root"
+		if s.probes.AuthorizedKeys != nil {
+			for _, candidate := range []string{"omahab", "ubuntu", "admin", "debian"} {
+				if _, keys, err := s.probes.AuthorizedKeys(candidate); err == nil && len(keys) > 0 {
+					user = candidate
+					break
+				}
+			}
+			if user == "root" {
+				if sudoUser := getEnvUser(); sudoUser != "" && sudoUser != "root" {
+					user = sudoUser
+				}
+			}
+		}
+	}
+	return user
+}
+
 func (s *Service) runSystemPrepareStep(_ context.Context) RunResult {
-	dirs := []string{
-		"/etc/omahab",
-		"/var/lib/omahab",
-		"/srv/omahab",
-		"/srv/omahab/apps",
-		"/srv/omahab/projects",
-		"/srv/omahab/sync",
-		"/srv/omahab/backups",
+	// Mirror packaging/tmpfiles.d/omahab.conf so a from-scratch install and
+	// the deb package layout agree (perms included).
+	dirs := []struct {
+		path string
+		perm uint32
+	}{
+		{"/etc/omahab", 0o755},
+		{"/var/lib/omahab", 0o700},
+		{"/var/lib/omahab/secrets", 0o700},
+		{"/srv/omahab", 0o755},
+		{"/srv/omahab/apps", 0o755},
+		{"/srv/omahab/projects", 0o755},
+		{"/srv/omahab/sync", 0o755},
+		{"/srv/omahab/backups", 0o755},
+		{"/srv/omahab/workspaces", 0o755},
+		{"/srv/omahab/derived-indexes", 0o755},
+		{"/var/log/omahab", 0o750},
+		{"/var/cache/omahab", 0o755},
 	}
 	for _, d := range dirs {
 		if s.probes.MkdirAll != nil {
-			if err := s.probes.MkdirAll(d, 0o750); err != nil {
-				return RunResult{Step: StepSystemPrepare, Status: JournalFailed, Error: fmt.Sprintf("mkdir %s: %v", d, err)}
+			if err := s.probes.MkdirAll(d.path, d.perm); err != nil {
+				return RunResult{Step: StepSystemPrepare, Status: JournalFailed, Error: fmt.Sprintf("mkdir %s: %v", d.path, err)}
 			}
 		}
 	}
@@ -419,6 +481,39 @@ func (s *Service) Rollback(ctx context.Context) []RunResult {
 			if e.Step == StepManifest && s.probes.RemoveFile != nil {
 				_ = s.probes.RemoveFile("/var/lib/omahab/install-manifest.json")
 			}
+			_ = s.journal.MarkRolledBack(ctx, e.Step)
+			results = append(results, RunResult{Step: e.Step, Status: JournalRolledBack})
+		case StepDaemon:
+			if err := RollbackDaemon(ctx, s.probes); err != nil {
+				results = append(results, RunResult{Step: e.Step, Status: JournalFailed, Error: err.Error()})
+			} else {
+				_ = s.journal.MarkRolledBack(ctx, e.Step)
+				results = append(results, RunResult{Step: e.Step, Status: JournalRolledBack})
+			}
+		case StepServices:
+			if err := RollbackServices(ctx, s.probes); err != nil {
+				results = append(results, RunResult{Step: e.Step, Status: JournalFailed, Error: err.Error()})
+			} else {
+				_ = s.journal.MarkRolledBack(ctx, e.Step)
+				results = append(results, RunResult{Step: e.Step, Status: JournalRolledBack})
+			}
+		case StepFirewall:
+			if err := RollbackFirewall(ctx, s.probes); err != nil {
+				results = append(results, RunResult{Step: e.Step, Status: JournalFailed, Error: err.Error()})
+			} else {
+				_ = s.journal.MarkRolledBack(ctx, e.Step)
+				results = append(results, RunResult{Step: e.Step, Status: JournalRolledBack})
+			}
+		case StepBinaries:
+			if err := RollbackBinaries(ctx, s.probes); err != nil {
+				results = append(results, RunResult{Step: e.Step, Status: JournalFailed, Error: err.Error()})
+			} else {
+				_ = s.journal.MarkRolledBack(ctx, e.Step)
+				results = append(results, RunResult{Step: e.Step, Status: JournalRolledBack})
+			}
+		case StepPackages:
+			// Packages stay installed: removing Docker or the vendor repos on
+			// rollback would destroy state and break SSH-independent recovery.
 			_ = s.journal.MarkRolledBack(ctx, e.Step)
 			results = append(results, RunResult{Step: e.Step, Status: JournalRolledBack})
 		default:

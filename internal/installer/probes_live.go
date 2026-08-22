@@ -3,7 +3,9 @@ package installer
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net"
@@ -567,13 +569,18 @@ func liveSecondSessionProbe(ctx context.Context) (bool, error) {
 // --- systemd rollback timer ---
 
 func liveScheduleRollback(ctx context.Context, after time.Duration, restorePath string) error {
-	// Create a transient timer that restores sshd_config.d/99-omahab.conf from backup.
-	// Implementation: write a systemd service+timer in /run/systemd/system.
+	// Create a transient timer that restores the sshd drop-in at
+	// sshdDropInPath from the backup taken by PrepareSSHDHardening. The
+	// unit mirrors rollbackSSHDFile: restore the backup when present,
+	// remove the drop-in when the host had none (.empty marker), and leave
+	// anything else untouched. Paths must stay identical to sshdDropInPath/
+	// sshdBackupPath or rollback restores the wrong file.
+	dropIn := sshdDropInPath
 	service := `[Unit]
 Description=Omahab SSH rollback
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c 'if [ -f ` + restorePath + ` ]; then cp ` + restorePath + ` /etc/ssh/sshd_config.d/99-omahab.conf; else rm -f /etc/ssh/sshd_config.d/99-omahab.conf; fi; sshd -t && systemctl reload sshd || true'
+ExecStart=/bin/sh -c 'if [ -f ` + restorePath + ` ]; then cp ` + restorePath + ` ` + dropIn + `; elif [ -f ` + restorePath + `.empty ]; then rm -f ` + dropIn + ` ` + restorePath + ` ` + restorePath + `.empty; else rm -f ` + dropIn + `; fi; sshd -t && systemctl reload sshd || true'
 `
 	timer := `[Unit]
 Description=Omahab SSH rollback timer
@@ -650,4 +657,106 @@ func liveFetchGitHubKeys(ctx context.Context, username string) ([]string, error)
 		return nil, fmt.Errorf("no keys found for github user %q", username)
 	}
 	return keys, nil
+}
+
+// --- apt / systemd / downloads (foundation install steps) ---
+
+// aptEnv returns the environment for non-interactive apt operations.
+func aptEnv() []string {
+	return append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
+}
+
+func liveAPTRefresh(ctx context.Context) error {
+	cmd := exec.CommandContext(ctx, "apt-get", "update")
+	cmd.Env = aptEnv()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("apt-get update: %w: %s", err, tailOutput(out, 400))
+	}
+	return nil
+}
+
+func liveAPTInstall(ctx context.Context, packages ...string) error {
+	args := append([]string{"install", "-y"}, packages...)
+	cmd := exec.CommandContext(ctx, "apt-get", args...)
+	cmd.Env = aptEnv()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("apt-get install %s: %w: %s", strings.Join(packages, " "), err, tailOutput(out, 400))
+	}
+	return nil
+}
+
+func liveSystemctl(ctx context.Context, args ...string) (string, error) {
+	full := append([]string{"systemctl"}, args...)
+	cmd := exec.CommandContext(ctx, full[0], full[1:]...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return string(out), fmt.Errorf("systemctl %s: %w: %s", strings.Join(args, " "), err, tailOutput(out, 400))
+	}
+	return string(out), nil
+}
+
+func liveDownloadFile(ctx context.Context, url, destPath string) error {
+	if !strings.HasPrefix(url, "https://") {
+		return fmt.Errorf("download url must be https:// (got %q)", url)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	client := &http.Client{
+		Timeout: 5 * time.Minute,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+		},
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("download %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("download %s: status %d", url, resp.StatusCode)
+	}
+	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+		return err
+	}
+	tmp := destPath + ".omahab-tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("download %s: %w", url, err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, destPath)
+}
+
+func liveSHA256File(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// tailOutput returns the last n bytes of command output for error messages.
+func tailOutput(out []byte, n int) string {
+	s := strings.TrimSpace(string(out))
+	if len(s) > n {
+		s = "..." + s[len(s)-n:]
+	}
+	return s
 }

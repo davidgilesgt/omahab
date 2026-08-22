@@ -16,20 +16,10 @@ export SOURCE_DATE_EPOCH
 PUBLISHED_AT="$(date -u -d "@$SOURCE_DATE_EPOCH" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "==> Go release $VERSION channel $CHANNEL epoch $SOURCE_DATE_EPOCH out $OUT"
 
-# 1) Build signed installer binaries for both supported architectures.
+# Go toolchain is required for catalog generation and installer builds.
 command -v go >/dev/null 2>&1 || { echo "error: go not found, cannot build" >&2; exit 1; }
-for arch in amd64 arm64; do
-  artifact="$OUT/omahab-installer-${VERSION}-${arch}"
-  GOOS=linux GOARCH=$arch CGO_ENABLED=0 go build -trimpath \
-    -ldflags "-s -w -X main.version=$VERSION -buildid=" \
-    -o "$artifact" ./cmd/omahab-install
-  chmod 0755 "$artifact"
-  if [[ "$SOURCE_DATE_EPOCH" =~ ^[0-9]+$ ]] && (( SOURCE_DATE_EPOCH > 0 )); then
-    touch -d "@$SOURCE_DATE_EPOCH" "$artifact"
-  fi
-done
 
-# 2) Resolve image digests — fail closed if any unavailable
+# 1) Resolve image digests — fail closed if any unavailable
 declare -A IMAGE_REPOS=(
   [caddy]="docker.io/library/caddy:alpine"
   [pocket-id]="ghcr.io/pocket-id/pocket-id:latest"
@@ -84,11 +74,13 @@ for key in "${!IMAGE_REPOS[@]}"; do
 done
 IMAGES_JSON+="}"
 
-# 2b) Generate the runtime application catalog from the curated bundle
+# 1b) Generate the runtime application catalog from the curated bundle
 #     definitions and the resolved digests, and stage it where the Debian
 #     packaging and the daemon (via /usr/share/omahab/catalog/) expect it.
 #     Validation is fail-closed: bundles whose images are not digest-pinned
 #     are rejected here, not at deploy time.
+#     This MUST happen BEFORE the installer is built because the installer
+#     embeds deploy/catalog/apps-catalog.json via internal/installer/assets/root.
 printf '%s\n' "$IMAGES_JSON" > "$OUT/image-digests.json"
 go run ./cmd/omahab-cataloggen \
   -catalog deploy/catalog/catalog.json \
@@ -96,6 +88,55 @@ go run ./cmd/omahab-cataloggen \
   -digests "$OUT/image-digests.json" \
   -out "$OUT/apps-catalog.json"
 cp "$OUT/apps-catalog.json" deploy/catalog/apps-catalog.json
+
+# 2) Build installer binaries with staged assets (each arch embeds arch-specific binaries + catalog)
+#    The installer embeds internal/installer/assets/root, so we stage that
+#    directory per-arch before each go build. This makes the installer bytes
+#    arch-specific (expected) and guarantees the just-generated apps-catalog.json
+#    is embedded. We also rebuild omahab/omahabd per arch so the embedded
+#    binaries match the installer's target architecture.
+ASSET_ROOT="internal/installer/assets/root"
+for arch in amd64 arm64; do
+  # Build arch-specific omahab binaries to embed. Use dist/<arch> as staging
+  # area (same layout as scripts/build.sh) so the assets are reproducible.
+  build_target="dist/$arch"
+  mkdir -p "$build_target"
+  GOOS=linux GOARCH=$arch CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$VERSION -buildid=" -o "$build_target/omahab" ./cmd/omahab
+  GOOS=linux GOARCH=$arch CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$VERSION -buildid=" -o "$build_target/omahabd" ./cmd/omahabd
+  chmod 0755 "$build_target/omahab" "$build_target/omahabd"
+  if [[ "$SOURCE_DATE_EPOCH" =~ ^[0-9]+$ ]] && (( SOURCE_DATE_EPOCH > 0 )); then
+    touch -d "@$SOURCE_DATE_EPOCH" "$build_target/omahab" "$build_target/omahabd"
+  fi
+
+  echo "==> staging installer assets for $arch into $ASSET_ROOT"
+  rm -rf "$ASSET_ROOT"
+  mkdir -p "$ASSET_ROOT/bin" "$ASSET_ROOT/systemd" "$ASSET_ROOT/catalog" "$ASSET_ROOT/tmpfiles.d"
+  cp "$build_target/omahab" "$build_target/omahabd" "$ASSET_ROOT/bin/"
+  cp deploy/systemd/omahabd.service deploy/systemd/omahab-backup.service deploy/systemd/omahab-backup.timer deploy/systemd/omahab-verify.service deploy/systemd/omahab-verify.timer deploy/systemd/cloudflared.service "$ASSET_ROOT/systemd/"
+  # Copy the entire catalog tree (includes the freshly generated apps-catalog.json).
+  cp -r deploy/catalog/. "$ASSET_ROOT/catalog/"
+  cp packaging/tmpfiles.d/omahab.conf "$ASSET_ROOT/tmpfiles.d/"
+  if [[ -d web/dist ]]; then
+    mkdir -p "$ASSET_ROOT/web"
+    cp -r web/dist/. "$ASSET_ROOT/web/"
+  fi
+
+  artifact="$OUT/omahab-installer-${VERSION}-${arch}"
+  GOOS=linux GOARCH=$arch CGO_ENABLED=0 go build -trimpath \
+    -ldflags "-s -w -X main.version=$VERSION -buildid=" \
+    -o "$artifact" ./cmd/omahab-install
+  chmod 0755 "$artifact"
+  if [[ "$SOURCE_DATE_EPOCH" =~ ^[0-9]+$ ]] && (( SOURCE_DATE_EPOCH > 0 )); then
+    touch -d "@$SOURCE_DATE_EPOCH" "$artifact"
+  fi
+done
+# Restore pristine root so the working tree stays clean. The staged files are
+# gitignored, but cleaning avoids leaving arch-specific binaries on disk and
+# ensures a subsequent `go build ./cmd/omahab-install` without --asset-dir
+# fails with the clear "run scripts/build.sh" hint.
+rm -rf "$ASSET_ROOT"
+mkdir -p "$ASSET_ROOT"
+touch "$ASSET_ROOT/.gitkeep"
 
 # 3) Checksums
 rm -f "$OUT/SHA256SUMS" "$OUT/SHA256SUMS.sig"

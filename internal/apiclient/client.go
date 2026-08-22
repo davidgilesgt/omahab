@@ -449,6 +449,14 @@ func (c *Client) VerifyBackup(ctx context.Context, id string) (*domain.Backup, e
 	return &out, nil
 }
 
+func (c *Client) VerifyLatestBackup(ctx context.Context) (*domain.Backup, error) {
+	var out domain.Backup
+	if err := c.post(ctx, "/backups/verify", map[string]any{}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // --- events ---
 
 type EventListParams struct {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"path"
 	"strings"
 	"time"
 )
@@ -36,31 +37,33 @@ func RunPreflight(ctx context.Context, probes Probes) ([]CheckResult, error) {
 	add(checkDebian(probes))
 	// 2. Architecture
 	add(checkArch(probes))
-	// 3. Dirty host: containers
+	// 3. systemd
+	add(checkSystemd(probes))
+	// 4. Dirty host: containers
 	add(checkContainers(probes))
-	// 4. Existing /srv/omahab
+	// 5. Existing /srv/omahab
 	add(checkDataDir(probes))
-	// 5. Occupied ports
+	// 6. Occupied ports
 	add(checkPorts(probes))
-	// 6. Conflicting services
+	// 7. Conflicting services
 	add(checkConflictingServices(probes))
-	// 7. APT sources
+	// 8. APT sources
 	add(checkAPTSources(probes))
-	// 8. RAM
+	// 9. RAM
 	add(checkRAM(probes))
-	// 9. Disk
+	// 10. Disk
 	add(checkDisk(probes))
-	// 10. Filesystem semantics
+	// 11. Filesystem semantics
 	add(checkFilesystem(probes))
-	// 11. System time
+	// 12. System time
 	add(checkTime(probes))
-	// 12. DNS
+	// 13. DNS
 	add(checkDNS(ctx, probes))
-	// 13. HTTPS
+	// 14. HTTPS
 	add(checkHTTPS(ctx, probes))
-	// 14. SSH keys
+	// 15. SSH keys
 	add(checkSSHKeys(probes))
-	// 15. Signed package / HTTPS CA sanity (covered by HTTPS + APT)
+	// 16. Signed package / HTTPS CA sanity (covered by HTTPS + APT)
 	add(checkPackageSigning(probes))
 
 	var failed []CheckResult
@@ -139,6 +142,22 @@ func checkArch(probes Probes) CheckResult {
 		}
 	}
 }
+func checkSystemd(probes Probes) CheckResult {
+	if probes.DirExists == nil {
+		return CheckResult{Name: "systemd", Level: LevelWarn, Message: "cannot check systemd: probe not configured"}
+	}
+	if probes.DirExists("/run/systemd/system") {
+		return CheckResult{Name: "systemd", Level: LevelPass, Message: "systemd detected (/run/systemd/system present)"}
+	}
+	return CheckResult{
+		Name:        "systemd",
+		Level:       LevelFail,
+		Message:     "/run/systemd/system not present — system not booted with systemd",
+		Remediation: "install on a fresh Debian 13 or Ubuntu 26.04 system booted with systemd; containers and chroots are not supported",
+		Dirty:       false,
+	}
+}
+
 
 func checkContainers(probes Probes) CheckResult {
 	// Look for docker/podman/k8s binaries and running containers.
@@ -146,7 +165,16 @@ func checkContainers(probes Probes) CheckResult {
 		if probes.CommandExists("docker") {
 			// Check if any container exists (docker ps -aq)
 			if probes.CommandOutput != nil {
-				out, _ := probes.CommandOutput(context.Background(), "docker", "ps", "-aq")
+				out, err := probes.CommandOutput(context.Background(), "docker", "ps", "-aq")
+				if err != nil {
+					return CheckResult{
+						Name:        "containers",
+						Level:       LevelFail,
+						Message:     "docker is installed but its daemon is not reachable",
+						Remediation: "start the daemon (systemctl start docker) so preflight can list containers, or remove docker",
+						Dirty:       false,
+					}
+				}
 				if strings.TrimSpace(out) != "" {
 					return CheckResult{
 						Name:        "containers",
@@ -156,8 +184,9 @@ func checkContainers(probes Probes) CheckResult {
 						Dirty:       true,
 					}
 				}
+				return CheckResult{Name: "containers", Level: LevelPass, Message: "no containers found (docker installed but no workloads)"}
 			}
-			// Even without containers, docker presence is dirty.
+			// Even without containers, docker presence is dirty if we cannot list.
 			return CheckResult{
 				Name:        "containers",
 				Level:       LevelFail,
@@ -300,6 +329,7 @@ func checkAPTSources(probes Probes) CheckResult {
 	}
 	_ = allowedHosts
 	var thirdParty []string
+	var vendorMsgs []string
 	for _, s := range sources {
 		line := strings.ToLower(s.Line)
 		// Skip deb lines that are clearly debian or ubuntu
@@ -327,6 +357,22 @@ func checkAPTSources(probes Probes) CheckResult {
 		if strings.Contains(line, "debian.org") || strings.Contains(line, "ubuntu.com") {
 			continue
 		}
+		hostLower := strings.ToLower(host)
+		// Allowlist ONLY omahab-*.list vendor sources for the two vendor hosts.
+		// Filename is not a bypass for other hosts; other hosts in omahab-*.list still fail dirty.
+		if strings.HasPrefix(s.File, "/etc/apt/sources.list.d/") {
+			base := path.Base(s.File)
+			if strings.HasPrefix(base, "omahab-") && strings.HasSuffix(base, ".list") {
+				switch hostLower {
+				case "pkgs.tailscale.com":
+					vendorMsgs = append(vendorMsgs, "omahab-managed vendor source (tailscale)")
+					continue
+				case "pkg.cloudflare.com":
+					vendorMsgs = append(vendorMsgs, "omahab-managed vendor source (cloudflare)")
+					continue
+				}
+			}
+		}
 		thirdParty = append(thirdParty, fmt.Sprintf("%s (%s)", host, s.File))
 	}
 	if len(thirdParty) > 0 {
@@ -337,6 +383,9 @@ func checkAPTSources(probes Probes) CheckResult {
 			Remediation: "remove third-party APT sources and reinstall from clean Debian 13 or Ubuntu 26.04",
 			Dirty:       true,
 		}
+	}
+	if len(vendorMsgs) > 0 {
+		return CheckResult{Name: "apt_sources", Level: LevelPass, Message: fmt.Sprintf("APT sources look clean (%s)", strings.Join(vendorMsgs, ", "))}
 	}
 	return CheckResult{Name: "apt_sources", Level: LevelPass, Message: "APT sources look clean"}
 }
