@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/omahab/omahab/internal/domain"
+	"github.com/omahab/omahab/internal/identity"
+	"github.com/omahab/omahab/internal/knowledge"
 )
 
 // Pagination controls list endpoints.
@@ -168,6 +170,45 @@ type EmailIngestRequest struct {
 	Signature string `json:"-"`
 }
 
+// Release token response for admin-only endpoints.
+type ReleaseTokenResponse struct {
+	Token       string `json:"token"`
+	TokenPrefix string `json:"token_prefix"`
+}
+
+// MirrorConfigRequest for push-mirror configuration (repo-scoped credential).
+type ConfigureMirrorRequest struct {
+	RemoteURL string `json:"remote_url"`
+	Token     string `json:"token"`
+	LFS       bool   `json:"lfs,omitempty"`
+}
+
+type MirrorResponse struct {
+	RemoteURL string   `json:"remote_url"`
+	SecretRef string   `json:"secret_ref,omitempty"`
+	Warnings  []string `json:"warnings,omitempty"`
+	LFS       bool     `json:"lfs"`
+}
+
+type WorkspaceCapabilityResponse struct {
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+type KnowledgeSearchRequest struct {
+	Query     string `json:"query"`
+	Principal string `json:"principal,omitempty"`
+	Limit     int    `json:"limit,omitempty"`
+}
+
+type KnowledgeUploadRequest struct {
+	Filename  string   `json:"filename"`
+	Content   []byte   `json:"content"`
+	Tags      []string `json:"tags,omitempty"`
+	Principal string   `json:"principal,omitempty"`
+}
+
+
 // Backend is the explicit control-plane interface consumed by the HTTP layer.
 // Every dashboard operation has a corresponding method; implementations remain
 // free to compose separate controllers behind this surface.
@@ -256,4 +297,42 @@ type Backend interface {
 	IngestEmail(ctx context.Context, req EmailIngestRequest) (domain.EmailMessage, error)
 	ListEmailMessages(ctx context.Context, p Pagination) ([]domain.EmailMessage, error)
 	GetEmailMessage(ctx context.Context, id domain.ID) (domain.EmailMessage, error)
+
+	// Release tokens (admin only; never exposed to Forgejo)
+	IssueReleaseToken(ctx context.Context, projectID domain.ID) (ReleaseTokenResponse, error)
+	RotateReleaseToken(ctx context.Context, projectID domain.ID) (ReleaseTokenResponse, error)
+	ReleaseWithToken(ctx context.Context, projectID domain.ID, token, commit, digest string) (domain.Release, error)
+
+	// Push mirror (repo-scoped credential, force-push warning, LFS)
+	GetPushMirror(ctx context.Context, projectID domain.ID) (MirrorResponse, error)
+	ConfigurePushMirror(ctx context.Context, projectID domain.ID, req ConfigureMirrorRequest) (MirrorResponse, error)
+	RemovePushMirror(ctx context.Context, projectID domain.ID) error
+
+	// Workspace capabilities (short-lived one-time token)
+	IssueWorkspaceCapability(ctx context.Context, workspaceID string) (WorkspaceCapabilityResponse, error)
+	ValidateWorkspaceCapability(ctx context.Context, workspaceID, token string) error
+
+	// Knowledge assistant tools (with Paperless permission checks)
+	KnowledgeSearch(ctx context.Context, principal, query string, limit int) ([]knowledge.Citation, error)
+	KnowledgeGetMetadata(ctx context.Context, principal, docID string) (*knowledge.PaperlessMetadata, error)
+	KnowledgeGetText(ctx context.Context, principal, docID string) (string, error)
+	KnowledgeListCorrespondents(ctx context.Context, principal string) ([]string, error)
+	KnowledgeListDocumentTypes(ctx context.Context, principal string) ([]string, error)
+	KnowledgeListTags(ctx context.Context, principal string) ([]string, error)
+	KnowledgeUpload(ctx context.Context, principal, filename string, content []byte, tags []string) (string, error)
+	KnowledgeAddTag(ctx context.Context, principal, docID, tag string) error
+	KnowledgeListSources(ctx context.Context) ([]*knowledge.Source, error)
+	KnowledgeIndexSetupOptions(ctx context.Context) ([]knowledge.IndexSetupOption, error)
+	KnowledgePinnedModels(ctx context.Context) ([]knowledge.ModelInfo, error)
+	KnowledgeGetSummarizationConsent(ctx context.Context, principal, provider string) (bool, error)
+	KnowledgeSetSummarizationConsent(ctx context.Context, principal, provider string, granted bool) error
+
+	// Identity extended (enrollment, app access, groups)
+	GetEnrollmentState(ctx context.Context, userID string) (identity.EnrollmentState, error)
+	ListApplicationAccess(ctx context.Context, userID string) ([]identity.AppAccess, error)
+	GetUserGroups(ctx context.Context, userID string) ([]identity.Group, error)
+	SetUserGroups(ctx context.Context, userID string, groupIDs []string) error
+
+	// Email routing gated on verification
+	EnsureEmailRoute(ctx context.Context, recipient string) error
 }

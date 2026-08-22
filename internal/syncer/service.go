@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -26,6 +28,12 @@ var (
 
 // DefaultSyncRoot is the server-side root under which all sync folders live.
 const DefaultSyncRoot = "/srv/omahab/sync"
+
+// DeviceStaleThreshold is the default duration after which a Syncthing device
+// that has not been seen is considered stale and triggers
+// syncthing.device_stale. Integrators may override per-Service via
+// SetStaleThreshold.
+const DeviceStaleThreshold = 24 * time.Hour
 
 // DefaultNotesExclusions returns the sensible Obsidian/notes exclusions from DESIGN §16.
 // These are applied to Notes folders and form the baseline for other folders.
@@ -67,11 +75,49 @@ type NoopRegistrar struct{}
 func (NoopRegistrar) Register(_ context.Context, _, _ string) error { return nil }
 func (NoopRegistrar) Unregister(_ context.Context, _ string) error  { return nil }
 
+// EventSink emits domain events for syncthing telemetry.
+// It mirrors the narrow interface used by other controllers.
+type EventSink interface {
+	Emit(ctx context.Context, ev domain.Event) error
+}
+
+// NoopEventSink discards events.
+type NoopEventSink struct{}
+
+func (NoopEventSink) Emit(_ context.Context, _ domain.Event) error { return nil }
+
+// ConnectionInfo describes a Syncthing device connection snapshot.
+type ConnectionInfo struct {
+	Connected bool
+	LastSeen  time.Time
+}
+
+// SyncthingClient is the narrow interface the syncer uses to query Syncthing.
+// SDK types must not leak past this boundary; implementations convert at the edge.
+type SyncthingClient interface {
+	FolderErrors(ctx context.Context, folder string) (string, error)
+	Connections(ctx context.Context) (map[string]ConnectionInfo, error)
+}
+
+// NoopSyncthingClient is a no-op client for testing or when Syncthing is disabled.
+type NoopSyncthingClient struct{}
+
+func (NoopSyncthingClient) FolderErrors(_ context.Context, _ string) (string, error) {
+	return "", nil
+}
+func (NoopSyncthingClient) Connections(_ context.Context) (map[string]ConnectionInfo, error) {
+	return map[string]ConnectionInfo{}, nil
+}
+
 // Service owns Syncthing folder and device metadata.
 type Service struct {
-	db        *sql.DB
-	syncRoot  string
-	registrar KnowledgeRegistrar
+	db             *sql.DB
+	syncRoot       string
+	registrar      KnowledgeRegistrar
+	client         SyncthingClient
+	sink           EventSink
+	now            func() time.Time
+	staleThreshold time.Duration
 }
 
 // New creates a Service. syncRoot is the server-side directory under which all
@@ -85,11 +131,53 @@ func New(db *sql.DB, syncRoot string, registrar KnowledgeRegistrar) *Service {
 	if registrar == nil {
 		registrar = NoopRegistrar{}
 	}
-	return &Service{db: db, syncRoot: syncRoot, registrar: registrar}
+	return &Service{
+		db:             db,
+		syncRoot:       syncRoot,
+		registrar:      registrar,
+		client:         NoopSyncthingClient{},
+		sink:           NoopEventSink{},
+		now:            func() time.Time { return time.Now().UTC() },
+		staleThreshold: DeviceStaleThreshold,
+	}
 }
 
 // SyncRoot returns the configured server-side root.
 func (s *Service) SyncRoot() string { return s.syncRoot }
+
+// SetSyncthingClient sets the Syncthing REST client. Nil is treated as no-op.
+func (s *Service) SetSyncthingClient(c SyncthingClient) {
+	if c == nil {
+		c = NoopSyncthingClient{}
+	}
+	s.client = c
+}
+
+// SetEventSink sets the event sink. Nil is treated as no-op.
+func (s *Service) SetEventSink(sink EventSink) {
+	if sink == nil {
+		sink = NoopEventSink{}
+	}
+	s.sink = sink
+}
+
+// SetNow sets the clock function for testing. Nil restores time.Now UTC.
+func (s *Service) SetNow(fn func() time.Time) {
+	if fn == nil {
+		s.now = func() time.Time { return time.Now().UTC() }
+		return
+	}
+	s.now = fn
+}
+
+// SetStaleThreshold overrides the device staleness threshold. Zero restores default.
+func (s *Service) SetStaleThreshold(d time.Duration) {
+	if d == 0 {
+		s.staleThreshold = DeviceStaleThreshold
+		return
+	}
+	s.staleThreshold = d
+}
 
 // CreateInput holds the fields required to create a sync folder.
 type CreateInput struct {
@@ -158,8 +246,6 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*domain.SyncFolde
 
 	if in.ShareWithAI {
 		if err := s.registrar.Register(ctx, id, serverPath); err != nil {
-			// Best-effort: log via error wrapping; do not leave folder without source
-			// registration silently. Caller can retry sync of registration.
 			_ = err
 		}
 	}
@@ -341,6 +427,176 @@ func (s *Service) RemoveDevice(ctx context.Context, folderID, deviceID string) e
 // ExclusionsFor returns the default exclusions for the named folder.
 func (s *Service) ExclusionsFor(folderName string) []string {
 	return DefaultExclusions(folderName)
+}
+
+// CheckConflicts inspects folders for Syncthing conflict files and folder errors
+// via the Syncthing client, emitting syncthing.conflict events.
+func (s *Service) CheckConflicts(ctx context.Context) error {
+	folders, err := s.List(ctx)
+	if err != nil {
+		return err
+	}
+	for _, f := range folders {
+		var details []string
+		var conflictFiles []string
+
+		hasFiles, files, walkErr := s.hasConflictFiles(f.ServerPath)
+		if walkErr == nil && hasFiles {
+			conflictFiles = files
+			details = append(details, fmt.Sprintf("conflict files: %s", strings.Join(files, ", ")))
+		}
+		var folderErr string
+		if s.client != nil {
+			if e, err := s.client.FolderErrors(ctx, string(f.ID)); err == nil && strings.TrimSpace(e) != "" {
+				folderErr = strings.TrimSpace(e)
+				details = append(details, "folder error: "+folderErr)
+			}
+			// Also try by folder name as fallback for HTTP client that keys by name.
+			if folderErr == "" && string(f.ID) != f.Name {
+				if e, err := s.client.FolderErrors(ctx, f.Name); err == nil && strings.TrimSpace(e) != "" {
+					folderErr = strings.TrimSpace(e)
+					details = append(details, "folder error: "+folderErr)
+				}
+			}
+		}
+		if len(details) == 0 {
+			continue
+		}
+		ev := domain.Event{
+			ID:         domain.ID(newID()),
+			Type:       "syncthing.conflict",
+			Severity:   "warning",
+			ResourceID: f.ID,
+			Message:    fmt.Sprintf("syncthing conflict detected for folder %q", f.Name),
+			Data: map[string]any{
+				"folder":         f.Name,
+				"server_path":    f.ServerPath,
+				"details":        strings.Join(details, "; "),
+				"conflict_files": conflictFiles,
+				"folder_error":   folderErr,
+			},
+			CreatedAt: s.now().UTC(),
+		}
+		_ = s.sink.Emit(ctx, ev)
+	}
+	return nil
+}
+
+// CheckDeviceStaleness checks enrolled devices against Syncthing last-seen
+// and emits syncthing.device_stale when a device has not been seen within
+// the stale threshold.
+func (s *Service) CheckDeviceStaleness(ctx context.Context) error {
+	if s.client == nil {
+		return nil
+	}
+	conns, err := s.client.Connections(ctx)
+	if err != nil {
+		return err
+	}
+	threshold := s.staleThreshold
+	if threshold == 0 {
+		threshold = DeviceStaleThreshold
+	}
+	now := s.now().UTC()
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT device_id, device_name FROM sync_devices`)
+	if err != nil {
+		return fmt.Errorf("list distinct devices: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var deviceID, deviceName string
+		if err := rows.Scan(&deviceID, &deviceName); err != nil {
+			return err
+		}
+		info, ok := conns[deviceID]
+		if ok && info.Connected {
+			continue
+		}
+		var lastSeen time.Time
+		if ok {
+			lastSeen = info.LastSeen
+		}
+		// If never seen (zero), consider stale if threshold passed since enrollment?
+		// Treat zero LastSeen as stale.
+		stale := false
+		if lastSeen.IsZero() {
+			stale = true
+		} else if now.Sub(lastSeen) > threshold {
+			stale = true
+		}
+		if !stale {
+			continue
+		}
+		ev := domain.Event{
+			ID:         domain.ID(newID()),
+			Type:       "syncthing.device_stale",
+			Severity:   "warning",
+			ResourceID: domain.ID(deviceID),
+			Message:    fmt.Sprintf("syncthing device %q stale (last seen %v)", deviceID, lastSeen),
+			Data: map[string]any{
+				"device_id":   deviceID,
+				"device_name": deviceName,
+				"last_seen":   lastSeen.UTC().Format(time.RFC3339Nano),
+				"threshold":   threshold.String(),
+			},
+			CreatedAt: now,
+		}
+		_ = s.sink.Emit(ctx, ev)
+	}
+	return rows.Err()
+}
+
+// PollSyncthing runs both conflict and staleness checks.
+func (s *Service) PollSyncthing(ctx context.Context) error {
+	if err := s.CheckConflicts(ctx); err != nil {
+		return err
+	}
+	return s.CheckDeviceStaleness(ctx)
+}
+
+// hasConflictFiles reports whether path contains any file whose base name
+// contains "sync-conflict". It returns up to 20 matches to bound event data.
+func (s *Service) hasConflictFiles(path string) (bool, []string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, os.ErrNotExist) {
+			return false, nil, nil
+		}
+		return false, nil, nil
+	}
+	if !info.IsDir() {
+		base := filepath.Base(path)
+		if strings.Contains(strings.ToLower(base), "sync-conflict") {
+			return true, []string{path}, nil
+		}
+		return false, nil, nil
+	}
+	var matches []string
+	err = filepath.WalkDir(path, func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		name := d.Name()
+		if strings.Contains(strings.ToLower(name), "sync-conflict") {
+			rel, _ := filepath.Rel(path, p)
+			if rel == "." {
+				rel = name
+			}
+			matches = append(matches, rel)
+			if len(matches) >= 20 {
+				return fs.SkipAll
+			}
+		}
+		// Skip .stversions quickly
+		if d.IsDir() && name == ".stversions" {
+			return fs.SkipDir
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return false, nil, err
+	}
+	return len(matches) > 0, matches, nil
 }
 
 // validateServerPath ensures the path is absolute, within syncRoot, contains no

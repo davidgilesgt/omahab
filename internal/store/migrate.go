@@ -24,6 +24,11 @@ type Migration struct {
 // records it: if the SQL fails, the transaction rolls back and neither the
 // schema change nor its bookkeeping remains. Duplicate or blank names in the
 // given list are rejected before anything is applied.
+//
+// Where a 1:1 mapping exists, this method delegates to sqlc-generated queries
+// (CreateSchemaMigrations, CheckSchemaMigration, InsertSchemaMigration).
+// Dynamic per-migration DDL (m.SQL) remains an explicit Exec because sqlc
+// cannot generate queries for arbitrary runtime SQL strings.
 func (s *Store) Migrate(ctx context.Context, migrations ...Migration) error {
 	if s == nil || s.db == nil {
 		return Validation("store is not opened")
@@ -43,10 +48,7 @@ func (s *Store) Migrate(ctx context.Context, migrations ...Migration) error {
 		}
 	}
 
-	if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
-		name TEXT PRIMARY KEY,
-		applied_at TEXT NOT NULL
-	)`); err != nil {
+	if err := New(s.db).CreateSchemaMigrations(ctx); err != nil {
 		return fmt.Errorf("store: create schema_migrations: %w", err)
 	}
 
@@ -65,6 +67,12 @@ func (s *Store) Migrate(ctx context.Context, migrations ...Migration) error {
 // existence check runs inside the transaction so concurrent Migrate calls
 // cannot double-apply a migration: transactions begin IMMEDIATE (see the
 // _txlock DSN parameter), which serializes writers before the check.
+//
+// Generated queries cover the existence check (CheckSchemaMigration) and the
+// bookkeeping insert (InsertSchemaMigration). The actual schema change
+// (tx.Exec with m.SQL) is intentionally not generated — the SQL string is
+// supplied at runtime per migration and cannot be statically analyzed by sqlc.
+// Transaction boundaries (BeginTx/Commit/Rollback) are also explicit.
 func (s *Store) applyMigration(ctx context.Context, m Migration) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -72,23 +80,26 @@ func (s *Store) applyMigration(ctx context.Context, m Migration) error {
 	}
 	defer func() { _ = tx.Rollback() }() // no-op after a successful commit
 
-	var applied bool
-	if err := tx.QueryRowContext(ctx,
-		`SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE name = ?)`, m.Name,
-	).Scan(&applied); err != nil {
+	qTx := New(tx)
+
+	applied, err := qTx.CheckSchemaMigration(ctx, m.Name)
+	if err != nil {
 		return fmt.Errorf("store: check migration %q: %w", m.Name, err)
 	}
 	if applied {
 		return nil // already recorded; the deferred rollback releases the tx
 	}
 
+	// Dynamic DDL — cannot be sqlc-generated. This is the only call site
+	// that intentionally bypasses sqlc; every other store operation now
+	// goes through generated queries.
 	if _, err := tx.ExecContext(ctx, m.SQL); err != nil {
 		return fmt.Errorf("store: apply migration %q: %w", m.Name, err)
 	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)`,
-		m.Name, FormatTime(time.Now()),
-	); err != nil {
+	if err := qTx.InsertSchemaMigration(ctx, InsertSchemaMigrationParams{
+		Name:      m.Name,
+		AppliedAt: FormatTime(time.Now()),
+	}); err != nil {
 		return fmt.Errorf("store: record migration %q: %w", m.Name, err)
 	}
 	if err := tx.Commit(); err != nil {

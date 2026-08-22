@@ -66,11 +66,15 @@ type Options struct {
 type Service struct {
 	db      *sql.DB
 	catalog *Catalog
+	catMu   sync.RWMutex
 	runner  Runner
 	events  EventSink
 	env     EnvSource
 	now     func() time.Time
 	locks   keyedLocks
+
+	updateMu       sync.Mutex
+	updateEmitted  map[string]string
 }
 
 // NewService validates options and returns the service.
@@ -93,12 +97,13 @@ func NewService(db *sql.DB, opt Options) (*Service, error) {
 		now = time.Now
 	}
 	return &Service{
-		db:      db,
-		catalog: opt.Catalog,
-		runner:  opt.Runner,
-		events:  events,
-		env:     opt.Env,
-		now:     now,
+		db:            db,
+		catalog:       opt.Catalog,
+		runner:        opt.Runner,
+		events:        events,
+		env:           opt.Env,
+		now:           now,
+		updateEmitted: make(map[string]string),
 	}, nil
 }
 
@@ -126,12 +131,18 @@ type InstallRequest struct {
 
 // CatalogBundles lists the curated bundles available for install, in catalog
 // order. It returns the validated, immutable entries only.
-func (s *Service) CatalogBundles() []Bundle { return s.catalog.Bundles() }
+func (s *Service) CatalogBundles() []Bundle {
+	s.catMu.RLock()
+	defer s.catMu.RUnlock()
+	return s.catalog.Bundles()
+}
 
 // Install validates the request, claims the app row with observed state
 // provisioning, deploys through the runner, and finalizes to running.
 func (s *Service) Install(ctx context.Context, req InstallRequest) (Status, error) {
+	s.catMu.RLock()
 	bundle, ok := s.catalog.Get(req.BundleID)
+	s.catMu.RUnlock()
 	if !ok {
 		return Status{}, invalid("unknown bundle %q", req.BundleID)
 	}
@@ -311,6 +322,10 @@ func (s *Service) Stop(ctx context.Context, id domain.ID) (Status, error) {
 // rejected. The current release pointer only moves after a successful
 // deploy; on failure the previous version is restored and the app records
 // the failure without changing its release history.
+// Update deploys a new pinned digest for the app's bundle. Mutable tags are
+// rejected. The current release pointer only moves after a successful
+// deploy; on failure the previous version is restored and the app records
+// the failure without changing its release history.
 func (s *Service) Update(ctx context.Context, id domain.ID, digest string) (Status, error) {
 	rec, unlock, err := s.lockedApp(ctx, id)
 	if err != nil {
@@ -326,7 +341,9 @@ func (s *Service) Update(ctx context.Context, id domain.ID, digest string) (Stat
 	if digest == rec.Digest {
 		return Status{}, invalid("digest %s is already current", digest)
 	}
+	s.catMu.RLock()
 	bundle, ok := s.catalog.Get(rec.BundleID)
+	s.catMu.RUnlock()
 	if !ok {
 		return Status{}, fmt.Errorf("%w: bundle %q missing from catalog", ErrConflict, rec.BundleID)
 	}
@@ -579,7 +596,10 @@ func (s *Service) specFor(ctx context.Context, rec appRecord) (DeploySpec, error
 }
 
 func (s *Service) healthCheckFor(bundleID string) HealthCheck {
-	if b, ok := s.catalog.Get(bundleID); ok {
+	s.catMu.RLock()
+	b, ok := s.catalog.Get(bundleID)
+	s.catMu.RUnlock()
+	if ok {
 		return b.HealthCheck
 	}
 	return HealthCheck{Kind: CheckNone}
@@ -668,6 +688,85 @@ func (s *Service) emit(ctx context.Context, typ, severity string, id domain.ID, 
 		slog.Warn("apps: event sink rejected event", "type", typ, "err", err)
 	}
 }
+
+// SetCatalog replaces the curated catalog atomically. It is used when a new
+// signed catalog is applied and allows CheckForUpdates to detect new digests
+// without restarting the service.
+func (s *Service) SetCatalog(c *Catalog) error {
+	if c == nil {
+		return invalid("catalog is required")
+	}
+	s.catMu.Lock()
+	s.catalog = c
+	s.catMu.Unlock()
+	return nil
+}
+
+// Catalog returns the current catalog snapshot.
+func (s *Service) CatalogSnapshot() *Catalog {
+	s.catMu.RLock()
+	defer s.catMu.RUnlock()
+	return s.catalog
+}
+
+// CheckForUpdates compares each installed app's digest with its bundle's
+// catalog digest and emits service.update_available on transitions to an
+// update-available state. It emits exactly once per distinct new digest and
+// is idempotent on re-observation of the same digest.
+func (s *Service) CheckForUpdates(ctx context.Context) ([]Status, error) {
+	recs, err := listApps(ctx, s.db)
+	if err != nil {
+		return nil, err
+	}
+	var withUpdates []Status
+	s.catMu.RLock()
+	cat := s.catalog
+	s.catMu.RUnlock()
+	if cat == nil {
+		return nil, nil
+	}
+	for _, rec := range recs {
+		bundle, ok := cat.Get(rec.BundleID)
+		if !ok {
+			continue
+		}
+		if bundle.Digest == "" || rec.Digest == bundle.Digest {
+			continue
+		}
+		st, err := s.view(ctx, rec)
+		if err != nil {
+			continue
+		}
+		withUpdates = append(withUpdates, st)
+		key := string(rec.ID)
+		s.updateMu.Lock()
+		last := s.updateEmitted[key]
+		if last == bundle.Digest {
+			s.updateMu.Unlock()
+			continue
+		}
+		s.updateEmitted[key] = bundle.Digest
+		s.updateMu.Unlock()
+		s.emit(ctx, EventUpdateAvailable, SeverityInfo, rec.ID,
+			rec.Name+" update available",
+			map[string]any{
+				"bundle_id":  rec.BundleID,
+				"old_digest": rec.Digest,
+				"new_digest": bundle.Digest,
+			})
+	}
+	return withUpdates, nil
+}
+
+// ResetUpdateAvailableDedup clears the in-memory dedup state for
+// service.update_available. It is exposed for tests and for catalog
+// rollback scenarios.
+func (s *Service) ResetUpdateAvailableDedup() {
+	s.updateMu.Lock()
+	s.updateEmitted = make(map[string]string)
+	s.updateMu.Unlock()
+}
+
 
 func (s *Service) lockedApp(ctx context.Context, id domain.ID) (appRecord, func(), error) {
 	unlock := s.locks.acquire(string(id))

@@ -113,5 +113,26 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_consents_principal ON knowledge_consent
 CREATE INDEX IF NOT EXISTS idx_knowledge_consents_provider ON knowledge_consents(provider);
 `,
 		},
+		{
+			Name: "knowledge-007-notes-source",
+			SQL: `
+-- Allow kind 'notes' for Syncthing notes folders (Share-with-AI).
+-- SQLite CHECK is part of table definition, so recreate via copy.
+CREATE TABLE IF NOT EXISTS knowledge_sources_new (
+	id TEXT PRIMARY KEY,
+	kind TEXT NOT NULL CHECK (kind IN ('paperless','karakeep','notes')),
+	name TEXT NOT NULL UNIQUE,
+	base_url TEXT NOT NULL,
+	health TEXT NOT NULL DEFAULT 'unknown',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL
+) STRICT;
+INSERT OR IGNORE INTO knowledge_sources_new (id, kind, name, base_url, health, created_at, updated_at)
+	SELECT id, kind, name, base_url, health, created_at, updated_at FROM knowledge_sources;
+DROP TABLE IF EXISTS knowledge_sources;
+ALTER TABLE knowledge_sources_new RENAME TO knowledge_sources;
+CREATE INDEX IF NOT EXISTS idx_knowledge_sources_kind ON knowledge_sources(kind);
+`,
+		},
 	}
 }

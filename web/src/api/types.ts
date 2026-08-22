@@ -145,3 +145,28 @@ export interface RecoverySession {
 export interface ListEnvelope<T> {
   items: T[];
 }
+
+export interface IndexSetupOption {
+  id: string;
+  label: string;
+  description: string;
+  model_alias?: string | null;
+}
+
+export interface ModelInfo {
+  alias: string;
+  name: string;
+  model_id: string;
+  license: string;
+  size_bytes: number;
+  expected_memory_mb: number;
+  dimensions?: number;
+  max_sequence_length?: number;
+  artifact_path?: string;
+}
+
+export interface KnowledgeConsent {
+  principal: string;
+  provider: string;
+  granted: boolean;
+}

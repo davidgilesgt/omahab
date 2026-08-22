@@ -35,6 +35,7 @@ func (s *Service) evaluateHealth(ctx context.Context, persist bool) (StatusRepor
 	rep := StatusReport{
 		Health:         domain.HealthUnhealthy,
 		RPOLimit:       s.cfg.RPO,
+		RTOLimit:       s.cfg.RTO,
 		VerifyInterval: s.cfg.VerifyInterval,
 		Repositories:   []Repository{},
 	}

@@ -1,0 +1,3 @@
+  [x] PASS os               Debian 13
+  [!] FAIL ram              too little
+       -> add RAM

@@ -10,7 +10,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "deploy": "wrangler deploy",
-    "dev": "wrangler dev"
+    "dev": "wrangler dev",
+    "generate:vars": "node scripts/generate-vars.mjs --domain",
+    "generate:alias": "node scripts/generate-vars.mjs --alias"
   },
   "devDependencies": {
     "typescript": "5.9.2",

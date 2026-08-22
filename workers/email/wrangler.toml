@@ -7,26 +7,40 @@ compatibility_date = "2024-12-01"
 compatibility_flags = ["nodejs_compat"]
 
 # --- Non-secret configuration (inspectable) ---
-# The allowed recipient is the AI address, e.g. ai@example.com.
-# This is not a secret but is intentionally single-valued: the worker
-# enforces exact recipient matching and rejects all other RCPT TO.
+# ALLOWED_RECIPIENT is the AI address, e.g. ai@example.com.
+# It is DERIVED at deploy time from the assistant slug and instance domain:
+#   node scripts/generate-vars.mjs --domain <domain> --slug <slug> [--alias]
+# The generator writes the vars below; do not hand-edit this file except via
+# the generator. The alias (RECIPIENT_ALIAS) is an optional randomized
+# shared secret between the Worker allowlist and omahabd ingestion.
+# The daemon reads the same alias from OMAHAB_EMAIL_RECIPIENT_ALIAS
+# (or OMAHAB_EMAIL_RECIPIENT_ALIAS_FILE); both sides must match.
 [vars]
 INGEST_URL = "https://api.example.com/api/v1/email/ingest"
 ALLOWED_RECIPIENT = "ai@example.com"
+# Optional randomized alias (shared secret). Uncomment after generation if used:
+# RECIPIENT_ALIAS = "ai+4f8a9c2e@example.com"
 MAX_RAW_BYTES = "26214400"
 
 # --- Secrets (never in vars, never in logs) ---
 # Set via: wrangler secret put HMAC_SECRET
 # And optionally: wrangler secret put HMAC_KEY_ID
 # HMAC_SECRET must be >=16 chars, high-entropy.
-# INGEST_URL and ALLOWED_RECIPIENT can also be set as secrets if
-# you prefer, but vars above is the paved road.
+# INGEST_URL, ALLOWED_RECIPIENT, and RECIPIENT_ALIAS can also be set as secrets
+# if you prefer, but vars above is the paved road.
+# If RECIPIENT_ALIAS is used as a secret, set it via:
+#   wrangler secret put RECIPIENT_ALIAS
 
 # Email routing: bind this worker to your Cloudflare Email Routing rule.
+# The address must match ALLOWED_RECIPIENT; if RECIPIENT_ALIAS is configured,
+# create a second route for the alias that also points to this Worker.
 # Example (uncomment and adjust after `wrangler deploy` or via dashboard):
 #
 # [[email]]
 # address = "ai@example.com"
+#
+# [[email]]
+# address = "ai+4f8a9c2e@example.com"
 #
 # Or via Cloudflare dashboard: Email Routing -> Routing rules -> Catch-all or specific
 # address -> Send to Worker -> omahab-email-worker

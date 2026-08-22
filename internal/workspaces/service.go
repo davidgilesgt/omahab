@@ -54,6 +54,8 @@ var allowedAgents = map[string]bool{
 type Runner interface {
 	Up(ctx context.Context, workspaceID string, projectID domain.ID, branch, agent string, opts RunnerOpts) error
 	Stop(ctx context.Context, workspaceID string) error
+	Delete(ctx context.Context, workspaceID string) error
+	Attach(ctx context.Context, workspaceID string) error
 	IsRunning(ctx context.Context, workspaceID string) (bool, error)
 }
 
@@ -65,13 +67,16 @@ type RunnerOpts struct {
 	DevcontainerSource string
 }
 
-// NoopRunner is a no-op Runner for testing.
+// NoopRunner is a no-op Runner for testing. It satisfies Runner without
+// touching the host. Production code should use NewDevPodRunner.
 type NoopRunner struct{}
 
 func (NoopRunner) Up(_ context.Context, _ string, _ domain.ID, _, _ string, _ RunnerOpts) error {
 	return nil
 }
 func (NoopRunner) Stop(_ context.Context, _ string) error              { return nil }
+func (NoopRunner) Delete(_ context.Context, _ string) error            { return nil }
+func (NoopRunner) Attach(_ context.Context, _ string) error            { return nil }
 func (NoopRunner) IsRunning(_ context.Context, _ string) (bool, error) { return true, nil }
 
 // Service owns workspace lifecycle.
@@ -81,6 +86,17 @@ type Service struct {
 }
 
 // New creates a Service. runner may be nil, in which case NoopRunner is used.
+// The integrator wires a real runner via NewDevPodRunner:
+//
+//	runner := workspaces.NewDevPodRunner(workspaces.DevPodRunnerConfig{
+//	    WorkspacesDir: cfg.DataDir + "/workspaces",
+//	    RepoResolver: func(ctx context.Context, id domain.ID) (string, error) {
+//	        p, _ := projectsSvc.Get(ctx, id)
+//	        return p.RepositoryURL, nil
+//	    },
+//	})
+//	svc := workspaces.New(db, runner)
+//	svc.StartIdleExpirer(ctx, time.Minute)
 func New(db *sql.DB, runner Runner) *Service {
 	if runner == nil {
 		runner = NoopRunner{}
@@ -248,6 +264,46 @@ func (s *Service) Stop(ctx context.Context, id string) error {
 	return err
 }
 
+// Delete deletes a workspace via the Runner and removes its row. It also
+// removes associated capabilities. The runner is called best-effort before
+// the row is deleted.
+func (s *Service) Delete(ctx context.Context, id string) error {
+	if _, err := s.Get(ctx, id); err != nil {
+		return err
+	}
+	// Best-effort runner delete; surface error if runner fails.
+	if err := s.runner.Delete(ctx, id); err != nil {
+		return fmt.Errorf("runner delete: %w", err)
+	}
+	_, _ = s.db.ExecContext(ctx, `DELETE FROM workspace_capabilities WHERE workspace_id = ?`, id)
+	res, err := s.db.ExecContext(ctx, `DELETE FROM workspaces WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete workspace: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// Attach creates-or-attaches a resumable tmux session for the workspace via
+// the Runner. On success it touches last_active_at to extend idle expiry.
+func (s *Service) Attach(ctx context.Context, id string) error {
+	ws, err := s.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if ws.Status == StatusStopped || ws.Status == StatusExpired {
+		return fmt.Errorf("%w: workspace is %s", ErrValidation, ws.Status)
+	}
+	if err := s.runner.Attach(ctx, id); err != nil {
+		return fmt.Errorf("runner attach: %w", err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, _ = s.db.ExecContext(ctx, `UPDATE workspaces SET last_active_at = ?, updated_at = ? WHERE id = ?`, now, now, id)
+	return nil
+}
+
 // Touch updates last_active_at to now, extending idle expiry.
 func (s *Service) Touch(ctx context.Context, id string) error {
 	ws, err := s.Get(ctx, id)
@@ -299,6 +355,30 @@ func (s *Service) ExpireIdle(ctx context.Context, idleTimeout time.Duration) (in
 		}
 	}
 	return count, nil
+}
+
+// StartIdleExpirer launches a background goroutine that calls ExpireIdle
+// every `every` interval using DefaultIdleTimeout. It stops when ctx is
+// canceled. If every <= 0 it defaults to one minute. This is the hook the
+// integrator starts from omahabd:
+//
+//	svc.StartIdleExpirer(ctx, time.Minute)
+func (s *Service) StartIdleExpirer(ctx context.Context, every time.Duration) {
+	if every <= 0 {
+		every = time.Minute
+	}
+	go func() {
+		ticker := time.NewTicker(every)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				_, _ = s.ExpireIdle(ctx, DefaultIdleTimeout)
+			}
+		}
+	}()
 }
 
 // IssueCapability generates a short-lived, one-time attach token for a workspace.
@@ -373,10 +453,13 @@ func (s *Service) ValidateCapability(ctx context.Context, workspaceID, token str
 		return ErrCapabilityInvalid
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err = s.db.ExecContext(ctx,
+	res, err := s.db.ExecContext(ctx,
 		`UPDATE workspace_capabilities SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL`, now, id)
 	if err != nil {
 		return fmt.Errorf("consume capability: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrCapabilityConsumed
 	}
 	// Touch workspace activity
 	_, _ = s.db.ExecContext(ctx,

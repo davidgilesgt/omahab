@@ -734,6 +734,274 @@ paths:
         '200': { description: Message, content: { application/json: { schema: { $ref: '#/components/schemas/EmailMessage' } } } }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /api/v1/email/routes:
+    post:
+      summary: Ensure email routing rule (gated on sender verification)
+      description: Dashboard-triggered activation of the AI address Cloudflare Email Routing rule. Requires sender verification; routed via scoped Token C.
+      operationId: ensureEmailRoute
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                recipient: { type: string, format: email }
+      responses:
+        '200': { description: Route ensured, content: { application/json: { schema: { type: object, required: [ok], properties: { ok: { type: boolean } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/projects/{id}/release-token:
+    post:
+      summary: Issue per-project release token (admin only, never to Forgejo)
+      description: Generates a per-project release token. Returns plaintext once; only hash persisted. Woodpecker holds this token, not an admin bearer.
+      operationId: issueReleaseToken
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      responses:
+        '201': { description: Issued, content: { application/json: { schema: { $ref: '#/components/schemas/ReleaseTokenResponse' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/projects/{id}/release-token/rotate:
+    post:
+      summary: Rotate per-project release token (admin only)
+      operationId: rotateReleaseToken
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      responses:
+        '200': { description: Rotated, content: { application/json: { schema: { $ref: '#/components/schemas/ReleaseTokenResponse' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/projects/{id}/releases/with-token:
+    post:
+      summary: Create release via per-project token (Woodpecker callback, not admin bearer)
+      description: |
+        Woodpecker release callback. Authorization Bearer is the per-project release token verified via projects.Service.Release (ReleaseTokenVerifier).
+        Keeps admin bearer path working but verified via token path. Woodpecker holds no host SSH key or admin credential.
+      operationId: releaseWithToken
+      security: []
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CreateReleaseRequest' } } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Release' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/projects/{id}/mirror:
+    get:
+      summary: Get push-mirror config
+      operationId: getPushMirror
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      responses:
+        '200': { description: Mirror, content: { application/json: { schema: { $ref: '#/components/schemas/MirrorResponse' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      summary: Configure push-mirror (repo-scoped credential, force-push warning)
+      description: |
+        Configures a read-only GitHub push mirror via Forgejo. Warnings include force-push overwrite, branch/tag scope, and explicit LFS handling.
+        Raw token is stored as repo-scoped secret (scope/name), never in SQLite state or Woodpecker args.
+      operationId: configurePushMirror
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ConfigureMirrorRequest' } } } }
+      responses:
+        '200': { description: Configured, content: { application/json: { schema: { $ref: '#/components/schemas/MirrorResponse' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      summary: Remove push mirror
+      operationId: removePushMirror
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      responses:
+        '204': { description: Removed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/workspaces/{id}/capabilities:
+    post:
+      summary: Issue workspace capability (one-time, TTL 5m)
+      operationId: issueWorkspaceCapability
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      responses:
+        '201': { description: Issued, content: { application/json: { schema: { $ref: '#/components/schemas/WorkspaceCapabilityResponse' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/workspaces/{id}/capabilities/validate:
+    post:
+      summary: Validate workspace capability (one-time)
+      operationId: validateWorkspaceCapability
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [token], properties: { token: { type: string } } } } } }
+      responses:
+        '200': { description: Valid, content: { application/json: { schema: { type: object, required: [valid], properties: { valid: { type: boolean } } } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/knowledge/search:
+    post:
+      summary: Knowledge search (assistant tool)
+      operationId: knowledgeSearch
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/KnowledgeSearchRequest' } } } }
+      responses:
+        '200': { description: Citations, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/Citation' } } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/knowledge/documents/{id}:
+    get:
+      summary: Get knowledge document metadata + text (assistant tool)
+      operationId: knowledgeGetDocument
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      responses:
+        '200': { description: Document, content: { application/json: { schema: { type: object, required: [metadata, text], properties: { metadata: { $ref: '#/components/schemas/PaperlessMetadata' }, text: { type: string } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/knowledge/documents/{id}/text:
+    get:
+      summary: Get knowledge document extracted text
+      operationId: knowledgeGetText
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      responses:
+        '200': { description: Text, content: { application/json: { schema: { type: object, required: [text], properties: { text: { type: string } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/knowledge/correspondents:
+    get:
+      summary: List Paperless correspondents (assistant tool)
+      operationId: knowledgeListCorrespondents
+      responses:
+        '200': { description: Correspondents, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { type: string } } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/knowledge/document-types:
+    get:
+      summary: List Paperless document types (assistant tool)
+      operationId: knowledgeListDocumentTypes
+      responses:
+        '200': { description: Types, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { type: string } } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/knowledge/tags:
+    get:
+      summary: List Paperless tags (assistant tool)
+      operationId: knowledgeListTags
+      responses:
+        '200': { description: Tags, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { type: string } } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/knowledge/upload:
+    post:
+      summary: Upload document to Paperless (assistant tool)
+      operationId: knowledgeUpload
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/KnowledgeUploadRequest' } } } }
+      responses:
+        '201': { description: Uploaded, content: { application/json: { schema: { type: object, required: [id], properties: { id: { type: string } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/knowledge/documents/{id}/tags:
+    post:
+      summary: Add tag to document (assistant tool)
+      operationId: knowledgeAddTag
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [tag], properties: { tag: { type: string } } } } } }
+      responses:
+        '204': { description: Tagged }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/knowledge/sources:
+    get:
+      summary: List knowledge sources with deep links
+      operationId: knowledgeListSources
+      responses:
+        '200': { description: Sources, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/KnowledgeSource' } } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/knowledge/index-setup-options:
+    get:
+      summary: Index setup options (Best English / Best worldwide / Full-text only)
+      operationId: knowledgeIndexSetupOptions
+      responses:
+        '200': { description: Options, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/IndexSetupOption' } } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/knowledge/pinned-models:
+    get:
+      summary: Pinned model metadata (license, size, memory)
+      operationId: knowledgePinnedModels
+      responses:
+        '200': { description: Models, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/ModelInfo' } } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/knowledge/consent:
+    get:
+      summary: Get summarization consent (per provider)
+      operationId: knowledgeGetConsent
+      parameters:
+        - name: principal
+          in: query
+          required: true
+          schema: { type: string }
+        - name: provider
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Consent, content: { application/json: { schema: { type: object, required: [principal, provider, granted], properties: { principal: { type: string }, provider: { type: string }, granted: { type: boolean } } } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    put:
+      summary: Set summarization consent (per provider)
+      operationId: knowledgeSetConsent
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [principal, provider, granted], properties: { principal: { type: string }, provider: { type: string }, granted: { type: boolean } } } } } }
+      responses:
+        '200': { description: Updated, content: { application/json: { schema: { type: object, required: [principal, provider, granted], properties: { principal: { type: string }, provider: { type: string }, granted: { type: boolean } } } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/users/{id}/enrollment:
+    get:
+      summary: Get enrollment state per user (proxy from PocketID)
+      operationId: getEnrollmentState
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      responses:
+        '200': { description: Enrollment, content: { application/json: { schema: { $ref: '#/components/schemas/EnrollmentState' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/users/{id}/app-access:
+    get:
+      summary: List per-user application access
+      operationId: listApplicationAccess
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      responses:
+        '200': { description: Access, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/AppAccess' } } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/users/{id}/groups:
+    get:
+      summary: Get user groups
+      operationId: getUserGroups
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      responses:
+        '200': { description: Groups, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/Group' } } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    put:
+      summary: Set user groups
+      operationId: setUserGroups
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, properties: { group_ids: { type: array, items: { type: string } }, groups: { type: array, items: { type: string } } } } } } }
+      responses:
+        '204': { description: Updated }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1014,6 +1282,131 @@ components:
         hostname: { type: string }
         exposure: { $ref: '#/components/schemas/Exposure' }
         updated_at: { type: string, format: date-time }
+
+    ReleaseTokenResponse:
+      type: object
+      required: [token, token_prefix]
+      properties:
+        token: { type: string }
+        token_prefix: { type: string }
+
+    MirrorResponse:
+      type: object
+      required: [remote_url, lfs]
+      properties:
+        remote_url: { type: string, format: uri }
+        secret_ref: { type: string }
+        warnings: { type: array, items: { type: string } }
+        lfs: { type: boolean }
+
+    ConfigureMirrorRequest:
+      type: object
+      required: [remote_url, token]
+      properties:
+        remote_url: { type: string, format: uri }
+        token: { type: string }
+        lfs: { type: boolean }
+      additionalProperties: false
+
+    WorkspaceCapabilityResponse:
+      type: object
+      required: [token, expires_at]
+      properties:
+        token: { type: string }
+        expires_at: { type: string, format: date-time }
+
+    KnowledgeSearchRequest:
+      type: object
+      required: [query]
+      properties:
+        query: { type: string }
+        principal: { type: string }
+        limit: { type: integer, minimum: 0, maximum: 100 }
+      additionalProperties: false
+
+    KnowledgeUploadRequest:
+      type: object
+      required: [filename, content]
+      properties:
+        filename: { type: string }
+        content: { type: string, format: byte }
+        tags: { type: array, items: { type: string } }
+        principal: { type: string }
+      additionalProperties: false
+
+    Citation:
+      type: object
+      required: [source_id, deep_link]
+      properties:
+        source_id: { type: string }
+        deep_link: { type: string }
+        snippet: { type: string }
+        score: { type: number }
+
+    PaperlessMetadata:
+      type: object
+      properties:
+        id: { type: string }
+        title: { type: string }
+        correspondent: { type: string }
+        document_type: { type: string }
+        tags: { type: array, items: { type: string } }
+        deep_link: { type: string }
+        text: { type: string }
+
+    KnowledgeSource:
+      type: object
+      required: [id, kind, name, base_url]
+      properties:
+        id: { type: string }
+        kind: { type: string, enum: [paperless, karakeep, notes] }
+        name: { type: string }
+        base_url: { type: string }
+
+    IndexSetupOption:
+      type: object
+      required: [id, label, description]
+      properties:
+        id: { type: string }
+        label: { type: string }
+        description: { type: string }
+        model_alias: { type: string, nullable: true }
+
+    ModelInfo:
+      type: object
+      required: [alias, name, license, size_bytes, expected_memory_mb]
+      properties:
+        alias: { type: string }
+        name: { type: string }
+        model_id: { type: string }
+        license: { type: string }
+        size_bytes: { type: integer }
+        expected_memory_mb: { type: integer }
+        dimensions: { type: integer }
+
+    EnrollmentState:
+      type: object
+      required: [user_id, has_passkey, passkey_count]
+      properties:
+        user_id: { type: string }
+        has_passkey: { type: boolean }
+        passkey_count: { type: integer }
+        enrolled_at: { type: string, format: date-time, nullable: true }
+
+    AppAccess:
+      type: object
+      required: [client_id, client_name]
+      properties:
+        client_id: { type: string }
+        client_name: { type: string }
+
+    Group:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        friendly_name: { type: string }
 
     CreateProjectRequest:
       type: object

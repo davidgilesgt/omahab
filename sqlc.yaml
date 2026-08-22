@@ -1,0 +1,37 @@
+# sqlc configuration for Omahab.
+# Generate typed queries with: sqlc generate
+# (when sqlc is not installed, the checked-in generated code under internal/store/ is authoritative.)
+
+# Incremental adoption order (TODO.md P2-1):
+#   1. internal/store          — instance + schema_migrations (this entry) ← Wave A (current)
+#   2. internal/apps/store.go  — apps / app_releases (desired/observed state, rollback releases)
+#   3. internal/secrets        — secrets (scoped encrypted values, versioning)
+#   4. internal/projects/schema.go — projects / releases (project metadata, Woodpecker releases)
+#   5. internal/providers      — provider_credentials / provider_aliases / provider_virtual_keys
+#   6. Remaining controllers   — backups, events, health, syncer, workspaces, emailing,
+#                                scm, knowledge, hermes, identity, integrations, exposure.
+# Each future step adds one additional element under `sql:` with its own
+# `schema`/`queries` pair, reusing the same `gen.go` options below.
+# Schema migrations themselves stay explicit via (*store.Store).Migrate;
+# sqlc never drives DDL — the schema files are a sqlc-readable view of the
+# migrations that are applied explicitly at runtime.
+version: "2"
+sql:
+  - engine: "sqlite"
+    schema: "internal/store/schema.sql"
+    queries: "internal/store/query.sql"
+    gen:
+      go:
+        package: "store"
+        out: "internal/store"
+        sql_package: "database/sql"
+        emit_interface: true
+        emit_json_tags: true
+        emit_db_tags: true
+        emit_prepared_queries: false
+        emit_exact_table_names: false
+        emit_empty_slices: true
+        emit_result_struct_pointers: false
+        emit_params_struct_pointers: false
+        emit_enum_valid_method: false
+        emit_all_enum_values: false

@@ -37,6 +37,11 @@ func Migrations() []Migration {
 // filled in; the created timestamp of an existing row is preserved. Saving
 // with an ID different from the existing one fails with ErrConflict: the
 // instance identity is stable and must not be silently replaced.
+//
+// This method now uses sqlc-generated queries for its CRUD operations
+// (GetInstanceIdentity, CreateInstance, UpdateInstance) while retaining
+// explicit transaction boundaries and domain validation. Schema migrations
+// remain explicit.
 func (s *Store) SaveInstance(ctx context.Context, in domain.Instance) (domain.Instance, error) {
 	var zero domain.Instance
 	if s == nil || s.db == nil {
@@ -49,10 +54,8 @@ func (s *Store) SaveInstance(ctx context.Context, in domain.Instance) (domain.In
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	var existingID, existingCreated string
-	err = tx.QueryRowContext(ctx,
-		`SELECT id, created_at FROM instance WHERE singleton = 1`,
-	).Scan(&existingID, &existingCreated)
+	qTx := New(tx)
+	ident, err := qTx.GetInstanceIdentity(ctx)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		if in.ID == "" {
@@ -64,25 +67,27 @@ func (s *Store) SaveInstance(ctx context.Context, in domain.Instance) (domain.In
 		if err := in.Validate(); err != nil {
 			return zero, Validationf("%s", err)
 		}
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO instance
-				(singleton, id, domain, tailnet, tailscale_ip, assistant_name, assistant_slug, created_at)
-			VALUES (1, ?, ?, ?, ?, ?, ?, ?)`,
-			string(in.ID), in.Domain, in.Tailnet, in.TailscaleIP,
-			in.AssistantName, in.AssistantSlug, FormatTime(in.CreatedAt),
-		); err != nil {
+		if err := qTx.CreateInstance(ctx, CreateInstanceParams{
+			ID:            string(in.ID),
+			Domain:        in.Domain,
+			Tailnet:       in.Tailnet,
+			TailscaleIP:   in.TailscaleIP,
+			AssistantName: in.AssistantName,
+			AssistantSlug: in.AssistantSlug,
+			CreatedAt:     FormatTime(in.CreatedAt),
+		}); err != nil {
 			return zero, fmt.Errorf("store: save instance: %w", Translate(err))
 		}
 	case err != nil:
 		return zero, fmt.Errorf("store: save instance: %w", err)
 	default:
 		if in.ID == "" {
-			in.ID = domain.ID(existingID)
+			in.ID = domain.ID(ident.ID)
 		}
-		if in.ID != domain.ID(existingID) {
-			return zero, Conflictf("instance identity %q does not match existing %q", in.ID, existingID)
+		if in.ID != domain.ID(ident.ID) {
+			return zero, Conflictf("instance identity %q does not match existing %q", in.ID, ident.ID)
 		}
-		createdAt, err := ParseTime(existingCreated)
+		createdAt, err := ParseTime(ident.CreatedAt)
 		if err != nil {
 			return zero, fmt.Errorf("store: parse instance created_at: %w", err)
 		}
@@ -90,12 +95,13 @@ func (s *Store) SaveInstance(ctx context.Context, in domain.Instance) (domain.In
 		if err := in.Validate(); err != nil {
 			return zero, Validationf("%s", err)
 		}
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE instance
-			SET domain = ?, tailnet = ?, tailscale_ip = ?, assistant_name = ?, assistant_slug = ?
-			WHERE singleton = 1`,
-			in.Domain, in.Tailnet, in.TailscaleIP, in.AssistantName, in.AssistantSlug,
-		); err != nil {
+		if err := qTx.UpdateInstance(ctx, UpdateInstanceParams{
+			Domain:        in.Domain,
+			Tailnet:       in.Tailnet,
+			TailscaleIP:   in.TailscaleIP,
+			AssistantName: in.AssistantName,
+			AssistantSlug: in.AssistantSlug,
+		}); err != nil {
 			return zero, fmt.Errorf("store: save instance: %w", Translate(err))
 		}
 	}
@@ -108,34 +114,33 @@ func (s *Store) SaveInstance(ctx context.Context, in domain.Instance) (domain.In
 
 // Instance returns the instance identity. Before the first SaveInstance it
 // fails with ErrNotFound.
+//
+// Uses the sqlc-generated GetInstance query.
 func (s *Store) Instance(ctx context.Context) (domain.Instance, error) {
 	var zero domain.Instance
 	if s == nil || s.db == nil {
 		return zero, Validation("store is not opened")
 	}
 
-	var id, dmn, tailnet, tailscaleIP, assistantName, assistantSlug, createdAt string
-	err := s.db.QueryRowContext(ctx, `
-		SELECT id, domain, tailnet, tailscale_ip, assistant_name, assistant_slug, created_at
-		FROM instance WHERE singleton = 1`,
-	).Scan(&id, &dmn, &tailnet, &tailscaleIP, &assistantName, &assistantSlug, &createdAt)
+	q := New(s.db)
+	row, err := q.GetInstance(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return zero, NotFound("instance is not initialized")
 	}
 	if err != nil {
 		return zero, fmt.Errorf("store: load instance: %w", err)
 	}
-	created, err := ParseTime(createdAt)
+	created, err := ParseTime(row.CreatedAt)
 	if err != nil {
 		return zero, fmt.Errorf("store: parse instance created_at: %w", err)
 	}
 	return domain.Instance{
-		ID:            domain.ID(id),
-		Domain:        dmn,
-		Tailnet:       tailnet,
-		TailscaleIP:   tailscaleIP,
-		AssistantName: assistantName,
-		AssistantSlug: assistantSlug,
+		ID:            domain.ID(row.ID),
+		Domain:        row.Domain,
+		Tailnet:       row.Tailnet,
+		TailscaleIP:   row.TailscaleIP,
+		AssistantName: row.AssistantName,
+		AssistantSlug: row.AssistantSlug,
 		CreatedAt:     created,
 	}, nil
 }

@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "../auth";
-
+import { useEventStream } from "./useEventStream";
 const NAVIGATION = [
   ["/", "Overview", "⌂", "Home overview"],
   ["/applications", "Applications", "▦", "Platform apps"],
@@ -19,7 +19,6 @@ const NAVIGATION = [
 export function AppShell({ children }: { children: ReactNode }) {
   const { client, signOut } = useAuth();
   const navigate = useNavigate();
-  const queryClient = useQueryClient();
   const searchRef = useRef<HTMLInputElement>(null);
   const [theme, setTheme] = useState(() => localStorage.getItem("omahab.theme") ?? "system");
   const [query, setQuery] = useState("");
@@ -27,6 +26,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const eventQuery = useQuery({ queryKey: ["events"], queryFn: client.events, staleTime: Infinity });
   const unread = eventQuery.data?.filter((event) => !event.read_at).length ?? 0;
 
+  useEventStream();
   // Keep theme in sync without flash - useLayoutEffect would be ideal but useEffect is okay with inline script
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -39,32 +39,6 @@ export function AppShell({ children }: { children: ReactNode }) {
     }
   }, [theme]);
 
-  // Single SSE source for inbox badge - replaces 30s poll
-  useEffect(() => {
-    let cancelled = false;
-    const controller = new AbortController();
-    // Use the client's streamEvents if available, fallback to direct EventSource
-    if (client.streamEvents) {
-      client.streamEvents(controller.signal, (ev) => {
-        if (cancelled) return;
-        queryClient.setQueryData(["events"], (old: any) => {
-          if (!old) return [ev];
-          // Merge or replace based on event id
-          const idx = old.findIndex((e: any) => e.id === ev.id);
-          if (idx >= 0) {
-            const copy = [...old];
-            copy[idx] = ev;
-            return copy;
-          }
-          return [ev, ...old];
-        });
-      }).catch(() => {});
-    }
-    return () => {
-      cancelled = true;
-      controller.abort();
-    };
-  }, [client, queryClient]);
 
   useEffect(() => {
     function handleShortcut(event: KeyboardEvent) {

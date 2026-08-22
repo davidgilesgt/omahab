@@ -61,6 +61,40 @@ func run() error {
 		return fmt.Errorf("init backend: %w", err)
 	}
 
+	// Signal handling
+	sigCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// Background schedulers: workspaces idle expiry, app update checks, syncthing poll
+	go backend.StartIdleExpirer(sigCtx, time.Minute)
+	go func() {
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-sigCtx.Done():
+				return
+			case <-ticker.C:
+				if _, err := backend.CheckForUpdates(sigCtx); err != nil {
+					logger.Error("check for updates failed", "error", err)
+				}
+			}
+		}
+	}()
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-sigCtx.Done():
+				return
+			case <-ticker.C:
+				if err := backend.PollSyncthing(sigCtx); err != nil {
+					logger.Error("syncthing poll failed", "error", err)
+				}
+			}
+		}
+	}()
 	// Create API server
 	token := backend.APIToken()
 	emailKey := backend.EmailHMACKey()
@@ -85,10 +119,7 @@ func run() error {
 		IdleTimeout:  120 * time.Second,
 	}
 
-	// Signal handling
-	sigCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
+	// Signal handling already prepared above
 	errCh := make(chan error, 1)
 	go func() {
 		logger.Info("omahabd listening", "addr", cfg.Listen, "version", version)

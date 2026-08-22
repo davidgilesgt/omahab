@@ -31,8 +31,23 @@ export interface Env {
   HMAC_SECRET: string;
   /** Full ingestion URL, must be https and end with /api/v1/email/ingest */
   INGEST_URL: string;
-  /** Single allowed envelope recipient, e.g. ai@example.com */
+  /**
+   * Primary allowed envelope recipient, e.g. ai@example.com.
+   * Generated at deploy time from assistant slug + instance domain via
+   * `node scripts/generate-vars.mjs --domain <domain> --slug <slug>`.
+   * Do not hand-edit; the file is overwritten by the generator.
+   */
   ALLOWED_RECIPIENT: string;
+  /**
+   * Optional randomized recipient alias as a shared secret between Worker
+   * allowlist and ingestion. Generated at deploy time alongside
+   * ALLOWED_RECIPIENT (e.g., ai+<hex>@example.com) and deployed to both
+   * the Worker (RECIPIENT_ALIAS) and the daemon
+   * (OMAHAB_EMAIL_RECIPIENT_ALIAS env/file — see internal/emailing/verifier.go
+   * AllowedRecipients docs). When set, the Worker accepts either the primary
+   * or the alias; when absent, only the primary is accepted.
+   */
+  RECIPIENT_ALIAS?: string;
   /** Optional max raw size in bytes as decimal string, default 26214400 (25 MiB) */
   MAX_RAW_BYTES?: string;
   /** Optional HMAC key id if rotation is needed; forwarded as metadata but covered by HMAC */
@@ -43,23 +58,8 @@ interface ValidatedEnv {
   hmacSecret: string;
   ingestUrl: string;
   allowedRecipient: string;
-  maxRawBytes: number;
-  hmacKeyId: string | null;
-}
-
-const DEFAULT_MAX_RAW_BYTES = 25 * 1024 * 1024; // 25 MiB
-const MIN_HMAC_SECRET_LENGTH = 16;
-const MAX_RETRIES = 3;
-
-function normalizeEmail(value: string): string {
-  return value.trim().toLowerCase();
-}
-
-function isValidEmail(value: string): boolean {
-  // Pragmatic RFC 5321-ish check; authoritative verification is in omahabd.
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
-}
-
+  /** Additional alias; null when not configured */
+  recipientAlias: string | null;
 export function validateEnv(env: Env): ValidatedEnv {
   if (!env || typeof env !== "object") {
     throw new Error("invalid environment: missing env");
@@ -97,6 +97,29 @@ export function validateEnv(env: Env): ValidatedEnv {
       "invalid environment: ALLOWED_RECIPIENT must be a valid email",
     );
   }
+  let alias: string | null = null;
+  if (env.RECIPIENT_ALIAS !== undefined && env.RECIPIENT_ALIAS !== "") {
+    alias = normalizeEmail(env.RECIPIENT_ALIAS);
+    if (!alias || !isValidEmail(alias)) {
+      throw new Error(
+        "invalid environment: RECIPIENT_ALIAS must be a valid email when set",
+      );
+    }
+    if (alias === allowed) {
+      throw new Error(
+        "invalid environment: RECIPIENT_ALIAS must differ from ALLOWED_RECIPIENT",
+      );
+    }
+    // Alias should share domain with primary for DMARC alignment parity;
+    // warn via error if domains mismatch (fail closed).
+    const primaryDomain = allowed.split("@")[1];
+    const aliasDomain = alias.split("@")[1];
+    if (primaryDomain !== aliasDomain) {
+      throw new Error(
+        "invalid environment: RECIPIENT_ALIAS domain must match ALLOWED_RECIPIENT domain",
+      );
+    }
+  }
 
   let maxRawBytes = DEFAULT_MAX_RAW_BYTES;
   if (env.MAX_RAW_BYTES !== undefined && env.MAX_RAW_BYTES !== "") {
@@ -118,14 +141,18 @@ export function validateEnv(env: Env): ValidatedEnv {
     throw new Error("invalid environment: HMAC_KEY_ID contains invalid characters");
   }
 
+  const allowedSet = new Set<string>([allowed]);
+  if (alias) allowedSet.add(alias);
+
   return {
     hmacSecret: secret,
     ingestUrl: parsed.toString(),
     allowedRecipient: allowed,
+    recipientAlias: alias,
+    allowedRecipients: allowedSet,
     maxRawBytes,
     hmacKeyId: keyId,
   };
-}
 
 // ---------------------------------------------------------------------------
 // Crypto
@@ -296,10 +323,10 @@ export async function handleEmail(
   // Fail closed on any malformed environment.
   const cfg = validateEnv(env);
 
-  // Enforce allowed recipient exactly (case-insensitive, trimmed).
-  // No alias expansion or routing logic — single configured address.
+  // Enforce allowed recipients: primary AI address plus optional randomized alias.
+  // Both values are lowercased by validateEnv; comparison is exact.
   const recipient = normalizeEmail(message.to ?? "");
-  if (!recipient || recipient !== cfg.allowedRecipient) {
+  if (!recipient || !cfg.allowedRecipients.has(recipient)) {
     message.setReject("Recipient not allowed");
     return;
   }

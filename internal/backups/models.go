@@ -230,6 +230,7 @@ type StatusReport struct {
 	LastVerifiedAt      *time.Time    `json:"last_verified_at,omitempty"`
 	RPOLimit            time.Duration `json:"rpo_limit"`
 	RPOExceeded         bool          `json:"rpo_exceeded"`
+	RTOLimit            time.Duration `json:"rto_limit"`
 	VerifyInterval      time.Duration `json:"verification_interval"`
 	VerificationOverdue bool          `json:"verification_overdue"`
 	ActiveRun           *Run          `json:"active_run,omitempty"`

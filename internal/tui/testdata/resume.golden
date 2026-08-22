@@ -1,0 +1,1 @@
+preflight [x] 2s · ssh_keys [x] 1s · sshd_hardening [x] 1s · system_prepare [ ] · packages [ ] · binaries [ ] · firewall [ ] · services [ ] · daemon [ ] · recovery_key [ ] · manifest [ ]

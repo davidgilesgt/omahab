@@ -6,7 +6,10 @@ import type {
   ControlEvent,
   Exposure,
   ExposureState,
+  IndexSetupOption,
+  KnowledgeConsent,
   ListEnvelope,
+  ModelInfo,
   Project,
   ProviderCredential,
   RecoverySession,
@@ -28,6 +31,14 @@ export class ApiError extends Error {
     super(message);
     this.name = "ApiError";
   }
+}
+
+export function isApiError(error: unknown): error is ApiError {
+  return error instanceof ApiError;
+}
+
+export function isUnauthorizedError(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 401;
 }
 
 function isEnvelope<T>(value: T[] | ListEnvelope<T>): value is ListEnvelope<T> {
@@ -126,12 +137,88 @@ export class ApiClient {
   revokeProvider = (id: string) =>
     this.request<void>(`/provider-credentials/${encodeURIComponent(id)}`, { method: "DELETE", body: JSON.stringify({}) });
 
-  async streamEvents(signal: AbortSignal, onEvent: (event: ControlEvent) => void): Promise<void> {
-    const token = this.getToken();
-    const response = await fetch(`${API_ROOT}/events/stream`, {
-      headers: { Accept: "text/event-stream", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-      signal,
+  knowledgeIndexSetupOptions = () => this.list<IndexSetupOption>("/knowledge/index-setup-options");
+
+  knowledgePinnedModels = () => this.list<ModelInfo>("/knowledge/pinned-models");
+
+  knowledgeGetConsent = (
+    providerOrInput: string | { provider: string; principal?: string },
+    principalMaybe?: string,
+  ): Promise<KnowledgeConsent> => {
+    let provider: string;
+    let principal = "default";
+    if (typeof providerOrInput === "string") {
+      if (principalMaybe !== undefined && typeof principalMaybe === "string") {
+        // Handle both (provider, principal) and (principal, provider) by detecting if first is a known principal placeholder
+        // Prefer provider-first as per task, but also support principal-first for backend shape
+        const looksLikePrincipal = providerOrInput === "default" || providerOrInput.includes("@");
+        const secondLooksLikePrincipal = principalMaybe === "default" || principalMaybe.includes("@");
+        if (looksLikePrincipal && !secondLooksLikePrincipal) {
+          principal = providerOrInput;
+          provider = principalMaybe;
+        } else if (!looksLikePrincipal && secondLooksLikePrincipal) {
+          provider = providerOrInput;
+          principal = principalMaybe;
+        } else {
+          // Default to provider first to match task description
+          provider = providerOrInput;
+          principal = principalMaybe;
+        }
+      } else {
+        provider = providerOrInput;
+      }
+    } else {
+      provider = providerOrInput.provider;
+      principal = providerOrInput.principal ?? "default";
+    }
+    const qs = `principal=${encodeURIComponent(principal)}&provider=${encodeURIComponent(provider)}`;
+    return this.request<KnowledgeConsent>(`/knowledge/consent?${qs}`);
+  };
+
+  knowledgeSetConsent = (
+    providerOrInput: string | { provider: string; granted: boolean; principal?: string },
+    grantedMaybe?: boolean,
+    principalMaybe?: string,
+  ): Promise<KnowledgeConsent> => {
+    let provider: string;
+    let granted: boolean;
+    let principal = "default";
+    if (typeof providerOrInput === "object") {
+      provider = providerOrInput.provider;
+      granted = providerOrInput.granted;
+      principal = providerOrInput.principal ?? "default";
+    } else if (typeof grantedMaybe === "boolean") {
+      provider = providerOrInput;
+      granted = grantedMaybe;
+      if (typeof principalMaybe === "string") principal = principalMaybe;
+    } else if (typeof grantedMaybe === "string" && typeof principalMaybe === "boolean") {
+      // (principal, provider, granted) shape
+      principal = providerOrInput;
+      provider = grantedMaybe as unknown as string;
+      granted = principalMaybe as unknown as boolean;
+    } else {
+      provider = providerOrInput;
+      granted = false;
+    }
+    return this.request<KnowledgeConsent>("/knowledge/consent", {
+      method: "PUT",
+      body: JSON.stringify({ principal, provider, granted }),
     });
+  };
+
+  // Backwards compatible aliases that mirror openapi operationIds
+  getKnowledgeConsent = this.knowledgeGetConsent;
+  setKnowledgeConsent = this.knowledgeSetConsent;
+  getKnowledgeIndexSetupOptions = this.knowledgeIndexSetupOptions;
+  getKnowledgePinnedModels = this.knowledgePinnedModels;
+
+  async streamEvents(signal: AbortSignal, onEvent: (event: ControlEvent) => void, lastEventId?: string): Promise<void> {
+    const token = this.getToken();
+    const url = lastEventId ? `${API_ROOT}/events/stream?lastEventId=${encodeURIComponent(lastEventId)}` : `${API_ROOT}/events/stream`;
+    const headers: Record<string, string> = { Accept: "text/event-stream" };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    if (lastEventId) headers["Last-Event-ID"] = lastEventId;
+    const response = await fetch(url, { headers, signal });
     if (!response.ok || !response.body) {
       if (response.status === 401) window.dispatchEvent(new Event("omahab:unauthorized"));
       throw new ApiError("The live event stream is unavailable.", "event_stream_unavailable", response.status);

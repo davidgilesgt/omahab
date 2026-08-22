@@ -675,18 +675,19 @@ func (s *Service) SyncRuns(ctx context.Context, projectID domain.ID) ([]*RunReco
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	for _, r := range runs {
 		id := newID()
-		// Upsert by (repository_id, run_number).
-		var existingID string
+		// Upsert by (repository_id, run_number) with prevStatus tracking for ci.failed emission.
+		var existingID, prevStatus string
 		err = s.db.QueryRowContext(ctx,
-			`SELECT id FROM scm_ci_runs WHERE repository_id=? AND run_number=?`,
+			`SELECT id, status FROM scm_ci_runs WHERE repository_id=? AND run_number=?`,
 			string(repo.ID), r.Number,
-		).Scan(&existingID)
+		).Scan(&existingID, &prevStatus)
 		if err == nil {
 			_, err = s.db.ExecContext(ctx,
 				`UPDATE scm_ci_runs SET woodpecker_run_id=?, status=?, branch=?, commit_sha=?, event=?, message=?, author=?, started_at=?, finished_at=?, updated_at=? WHERE id=?`,
 				r.WoodpeckerID, r.Status, r.Branch, r.CommitSHA, r.Event, r.Message, r.Author, nullStr(r.StartedAt), nullStr(r.FinishedAt), now, existingID,
 			)
 		} else if errors.Is(err, sql.ErrNoRows) {
+			prevStatus = ""
 			_, err = s.db.ExecContext(ctx,
 				`INSERT INTO scm_ci_runs (id, repository_id, run_number, woodpecker_run_id, status, branch, commit_sha, event, message, author, started_at, finished_at, created_at, updated_at)
 				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -696,6 +697,7 @@ func (s *Service) SyncRuns(ctx context.Context, projectID domain.ID) ([]*RunReco
 		if err != nil {
 			return nil, fmt.Errorf("upsert run %d: %w", r.Number, err)
 		}
+		_ = CheckAndEmitCIFailed(ctx, s.sink, projectID, repo.Owner, repo.Name, repo.ID, prevStatus, r)
 	}
 	return s.ListRuns(ctx, projectID, 0)
 }
@@ -1167,6 +1169,29 @@ func scanRunRecord(row rowScanner) (*RunRecord, error) {
 }
 
 // --- small helpers ---
+
+// SeedWoodpeckerConfig seeds .woodpecker.yaml via the underlying Forgejo client if it supports PutFile.
+// It is a thin adapter for controlplane CreateProject to ensure the pipeline file exists after Provision.
+func (s *Service) SeedWoodpeckerConfig(ctx context.Context, ref RepoRef, content string) error {
+	if s == nil || s.forgejo == nil {
+		return nil
+	}
+	// Try interface with SeedWoodpeckerConfig first (concrete client).
+	type seeder interface {
+		SeedWoodpeckerConfig(context.Context, RepoRef, string) error
+	}
+	if sc, ok := s.forgejo.(seeder); ok {
+		return sc.SeedWoodpeckerConfig(ctx, ref, content)
+	}
+	// Fallback to generic PutFile if available.
+	type putter interface {
+		PutFile(context.Context, RepoRef, string, []byte, string) error
+	}
+	if sc, ok := s.forgejo.(putter); ok {
+		return sc.PutFile(ctx, ref, ".woodpecker.yaml", []byte(content), "Add .woodpecker.yaml (managed by Omahab)")
+	}
+	return nil
+}
 
 func newID() string {
 	var b [16]byte

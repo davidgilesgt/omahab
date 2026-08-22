@@ -36,6 +36,7 @@ import (
 // Controller-wide defaults, aligned with the design's recovery objectives.
 const (
 	DefaultRPO            = 24 * time.Hour
+	DefaultRTO            = 4 * time.Hour
 	DefaultVerifyInterval = 7 * 24 * time.Hour
 	DefaultVerifyRoot     = "/var/lib/omahab/backups/verify"
 	DefaultCacheDir       = "/var/lib/omahab/backups/cache"
@@ -58,7 +59,6 @@ func DefaultPaths() []string {
 		"/srv/omahab/sync",
 	}
 }
-
 // Config holds controller-level defaults.
 type Config struct {
 	// Paths are the host paths handed to restic on every backup run.
@@ -72,6 +72,8 @@ type Config struct {
 	CacheDir string
 	// RPO is the maximum allowed age of the last successful backup.
 	RPO time.Duration
+	// RTO is the recovery time objective for the single-node restore path (approx 4h).
+	RTO time.Duration
 	// VerifyInterval is how often a verified restore must be demonstrated.
 	VerifyInterval time.Duration
 }
@@ -88,6 +90,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.RPO <= 0 {
 		c.RPO = DefaultRPO
+	}
+	if c.RTO <= 0 {
+		c.RTO = DefaultRTO
 	}
 	if c.VerifyInterval <= 0 {
 		c.VerifyInterval = DefaultVerifyInterval

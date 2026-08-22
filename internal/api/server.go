@@ -124,9 +124,11 @@ func (s *Server) buildRouter() chi.Router {
 	// Public routes (no bearer auth).
 	r.Get("/up", s.handleUp)
 
+	// Release callback via per-project token (Woodpecker) — no admin bearer, verifies release token.
+	r.Post("/api/v1/projects/{id}/releases/with-token", s.withBodyLimit(defaultBodyLimit, s.handleReleaseWithToken))
+
 	// Email webhook with separate HMAC auth (not bearer).
 	r.Post("/api/v1/email/ingest", s.withBodyLimit(maxBodyLimit, s.handleEmailIngestHMAC))
-
 	// Authenticated API group.
 	r.Group(func(r chi.Router) {
 		r.Use(s.bearerAuth)
@@ -167,6 +169,14 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/api/v1/projects/{id}/releases/{releaseID}", s.handleGetRelease)
 		r.Post("/api/v1/projects/{id}/releases/{releaseID}/rollback", s.handleRollbackRelease)
 
+		// Release tokens (admin only)
+		r.Post("/api/v1/projects/{id}/release-token", s.handleIssueReleaseToken)
+		r.Post("/api/v1/projects/{id}/release-token/rotate", s.handleRotateReleaseToken)
+
+		// Push mirror config (repo-scoped credential, force-push warning)
+		r.Get("/api/v1/projects/{id}/mirror", s.handleGetPushMirror)
+		r.Put("/api/v1/projects/{id}/mirror", s.withBodyLimit(defaultBodyLimit, s.handleConfigurePushMirror))
+		r.Delete("/api/v1/projects/{id}/mirror", s.handleRemovePushMirror)
 		// Secrets (metadata only)
 		r.Get("/api/v1/secrets", s.handleListSecrets)
 		r.Post("/api/v1/secrets", s.withBodyLimit(defaultBodyLimit, s.handleCreateSecret))
@@ -202,6 +212,23 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/api/v1/workspaces/{id}", s.handleGetWorkspace)
 		r.Post("/api/v1/workspaces/{id}/stop", s.handleStopWorkspace)
 		r.Delete("/api/v1/workspaces/{id}", s.handleDeleteWorkspace)
+		r.Post("/api/v1/workspaces/{id}/capabilities", s.handleIssueWorkspaceCapability)
+		r.Post("/api/v1/workspaces/{id}/capabilities/validate", s.withBodyLimit(defaultBodyLimit, s.handleValidateWorkspaceCapability))
+
+		// Knowledge assistant tools (six + sources, index options, pinned models, consent)
+		r.Post("/api/v1/knowledge/search", s.withBodyLimit(defaultBodyLimit, s.handleKnowledgeSearch))
+		r.Get("/api/v1/knowledge/documents/{id}", s.handleKnowledgeGetDocument)
+		r.Get("/api/v1/knowledge/documents/{id}/text", s.handleKnowledgeGetText)
+		r.Get("/api/v1/knowledge/correspondents", s.handleKnowledgeListCorrespondents)
+		r.Get("/api/v1/knowledge/document-types", s.handleKnowledgeListDocumentTypes)
+		r.Get("/api/v1/knowledge/tags", s.handleKnowledgeListTags)
+		r.Post("/api/v1/knowledge/upload", s.handleKnowledgeUpload)
+		r.Post("/api/v1/knowledge/documents/{id}/tags", s.withBodyLimit(defaultBodyLimit, s.handleKnowledgeAddTag))
+		r.Get("/api/v1/knowledge/sources", s.handleKnowledgeListSources)
+		r.Get("/api/v1/knowledge/index-setup-options", s.handleKnowledgeIndexSetupOptions)
+		r.Get("/api/v1/knowledge/pinned-models", s.handleKnowledgePinnedModels)
+		r.Get("/api/v1/knowledge/consent", s.handleKnowledgeGetConsent)
+		r.Put("/api/v1/knowledge/consent", s.withBodyLimit(defaultBodyLimit, s.handleKnowledgeSetConsent))
 
 		// Users / identity recovery
 		r.Get("/api/v1/users", s.handleListUsers)
@@ -211,16 +238,20 @@ func (s *Server) buildRouter() chi.Router {
 		r.Delete("/api/v1/users/{id}", s.handleDeleteUser)
 		r.Post("/api/v1/users/{id}/recovery", s.handleCreateUserRecovery)
 		r.Post("/api/v1/identity/recover", s.withBodyLimit(defaultBodyLimit, s.handleIdentityRecover))
-
+		r.Get("/api/v1/users/{id}/enrollment", s.handleGetEnrollmentState)
+		r.Get("/api/v1/users/{id}/app-access", s.handleListApplicationAccess)
+		r.Get("/api/v1/users/{id}/groups", s.handleGetUserGroups)
+		r.Put("/api/v1/users/{id}/groups", s.withBodyLimit(defaultBodyLimit, s.handleSetUserGroups))
 		// Provider credentials
 		r.Get("/api/v1/provider-credentials", s.handleListProviderCredentials)
 		r.Post("/api/v1/provider-credentials", s.withBodyLimit(defaultBodyLimit, s.handleCreateProviderCredential))
 		r.Get("/api/v1/provider-credentials/{id}", s.handleGetProviderCredential)
 		r.Delete("/api/v1/provider-credentials/{id}", s.handleDeleteProviderCredential)
 
-		// Email (authenticated read)
+		// Email (authenticated read + route activation gated on verification)
 		r.Get("/api/v1/email/messages", s.handleListEmailMessages)
 		r.Get("/api/v1/email/messages/{id}", s.handleGetEmailMessage)
+		r.Post("/api/v1/email/routes", s.withBodyLimit(defaultBodyLimit, s.handleEnsureEmailRoute))
 	})
 
 	return r

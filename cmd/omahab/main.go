@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -14,9 +15,12 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/charmbracelet/x/term"
 
 	"github.com/omahab/omahab/internal/apiclient"
 	"github.com/omahab/omahab/internal/domain"
+	"github.com/omahab/omahab/internal/installer"
+	"github.com/omahab/omahab/internal/tui"
 )
 
 var (
@@ -32,10 +36,19 @@ var (
 
 func main() {
 	if err := newRootCmd().Execute(); err != nil {
-		// Cobra already prints error; ensure exit code
+		if _, ok := err.(*printedError); ok {
+			os.Exit(1)
+		}
+		// Fallback for errors not via handleFailure (flag parse, PersistentPreRunE, validation)
+		_ = handleFailure(err)
 		os.Exit(1)
 	}
 }
+
+type printedError struct{ err error }
+
+func (e *printedError) Error() string { return e.err.Error() }
+func (e *printedError) Unwrap() error { return e.err }
 
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
@@ -47,14 +60,20 @@ Every operation has a JSON equivalent via --json.
 Credentials are never passed as arguments; set OMAHAB_TOKEN or use the credential store.
 Use --server to target a different control plane (env OMAHAB_SERVER, then ~/.config/omahab/client.json).`,
 		SilenceUsage:  true,
-		SilenceErrors: false,
+		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			// Validate mutating content-type requirement is handled client side
-			// Ensure timeout is sane
 			if flagTimeout < time.Second || flagTimeout > 5*time.Minute {
 				return fmt.Errorf("--timeout must be between 1s and 5m")
 			}
 			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Bare `omahab` with no subcommand: welcome card. Help flag is handled by cobra before RunE.
+			if len(args) == 0 {
+				printWelcomeCard()
+				return nil
+			}
+			return cmd.Help()
 		},
 	}
 	// Persistent flags (structured output, server selection, interactivity, timeouts)
@@ -68,6 +87,7 @@ Use --server to target a different control plane (env OMAHAB_SERVER, then ~/.con
 	// Also --yes alias for force (common UX)
 	root.PersistentFlags().BoolVarP(&flagYes, "yes", "y", false, "alias for --force")
 	// Core commands
+	root.AddCommand(newLoginCmd())
 	root.AddCommand(newStatusCmd())
 	root.AddCommand(newUpCmd())
 	root.AddCommand(newDoctorCmd())
@@ -102,15 +122,11 @@ func isNonInteractive() bool {
 	if flagNonInteractive {
 		return true
 	}
-	// TERM=dumb or non-TTY also considered non-interactive for destructive guard?
 	if os.Getenv("TERM") == "dumb" {
 		return true
 	}
-	// If stdin is not a tty, treat as non-interactive for safety
 	if fi, err := os.Stdin.Stat(); err == nil {
 		if (fi.Mode() & os.ModeCharDevice) == 0 {
-			// stdin is piped; but not necessarily non-interactive for all cmds.
-			// We only enforce for destructive operations.
 		}
 	}
 	return false
@@ -124,13 +140,45 @@ func needForceGuard(isDestructiveOrPublic bool) error {
 
 func cobraFlagBool(name string) (bool, bool) { return false, false }
 
+func tokenFromClientJSON() string {
+	p, err := apiclient.DefaultClientConfigPath()
+	if err != nil {
+		return ""
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return ""
+	}
+	if len(strings.TrimSpace(string(b))) == 0 {
+		return ""
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return ""
+	}
+	if tok, ok := raw["token"].(string); ok {
+		return strings.TrimSpace(tok)
+	}
+	return ""
+}
+
 func resolveClient() (*apiclient.Client, error) {
 	cfg, err := apiclient.LoadClientConfig("")
 	if err != nil {
 		return nil, fmt.Errorf("load client config: %w", err)
 	}
 	server := apiclient.ResolveServer(flagServer, cfg)
-	// Token via CredentialStore or OMAHAB_TOKEN, never args
+	envTok := strings.TrimSpace(os.Getenv("OMAHAB_TOKEN"))
+	if envTok != "" {
+		c := apiclient.New(server, envTok)
+		c.HTTPClient.Timeout = flagTimeout
+		return c, nil
+	}
+	if tok := tokenFromClientJSON(); tok != "" {
+		c := apiclient.New(server, tok)
+		c.HTTPClient.Timeout = flagTimeout
+		return c, nil
+	}
 	store := apiclient.CompositeCredentialStore{
 		Stores: []apiclient.CredentialStore{
 			apiclient.EnvCredentialStore{},
@@ -143,7 +191,6 @@ func resolveClient() (*apiclient.Client, error) {
 	}
 	c := apiclient.New(server, token)
 	c.HTTPClient.Timeout = flagTimeout
-	// Allow insecure? No. Respect timeout
 	return c, nil
 }
 
@@ -155,7 +202,6 @@ func isColorEnabled() bool {
 	if os.Getenv("NO_COLOR") != "" {
 		return false
 	}
-	// Could also check TERM
 	return true
 }
 
@@ -193,29 +239,203 @@ func printErrorJSON(err error) {
 	_ = printJSON(env)
 }
 
-func handleError(err error) error {
+func isTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	if os.IsTimeout(err) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline exceeded") || strings.Contains(msg, "context deadline") {
+		return true
+	}
+	return false
+}
+
+func hintForError(err error) string {
+	if err == nil {
+		return ""
+	}
+	if apiErr, ok := err.(*apiclient.APIError); ok {
+		switch apiErr.StatusCode {
+		case http.StatusUnauthorized, http.StatusForbidden:
+			return "hint: authentication failed (401) — set OMAHAB_TOKEN or run `omahab login`"
+		case http.StatusNotFound:
+			return "hint: not found (404) — run `omahab <resource> list` to see available resources"
+		}
+	}
+	if isTimeoutError(err) {
+		return "hint: request timed out — check --server / OMAHAB_SERVER and Tailscale connectivity"
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "connection refused") || strings.Contains(msg, "no such host") || strings.Contains(msg, "dial tcp") || strings.Contains(msg, "connect:") || strings.Contains(msg, "network is unreachable") {
+		return "hint: check --server / OMAHAB_SERVER and Tailscale connectivity"
+	}
+	if strings.Contains(msg, "401") || strings.Contains(msg, "unauthorized") || strings.Contains(msg, "unauthenticated") {
+		return "hint: set OMAHAB_TOKEN or run `omahab login`"
+	}
+	if strings.Contains(msg, "404") || strings.Contains(msg, "not found") {
+		return "hint: run `omahab <resource> list`"
+	}
+	return ""
+}
+
+func handleFailure(err error) error {
 	if err == nil {
 		return nil
 	}
+	hint := hintForError(err)
 	if flagJSON {
 		printErrorJSON(err)
-		// Return nil to avoid double printing by cobra?
-		// But we want non-zero exit; cobra will print error again if we return err.
-		// So we print JSON envelope and return a sentinel that suppresses cobra's error?
-		// Instead, return err but also ensure SilenceErrors maybe? Root has SilenceErrors false.
-		// So we output JSON and then return err for exit code, but avoid duplicate.
-		// We'll have caller return err after printing; cobra will print again. To avoid, we
-		// print JSON and return nil with os.Exit? Simpler: print and return custom that cobra treats silent?
-		// We set SilenceErrors true per command and manually handle.
-		return nil
+		if hint != "" {
+			fmt.Fprintln(os.Stderr, hint)
+		}
+		return &printedError{err: err}
 	}
-	// Human concise error
 	fmt.Fprintf(os.Stderr, "error: %v\n", err)
-	if apiErr, ok := err.(*apiclient.APIError); ok && apiErr.Raw != "" && flagJSON == false {
-		// Don't leak raw if not JSON? Keep concise.
-		_ = apiErr
+	if hint != "" {
+		fmt.Fprintln(os.Stderr, hint)
 	}
-	return nil
+	return &printedError{err: err}
+}
+
+func readTokenHidden() (string, error) {
+	if term.IsTerminal(os.Stdin.Fd()) {
+		b, err := term.ReadPassword(os.Stdin.Fd())
+		fmt.Fprintln(os.Stderr)
+		if err != nil {
+			return "", err
+		}
+		return string(b), nil
+	}
+	reader := bufio.NewReader(os.Stdin)
+	line, err := reader.ReadString('\n')
+	if err != nil && err != io.EOF {
+		return "", err
+	}
+	return strings.TrimSpace(line), nil
+}
+
+func printWelcomeCard() {
+	cfg, _ := apiclient.LoadClientConfig("")
+	server := apiclient.ResolveServer(flagServer, cfg)
+	serverSource := "default"
+	if strings.TrimSpace(flagServer) != "" {
+		serverSource = "--server flag"
+	} else if strings.TrimSpace(os.Getenv("OMAHAB_SERVER")) != "" {
+		serverSource = "OMAHAB_SERVER"
+	} else if strings.TrimSpace(cfg.Server) != "" {
+		serverSource = "~/.config/omahab/client.json"
+	}
+	tokenStatus := "not set"
+	hint := "export OMAHAB_TOKEN or run `omahab login`"
+	if tok := strings.TrimSpace(os.Getenv("OMAHAB_TOKEN")); tok != "" {
+		tokenStatus = "set (via OMAHAB_TOKEN)"
+		hint = ""
+	} else if tok := tokenFromClientJSON(); tok != "" {
+		tokenStatus = "set (via ~/.config/omahab/client.json)"
+		hint = ""
+	} else if tok, _ := (apiclient.FileCredentialStore{}).Token(); strings.TrimSpace(tok) != "" {
+		tokenStatus = "set (via credentials file)"
+		hint = ""
+	}
+	if flagJSON {
+		_ = printJSON(map[string]any{
+			"server":       server,
+			"serverSource": serverSource,
+			"token":        tokenStatus,
+			"hint":         hint,
+		})
+		return
+	}
+	fmt.Println("Omahab — the opinionated home server.")
+	fmt.Println()
+	fmt.Printf("  server: %s (%s)\n", server, serverSource)
+	if hint != "" {
+		fmt.Printf("  token:  %s → %s\n", tokenStatus, hint)
+	} else {
+		fmt.Printf("  token:  %s\n", tokenStatus)
+	}
+	fmt.Println()
+	fmt.Println("Run `omahab --help` for commands.")
+	if tokenStatus == "not set" {
+		fmt.Println("First run?  `omahab login [--server <url>]` to authenticate.")
+	} else {
+		fmt.Println("Try `omahab status` to check the control plane.")
+	}
+}
+
+func newLoginCmd() *cobra.Command {
+	var loginServer string
+	cmd := &cobra.Command{
+		Use:   "login",
+		Short: "Authenticate with the control plane",
+		Long: `Prompt for a bearer token (input hidden), verify it, and save to ~/.config/omahab/client.json.
+
+The token is stored with 0600 permissions. OMAHAB_TOKEN env var takes precedence at runtime.
+Use --server to set the control plane URL.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			server := strings.TrimSpace(loginServer)
+			if server == "" {
+				server = strings.TrimSpace(flagServer)
+			}
+			if server == "" {
+				cfg, _ := apiclient.LoadClientConfig("")
+				server = apiclient.ResolveServer("", cfg)
+			}
+			if server == "" {
+				server = "http://127.0.0.1:8484"
+			}
+			fmt.Fprint(os.Stderr, "Token: ")
+			tok, err := readTokenHidden()
+			if err != nil {
+				return handleFailure(fmt.Errorf("read token: %w", err))
+			}
+			tok = strings.TrimSpace(tok)
+			if tok == "" {
+				return handleFailure(errors.New("token is required"))
+			}
+			fmt.Fprintln(os.Stderr, "Verifying…")
+			c := apiclient.New(server, tok)
+			c.HTTPClient.Timeout = flagTimeout
+			ctx, cancel := newContext()
+			defer cancel()
+			if _, err := c.Status(ctx); err != nil {
+				return handleFailure(fmt.Errorf("verify token: %w", err))
+			}
+			path, err := apiclient.DefaultClientConfigPath()
+			if err != nil {
+				return handleFailure(err)
+			}
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				return handleFailure(err)
+			}
+			data := map[string]string{
+				"server": server,
+				"token":  tok,
+			}
+			b, _ := json.MarshalIndent(data, "", "  ")
+			if err := os.WriteFile(path, append(b, '\n'), 0o600); err != nil {
+				return handleFailure(err)
+			}
+			if flagJSON {
+				return printJSON(map[string]string{"server": server, "saved": path})
+			}
+			fmt.Printf("Saved to %s\n", path)
+			fmt.Println("Token verified and saved.")
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&loginServer, "server", "", "control plane URL (default http://127.0.0.1:8484)")
+	return cmd
 }
 
 func confirmPrompt(msg string) bool {
@@ -244,6 +464,12 @@ func humanStatus(s *domain.Status) {
 	if flagJSON {
 		_ = printJSON(s)
 		return
+	}
+	// Reuse StepBar compact strip for TUI layer — preserves data content, adds styled glyph.
+	caps := installer.ResolveCapabilities(term.IsTerminal(os.Stdout.Fd()), false, os.Getenv("TERM"), os.Getenv("NO_COLOR"))
+	if caps.IsTTY && caps.ColorEnabled {
+		strip := tui.CompactStatusStrip(string(s.Health), caps)
+		fmt.Println(strip)
 	}
 	fmt.Printf("instance: %s\n", s.InstanceID)
 	fmt.Printf("version:  %s\n", s.Version)
@@ -376,21 +602,12 @@ func newStatusCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			st, err := c.Status(ctx)
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return nil
-			}
+			return handleFailure(err)
+		}
 			humanStatus(st)
 			return nil
 		},
@@ -407,22 +624,13 @@ func newUpCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			// Force no token for up? client already handles stripping auth for /up path
 			out, err := c.Up(ctx)
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return nil
-			}
+			return handleFailure(err)
+		}
 			if flagJSON {
 				return printJSON(out)
 			}
@@ -448,24 +656,33 @@ func newDoctorCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			res, err := c.Doctor(ctx)
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return nil
-			}
+			return handleFailure(err)
+		}
 			if flagJSON {
 				return printJSON(res)
 			}
+			// Preserve data content: overall healthy flag plus checklist rendering via tui.
+			caps := installer.ResolveCapabilities(term.IsTerminal(os.Stdout.Fd()), false, os.Getenv("TERM"), os.Getenv("NO_COLOR"))
+			if caps.IsTTY && caps.ColorEnabled {
+				// Use tui checklist component — same logic as PreflightChecklist but for health.
+				var views []tui.DoctorCheckView
+				for _, ch := range res.Checks {
+					views = append(views, tui.DoctorCheckView{Name: ch.Name, Status: ch.Status, Message: ch.Message, Detail: ch.Detail})
+				}
+				// Overall status as header
+				if res.Healthy {
+					fmt.Println(tui.PassChip.Render(" healthy "))
+				} else {
+					fmt.Println(tui.FailChip.Render(" unhealthy "))
+				}
+				fmt.Print(tui.RenderDoctorChecklist(views, caps))
+				return nil
+			}
+			// Fallback plain rendering (byte-stable, NO_COLOR/TERM=dumb)
 			if res.Healthy {
 				if isColorEnabled() {
 					fmt.Println("\x1b[32mhealthy\x1b[0m")
@@ -520,21 +737,12 @@ func newAppCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			items, err := c.ListApplications(ctx)
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return nil
-			}
+			return handleFailure(err)
+		}
 			humanListApps(items)
 			return nil
 		},
@@ -548,21 +756,12 @@ func newAppCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			a, err := c.GetApplication(ctx, args[0])
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return nil
-			}
+			return handleFailure(err)
+		}
 			if flagJSON {
 				return printJSON(a)
 			}
@@ -588,31 +787,18 @@ func newAppCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := needForceGuard(false); err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			ctx, cancel := newContext()
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			res, err := c.RestartApplication(ctx, args[0])
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return nil
-			}
+			return handleFailure(err)
+		}
 			if flagJSON {
 				return printJSON(res)
 			}
@@ -641,21 +827,12 @@ func newProjectCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			items, err := c.ListProjects(ctx)
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return nil
-			}
+			return handleFailure(err)
+		}
 			humanListProjects(items)
 			return nil
 		},
@@ -674,21 +851,12 @@ func newProjectCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			p, err := c.CreateProject(ctx, apiclient.CreateProjectRequest{Name: createName, Slug: createSlug})
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return nil
-			}
+			return handleFailure(err)
+		}
 			if flagJSON {
 				return printJSON(p)
 			}
@@ -710,21 +878,12 @@ func newProjectCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			p, err := c.GetProject(ctx, args[0])
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return nil
-			}
+			return handleFailure(err)
+		}
 			if flagJSON {
 				return printJSON(p)
 			}
@@ -749,12 +908,8 @@ func newProjectCmd() *cobra.Command {
 			force, _ := cmd.Flags().GetBool("force")
 			if isNonInteractive() && !force && !flagForce {
 				err := errors.New("refusing to delete project without --force in --non-interactive mode")
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+				return handleFailure(err)
+}
 			if !force && !flagForce && !flagJSON {
 				if !confirmPrompt(fmt.Sprintf("delete project %q?", args[0])) {
 					fmt.Println("aborted")
@@ -765,20 +920,11 @@ func newProjectCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			if err := c.DeleteProject(ctx, args[0]); err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return nil
-			}
+				return handleFailure(err)
+}
 			if flagJSON {
 				return printJSON(map[string]string{"deleted": args[0]})
 			}
@@ -799,21 +945,12 @@ func newProjectCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			rs, err := c.ListReleases(ctx, args[0])
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return nil
-			}
+			return handleFailure(err)
+		}
 			if flagJSON {
 				return printJSON(map[string]any{"items": rs})
 			}
@@ -847,21 +984,12 @@ func newProjectCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			rel, err := c.CreateRelease(ctx, args[0], apiclient.CreateReleaseRequest{Commit: deployCommit, Digest: deployDigest})
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return nil
-			}
+			return handleFailure(err)
+		}
 			if flagJSON {
 				return printJSON(rel)
 			}
@@ -882,31 +1010,18 @@ func newProjectCmd() *cobra.Command {
 			force, _ := cmd.Flags().GetBool("force")
 			if isNonInteractive() && !force && !flagForce {
 				err := errors.New("refusing rollback without --force in --non-interactive mode")
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+				return handleFailure(err)
+}
 			ctx, cancel := newContext()
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			rel, err := c.RollbackRelease(ctx, args[0], args[1])
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return nil
-			}
+			return handleFailure(err)
+		}
 			if flagJSON {
 				return printJSON(rel)
 			}
@@ -926,21 +1041,12 @@ func newProjectCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			p, err := c.GetProject(ctx, args[0])
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return nil
-			}
+			return handleFailure(err)
+		}
 			// Prefer clientd if available
 			cd := clientd()
 			if cd.Available(ctx) {
@@ -951,15 +1057,8 @@ func newProjectCmd() *cobra.Command {
 					dest = filepath.Join(home, "projects", p.Slug)
 				}
 				if err := cd.ProjectClone(ctx, string(p.ID), dest); err != nil {
-					if flagJSON {
-						printErrorJSON(err)
-						return nil
-					}
-					fmt.Fprintf(os.Stderr, "clientd clone failed: %v\n", err)
-					fmt.Printf("repo: %s\n", p.RepositoryURL)
-					fmt.Printf("hint: git clone %s %s\n", p.RepositoryURL, dest)
-					return nil
-				}
+					return handleFailure(err)
+}
 				if flagJSON {
 					return printJSON(map[string]string{"cloned": string(p.ID), "path": dest})
 				}
@@ -987,31 +1086,17 @@ func newProjectCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			p, err := c.GetProject(ctx, args[0])
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return nil
-			}
+			return handleFailure(err)
+		}
 			cd := clientd()
 			if cd.Available(ctx) {
 				if err := cd.ProjectOpen(ctx, string(p.ID)); err != nil {
-					if flagJSON {
-						printErrorJSON(err)
-						return nil
-					}
-					fmt.Fprintf(os.Stderr, "error: %v\n", err)
-					return nil
-				}
+					return handleFailure(err)
+}
 				if flagJSON {
 					return printJSON(map[string]string{"opened": string(p.ID)})
 				}
@@ -1055,12 +1140,8 @@ Changing to shared/public is a public-route change; inspectable and reversible.`
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			// Dispatch to typed helpers when possible
 			var out any
 			var reqErr error
@@ -1072,13 +1153,8 @@ Changing to shared/public is a public-route change; inspectable and reversible.`
 				out, reqErr = c.GetExposure(ctx, target)
 			}
 			if reqErr != nil {
-				if flagJSON {
-					printErrorJSON(reqErr)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", reqErr)
-				return nil
-			}
+			return handleFailure(reqErr)
+		}
 			if flagJSON {
 				return printJSON(out)
 			}
@@ -1120,12 +1196,8 @@ Changing to shared/public is a public-route change; inspectable and reversible.`
 				f, _ := cmd.Flags().GetBool("force")
 				if !f {
 					err := errors.New("making a service public requires --force in --non-interactive mode")
-					if flagJSON {
-						printErrorJSON(err)
-						return nil
-					}
-					return err
-				}
+					return handleFailure(err)
+}
 			}
 			target, _ := cmd.Flags().GetString("target")
 			appID, _ := cmd.Flags().GetString("app")
@@ -1151,12 +1223,8 @@ Changing to shared/public is a public-route change; inspectable and reversible.`
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			// Prefer typed helpers
 			var out *apiclient.ExposureResponse
 			var reqErr error
@@ -1168,13 +1236,8 @@ Changing to shared/public is a public-route change; inspectable and reversible.`
 				out, reqErr = c.SetExposure(ctx, apiclient.ExposureRequest{Target: target, Exposure: exposure, Hostname: hostname})
 			}
 			if reqErr != nil {
-				if flagJSON {
-					printErrorJSON(reqErr)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", reqErr)
-				return nil
-			}
+			return handleFailure(reqErr)
+		}
 			if flagJSON {
 				return printJSON(out)
 			}
@@ -1202,21 +1265,12 @@ Changing to shared/public is a public-route change; inspectable and reversible.`
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			items, err := c.ListExposures(ctx)
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return nil
-			}
+			return handleFailure(err)
+		}
 			if flagJSON {
 				return printJSON(map[string]any{"items": items})
 			}
@@ -1248,21 +1302,12 @@ func newBackupCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			items, err := c.ListBackups(ctx)
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return nil
-			}
+			return handleFailure(err)
+		}
 			humanListBackups(items)
 			return nil
 		},
@@ -1276,21 +1321,12 @@ func newBackupCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			b, err := c.GetBackup(ctx, args[0])
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return nil
-			}
+			return handleFailure(err)
+		}
 			if flagJSON {
 				return printJSON(b)
 			}
@@ -1320,21 +1356,12 @@ func newBackupCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			b, err := c.CreateBackup(ctx, apiclient.CreateBackupRequest{Repository: repo})
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return nil
-			}
+			return handleFailure(err)
+		}
 			if flagJSON {
 				return printJSON(b)
 			}
@@ -1357,12 +1384,8 @@ func newBackupCmd() *cobra.Command {
 			force, _ := cmd.Flags().GetBool("force")
 			if isNonInteractive() && !force && !flagForce {
 				err := errors.New("restore is destructive; requires --force in --non-interactive mode")
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+				return handleFailure(err)
+}
 			if !force && !flagForce && !flagJSON {
 				if !confirmPrompt(fmt.Sprintf("restore backup %s? This overwrites current data", args[0])) {
 					fmt.Println("aborted")
@@ -1373,21 +1396,12 @@ func newBackupCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			b, err := c.RestoreBackup(ctx, args[0])
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return nil
-			}
+			return handleFailure(err)
+		}
 			if flagJSON {
 				return printJSON(b)
 			}
@@ -1407,12 +1421,8 @@ func newBackupCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			var b *domain.Backup
 			if len(args) == 0 {
 				b, err = c.VerifyLatestBackup(ctx)
@@ -1420,13 +1430,8 @@ func newBackupCmd() *cobra.Command {
 				b, err = c.VerifyBackup(ctx, args[0])
 			}
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return nil
-			}
+			return handleFailure(err)
+		}
 			if flagJSON {
 				return printJSON(b)
 			}
@@ -1455,21 +1460,12 @@ func newEventCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			events, err := c.ListEvents(ctx, apiclient.EventListParams{Limit: limit, UnreadOnly: unread, Type: typ})
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return nil
-			}
+			return handleFailure(err)
+		}
 			humanListEvents(events)
 			return nil
 		},
@@ -1490,21 +1486,12 @@ func newEventCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			e, err := c.GetEvent(ctx, args[0])
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return nil
-			}
+			return handleFailure(err)
+		}
 			if flagJSON {
 				return printJSON(e)
 			}
@@ -1532,12 +1519,8 @@ func newEventCmd() *cobra.Command {
 			// Handle SIGINT gracefully? Simple.
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			ch := make(chan domain.Event, 16)
 			go func() {
 				if err := c.WatchEvents(ctx, ch); err != nil && !errors.Is(err, context.Canceled) {
@@ -1568,20 +1551,11 @@ func newEventCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			if err := c.AckEvent(ctx, args[0]); err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return nil
-			}
+				return handleFailure(err)
+}
 			if flagJSON {
 				return printJSON(map[string]string{"acked": args[0]})
 			}
@@ -1606,21 +1580,12 @@ func newSyncCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			items, err := c.ListSyncFolders(ctx)
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return nil
-			}
+			return handleFailure(err)
+		}
 			humanListSync(items)
 			return nil
 		},
@@ -1634,21 +1599,12 @@ func newSyncCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			f, err := c.GetSyncFolder(ctx, args[0])
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return nil
-			}
+			return handleFailure(err)
+		}
 			if flagJSON {
 				return printJSON(f)
 			}
@@ -1674,22 +1630,13 @@ func newSyncCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			// Try server first
 			f, err := c.CreateSyncFolder(ctx, apiclient.CreateSyncFolderRequest{Name: addName, ServerPath: addPath, ShareWithAI: addShare})
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return nil
-			}
+			return handleFailure(err)
+		}
 			// Best-effort clientd enrollment
 			cd := clientd()
 			if cd.Available(ctx) {
@@ -1716,12 +1663,8 @@ func newSyncCmd() *cobra.Command {
 			force, _ := cmd.Flags().GetBool("force")
 			if isNonInteractive() && !force && !flagForce {
 				err := errors.New("removing sync folder requires --force in --non-interactive mode")
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+				return handleFailure(err)
+}
 			if !force && !flagForce && !flagJSON {
 				if !confirmPrompt(fmt.Sprintf("remove sync folder %q?", args[0])) {
 					fmt.Println("aborted")
@@ -1732,20 +1675,11 @@ func newSyncCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			if err := c.DeleteSyncFolder(ctx, args[0]); err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return nil
-			}
+				return handleFailure(err)
+}
 			if flagJSON {
 				return printJSON(map[string]string{"deleted": args[0]})
 			}
@@ -1775,21 +1709,12 @@ func newRunnerCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			items, err := c.ListWorkspaces(ctx)
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return nil
-			}
+			return handleFailure(err)
+		}
 			// Filter by --project if given
 			projFilter, _ := cmd.Flags().GetString("project")
 			if projFilter != "" {
@@ -1819,21 +1744,12 @@ func newRunnerCmd() *cobra.Command {
 			defer cancel()
 			cl, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			w, err := cl.GetWorkspace(ctx, args[0])
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return nil
-			}
+			return handleFailure(err)
+		}
 			if flagJSON {
 				return printJSON(w)
 			}
@@ -1863,21 +1779,12 @@ func newRunnerCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			w, err := c.CreateWorkspace(ctx, apiclient.CreateWorkspaceRequest{ProjectID: createProject, Branch: createBranch, Agent: createAgent})
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return nil
-			}
+			return handleFailure(err)
+		}
 			if flagJSON {
 				return printJSON(w)
 			}
@@ -1900,22 +1807,11 @@ func newRunnerCmd() *cobra.Command {
 			cd := clientd()
 			if !cd.Available(ctx) {
 				err := errors.New("omahab-clientd not available; ensure it is running and OMAHAB_CLIENTD_SOCKET is correct")
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				fmt.Println("hint: runner attach requires the Omarchy companion daemon (omahab-clientd) on this machine")
-				return nil
-			}
+				return handleFailure(err)
+}
 			if err := cd.RunnerAttach(ctx, args[0]); err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return nil
-			}
+				return handleFailure(err)
+}
 			if flagJSON {
 				return printJSON(map[string]string{"attached": args[0]})
 			}
@@ -1936,20 +1832,11 @@ func newRunnerCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			if err := c.StopWorkspace(ctx, args[0]); err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return nil
-			}
+				return handleFailure(err)
+}
 			if flagJSON {
 				return printJSON(map[string]string{"stopped": args[0]})
 			}
@@ -1971,12 +1858,8 @@ func newRunnerCmd() *cobra.Command {
 			cd := clientd()
 			if !cd.Available(ctx) {
 				err := errors.New("clientd not available")
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+				return handleFailure(err)
+}
 			return cd.RunnerAttach(ctx, args[0])
 		},
 	})
@@ -2013,24 +1896,12 @@ Requires local root or sudo on the server (enforced server-side).`,
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			res, err := c.RecoverIdentity(ctx, email)
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				if apiErr, ok := err.(*apiclient.APIError); ok && apiErr.StatusCode == http.StatusForbidden {
-					fmt.Fprintln(os.Stderr, "hint: identity recover requires local root/sudo on the server")
-				}
-				return nil
-			}
+			return handleFailure(err)
+		}
 			if flagJSON {
 				return printJSON(res)
 			}
@@ -2062,19 +1933,15 @@ Requires local root or sudo on the server (enforced server-side).`,
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			// Try generic endpoint via raw GET using client's private? Use workaround: direct http
 			// Instead, attempt via api client helper if available: not yet; do raw.
 			// Reconstruct URL for /users
 			server := c.BaseURL
 			req, err := http.NewRequestWithContext(ctx, http.MethodGet, server+"/users", nil)
 			if err != nil {
-				return err
+				return handleFailure(err)
 			}
 			if c.Token != "" {
 				req.Header.Set("Authorization", "Bearer "+c.Token)
@@ -2082,13 +1949,8 @@ Requires local root or sudo on the server (enforced server-side).`,
 			req.Header.Set("Accept", "application/json")
 			resp, err := c.HTTPClient.Do(req)
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return nil
-			}
+			return handleFailure(err)
+		}
 			defer resp.Body.Close()
 			if resp.StatusCode >= 400 {
 				body, _ := io.ReadAll(resp.Body)
@@ -2148,13 +2010,8 @@ func newHermesCmd() *cobra.Command {
 			cd := clientd()
 			if cd.Available(ctx) {
 				if err := cd.HermesOpen(ctx, targetURL); err != nil {
-					if flagJSON {
-						printErrorJSON(err)
-						return nil
-					}
-					fmt.Fprintf(os.Stderr, "error: %v\n", err)
-					return nil
-				}
+					return handleFailure(err)
+}
 				if flagJSON {
 					return printJSON(map[string]string{"opened": targetURL})
 				}
@@ -2194,21 +2051,12 @@ func newSecretsCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				return err
-			}
+			return handleFailure(err)
+		}
 			items, err := c.ListSecrets(ctx)
 			if err != nil {
-				if flagJSON {
-					printErrorJSON(err)
-					return nil
-				}
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return nil
-			}
+			return handleFailure(err)
+		}
 			if flagJSON {
 				return printJSON(map[string]any{"items": items})
 			}

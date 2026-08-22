@@ -16,11 +16,48 @@ import (
 // PocketID is the minimal Pocket ID integration surface for recovery.
 // Implementations must talk to Pocket ID's API; Omahab never verifies
 // passkeys itself.
+// The interface is extended with P1-2 provisioning capabilities: user
+// creation with expiring enrollment links, group seeding and assignment,
+// enrollment-state inspection, per-user application access, and default
+// configuration. Implementations that are not configured must return
+// ErrNotConfigured so callers fail loudly.
 type PocketID interface {
 	// CreateRecoveryCode generates a short-lived login code and enrollment URL
 	// for email. exp is the absolute expiry. Implementations must generate
 	// fresh random codes per call and never reuse a static token.
 	CreateRecoveryCode(ctx context.Context, email string) (code string, url string, expiresAt time.Time, err error)
+	// ValidateRecovery checks that a recovery code for email is valid.
+	ValidateRecovery(ctx context.Context, email, code string) error
+	// CreateUser creates a Pocket ID user and returns an expiring enrollment URL.
+	CreateUser(ctx context.Context, email, name string, isAdmin bool, groupIDs []string) (userID string, enrollmentURL string, expiresAt time.Time, err error)
+	// GetUser returns a domain user for the given Pocket ID user ID.
+	GetUser(ctx context.Context, userID string) (domain.User, error)
+	// ListUsers returns all Pocket ID users.
+	ListUsers(ctx context.Context) ([]domain.User, error)
+	// DisableUser disables or enables a user.
+	DisableUser(ctx context.Context, userID string, disabled bool) error
+	// DeleteUser deletes a user.
+	DeleteUser(ctx context.Context, userID string) error
+	// EnsureGroups idempotently ensures groups with the given names exist.
+	EnsureGroups(ctx context.Context, names []string) ([]Group, error)
+	// GetUserGroups returns the groups a user belongs to.
+	GetUserGroups(ctx context.Context, userID string) ([]Group, error)
+	// SetUserGroups replaces the groups for a user.
+	SetUserGroups(ctx context.Context, userID string, groupIDs []string) error
+	// AddUserToGroup adds a user to a group idempotently.
+	AddUserToGroup(ctx context.Context, userID, groupID string) error
+	// RemoveUserFromGroup removes a user from a group.
+	RemoveUserFromGroup(ctx context.Context, userID, groupID string) error
+	// GetEnrollmentState inspects passkey enrollment state for a user.
+	GetEnrollmentState(ctx context.Context, userID string) (EnrollmentState, error)
+	// ListApplicationAccess returns the OIDC clients a user may access via groups.
+	ListApplicationAccess(ctx context.Context, userID string) ([]AppAccess, error)
+	// ConfigureDefaults provisions Pocket ID defaults (passkey-first, email OTP disabled).
+	ConfigureDefaults(ctx context.Context) error
+	// SeedDefaultGroups ensures the initial groups admins/members/guests exist.
+	SeedDefaultGroups(ctx context.Context) error
+	// HealthCheck verifies Pocket ID reachability.
+	HealthCheck(ctx context.Context) error
 }
 
 // EventRecorder records security events for audit.

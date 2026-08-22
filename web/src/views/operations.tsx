@@ -1,12 +1,67 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../auth";
-import type { Application, Backup, ControlEvent, Exposure, Project } from "../api/types";
+import type { Application, Backup, Exposure, Project, Release } from "../api/types";
 import { EmptyState, ErrorState, formatDate, LoadingState, PageHeader, Section, shortDigest, StatusPill } from "../components/ui";
+import { useToast } from "../components/toast";
+import { CopyButton } from "../components/copyButton";
 
 function MutationNotice({ error }: { error: unknown }) {
   if (!error) return null;
   return <p className="inline-error" role="alert">{error instanceof Error ? error.message : "The operation failed."}</p>;
+}
+
+function DestructiveConfirm({
+  title,
+  description,
+  confirmValue,
+  confirmLabel,
+  onConfirm,
+  onClose,
+  pending,
+  error,
+}: {
+  title: string;
+  description: string;
+  confirmValue: string;
+  confirmLabel: string;
+  onConfirm: () => void;
+  onClose: () => void;
+  pending?: boolean;
+  error?: unknown;
+}) {
+  const [input, setInput] = useState("");
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    const returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    if (dialog && !dialog.open) dialog.showModal();
+    return () => {
+      if (dialog?.open) dialog.close();
+      returnFocus?.focus();
+    };
+  }, []);
+  const confirmed = input === confirmValue;
+  return (
+    <dialog ref={dialogRef} className="modal" aria-labelledby="confirm-title" onCancel={(event) => { event.preventDefault(); onClose(); }}>
+      <header><div><p className="eyebrow">Confirm</p><h2 id="confirm-title">{title}</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="Close">×</button></header>
+      <div className="form-stack">
+        <p>{description}</p>
+        <div className="danger-zone">
+          <strong>This action cannot be undone.</strong>
+          <p>Type <span className="mono">{confirmValue}</span> to continue.</p>
+          <label>{confirmLabel} <span className="mono">{confirmValue}</span>
+            <input value={input} onChange={(event) => setInput(event.currentTarget.value)} autoComplete="off" spellCheck={false} />
+          </label>
+        </div>
+        {error ? <p className="inline-error" role="alert">{error instanceof Error ? error.message : "The operation failed."}</p> : null}
+        <div className="modal-actions">
+          <button type="button" className="button secondary" onClick={onClose}>Cancel</button>
+          <button type="button" className="button danger" disabled={!confirmed || pending} onClick={onConfirm}>{pending ? "Working…" : "Confirm"}</button>
+        </div>
+      </div>
+    </dialog>
+  );
 }
 
 export function OverviewPage() {
@@ -53,7 +108,7 @@ export function OverviewPage() {
           {backups.isLoading ? <LoadingState label="Loading backups" /> : backups.isError ? <ErrorState error={backups.error} /> : latestBackup ? (
             <dl className="definition-list">
               <div><dt>Last backup</dt><dd>{formatDate(latestBackup.finished_at ?? latestBackup.started_at)}</dd></div>
-              <div><dt>Snapshot</dt><dd className="mono">{latestBackup.snapshot_id ? shortDigest(latestBackup.snapshot_id) : "Pending"}</dd></div>
+              <div><dt>Snapshot</dt><dd className="mono">{latestBackup.snapshot_id ? <><span>{shortDigest(latestBackup.snapshot_id)}</span> <CopyButton text={latestBackup.snapshot_id} label="Copy" /></> : "Pending"}</dd></div>
               <div><dt>Restore verified</dt><dd>{formatDate(latestBackup.verified_at)}</dd></div>
               <div><dt>Status</dt><dd><StatusPill value={latestBackup.status} /></dd></div>
             </dl>
@@ -73,6 +128,7 @@ interface ExposureReviewProps {
 function ExposureReview({ resource, item, onClose }: ExposureReviewProps) {
   const { client } = useAuth();
   const queryClient = useQueryClient();
+  const toast = useToast();
   const [mode, setMode] = useState<Exposure>(item.exposure);
   const [confirmation, setConfirmation] = useState("");
   const dialogRef = useRef<HTMLDialogElement>(null);
@@ -89,8 +145,10 @@ function ExposureReview({ resource, item, onClose }: ExposureReviewProps) {
     mutationFn: () => client.setExposure(resource, item.id, mode, confirmation || undefined),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: [resource] });
+      toast.success("Exposure updated");
       onClose();
     },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Could not update exposure"),
   });
   const publicConfirmed = mode !== "public" || confirmation === item.hostname;
 
@@ -106,14 +164,14 @@ function ExposureReview({ resource, item, onClose }: ExposureReviewProps) {
             </select>
           </label>
           <dl className="review-list">
-            <div><dt>Resulting hostname</dt><dd className="mono">{item.hostname}</dd></div>
+            <div><dt>Resulting hostname</dt><dd className="mono">{item.hostname} <CopyButton text={item.hostname} label="Copy" /></dd></div>
             <div><dt>Current mode</dt><dd><StatusPill value={item.exposure} /></dd></div>
             <div><dt>Requested mode</dt><dd><StatusPill value={mode} /></dd></div>
           </dl>
           {mode === "public" && (
             <div className="danger-zone">
               <strong>This endpoint will be reachable from the public internet.</strong>
-              <p>Confirm the application’s own authentication is appropriate. Type the exact hostname to continue.</p>
+              <p>Confirm the application&apos;s own authentication is appropriate. Type the exact hostname to continue.</p>
               <label>Type <span className="mono">{item.hostname}</span>
                 <input value={confirmation} onChange={(event) => setConfirmation(event.currentTarget.value)} autoComplete="off" spellCheck={false} />
               </label>
@@ -134,19 +192,29 @@ function ExposureReview({ resource, item, onClose }: ExposureReviewProps) {
 export function ApplicationsPage() {
   const { client } = useAuth();
   const queryClient = useQueryClient();
+  const toast = useToast();
   const query = useQuery({ queryKey: ["applications"], queryFn: client.applications });
   const catalogQuery = useQuery({ queryKey: ["catalog"], queryFn: client.catalog });
   const [review, setReview] = useState<Application | null>(null);
+  const [pendingAction, setPendingAction] = useState<{ id: string; action: "stop" | "update"; hostname: string; name: string } | null>(null);
   const mutation = useMutation({
     mutationFn: ({ id, action }: { id: string; action: "start" | "stop" | "restart" | "update" }) => client.applicationAction(id, action),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["applications"] }),
+    onSuccess: (_data, vars) => {
+      queryClient.invalidateQueries({ queryKey: ["applications"] });
+      const label = vars.action === "stop" ? "Application stopped" : vars.action === "update" ? "Application update started" : vars.action === "restart" ? "Application restarted" : "Application started";
+      toast.success(label);
+      setPendingAction(null);
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Application action failed"),
   });
   const install = useMutation({
     mutationFn: (bundleId: string) => client.installApplication({ bundle_id: bundleId }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["applications"] });
       queryClient.invalidateQueries({ queryKey: ["catalog"] });
+      toast.success("Application installed");
     },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Install failed"),
   });
   const applications = query.data ?? [];
   const catalog = (catalogQuery.data ?? []).filter((bundle) => !bundle.installed);
@@ -158,7 +226,7 @@ export function ApplicationsPage() {
         <div className="resource-list">
           {catalog.map((bundle) => (
             <article className="resource-row" key={bundle.id}>
-              <div className="resource-main"><div className="resource-title"><h2>{bundle.name}</h2><StatusPill value={bundle.default_exposure} /></div><p className="mono">{bundle.image}</p><small>{bundle.architectures.join(" / ")}{bundle.memory_mb ? ` · ~${bundle.memory_mb} MiB` : ""} · max exposure {bundle.max_exposure}</small></div>
+              <div className="resource-main"><div className="resource-title"><h2>{bundle.name}</h2><StatusPill value={bundle.default_exposure} /></div><p className="mono">{bundle.image} <CopyButton text={bundle.image} label="Copy" /></p><small>{bundle.architectures.join(" / ")}{bundle.memory_mb ? ` · ~${bundle.memory_mb} MiB` : ""} · max exposure {bundle.max_exposure}</small></div>
               <div className="row-actions">
                 <button className="button primary" type="button" disabled={install.isPending} onClick={() => install.mutate(bundle.id)}>{install.isPending ? "Installing…" : "Install"}</button>
               </div>
@@ -175,11 +243,11 @@ export function ApplicationsPage() {
             const running = application.observed_state === "running";
             return (
               <article className="resource-row" key={application.id}>
-                <div className="resource-main"><div className="resource-title"><h2>{application.name}</h2><StatusPill value={application.health} /><StatusPill value={application.exposure} /></div><p className="mono">{application.hostname || application.image}</p><small>Desired {application.desired_state} · observed {application.observed_state} · updated {formatDate(application.updated_at)}</small></div>
+                <div className="resource-main"><div className="resource-title"><h2>{application.name}</h2><StatusPill value={application.health} /><StatusPill value={application.exposure} /></div><p className="mono">{application.hostname || application.image} <CopyButton text={application.hostname || application.image} label="Copy" /></p><small>Digest <span className="mono">{shortDigest(application.digest)}</span> <CopyButton text={application.digest} label="Copy digest" /></small><small>Desired {application.desired_state} · observed {application.observed_state} · updated {formatDate(application.updated_at)}</small></div>
                 <div className="row-actions">
                   <button className="button secondary" type="button" disabled={mutation.isPending} onClick={() => mutation.mutate({ id: application.id, action: running ? "restart" : "start" })}>{running ? "Restart" : "Start"}</button>
-                  {running && <button className="button ghost" type="button" disabled={mutation.isPending} onClick={() => mutation.mutate({ id: application.id, action: "stop" })}>Stop</button>}
-                  <button className="button ghost" type="button" disabled={mutation.isPending} onClick={() => mutation.mutate({ id: application.id, action: "update" })}>Update</button>
+                  {running && <button className="button ghost" type="button" disabled={mutation.isPending} onClick={() => setPendingAction({ id: application.id, action: "stop", hostname: application.hostname || application.image, name: application.name })}>Stop</button>}
+                  <button className="button ghost" type="button" disabled={mutation.isPending} onClick={() => setPendingAction({ id: application.id, action: "update", hostname: application.hostname || application.image, name: application.name })}>Update</button>
                   <button className="button secondary" type="button" onClick={() => setReview(application)}>Exposure</button>
                 </div>
               </article>
@@ -189,6 +257,18 @@ export function ApplicationsPage() {
         </div>
       )}
       {review && <ExposureReview resource="applications" item={review} onClose={() => setReview(null)} />}
+      {pendingAction && (
+        <DestructiveConfirm
+          title={`${pendingAction.action === "stop" ? "Stop" : "Update"} ${pendingAction.name}`}
+          description={pendingAction.action === "stop" ? "The application will be stopped. Existing sessions may be interrupted." : "The application will update to the latest pinned digest. The previous version will be retained until the new one is healthy."}
+          confirmValue={pendingAction.hostname}
+          confirmLabel={`Type ${pendingAction.hostname === pendingAction.name ? "the application image" : "the hostname"}`}
+          onClose={() => setPendingAction(null)}
+          onConfirm={() => mutation.mutate({ id: pendingAction.id, action: pendingAction.action })}
+          pending={mutation.isPending}
+          error={mutation.error}
+        />
+      )}
     </div>
   );
 }
@@ -196,16 +276,49 @@ export function ApplicationsPage() {
 function ProjectReleases({ project }: { project: Project }) {
   const { client } = useAuth();
   const queryClient = useQueryClient();
+  const toast = useToast();
   const query = useQuery({ queryKey: ["projects", project.id, "releases"], queryFn: () => client.releases(project.id) });
   const rollback = useMutation({
     mutationFn: (releaseId: string) => client.rollbackRelease(project.id, releaseId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["projects", project.id, "releases"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["projects", project.id, "releases"] });
+      toast.success("Release rollback started");
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Rollback failed"),
   });
+  const [confirmRelease, setConfirmRelease] = useState<Release | null>(null);
   const releases = query.data ?? [];
   if (query.isLoading) return <LoadingState label="Loading releases" />;
   if (query.isError) return <ErrorState error={query.error} retry={() => void query.refetch()} />;
   if (!releases.length) return <EmptyState title="No releases" description="Releases appear here after a successful project build." />;
-  return <div className="compact-list">{releases.map((release) => <div key={release.id}><div><strong className="mono">{release.commit.slice(0, 12)}</strong><span>{formatDate(release.created_at)}</span></div><StatusPill value={release.active ? "active" : release.status} />{!release.active && <button className="button ghost" type="button" disabled={rollback.isPending} onClick={() => rollback.mutate(release.id)}>Roll back to this</button>}</div>)}<MutationNotice error={rollback.error} /></div>;
+  return (
+    <div className="compact-list">
+      {releases.map((release) => (
+        <div key={release.id}>
+          <div>
+            <strong className="mono">{release.commit.slice(0, 12)}</strong> <CopyButton text={release.commit} label="Copy" />
+            {release.digest && <small className="mono">{shortDigest(release.digest)} <CopyButton text={release.digest} label="Copy digest" /></small>}
+            <span>{formatDate(release.created_at)}</span>
+          </div>
+          <StatusPill value={release.active ? "active" : release.status} />
+          {!release.active && <button className="button ghost" type="button" disabled={rollback.isPending} onClick={() => setConfirmRelease(release)}>Roll back to this</button>}
+        </div>
+      ))}
+      <MutationNotice error={rollback.error} />
+      {confirmRelease && (
+        <DestructiveConfirm
+          title="Roll back release"
+          description={`Roll back ${project.name} to ${confirmRelease.commit.slice(0, 12)}? The current active release will be replaced.`}
+          confirmValue={confirmRelease.commit.slice(0, 12)}
+          confirmLabel="Type the commit prefix"
+          onClose={() => setConfirmRelease(null)}
+          onConfirm={() => { rollback.mutate(confirmRelease.id); setConfirmRelease(null); }}
+          pending={rollback.isPending}
+          error={rollback.error}
+        />
+      )}
+    </div>
+  );
 }
 
 export function ProjectsPage() {
@@ -213,11 +326,12 @@ export function ProjectsPage() {
   const query = useQuery({ queryKey: ["projects"], queryFn: client.projects });
   const [review, setReview] = useState<Project | null>(null);
   const projects = query.data ?? [];
+  const createCommand = "omahab project create --name my-app --repo https://forge.example.com/owner/repo";
   return (
     <div className="page">
       <PageHeader eyebrow="Build & deploy" title="Projects and releases" description="Inspect immutable releases and deliberately select what is active." />
-      {query.isLoading ? <LoadingState label="Loading projects" /> : query.isError ? <ErrorState error={query.error} retry={() => void query.refetch()} /> : !projects.length ? <EmptyState title="No projects" description="Create a project with the CLI to connect a Forgejo repository and deployment pipeline." /> : (
-        <div className="resource-list">{projects.map((project) => <article className="resource-row project-row" key={project.id}><div className="resource-main"><div className="resource-title"><h2>{project.name}</h2><StatusPill value={project.exposure} /></div><p>{project.repository_url}</p><small className="mono">{project.hostname}</small><details><summary>Releases</summary><ProjectReleases project={project} /></details></div><div className="row-actions"><button className="button secondary" type="button" onClick={() => setReview(project)}>Exposure</button></div></article>)}</div>
+      {query.isLoading ? <LoadingState label="Loading projects" /> : query.isError ? <ErrorState error={query.error} retry={() => void query.refetch()} /> : !projects.length ? <EmptyState title="No projects" description="Create a project with the CLI to connect a Forgejo repository and deployment pipeline." action={<div className="form-stack"><code className="mono">{createCommand}</code><CopyButton text={createCommand} label="Copy command" /></div>} /> : (
+        <div className="resource-list">{projects.map((project) => <article className="resource-row project-row" key={project.id}><div className="resource-main"><div className="resource-title"><h2>{project.name}</h2><StatusPill value={project.exposure} /></div><p>{project.repository_url}</p><small className="mono">{project.hostname} <CopyButton text={project.hostname} label="Copy" /></small><details><summary>Releases</summary><ProjectReleases project={project} /></details></div><div className="row-actions"><button className="button secondary" type="button" onClick={() => setReview(project)}>Exposure</button></div></article>)}</div>
       )}
       {review && <ExposureReview resource="projects" item={review} onClose={() => setReview(null)} />}
     </div>
@@ -227,16 +341,31 @@ export function ProjectsPage() {
 export function BackupsPage() {
   const { client } = useAuth();
   const queryClient = useQueryClient();
+  const toast = useToast();
   const query = useQuery({ queryKey: ["backups"], queryFn: client.backups });
-  const create = useMutation({ mutationFn: client.createBackup, onSuccess: () => queryClient.invalidateQueries({ queryKey: ["backups"] }) });
-  const verify = useMutation({ mutationFn: client.verifyBackup, onSuccess: () => queryClient.invalidateQueries({ queryKey: ["backups"] }) });
+  const create = useMutation({
+    mutationFn: client.createBackup,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["backups"] });
+      toast.success("Backup started");
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Backup failed"),
+  });
+  const verify = useMutation({
+    mutationFn: client.verifyBackup,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["backups"] });
+      toast.success("Restore verification started");
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Verification failed"),
+  });
   const backups = query.data ?? [];
   return (
     <div className="page">
       <PageHeader eyebrow="Recovery" title="Backups" description="Encrypted snapshots and evidence that they can actually be restored." actions={<button className="button primary" type="button" disabled={create.isPending} onClick={() => create.mutate()}>{create.isPending ? "Starting…" : "Back up now"}</button>} />
       <MutationNotice error={create.error ?? verify.error} />
-      {query.isLoading ? <LoadingState label="Loading backup history" /> : query.isError ? <ErrorState error={query.error} retry={() => void query.refetch()} /> : !backups.length ? <EmptyState title="No backup history" description="Start an encrypted backup, then run restore verification before relying on it." /> : (
-        <div className="table-wrap"><table><thead><tr><th>Status</th><th>Snapshot</th><th>Started</th><th>Restore verification</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>{backups.map((backup) => <tr key={backup.id}><td><StatusPill value={backup.status} />{backup.error && <span className="cell-error">{backup.error}</span>}</td><td className="mono">{backup.snapshot_id ? shortDigest(backup.snapshot_id) : "—"}</td><td>{formatDate(backup.started_at)}</td><td>{backup.verified_at ? <><StatusPill value="verified" /><small>{formatDate(backup.verified_at)}</small></> : <StatusPill value="not verified" />}</td><td><button className="button secondary" type="button" disabled={!backup.snapshot_id || verify.isPending} onClick={() => verify.mutate(backup.id)}>Verify restore</button></td></tr>)}</tbody></table></div>
+      {query.isLoading ? <LoadingState label="Loading backup history" /> : query.isError ? <ErrorState error={query.error} retry={() => void query.refetch()} /> : !backups.length ? <EmptyState title="No backup history" description="Start an encrypted backup, then run restore verification before relying on it." action={<button className="button primary" type="button" disabled={create.isPending} onClick={() => create.mutate()}>{create.isPending ? "Starting…" : "Back up now"}</button>} /> : (
+        <div className="table-wrap"><table><thead><tr><th>Status</th><th>Snapshot</th><th>Started</th><th>Restore verification</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>{backups.map((backup) => <tr key={backup.id}><td><StatusPill value={backup.status} />{backup.error && <span className="cell-error">{backup.error}</span>}</td><td className="mono">{backup.snapshot_id ? <><span>{shortDigest(backup.snapshot_id)}</span> <CopyButton text={backup.snapshot_id} label="Copy" /></> : "—"}</td><td>{formatDate(backup.started_at)}</td><td>{backup.verified_at ? <><StatusPill value="verified" /><small>{formatDate(backup.verified_at)}</small></> : <StatusPill value="not verified" />}</td><td><button className="button secondary" type="button" disabled={!backup.snapshot_id || verify.isPending} onClick={() => verify.mutate(backup.id)}>Verify restore</button></td></tr>)}</tbody></table></div>
       )}
     </div>
   );
@@ -245,44 +374,20 @@ export function BackupsPage() {
 export function EventsPage() {
   const { client } = useAuth();
   const queryClient = useQueryClient();
+  const toast = useToast();
   const query = useQuery({ queryKey: ["events"], queryFn: client.events });
-  const read = useMutation({ mutationFn: client.markEventRead, onSuccess: () => queryClient.invalidateQueries({ queryKey: ["events"] }) });
-  const [streamError, setStreamError] = useState<string | null>(null);
-  useEffect(() => {
-    const controller = new AbortController();
-    let retryTimer: number | undefined;
-    let wakeRetry: (() => void) | null = null;
-    async function maintainStream() {
-      while (!controller.signal.aborted) {
-        try {
-          await client.streamEvents(controller.signal, (event) => {
-            queryClient.setQueryData<ControlEvent[]>(["events"], (current = []) => current.some((item) => item.id === event.id) ? current : [event, ...current]);
-          });
-          if (!controller.signal.aborted) setStreamError("Live updates disconnected.");
-        } catch (error) {
-          if (!controller.signal.aborted) setStreamError(error instanceof Error ? error.message : "Live updates disconnected.");
-        }
-        if (controller.signal.aborted) break;
-        const { promise, resolve } = Promise.withResolvers<void>();
-        wakeRetry = resolve;
-        retryTimer = window.setTimeout(resolve, 3_000);
-        await promise;
-        wakeRetry = null;
-        setStreamError(null);
-      }
-    }
-    void maintainStream();
-    return () => {
-      controller.abort();
-      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
-      wakeRetry?.();
-    };
-  }, [client, queryClient]);
+  const read = useMutation({
+    mutationFn: client.markEventRead,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["events"] });
+      toast.success("Event marked read");
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Could not mark read"),
+  });
   const grouped = useMemo(() => query.data?.slice().sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at)), [query.data]);
   return (
     <div className="page">
       <PageHeader eyebrow="Operational inbox" title="Events" description="A live, durable record of health changes and actions across your server." />
-      {streamError && <p className="inline-warning" role="status">{streamError} History remains available.</p>}
       {query.isLoading ? <LoadingState label="Loading events" /> : query.isError ? <ErrorState error={query.error} retry={() => void query.refetch()} /> : !grouped?.length ? <EmptyState title="Inbox is clear" description="New operational events will appear here as they happen." /> : (
         <ol className="event-list">{grouped.map((event) => <li key={event.id} className={event.read_at ? "read" : "unread"}><span className="event-dot" aria-hidden="true" /><div><div className="resource-title"><StatusPill value={event.severity} /><strong>{event.message}</strong></div><p>{event.type.replaceAll(".", " · ")}</p><small>{formatDate(event.created_at)}</small></div>{!event.read_at && <button className="button ghost" type="button" disabled={read.isPending} onClick={() => read.mutate(event.id)}>Mark read</button>}</li>)}</ol>
       )}

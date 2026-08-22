@@ -80,6 +80,12 @@ func NewService(deps Deps) (*Service, error) {
 	}, nil
 }
 
+// SetReleaseTokenVerifier sets the token verifier after construction.
+// This allows wiring the service as its own verifier (Deps.Tokens = svc).
+func (s *Service) SetReleaseTokenVerifier(v ReleaseTokenVerifier) {
+	s.tokens = v
+}
+
 // Ensure the package honors the store.Migrate contract.
 var _ = func() {
 	var _ = Migrations

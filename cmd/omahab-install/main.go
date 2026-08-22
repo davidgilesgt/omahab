@@ -20,13 +20,16 @@ import (
 
 	"github.com/omahab/omahab/internal/installer"
 	"github.com/omahab/omahab/internal/installer/assets"
+	"github.com/omahab/omahab/internal/tui"
 
+	"github.com/skip2/go-qrcode"
 	"github.com/spf13/cobra"
 )
 
 var (
 	flagJSON           bool
 	flagNonInteractive bool
+	flagNoColor        bool
 	flagStateDir       string
 	flagVersion        string
 	flagTargetUser     string
@@ -36,6 +39,8 @@ var (
 	flagYes            bool
 	flagUntil          string
 	flagAssetDir       string
+	flagRecoveryKey    string
+	flagRecoveryPath   string
 )
 
 func main() {
@@ -63,6 +68,7 @@ Use --json for structured output and --non-interactive for automation.`,
 
 	root.PersistentFlags().BoolVar(&flagJSON, "json", false, "emit JSON output")
 	root.PersistentFlags().BoolVar(&flagNonInteractive, "non-interactive", false, "never prompt; fail with structured error if input required")
+	root.PersistentFlags().BoolVar(&flagNoColor, "no-color", false, "disable color output (same as NO_COLOR=1)")
 	root.Flags().StringVar(&flagStateDir, "state-dir", envOr("OMAHAB_STATE_DIR", "/var/lib/omahab"), "state directory (contains control.db and manifest)")
 	root.Flags().StringVar(&flagVersion, "version", envOr("OMAHAB_VERSION", "0.0.0-dev"), "version to record in manifest")
 	root.Flags().StringVar(&flagTargetUser, "target-user", "", "user whose authorized_keys to manage (default: $SUDO_USER, omahab, admin, or $USER)")
@@ -72,6 +78,8 @@ Use --json for structured output and --non-interactive for automation.`,
 	root.Flags().BoolVar(&flagYes, "yes", false, "assume yes to prompts (requires --non-interactive)")
 	root.Flags().StringVar(&flagUntil, "until", "", "stop after this step (one of: "+strings.Join(installer.OrderedSteps, ", ")+")")
 	root.Flags().StringVar(&flagAssetDir, "asset-dir", "", "load install assets (binaries, units, catalog) from this directory instead of the embedded set")
+	root.Flags().StringVar(&flagRecoveryKey, "recovery-key", "", "age recipient public key (age1...) for recovery copy (setup refuses to complete without it); interactive prompt if not supplied")
+	root.Flags().StringVar(&flagRecoveryPath, "recovery-path", "", "destination for armored recovery copy (default <state-dir>/recovery.age)")
 
 	// Also add a dedicated preflight subcommand.
 	preflightCmd := &cobra.Command{
@@ -99,13 +107,50 @@ Use --json for structured output and --non-interactive for automation.`,
 	return root.Execute()
 }
 
-// output controls rendering.
+// Renderer is the narrow rendering interface that the installer UI uses.
+// The Service emits typed Events via Options.Emit; the CLI's Renderer
+// translates those Events to terminal output. The later TUI agent swaps
+// the implementation without touching Service logic. This interface is
+// intentionally small: a single Render method is enough to drive either the
+// plain printf transcript or the JSON streamer.
+type Renderer interface {
+	Render(installer.Event)
+}
+
+// PlainRenderer reproduces today's printf transcript byte-for-byte when fed the
+// same event stream. It writes UI to w with optional ANSI color. The TUI agent
+// will provide an alternative Renderer that implements the same method.
+type PlainRenderer struct {
+	w        io.Writer
+	useColor bool
+	emit     func(installer.Event)
+}
+
+// NewPlainRenderer constructs a Renderer that writes UI to w.
+func NewPlainRenderer(w io.Writer, useColor bool) *PlainRenderer {
+	return &PlainRenderer{w: w, useColor: useColor, emit: installer.NewPlainEmitter(w, useColor)}
+}
+
+// Render implements Renderer.
+func (r *PlainRenderer) Render(e installer.Event) {
+	if r.emit != nil {
+		r.emit(e)
+	}
+}
+
+// output controls rendering. UI goes to ui (stderr) and data goes to data
+// (stdout) per DESIGN.md §5.3 so piping the manifest keeps working. The
+// capability ladder {isTTY, colorProfile, width} is resolved once at startup
+// and picks the Renderer. NO_COLOR, --no-color, TERM=dumb force downgrade.
 type output struct {
 	jsonMode       bool
 	nonInteractive bool
 	color          bool
 	isTTY          bool
-	w              io.Writer
+	ui             io.Writer
+	data           io.Writer
+	renderer       Renderer
+	caps           installer.Capabilities
 }
 
 func newOutput(cmd *cobra.Command) output {
@@ -115,39 +160,66 @@ func newOutput(cmd *cobra.Command) output {
 	if os.Getenv("TERM") == "dumb" {
 		nonInteractive = true
 	}
-	// NO_COLOR disables color.
+	term := os.Getenv("TERM")
+	noColorEnv := os.Getenv("NO_COLOR")
+	noColorFlag := flagNoColor
+	// NO_COLOR, --no-color, TERM=dumb, or --json disable color.
 	color := true
-	if os.Getenv("NO_COLOR") != "" {
+	if noColorEnv != "" || noColorFlag || term == "dumb" || jsonMode {
 		color = false
 	}
-	if jsonMode {
-		color = false
-	}
-	// Detect TTY for stdout.
-	isTTY := isTerminal(os.Stdout)
-	if os.Getenv("TERM") == "dumb" {
+	// Detect TTY for the UI stream (stderr), not stdout, because UI is on
+	// stderr per the rendering contract. This keeps piped manifest on stdout
+	// clean while still detecting an interactive terminal for QR and glyphs.
+	isTTY := isTerminal(os.Stderr)
+	if term == "dumb" {
 		isTTY = false
 	}
 	if nonInteractive {
 		isTTY = false
 	}
-	w := cmd.OutOrStdout()
-	if w == nil {
-		w = os.Stdout
+	ui := cmd.ErrOrStderr()
+	if ui == nil {
+		ui = os.Stderr
 	}
-	return output{jsonMode: jsonMode, nonInteractive: nonInteractive, color: color, isTTY: isTTY, w: w}
+	data := cmd.OutOrStdout()
+	if data == nil {
+		data = os.Stdout
+	}
+	caps := installer.ResolveCapabilities(isTTY, noColorFlag, term, noColorEnv)
+	// Renderer selection per capability ladder: TUI when TTY+color, else plain byte-stable.
+	// JSON mode always uses JSON emitter for events (handled via Emit func), but keep a
+	// plain renderer for non-event UI (banners/next-steps) to avoid TUI noise on stdout.
+	var r Renderer
+	if jsonMode {
+		r = NewPlainRenderer(ui, false)
+	} else if caps.IsTTY && caps.ColorEnabled {
+		r = tui.NewTUIRenderer(ui, caps)
+	} else {
+		r = NewPlainRenderer(ui, false)
+	}
+	// Ensure color is false when not a TTY (capability ladder downgrade) and
+	// keep glyph fallback consistent.
+	if !caps.IsTTY {
+		color = false
+	}
+	return output{jsonMode: jsonMode, nonInteractive: nonInteractive, color: color, isTTY: isTTY, ui: ui, data: data, renderer: r, caps: caps}
 }
 
 func (o output) printf(format string, args ...any) {
-	fmt.Fprintf(o.w, format, args...)
+	fmt.Fprintf(o.ui, format, args...)
 }
 
 func (o output) println(a ...any) {
-	fmt.Fprintln(o.w, a...)
+	fmt.Fprintln(o.ui, a...)
+}
+
+func (o output) printfData(format string, args ...any) {
+	fmt.Fprintf(o.data, format, args...)
 }
 
 func (o output) emitJSON(v any) {
-	enc := json.NewEncoder(o.w)
+	enc := json.NewEncoder(o.data)
 	enc.SetEscapeHTML(false)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(v)
@@ -180,6 +252,22 @@ func (o output) emitError(code, message, remediation string, checks []installer.
 			}
 		}
 	}
+}
+
+// printQR renders url as a terminal QR code using halfblock characters when
+// the UI is a TTY. It is a no-op when stderr is not a TTY, so piped or
+// non-interactive runs remain clean. The QR is written to the UI stream.
+func (o output) printQR(label, url string) {
+	if !o.isTTY || strings.TrimSpace(url) == "" {
+		return
+	}
+	qr, err := qrcode.New(url, qrcode.Medium)
+	if err != nil {
+		return
+	}
+	// Use halfblock output (ToSmallString) for compact terminal rendering.
+	art := qr.ToSmallString(false)
+	o.printf("\n%s\n%s\n", label, art)
 }
 
 func doPreflight(cmd *cobra.Command) error {
@@ -228,8 +316,16 @@ func doManifest(cmd *cobra.Command) error {
 		out.emitJSON(m)
 		return nil
 	}
+	// Human path: render receipt to UI (stderr) ≤64 cols, and JSON to data (stdout) for piping.
+	ctx := context.Background()
+	ip := tailscaleIP(ctx, probes)
+	receipt := tui.RenderReceiptWithCaps(*m, out.caps, ip)
+	// UI text on stderr
+	fmt.Fprint(out.ui, receipt)
+	fmt.Fprintln(out.ui)
+	// Data on stdout (JSON) keeps `omahab-install manifest | cat` yielding JSON only on stdout
 	data, _ := json.MarshalIndent(m, "", "  ")
-	out.printf("%s\n", string(data))
+	out.printfData("%s\n", string(data))
 	return nil
 }
 
@@ -360,7 +456,15 @@ func doInstall(cmd *cobra.Command) error {
 		KeyFile:              flagKeyFile,
 		RequireSecondSession: true,
 		UntilStep:            flagUntil,
+		StateDir:             flagStateDir,
+		RecoveryKey:          flagRecoveryKey,
+		RecoveryPath:         flagRecoveryPath,
 	}
+	// Preflight already passed at the top of doInstall, so the Run's preflight
+	// step can be skipped to avoid double printing. The service's
+	// runPreflightStep respects SkipPreflight and returns Completed with no
+	// checks, and our Emit for that step will then be a no-op for checks.
+	opts.SkipPreflight = true
 
 	// If stdin is piped and looks like keys, consume it before any prompt.
 	var stdinKeys string
@@ -423,61 +527,96 @@ func doInstall(cmd *cobra.Command) error {
 		}
 	}
 
+	// Recovery key handling: required when the recovery step is in scope.
+	if stepInScope(installer.StepRecovery, flagUntil) {
+		if flagRecoveryKey != "" {
+			if err := installer.ValidateRecoveryKey(flagRecoveryKey); err != nil {
+				out.emitError("recovery_key", err.Error(), "generate with: age-keygen -o recovery.key", nil)
+				return err
+			}
+			opts.RecoveryKey = flagRecoveryKey
+			opts.RecoveryPath = flagRecoveryPath
+		} else if out.nonInteractive || out.jsonMode {
+			err := fmt.Errorf("recovery key required: pass --recovery-key age1... (setup refuses to complete without an offline recovery copy; see DESIGN.md §9)")
+			out.emitError("recovery_key", err.Error(), "generate with: age-keygen -o recovery.key; age-keygen -y recovery.key", nil)
+			return err
+		} else if !isTerminal(os.Stdin) {
+			err := fmt.Errorf("recovery key required but stdin is not a terminal; pass --recovery-key age1...")
+			out.emitError("recovery_key", err.Error(), "generate with: age-keygen -o recovery.key", nil)
+			return err
+		} else {
+			// Interactive prompt for recovery key and destination.
+			key, path, err := promptForRecoveryKey(out)
+			if err != nil {
+				if err == installer.ErrCancelled {
+					out.printf("Installation cancelled.\n")
+					return err
+				}
+				out.emitError("input", err.Error(), "", nil)
+				return err
+			}
+			opts.RecoveryKey = key
+			if flagRecoveryPath != "" {
+				opts.RecoveryPath = flagRecoveryPath
+			} else {
+				opts.RecoveryPath = path
+			}
+		}
+	}
+	opts.StateDir = flagStateDir
+
+	// Wire event streaming. UI on stderr, data on stdout per contract; the
+	// plain emitter writes UI to out.ui (stderr) and the JSON emitter writes
+	// one object per event to out.data (stdout) so piping the manifest keeps
+	// working. The banner "progress is streamed per step" is now true because
+	// packages and daemon health poll emit StepLog lines through this Emit.
+	if out.jsonMode {
+		opts.Emit = installer.NewJSONEmitter(out.data)
+	} else {
+		// Use the renderer selected by capability ladder (TUI when TTY, plain otherwise).
+		// For --resume the TUI StepBar is pre-hydrated from journal so completed steps show ✓.
+		if tr, ok := out.renderer.(*tui.TUIRenderer); ok {
+			entries, _ := svc.JournalEntries(ctx)
+			tr.StepBar().LoadJournal(entries)
+		}
+		opts.Emit = func(e installer.Event) { out.renderer.Render(e) }
+	}
+
 	if !out.jsonMode {
 		out.printf("Starting installation (version %s)...\n", opts.Version)
 		out.printf("This will take a few minutes; progress is streamed per step.\n")
-		entries, _ := svc.JournalEntries(ctx)
-		for _, e := range entries {
-			if e.Status == installer.JournalCompleted {
-				out.printf("  [done] %s\n", e.Step)
-			} else if e.Status == installer.JournalFailed {
-				out.printf("  [failed] %s: %s\n", e.Step, e.Error)
+		// For plain renderer show legacy journal snapshot; for TUI show StepBar strip.
+		if tr, ok := out.renderer.(*tui.TUIRenderer); ok {
+			out.printf("%s\n", tr.StepBar().View())
+		} else {
+			entries, _ := svc.JournalEntries(ctx)
+			for _, e := range entries {
+				if e.Status == installer.JournalCompleted {
+					out.printf("  [done] %s\n", e.Step)
+				} else if e.Status == installer.JournalFailed {
+					out.printf("  [failed] %s: %s\n", e.Step, e.Error)
+				}
 			}
 		}
 	}
-
-	results, runErr := svc.Run(ctx, opts)
+	_, runErr := svc.Run(ctx, opts)
 
 	if out.jsonMode {
-		ok := runErr == nil
-		var failedChecks []installer.CheckResult
-		if se, ok2 := runErr.(*installer.StepError); ok2 {
-			failedChecks = se.Result.Checks
-		}
-		out.emitJSON(map[string]any{
-			"ok":      ok,
-			"steps":   results,
-			"checks":  failedChecks,
-			"error":   errStr(runErr),
-			"version": opts.Version,
-		})
+		// JSON streaming has already written one object per event to out.data
+		// via opts.Emit. The aggregated "steps" envelope is no longer emitted;
+		// the stream itself is the contract. Return the error for exit code.
 		if runErr != nil {
 			return runErr
 		}
-		// Avoid extra printf after JSON - just return, caller can check IsRollbackActive via JSON field
+		// Success: the event stream is complete. Skip the plain-only
+		// second-session, manifest, and next-steps UI and return.
 		return nil
 	}
 
-	// Plain output.
-	for _, r := range results {
-		switch r.Status {
-		case installer.JournalCompleted:
-			out.printf("  [ok] %s\n", r.Step)
-			if r.Step == installer.StepPreflight && len(r.Checks) > 0 {
-				// already printed
-			}
-			if len(r.Keys) > 0 {
-				for _, k := range r.Keys {
-					out.printf("       key %s %s (%s)\n", k.Type, k.Fingerprint, k.Comment)
-				}
-			}
-		case installer.JournalFailed:
-			out.printf("  [fail] %s: %s\n", r.Step, r.Error)
-			if len(r.Checks) > 0 {
-				printChecks(out, r.Checks)
-			}
-		}
-	}
+	// Plain mode: step results and logs were already streamed via the plain
+	// emitter (which reproduces the current transcript). Do not re-print
+	// "[ok]/[fail]" lines here or we would double the output. Only the
+	// actionable remediation for failures is printed once.
 
 	if runErr != nil {
 		// Provide actionable remediation.
@@ -527,7 +666,7 @@ func doInstall(cmd *cobra.Command) error {
 		}
 	}
 
-	// Show manifest.
+	// Show manifest and receipt.
 	manifestPath := filepath.Join(stateDir, "install-manifest.json")
 	if probes.ReadFile != nil {
 		if data, err := probes.ReadFile(manifestPath); err == nil {
@@ -539,20 +678,35 @@ func doInstall(cmd *cobra.Command) error {
 			}
 		}
 	}
+	// Render receipt ≤64 cols on UI (stderr) for serial-console safety.
+	if !out.jsonMode {
+		if m, err := installer.ReadManifest(probes); err == nil {
+			ip := tailscaleIP(ctx, probes)
+			receipt := tui.RenderReceiptWithCaps(*m, out.caps, ip)
+			fmt.Fprint(out.ui, "\n")
+			fmt.Fprint(out.ui, receipt)
+			fmt.Fprintln(out.ui)
+		}
+	}
 
 	if !out.jsonMode {
 		out.printf("\nInstallation complete (version %s).\n", opts.Version)
 		out.printf("omahab is installed to /usr/bin/omahab (standard PATH).\n")
 		out.printf("Shell completions installed for bash, zsh, and fish.\n")
 		out.printf("If `omahab` is not found, open a new shell or run: hash -r\n")
+		if out.isTTY {
+			if ip := tailscaleIP(ctx, probes); ip != "" {
+				out.printf("\nDashboard: %s\n", "http://"+ip+":8484")
+				out.printQR("Dashboard QR (scan to open):", "http://"+ip+":8484")
+			}
+		}
 	}
-
 
 	// Guided post-install enrollment: when running interactively on a TTY,
 	// actually run Tailscale + Cloudflare checks until satisfied instead of
 	// just printing static instructions. Non-interactive / JSON / --until
 	// keep the old static next-steps so automation is not blocked.
-	if stepInScope(installer.StepDaemon, flagUntil) && !out.jsonMode && !out.nonInteractive && isTerminal(os.Stdin) && isTerminal(os.Stdout) {
+	if stepInScope(installer.StepDaemon, flagUntil) && !out.jsonMode && !out.nonInteractive && isTerminal(os.Stdin) && out.isTTY {
 		if err := guideTailscale(ctx, out, probes); err != nil && err != installer.ErrCancelled {
 			out.printf("\nTailscale guided setup ended: %v\n", err)
 			out.printf("You can retry later with: sudo tailscale up ; tailscale status ; omahab doctor\n")
@@ -851,6 +1005,33 @@ func runTailscaleUp(ctx context.Context, out output, probes installer.Probes) {
 				} else {
 					out.printf("  %s\n", l)
 				}
+				// QR for the login URL when stderr is a TTY (phone scan).
+				if out.isTTY {
+					// Extract the first https:// URL from the line.
+					url := ""
+					for _, field := range strings.Fields(l) {
+						if strings.HasPrefix(field, "https://login.tailscale.com") {
+							// Trim trailing punctuation
+							url = strings.TrimRight(field, ".,;)")
+							break
+						}
+					}
+					if url == "" {
+						// Fallback: try to find any https://
+						idx := strings.Index(l, "https://")
+						if idx >= 0 {
+							rest := l[idx:]
+							if sp := strings.IndexAny(rest, " \t\n\r\"'"); sp >= 0 {
+								url = rest[:sp]
+							} else {
+								url = rest
+							}
+						}
+					}
+					if url != "" {
+						out.printQR("  Tailscale login QR (scan with phone):", url)
+					}
+				}
 			} else {
 				out.printf("  %s\n", l)
 			}
@@ -865,7 +1046,6 @@ func runTailscaleUp(ctx context.Context, out output, probes installer.Probes) {
 		out.printf("  tailscale up finished — check status below.\n")
 	}
 }
-
 func guideTailscale(ctx context.Context, out output, probes installer.Probes) error {
 	if out.nonInteractive || out.jsonMode || !isTerminal(os.Stdin) {
 		return nil
@@ -917,6 +1097,8 @@ func guideTailscale(ctx context.Context, out output, probes installer.Probes) er
 			}
 			out.printf("    Verify: %s  —  %s\n", hl("tailscale status"), hl("omahab doctor"))
 			out.printf("    Dashboard: %s  or  %s\n", hl("http://"+ip+":8484"), hl("http://<hostname>.<tailnet>.ts.net:8484"))
+			// Terminal QR for the dashboard URL when stderr is a TTY.
+			out.printQR("  Dashboard QR (scan to open):", "http://"+ip+":8484")
 			return nil
 		}
 
@@ -937,7 +1119,7 @@ func guideTailscale(ctx context.Context, out output, probes installer.Probes) er
 		out.printf("\n  %s\n", dim("Open the URL shown above on any device signed into your tailnet,"))
 		out.printf("  %s %s → Machines → Approve, then return here.\n", dim("approve at"), hl("https://login.tailscale.com/admin/machines"))
 		out.printf("  %s\n", dim("Tip: Disable key expiry for this server (machine ⋯ → Disable key expiry)."))
-		fmt.Fprint(out.w, "\n  Press Enter after approving (or type 'skip' to do later, 'retry' to re-run tailscale up, 'status' to re-check): ")
+	fmt.Fprint(out.ui, "\n  Press Enter after approving (or type 'skip' to do later, 'retry' to re-run tailscale up, 'status' to re-check): ")
 		scanner := bufio.NewScanner(os.Stdin)
 		if !scanner.Scan() {
 			return installer.ErrCancelled
@@ -968,69 +1150,13 @@ func guideTailscale(ctx context.Context, out output, probes installer.Probes) er
 var apexDomainRe = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$`)
 
 func validateApexDomain(raw string) error {
-	s := strings.TrimSpace(strings.ToLower(raw))
-	if s == "" {
-		return fmt.Errorf("domain is empty")
-	}
-	if strings.Contains(s, "://") {
-		return fmt.Errorf("remove scheme (just %q, not https://...)", strings.TrimPrefix(strings.Split(s, "://")[1], ""))
-	}
-	if strings.Contains(s, "/") {
-		return fmt.Errorf("remove path (just %q)", strings.Split(s, "/")[0])
-	}
-	if strings.Contains(s, ":") {
-		return fmt.Errorf("remove port (just the hostname)")
-	}
-	if strings.Contains(s, " ") {
-		return fmt.Errorf("domain must not contain spaces")
-	}
-	if strings.HasPrefix(s, ".") || strings.HasSuffix(s, ".") {
-		return fmt.Errorf("domain must not start or end with '.'")
-	}
-	if strings.HasPrefix(s, "-") || strings.Contains(s, "..") {
-		return fmt.Errorf("invalid hyphen or empty label")
-	}
-	if len(s) > 253 {
-		return fmt.Errorf("domain too long (>253)")
-	}
-	if !apexDomainRe.MatchString(s) {
-		return fmt.Errorf("not a valid apex domain (e.g. example.com)")
-	}
-	if !strings.Contains(s, ".") {
-		return fmt.Errorf("apex domain must contain a dot (e.g. example.com)")
-	}
-	parts := strings.Split(s, ".")
-	for _, p := range parts {
-		if len(p) > 63 {
-			return fmt.Errorf("label %q too long (>63)", p)
-		}
-		if strings.HasPrefix(p, "-") || strings.HasSuffix(p, "-") {
-			return fmt.Errorf("label %q must not start or end with '-'", p)
-		}
-	}
-	return nil
+	return installer.ValidateApexDomain(raw)
 }
 
 var cfTokenRe = regexp.MustCompile(`^[A-Za-z0-9_-]{30,200}$`)
 
 func validateCloudflareToken(raw string) error {
-	s := strings.TrimSpace(raw)
-	if s == "" {
-		return fmt.Errorf("token is empty")
-	}
-	if strings.Contains(s, " ") {
-		return fmt.Errorf("token must not contain spaces (copied with newline?)")
-	}
-	if len(s) < 30 {
-		return fmt.Errorf("token too short (<30) — did you copy the whole value? (Cloudflare shows it only once)")
-	}
-	if !cfTokenRe.MatchString(s) {
-		return fmt.Errorf("token contains invalid characters (expected A-Za-z0-9_-)")
-	}
-	if strings.HasPrefix(strings.ToLower(s), "example") {
-		return fmt.Errorf("placeholder token — paste the real value from dash.cloudflare.com")
-	}
-	return nil
+	return installer.ValidateCloudflareToken(raw)
 }
 
 func verifyCloudflareTokenLive(ctx context.Context, token string) (ok bool, status string, detail string) {
@@ -1131,15 +1257,35 @@ func guideCloudflare(ctx context.Context, out output, probes installer.Probes) e
 	out.printf("   %s Tokens are shown only once — copy them then paste here. %s\n", yellow+bold(""), reset+dim(""))
 	out.printf("\n")
 
+	isTUI := out.caps.IsTTY && out.caps.ColorEnabled && isTerminal(os.Stderr)
+
 	// --- Domain loop ---
 	var domain string
 	for {
-		fmt.Fprint(out.w, bold("   Apex domain (Cloudflare URL)")+dim(" e.g. example.com, empty to skip: ")+hl(""))
-		scanner := bufio.NewScanner(os.Stdin)
-		if !scanner.Scan() {
-			return installer.ErrCancelled
+		var raw string
+		if isTUI {
+			tmpDef := installer.PromptApexDomainDef
+			orig := tmpDef.Validate
+			tmpDef.Validate = func(s string) error {
+				t := strings.TrimSpace(s)
+				if t == "" || strings.EqualFold(t, "skip") || strings.EqualFold(t, "s") {
+					return nil
+				}
+				return orig(t)
+			}
+			v, err := tui.RunSinglePrompt(tmpDef, out.caps)
+			if err != nil {
+				return installer.ErrCancelled
+			}
+			raw = strings.TrimSpace(v)
+		} else {
+			fmt.Fprint(out.ui, bold("   Apex domain (Cloudflare URL)")+dim(" e.g. example.com, empty to skip: ")+hl(""))
+			scanner := bufio.NewScanner(os.Stdin)
+			if !scanner.Scan() {
+				return installer.ErrCancelled
+			}
+			raw = strings.TrimSpace(scanner.Text())
 		}
-		raw := strings.TrimSpace(scanner.Text())
 		if raw == "" {
 			out.printf("   Skipped Cloudflare setup — you can set it later at %s (Settings → Domain)\n", hl("http://<tailscale-ip>:8484"))
 			out.printf("   Then: %s\n", hl("omahab doctor"))
@@ -1164,12 +1310,33 @@ func guideCloudflare(ctx context.Context, out output, probes installer.Probes) e
 	var tokenA string
 	for {
 		out.printf("\n   %s for %s — paste %s\n", bold("Token A — DNS"), hl(domain), hl("Token A (Zone:Read + DNS:Edit)"))
-		fmt.Fprint(out.w, "   Paste Token A (or 'skip' to do later, token will be hidden after paste but is echoed while typing): ")
-		scanner := bufio.NewScanner(os.Stdin)
-		if !scanner.Scan() {
-			return installer.ErrCancelled
+		var raw string
+		if isTUI {
+			tmpDef := installer.PromptTokenADef
+			orig := tmpDef.Validate
+			tmpDef.Validate = func(s string) error {
+				t := strings.TrimSpace(s)
+				if strings.EqualFold(t, "skip") || strings.EqualFold(t, "s") {
+					return nil
+				}
+				if t == "" {
+					return fmt.Errorf("token is required (or type 'skip')")
+				}
+				return orig(t)
+			}
+			v, err := tui.RunSinglePrompt(tmpDef, out.caps)
+			if err != nil {
+				return installer.ErrCancelled
+			}
+			raw = strings.TrimSpace(v)
+		} else {
+			fmt.Fprint(out.ui, "   Paste Token A (or 'skip' to do later, token will be hidden after paste but is echoed while typing): ")
+			scanner := bufio.NewScanner(os.Stdin)
+			if !scanner.Scan() {
+				return installer.ErrCancelled
+			}
+			raw = strings.TrimSpace(scanner.Text())
 		}
-		raw := strings.TrimSpace(scanner.Text())
 		if raw == "" {
 			out.printf("   %sToken A is required for DNS. Either paste a token or type 'skip' to defer.%s\n", yellow, reset)
 			continue
@@ -1183,7 +1350,6 @@ func guideCloudflare(ctx context.Context, out output, probes installer.Probes) e
 			out.printf("     %s Create at %s → Profile → API Tokens → Create Custom Token; it is shown only once.\n", dim("hint:"), hl("dash.cloudflare.com"))
 			continue
 		}
-		// Live verify (best-effort, skip on network failure with warning).
 		out.printf("   Verifying Token A with %s ...\n", hl("api.cloudflare.com/client/v4/user/tokens/verify"))
 		ok, _, detail := verifyCloudflareTokenLive(ctx, raw)
 		if ok {
@@ -1194,7 +1360,10 @@ func guideCloudflare(ctx context.Context, out output, probes installer.Probes) e
 		out.printf("   %s✗ Token A not verified:%s %s\n", yellow, reset, detail)
 		out.printf("     %sPermissions needed:%s Zone:Read + DNS:Edit on %s (zone %s)\n", dim(""), reset, hl(domain), hl(domain))
 		out.printf("     %sNever use Global API Key. Recreate the token with the exact permissions above and paste again.\n", dim(""))
-		fmt.Fprint(out.w, "     Retry? [Enter to paste again, 'skip' to defer]: ")
+		if isTUI {
+			continue
+		}
+		fmt.Fprint(out.ui, "     Retry? [Enter to paste again, 'skip' to defer]: ")
 		scanner2 := bufio.NewScanner(os.Stdin)
 		if !scanner2.Scan() {
 			return installer.ErrCancelled
@@ -1210,12 +1379,30 @@ func guideCloudflare(ctx context.Context, out output, probes installer.Probes) e
 	for {
 		out.printf("\n   %s for %s — paste %s %s\n", bold("Token B — Tunnel+Access"), hl(domain), hl("Token B"), dim("(Enter to skip if private-only for now)"))
 		out.printf("   %s Permissions: Account Tunnel Edit + Access: Apps and Policies Edit + Zone Read on %s\n", dim(""), hl(domain))
-		fmt.Fprint(out.w, "   Paste Token B (or Enter to skip): ")
-		scanner := bufio.NewScanner(os.Stdin)
-		if !scanner.Scan() {
-			return installer.ErrCancelled
+		var raw string
+		if isTUI {
+			tmpDef := installer.PromptTokenBDef
+			orig := tmpDef.Validate
+			tmpDef.Validate = func(s string) error {
+				t := strings.TrimSpace(s)
+				if t == "" || strings.EqualFold(t, "skip") || strings.EqualFold(t, "s") {
+					return nil
+				}
+				return orig(t)
+			}
+			v, err := tui.RunSinglePrompt(tmpDef, out.caps)
+			if err != nil {
+				return installer.ErrCancelled
+			}
+			raw = strings.TrimSpace(v)
+		} else {
+			fmt.Fprint(out.ui, "   Paste Token B (or Enter to skip): ")
+			scanner := bufio.NewScanner(os.Stdin)
+			if !scanner.Scan() {
+				return installer.ErrCancelled
+			}
+			raw = strings.TrimSpace(scanner.Text())
 		}
-		raw := strings.TrimSpace(scanner.Text())
 		if raw == "" {
 			out.printf("   Skipped Token B — you can add it later for shared/public. Private DNS works with Token A alone.\n")
 			break
@@ -1236,7 +1423,10 @@ func guideCloudflare(ctx context.Context, out output, probes installer.Probes) e
 		}
 		out.printf("   %s✗ Token B not verified:%s %s\n", yellow, reset, detail)
 		out.printf("     %sNeeded:%s Account Tunnel Edit + Access: Apps and Policies Edit + Zone Read\n", dim(""), reset)
-		fmt.Fprint(out.w, "     Retry? [Enter to re-paste, 'skip' to defer]: ")
+		if isTUI {
+			continue
+		}
+		fmt.Fprint(out.ui, "     Retry? [Enter to re-paste, 'skip' to defer]: ")
 		scanner2 := bufio.NewScanner(os.Stdin)
 		if !scanner2.Scan() {
 			return installer.ErrCancelled
@@ -1262,8 +1452,6 @@ func guideCloudflare(ctx context.Context, out output, probes installer.Probes) e
 		out.printf("\n   Next: open %s (over Tailscale) → Settings → Domain → confirm %s\n", hl("http://<tailscale-ip>:8484"), hl(domain))
 		out.printf("   Paste the same token(s) there if the installer did not persist them automatically;\n")
 		out.printf("   the dashboard stores them encrypted in %s (never echoed back).\n", hl("/var/lib/omahab/secrets"))
-		// Best-effort: try to persist via the control plane API if omahabd is up.
-		// We do not fail the install if this is not yet available — dashboard remains the SSOT.
 		_ = domain
 		_ = tokenA
 		_ = tokenB
@@ -1328,8 +1516,71 @@ func secondSessionGate(ctx context.Context, out output, svc *installer.Service, 
 	out.printf("Please open a SECOND SSH session to this host now, then return here and press Enter to confirm.\n")
 	out.printf("If the second session fails, the rollback timer will recover SSH access automatically.\n\n")
 
-	// Wait for user to press Enter.
-	fmt.Fprint(out.w, "Press Enter after you have confirmed the second session (or type 'abort' to roll back): ")
+	// TUI path: live 10-minute countdown polling ConfirmSecondSession, rendered in-place when TTY+color.
+	if out.caps.IsTTY && out.caps.ColorEnabled && isTerminal(os.Stdin) && isTerminal(os.Stderr) && !out.nonInteractive {
+		gate := tui.NewSecondSessionGate(out.caps)
+		// Use a ticker for live countdown and auto-poll.
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		inputCh := make(chan string, 1)
+		go func() {
+			scanner := bufio.NewScanner(os.Stdin)
+			if scanner.Scan() {
+				inputCh <- strings.TrimSpace(scanner.Text())
+			} else {
+				close(inputCh)
+			}
+		}()
+		// Initial render
+		fmt.Fprintln(out.ui, gate.View())
+		fmt.Fprint(out.ui, "Press Enter after you have confirmed the second session (or type 'abort' to roll back): ")
+		for {
+			select {
+			case <-ctx.Done():
+				fmt.Fprintln(out.ui)
+				return ctx.Err()
+			case line, ok := <-inputCh:
+				fmt.Fprintln(out.ui)
+				if !ok {
+					return fmt.Errorf("no input; rollback timer remains active")
+				}
+				if strings.EqualFold(line, "abort") {
+					if err := installer.RollbackSSHD(ctx, probes); err != nil {
+						return fmt.Errorf("rollback failed: %w", err)
+					}
+					return fmt.Errorf("aborted by user; sshd config rolled back")
+				}
+				// Verify second session exists via ConfirmSecondSession (polling)
+				if err := installer.ConfirmSecondSession(ctx, probes); err != nil {
+					if err == installer.ErrNotConfirmed {
+						return fmt.Errorf("%w: no second SSH session detected; not cancelling rollback", installer.ErrNotConfirmed)
+					}
+					return fmt.Errorf("confirm failed: %w", err)
+				}
+				out.printf("Second session confirmed. Rollback timer cancelled. Password authentication is now disabled.\n")
+				return nil
+			case <-ticker.C:
+				gate.Tick()
+				// In-place countdown render
+				fmt.Fprintf(out.ui, "\r%s   ", gate.View())
+				// Auto-poll: if second session now present, confirm automatically without waiting for Enter.
+				if ok, _ := probes.SecondSessionProbe(ctx); ok {
+					if err := installer.ConfirmSecondSession(ctx, probes); err == nil {
+						fmt.Fprintln(out.ui)
+						out.printf("Second session confirmed (auto-detected). Rollback timer cancelled. Password authentication is now disabled.\n")
+						return nil
+					}
+				}
+				if gate.IsExpired() {
+					fmt.Fprintln(out.ui)
+					return fmt.Errorf("rollback window expired; sshd will revert")
+				}
+			}
+		}
+	}
+
+	// Fallback: plain linear prompt (TERM=dumb, non-TTY, NO_COLOR, piped stdin)
+	fmt.Fprint(out.ui, "Press Enter after you have confirmed the second session (or type 'abort' to roll back): ")
 	scanner := bufio.NewScanner(os.Stdin)
 	if !scanner.Scan() {
 		return fmt.Errorf("no input; rollback timer remains active")
@@ -1341,7 +1592,6 @@ func secondSessionGate(ctx context.Context, out output, svc *installer.Service, 
 		}
 		return fmt.Errorf("aborted by user; sshd config rolled back")
 	}
-	// Verify second session actually exists.
 	ok, err := probes.SecondSessionProbe(ctx)
 	if err != nil {
 		return fmt.Errorf("cannot verify second session: %w", err)
@@ -1357,14 +1607,46 @@ func secondSessionGate(ctx context.Context, out output, svc *installer.Service, 
 }
 
 func promptForKeys(out output) (pasted string, githubUsers []string, keyFile string, err error) {
-	// Plain inline prompts, no full-screen.
-	fmt.Fprintln(out.w, "SSH key setup — choose how to provide keys:")
-	fmt.Fprintln(out.w, "  1) Keep existing authorized_keys (if any)")
-	fmt.Fprintln(out.w, "  2) Paste public key(s)")
-	fmt.Fprintln(out.w, "  3) Import from GitHub (username)")
-	fmt.Fprintln(out.w, "  4) Read from file")
-	fmt.Fprintln(out.w, "You may combine options (e.g. paste + GitHub). Leave blank to keep existing.")
-	fmt.Fprint(out.w, "\nPaste key(s) (empty to skip, 'done' to finish): ")
+	// Use Huh form when TTY+color, else linear fallback. Same PromptDefinitions.
+	if out.caps.IsTTY && out.caps.ColorEnabled && isTerminal(os.Stdin) && !out.nonInteractive {
+		// Try Huh form for SSH keys paste (multiline) via tui
+		def := installer.PromptSSHKeysDef
+		val, ferr := tui.RunSinglePrompt(def, out.caps)
+		if ferr == nil {
+			pasted = val
+		} else if ferr != nil && val == "" {
+			// Fall through to plain if huh cancelled or error
+			pasted = ""
+		}
+		// For GitHub user and file, use simple huh inputs as well if desired,
+		// but keep plain scanner fallback for those to avoid overcomplicating.
+		// If huh path already handled paste, still need github/file via plain?
+		// We'll do huh for those too when possible.
+		// GitHub user prompt
+		if out.caps.IsTTY && out.caps.ColorEnabled {
+			// Use non-masked single prompt for github user (empty allowed)
+			// Reuse a synthetic prompt definition without validator (any username)
+			ghDef := installer.PromptDefinition{Kind: installer.PromptKindGitHubUser, Title: "GitHub username to import (empty to skip)", Validate: func(s string) error { return nil }}
+			ghVal, _ := tui.RunSinglePrompt(ghDef, out.caps)
+			if strings.TrimSpace(ghVal) != "" {
+				githubUsers = append(githubUsers, strings.TrimSpace(ghVal))
+			}
+			fileDef := installer.PromptDefinition{Kind: installer.PromptKindKeyFile, Title: "File path for keys (empty to skip)", Validate: func(s string) error { return nil }}
+			fileVal, _ := tui.RunSinglePrompt(fileDef, out.caps)
+			if strings.TrimSpace(fileVal) != "" {
+				keyFile = strings.TrimSpace(fileVal)
+			}
+			return pasted, githubUsers, keyFile, nil
+		}
+	}
+	// Plain linear fallback — one-question-per-line, same definitions, no alt-screen
+	fmt.Fprintln(out.ui, "SSH key setup — choose how to provide keys:")
+	fmt.Fprintln(out.ui, "  1) Keep existing authorized_keys (if any)")
+	fmt.Fprintln(out.ui, "  2) Paste public key(s)")
+	fmt.Fprintln(out.ui, "  3) Import from GitHub (username)")
+	fmt.Fprintln(out.ui, "  4) Read from file")
+	fmt.Fprintln(out.ui, "You may combine options (e.g. paste + GitHub). Leave blank to keep existing.")
+	fmt.Fprint(out.ui, "\nPaste key(s) (empty to skip, 'done' to finish): ")
 
 	scanner := bufio.NewScanner(os.Stdin)
 	var lines []string
@@ -1385,14 +1667,14 @@ func promptForKeys(out output) (pasted string, githubUsers []string, keyFile str
 		pasted = strings.Join(lines, "\n")
 	}
 
-	fmt.Fprint(out.w, "GitHub username to import (empty to skip): ")
+	fmt.Fprint(out.ui, "GitHub username to import (empty to skip): ")
 	if scanner.Scan() {
 		u := strings.TrimSpace(scanner.Text())
 		if u != "" {
 			githubUsers = append(githubUsers, u)
 		}
 	}
-	fmt.Fprint(out.w, "File path for keys (empty to skip): ")
+	fmt.Fprint(out.ui, "File path for keys (empty to skip): ")
 	if scanner.Scan() {
 		p := strings.TrimSpace(scanner.Text())
 		if p != "" {
@@ -1401,6 +1683,83 @@ func promptForKeys(out output) (pasted string, githubUsers []string, keyFile str
 	}
 	return pasted, githubUsers, keyFile, scanner.Err()
 }
+func promptForRecoveryKey(out output) (key string, path string, err error) {
+	def := installer.PromptRecoveryKeyDef
+	// TUI path: Huh form with live validator, inline, masked false.
+	if out.caps.IsTTY && out.caps.ColorEnabled && isTerminal(os.Stdin) && !out.nonInteractive {
+		out.printf("\n%s\n", def.Title)
+		out.printf("  %s\n", "This age public key will hold an encrypted copy of the master key for offline recovery.")
+		out.printf("  %s\n", "Generate with: age-keygen -o recovery.key  (public key is age1...)")
+		out.printf("  %s\n", "Store the private key securely (password manager, printed QR).")
+		val, ferr := tui.RunSinglePrompt(def, out.caps)
+		if ferr != nil {
+			return "", "", ferr
+		}
+		key = strings.TrimSpace(val)
+		if key == "" {
+			return "", "", fmt.Errorf("recovery key is required")
+		}
+		// Destination prompt via huh as well (non-masked)
+		defPath := filepath.Join(flagStateDir, "recovery.age")
+		if flagStateDir == "" {
+			defPath = "/var/lib/omahab/recovery.age"
+		}
+		pathDef := installer.PromptDefinition{Kind: installer.PromptKindRecoveryKey, Title: fmt.Sprintf("Recovery copy destination [%s]", defPath), Validate: func(s string) error { return nil }}
+		pval, _ := tui.RunSinglePrompt(pathDef, out.caps)
+		if strings.TrimSpace(pval) == "" {
+			path = defPath
+		} else {
+			path = strings.TrimSpace(pval)
+		}
+		return key, path, nil
+	}
+	// Linear fallback (TERM=dumb, piped stdin, NO_COLOR) — same definitions one per line.
+	out.printf("\n%s\n", def.Title)
+	out.printf("  %s\n", "This age public key will hold an encrypted copy of the master key for offline recovery.")
+	out.printf("  %s\n", "Generate with: age-keygen -o recovery.key  (public key is age1...)")
+	out.printf("  %s\n", "Store the private key securely (password manager, printed QR).")
+	scanner := bufio.NewScanner(os.Stdin)
+	for {
+		fmt.Fprint(out.ui, "Enter age recipient public key (age1...): ")
+		if !scanner.Scan() {
+			return "", "", installer.ErrCancelled
+		}
+		raw := strings.TrimSpace(scanner.Text())
+		if raw == "" {
+			out.printf("Recovery key is required — setup refuses to complete without it (DESIGN.md §9).\n")
+			continue
+		}
+		if err := def.Validate(raw); err != nil {
+			out.printf("Invalid recovery key: %v\n", err)
+			continue
+		}
+		key = raw
+		break
+	}
+	for {
+		defPath := filepath.Join(flagStateDir, "recovery.age")
+		if flagStateDir == "" {
+			defPath = "/var/lib/omahab/recovery.age"
+		}
+		fmt.Fprintf(out.ui, "Recovery copy destination [%s]: ", defPath)
+		if !scanner.Scan() {
+			return "", "", installer.ErrCancelled
+		}
+		rawPath := strings.TrimSpace(scanner.Text())
+		if rawPath == "" {
+			path = defPath
+		} else {
+			path = rawPath
+		}
+		if path == "" {
+			out.printf("Path is required\n")
+			continue
+		}
+		break
+	}
+	return key, path, scanner.Err()
+}
+
 
 func collectKeysForDisplay(ctx context.Context, probes installer.Probes, opts installer.InstallOptions) []installer.SSHKey {
 	var all []installer.SSHKey
@@ -1457,6 +1816,7 @@ func printChecks(out output, checks []installer.CheckResult) {
 			out.printf("       -> %s\n", c.Remediation)
 		}
 	}
+	out.printf("  Recommendation: enable LUKS on bare metal and encrypted Proxmox storage for VMs (DESIGN.md §9) — offline disk access bypasses OS controls.\n")
 }
 
 func havePipedStdin() bool {

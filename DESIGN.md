@@ -189,7 +189,7 @@ Reasons:
 - amd64 and arm64 availability;
 - conservative host changes while applications update independently.
 
-Ubuntu is not an initial supported host. Supporting one distribution reduces testing, package, firewall, SSH, and upgrade variance.
+Ubuntu 26.04 is also a supported host (preflight, installer, and package selection accept it — see `preflight.go:checkDebian`, `scripts/install`, `packages.go:PackagesForOS`). Debian 13 remains the reference host; the Ubuntu path exists to reduce friction on hosts already running it, at the cost of the extra variance above.
 
 ### 5.2 Installation form
 

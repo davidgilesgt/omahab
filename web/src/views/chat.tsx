@@ -1,13 +1,22 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { defaultHermesUrl, HermesTransport, safeHermesUrl, type HermesApprovalRequest, type HermesMessage } from "../api/hermes";
 import { PageHeader, StatusPill, formatDate } from "../components/ui";
+import { useToast } from "../components/toast";
+import { AssistantKnowledgePanel } from "./knowledge";
 
 const HERMES_URL_KEY = "omahab.hermes.url";
 const HERMES_PROFILE_KEY = "omahab.hermes.profile";
 
 type ConnectionState = "connecting" | "connected" | "disconnected" | "error";
 
+const SUGGESTED_PROMPTS = [
+  "Summarize recent backup status",
+  "What projects need attention?",
+  "Show unread operational events",
+] as const;
+
 export function ChatPage() {
+  const toast = useToast();
   const [url, setUrl] = useState(() => safeHermesUrl(localStorage.getItem(HERMES_URL_KEY) ?? "") ?? defaultHermesUrl());
   const [profile, setProfile] = useState(() => localStorage.getItem(HERMES_PROFILE_KEY) ?? "default");
   const [connection, setConnection] = useState<ConnectionState>("connecting");
@@ -18,6 +27,7 @@ export function ChatPage() {
   const [approval, setApproval] = useState<HermesApprovalRequest | null>(null);
   const [approvalPending, setApprovalPending] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [knowledgeOpen, setKnowledgeOpen] = useState(false);
   const transportRef = useRef<HermesTransport | null>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -33,7 +43,9 @@ export function ChatPage() {
     const unsubscribeApprovals = transport.subscribeApprovals(setApproval);
     transport.connect().then(() => setConnection("connected")).catch((error: unknown) => {
       setConnection("error");
-      setConnectionError(error instanceof Error ? error.message : "Hermes could not be reached.");
+      const msg = error instanceof Error ? error.message : "Hermes could not be reached.";
+      setConnectionError(msg);
+      toast.error(msg);
     });
     return () => {
       unsubscribeApprovals();
@@ -41,7 +53,7 @@ export function ChatPage() {
       transport.close();
       if (transportRef.current === transport) transportRef.current = null;
     };
-  }, [profile, url]);
+  }, [profile, url, toast]);
 
   useEffect(() => {
     transcriptRef.current?.scrollTo({ top: transcriptRef.current.scrollHeight, behavior: "smooth" });
@@ -57,8 +69,11 @@ export function ChatPage() {
     setConnectionError(null);
     try {
       await transportRef.current.send(content);
+      toast.success("Message sent");
     } catch (error) {
-      setConnectionError(error instanceof Error ? error.message : "The message could not be sent.");
+      const msg = error instanceof Error ? error.message : "The message could not be sent.";
+      setConnectionError(msg);
+      toast.error(msg);
     } finally {
       setSending(false);
       composerRef.current?.focus();
@@ -71,8 +86,11 @@ export function ChatPage() {
     try {
       await transportRef.current.respondToApproval(approval.requestId, choice);
       setApproval(null);
+      toast.success(choice === "deny" ? "Approval denied" : "Approval granted");
     } catch (error) {
-      setConnectionError(error instanceof Error ? error.message : "The approval response could not be sent.");
+      const msg = error instanceof Error ? error.message : "The approval response could not be sent.";
+      setConnectionError(msg);
+      toast.error(msg);
     } finally {
       setApprovalPending(false);
     }
@@ -93,7 +111,9 @@ export function ChatPage() {
         throw new Error("Do not put credentials in the WebSocket URL. Configure authentication at the gateway.");
       }
     } catch (error) {
-      setConnectionError(error instanceof Error ? error.message : "Enter a valid WebSocket URL.");
+      const msg = error instanceof Error ? error.message : "Enter a valid WebSocket URL.";
+      setConnectionError(msg);
+      toast.error(msg);
       return;
     }
     localStorage.setItem(HERMES_URL_KEY, nextUrl);
@@ -101,6 +121,7 @@ export function ChatPage() {
     setUrl(nextUrl);
     setProfile(nextProfile);
     setSettingsOpen(false);
+    toast.success("Connection updated");
   }
 
   function handleComposerKey(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -110,9 +131,34 @@ export function ChatPage() {
     }
   }
 
+  function applySuggestion(prompt: string) {
+    setDraft(prompt);
+    composerRef.current?.focus();
+  }
+
   return (
-    <div className="page chat-page">
-      <PageHeader eyebrow="Hermes" title="AI" description="A direct, authenticated JSON-RPC session with your server-side assistant." actions={<button className="button secondary" type="button" onClick={() => setSettingsOpen((open) => !open)} aria-expanded={settingsOpen}>Connection</button>} />
+    <div className="page chat-page" style={knowledgeOpen ? { height: "auto", gridTemplateRows: "auto auto auto minmax(28rem, 1fr)" } : undefined}>
+      <PageHeader
+        eyebrow="Hermes"
+        title="AI"
+        description="A direct, authenticated JSON-RPC session with your server-side assistant."
+        actions={
+          <div className="row-actions">
+            <button className="button secondary" type="button" onClick={() => setSettingsOpen((open) => !open)} aria-expanded={settingsOpen}>
+              Connection
+            </button>
+            <button
+              className="button secondary"
+              type="button"
+              onClick={() => setKnowledgeOpen((open) => !open)}
+              aria-expanded={knowledgeOpen}
+              aria-controls="assistant-knowledge-panel"
+            >
+              Assistant knowledge
+            </button>
+          </div>
+        }
+      />
       {settingsOpen && (
         <section className="connection-panel" aria-labelledby="connection-heading">
           <div><h2 id="connection-heading">Hermes connection</h2><p>Only non-secret endpoint metadata is saved in this browser.</p></div>
@@ -123,11 +169,22 @@ export function ChatPage() {
           </form>
         </section>
       )}
+      {knowledgeOpen && (
+        <section id="assistant-knowledge-panel" aria-labelledby="knowledge-heading">
+          <AssistantKnowledgePanel />
+        </section>
+      )}
       <section className="chat-shell" aria-label="AI conversation">
         <header className="chat-status"><div><span className="assistant-avatar" aria-hidden="true">AI</span><div><strong>AI</strong><small>Profile <span className="mono">{profile}</span></small></div></div><StatusPill value={connection} /></header>
         <div className="transcript" ref={transcriptRef} role="log" aria-live="polite" aria-relevant="additions">
           {messages.length === 0 ? (
-            <div className="chat-empty"><span className="assistant-avatar large" aria-hidden="true">AI</span><h2>What can I help with?</h2><p>Messages and tool activity come directly from your configured Hermes profile. Nothing is simulated in this interface.</p></div>
+            <div className="chat-empty"><span className="assistant-avatar large" aria-hidden="true">AI</span><h2>What can I help with?</h2><p>Messages and tool activity come directly from your configured Hermes profile. Nothing is simulated in this interface.</p>
+              <div className="row-actions" style={{ justifyContent: "center", marginTop: "1rem" }}>
+                {SUGGESTED_PROMPTS.map((prompt) => (
+                  <button key={prompt} type="button" className="button secondary" onClick={() => applySuggestion(prompt)}>{prompt}</button>
+                ))}
+              </div>
+            </div>
           ) : messages.map((message) => (
             <article key={message.id} className={`message message-${message.role}`}>
               <header><strong>{message.role === "user" ? "You" : message.role === "assistant" ? "AI" : "Tool"}</strong><time dateTime={message.created_at}>{formatDate(message.created_at)}</time></header>

@@ -50,6 +50,9 @@ type curatedBundle struct {
 		PreHooks  []string `json:"preHooks"`
 		PostHooks []string `json:"postHooks"`
 	} `json:"backup"`
+	Restore struct {
+		Hooks []string `json:"hooks"`
+	} `json:"restore"`
 	OIDC struct {
 		Supported bool `json:"supported"`
 	} `json:"oidc"`
@@ -208,7 +211,7 @@ func convert(cb curatedBundle, composeDir string, digests map[string]string) (ap
 	b.HealthCheck = healthCheck(cb, primary)
 	b.Backup = apps.BackupHooks{
 		PreBackup:   hookArgv(cb.Backup.PreHooks, cb.Name),
-		PostRestore: hookArgv(cb.Backup.PostHooks, cb.Name),
+		PostRestore: hookArgv(cb.Restore.Hooks, cb.Name),
 	}
 	return b, nil
 }

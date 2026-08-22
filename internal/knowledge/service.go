@@ -76,8 +76,8 @@ func (s *Service) RegisterSource(ctx context.Context, kind, name, baseURL string
 	kind = strings.TrimSpace(strings.ToLower(kind))
 	name = strings.TrimSpace(name)
 	baseURL = strings.TrimSpace(baseURL)
-	if kind != "paperless" && kind != "karakeep" {
-		return nil, validationf("kind must be paperless or karakeep, got %q", kind)
+	if kind != "paperless" && kind != "karakeep" && kind != "notes" {
+		return nil, validationf("kind must be paperless, karakeep, or notes, got %q", kind)
 	}
 	if name == "" {
 		return nil, validation("name is required")
@@ -1049,7 +1049,93 @@ func (s *Service) CheckSummarizationAllowed(ctx context.Context, principal, prov
 	return nil
 }
 
-// --- Helpers ---
+// IndexSetupOption describes one of the three semantic-index setup choices.
+// DESIGN §15.2 requires exactly three options presented verbatim with no locale
+// inference. The UI must present these labels; the service maps the choice to a
+// model alias (or nil for full-text-only).
+type IndexSetupOption struct {
+	ID          string  `json:"id"`                    // english|worldwide|full_text
+	Label       string  `json:"label"`                 // human label
+	Description string  `json:"description,omitempty"` // longer description
+	ModelAlias  *string `json:"model_alias,omitempty"` // nil for full-text only
+}
+
+// IndexSetupOptions returns the three semantic-index setup options required by
+// DESIGN §15.2: Best English, Best worldwide, Full-text only. No locale inference.
+func IndexSetupOptions() []IndexSetupOption {
+	eng := "omahab-embed-english"
+	world := "omahab-embed-worldwide"
+	return []IndexSetupOption{
+		{ID: "english", Label: "Best English model", Description: "Highest quality English embeddings (Nomic Embed Text v1.5). Best for English-only collections.", ModelAlias: &eng},
+		{ID: "worldwide", Label: "Best worldwide model", Description: "Multilingual embeddings (Qwen3 Embedding 0.6B). Best for mixed-language collections.", ModelAlias: &world},
+		{ID: "full_text", Label: "Full-text only", Description: "No local embeddings; use full-text search only. Zero model download and memory.", ModelAlias: nil},
+	}
+}
+
+// ServiceIndexSetupOptions is the service-level accessor for UI wiring. It
+// returns the same three options as the package-level IndexSetupOptions.
+func (s *Service) ServiceIndexSetupOptions(_ context.Context) ([]IndexSetupOption, error) {
+	return IndexSetupOptions(), nil
+}
+
+// IndexOptions is an alias for IndexSetupOptions for broader test surface.
+func (s *Service) IndexOptions(_ context.Context) ([]IndexSetupOption, error) {
+	return IndexSetupOptions(), nil
+}
+
+// GetSummarizationConsent returns whether principal has granted summarization
+// consent for provider. Thin wrapper over HasSummarizationConsent for UI.
+func (s *Service) GetSummarizationConsent(ctx context.Context, principal, provider string) (bool, error) {
+	return s.HasSummarizationConsent(ctx, principal, provider)
+}
+
+// SetSummarizationConsent creates or updates summarization consent for
+// principal/provider to the desired granted value. When granted is true it
+// upserts a granted consent; when false it revokes any existing consent.
+// It is wired to the existing knowledge_consents table.
+func (s *Service) SetSummarizationConsent(ctx context.Context, principal, provider string, granted bool) (*Consent, error) {
+	principal = strings.TrimSpace(principal)
+	provider = strings.TrimSpace(provider)
+	if principal == "" {
+		return nil, validation("principal is required")
+	}
+	if provider == "" {
+		return nil, validation("provider is required")
+	}
+	if granted {
+		now := time.Now().UTC()
+		nowStr := now.Format(time.RFC3339Nano)
+		id := newID()
+		_, err := s.db.ExecContext(ctx,
+			`INSERT INTO knowledge_consents (id, principal, provider, scope, granted, granted_at, revoked_at, created_at, updated_at)
+			 VALUES (?, ?, ?, 'summarization', 1, ?, NULL, ?, ?)
+			 ON CONFLICT(principal, provider, scope) DO UPDATE SET granted=1, granted_at=excluded.granted_at, revoked_at=NULL, updated_at=excluded.updated_at`,
+			id, principal, provider, nowStr, nowStr, nowStr,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("set consent: %w", err)
+		}
+		return s.GetConsent(ctx, principal, provider, "summarization")
+	}
+	// granted == false → revoke existing if any
+	c, err := s.GetConsent(ctx, principal, provider, "summarization")
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) || errors.Is(err, ErrNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if c.Granted && c.RevokedAt == nil {
+		if err := s.RevokeConsent(ctx, c.ID); err != nil {
+			return nil, err
+		}
+		c.Granted = false
+		now := time.Now().UTC()
+		c.RevokedAt = &now
+	}
+	return c, nil
+}
+
 
 func (s *Service) paperlessSourcesWithAccess(ctx context.Context, principal string) ([]*Source, error) {
 	all, err := s.ListSources(ctx)

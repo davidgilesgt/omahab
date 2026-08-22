@@ -111,6 +111,23 @@ func Open(path string) (*Store, error) {
 // queries. Prefer the Store helpers where they exist.
 func (s *Store) DB() *sql.DB { return s.db }
 
+// Queries returns a sqlc-generated Queries backed by the store's database.
+// It is the typed entry point for instance and migration queries; callers
+// should prefer it over hand-written database/sql strings.
+// For transactional work, use QueriesWithTx.
+// The integrator entry point is store.New(store.DB()) or s.Queries().
+func (s *Store) Queries() *Queries {
+	if s == nil || s.db == nil {
+		return &Queries{db: nil}
+	}
+	return New(s.db)
+}
+
+// QueriesWithTx returns a Queries bound to tx, for use inside an explicit
+// transaction (BeginTx / Commit / Rollback). The transaction's isolation is
+// IMMEDIATE, matching the store's DSN _txlock.
+func (s *Store) QueriesWithTx(tx *sql.Tx) *Queries { return New(tx) }
+
 // Close closes the store. It is safe to call once; afterwards the store must
 // not be used again.
 func (s *Store) Close() error {

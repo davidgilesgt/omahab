@@ -16,6 +16,10 @@ const DaemonHealthURL = "http://127.0.0.1:8484/up"
 // honours ctx cancellation and returns an error mentioning
 // `journalctl -u omahabd -n 50 --no-pager` on deadline expiry.
 func waitHealthy(ctx context.Context, p Probes) error {
+	return waitHealthyWithEmit(ctx, p, nil)
+}
+
+func waitHealthyWithEmit(ctx context.Context, p Probes, emit func(string)) error {
 	if p.HTTPSGet == nil {
 		return fmt.Errorf("https get probe not configured")
 	}
@@ -27,6 +31,7 @@ func waitHealthy(ctx context.Context, p Probes) error {
 	start := nowFn()
 	deadline := start.Add(120 * time.Second)
 
+	attempt := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -34,9 +39,20 @@ func waitHealthy(ctx context.Context, p Probes) error {
 		default:
 		}
 
+		attempt++
 		status, _, err := p.HTTPSGet(ctx, DaemonHealthURL)
 		if err == nil && status == 200 {
+			if emit != nil {
+				emit(fmt.Sprintf("omahabd healthy after %d checks", attempt))
+			}
 			return nil
+		}
+		if emit != nil {
+			if err != nil {
+				emit(fmt.Sprintf("health check %d: waiting (error: %v)", attempt, err))
+			} else {
+				emit(fmt.Sprintf("health check %d: status %d, waiting", attempt, status))
+			}
 		}
 
 		now := nowFn()
@@ -63,7 +79,11 @@ func waitHealthy(ctx context.Context, p Probes) error {
 }
 
 func (s *Service) runDaemonStep(ctx context.Context, opts InstallOptions) RunResult {
-	_ = opts
+	emit := func(line string) {
+		if opts.Emit != nil {
+			opts.Emit(StepLog{Step: StepDaemon, Line: line})
+		}
+	}
 	if s == nil {
 		return RunResult{Step: StepDaemon, Status: JournalFailed, Error: "service not configured"}
 	}
@@ -72,15 +92,19 @@ func (s *Service) runDaemonStep(ctx context.Context, opts InstallOptions) RunRes
 	if p.Systemctl == nil {
 		return RunResult{Step: StepDaemon, Status: JournalFailed, Error: "systemctl probe not configured"}
 	}
+	emit("enabling omahabd")
 	if _, err := p.Systemctl(ctx, "enable", "omahabd"); err != nil {
 		return RunResult{Step: StepDaemon, Status: JournalFailed, Error: err.Error()}
 	}
+	emit("restarting omahabd")
 	if _, err := p.Systemctl(ctx, "restart", "omahabd"); err != nil {
 		return RunResult{Step: StepDaemon, Status: JournalFailed, Error: err.Error()}
 	}
-	if err := waitHealthy(ctx, p); err != nil {
+	emit("waiting for omahabd health check")
+	if err := waitHealthyWithEmit(ctx, p, func(line string) { emit(line) }); err != nil {
 		return RunResult{Step: StepDaemon, Status: JournalFailed, Error: err.Error()}
 	}
+	emit("omahabd is healthy")
 	if p.ReadFile == nil {
 		return RunResult{Step: StepDaemon, Status: JournalFailed, Error: "read file probe not configured"}
 	}
@@ -97,15 +121,15 @@ func (s *Service) runDaemonStep(ctx context.Context, opts InstallOptions) RunRes
 
 	// Idempotency: skip write when content identical.
 	if p.ReadFile != nil {
-		if existing, err := p.ReadFile("/etc/omahab/backup.env"); err == nil {
-			if string(existing) == content {
-				return RunResult{Step: StepDaemon, Status: JournalCompleted}
-			}
+		if existing, err := p.ReadFile("/etc/omahab/backup.env"); err == nil && string(existing) == content {
+			emit("backup.env already up to date")
+			return RunResult{Step: StepDaemon, Status: JournalCompleted}
 		}
 	}
 	if p.WriteFile == nil {
 		return RunResult{Step: StepDaemon, Status: JournalFailed, Error: "write file probe not configured"}
 	}
+	emit("writing backup.env")
 	if err := p.WriteFile("/etc/omahab/backup.env", []byte(content), 0o600); err != nil {
 		return RunResult{Step: StepDaemon, Status: JournalFailed, Error: err.Error()}
 	}

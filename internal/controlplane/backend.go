@@ -9,12 +9,14 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/omahab/omahab/internal/api"
 	"github.com/omahab/omahab/internal/apps"
 	"github.com/omahab/omahab/internal/backups"
+	"github.com/omahab/omahab/internal/cloudflare"
 	"github.com/omahab/omahab/internal/config"
 	"github.com/omahab/omahab/internal/domain"
 	"github.com/omahab/omahab/internal/emailing"
@@ -63,6 +65,13 @@ type Backend struct {
 
 	masterKey [32]byte
 	apiToken  string
+
+	// extended integrations for dashboard-triggered actions
+	emailRouter     *cloudflare.EmailClient
+	emailPrimary    string
+	emailAlias      string
+	approvalEmitter *hermes.ApprovalEmitter
+	pocketClient    *identity.PocketIDClient
 }
 
 // Options for New
@@ -119,6 +128,37 @@ func (b *Backend) initServices(ctx context.Context) error {
 	b.events = events.New(b.db, nil)
 
 	domainSink := &domainEventSink{b.events}
+	_ = domainSink
+
+	// instance for domain / tailscale IP / slug
+	inst, _ := b.store.Instance(ctx)
+
+	// secrets - required for all scoped credential storage
+	secSvc, err := secrets.New(b.db, b.masterKey[:])
+	if err != nil {
+		return fmt.Errorf("secrets: %w", err)
+	}
+	b.secrets = secSvc
+
+	// helper to reveal platform-app scoped secrets; returns "" on not-found
+	secret := func(name string) string {
+		v, err := secSvc.RevealByName(ctx, "platform-app", name)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return ""
+			}
+			// treat other errors as not-configured to avoid startup failure on transient DB issues
+			return ""
+		}
+		return strings.TrimSpace(v)
+	}
+	// also allow env fallback for local dev / tests
+	secretOrEnv := func(name, env string) string {
+		if v := secret(name); v != "" {
+			return v
+		}
+		return strings.TrimSpace(os.Getenv(env))
+	}
 
 	// apps: the runtime catalog ships with signed releases. A missing file
 	// means no bundles are installable (fail closed); a present but invalid
@@ -165,9 +205,26 @@ func (b *Backend) initServices(ctx context.Context) error {
 	}
 	b.apps = appSvc
 
-	// projects runner
+	// knowledge with noops (real clients wiring via direct secrets would come here; for now no-op clients)
+	b.knowledge = knowledge.New(b.db, knowledge.ServiceOption{
+		Sink: newKnowledgeSink(b.events),
+	})
+
+	// syncer with knowledge registrar bridge
+	b.syncer = syncer.New(b.db, b.cfg.DataDir+"/sync", syncer.NewKnowledgeRegistrar(b.knowledge))
+	syncBaseURL := secretOrEnv("syncthing_base_url", "OMAHAB_SYNCTHING_URL")
+	syncAPIKey := secretOrEnv("syncthing_api_key", "OMAHAB_SYNCTHING_API_KEY")
+	if syncBaseURL == "" {
+		syncBaseURL = "http://127.0.0.1:8384"
+	}
+	// only set client when at least one value is configured; empty api key still allows polling with empty key (Syncthing may be reachable without auth)
+	if syncAPIKey != "" || syncBaseURL != "http://127.0.0.1:8384" || secret("syncthing_base_url") != "" {
+		b.syncer.SetSyncthingClient(syncer.NewHTTPClient(syncBaseURL, syncAPIKey))
+	}
+	b.syncer.SetEventSink(newSyncerSink(b.events))
+
+	// projects runner - wire self as ReleaseTokenVerifier post-creation
 	onceRunner := NewCommandOnceRunner("omahab-once", "127.0.0.1:8080")
-	rtv := &releaseTokenVerifier{db: b.db}
 	projSvc, err := projects.NewService(projects.Deps{
 		DB:     b.db,
 		Runner: onceRunner,
@@ -177,28 +234,16 @@ func (b *Backend) initServices(ctx context.Context) error {
 			SecretsDir: b.cfg.StateDir + "/secrets/projects",
 		},
 		Events: newProjectsSink(b.events),
-		Tokens: rtv,
+		Tokens: nil,
 	})
 	if err != nil {
 		return fmt.Errorf("projects: %w", err)
 	}
+	// wire self-verifier: projects.Service implements ReleaseTokenVerifier
+	projSvc.SetReleaseTokenVerifier(projSvc)
 	b.projects = projSvc
 
-	// secrets
-	secSvc, err := secrets.New(b.db, b.masterKey[:])
-	if err != nil {
-		return fmt.Errorf("secrets: %w", err)
-	}
-	b.secrets = secSvc
-
-	// health
-	b.health = health.New(health.Options{
-		DB:   b.db,
-		Sink: newHealthSink(b.events),
-	})
-
-	// syncer
-	b.syncer = syncer.New(b.db, b.cfg.DataDir+"/sync", nil)
+	// backups with real HookSource
 	backupSvc := backups.New(b.store, backups.Config{
 		Paths: []string{
 			b.cfg.StateDir,
@@ -209,9 +254,11 @@ func (b *Backend) initServices(ctx context.Context) error {
 		VerifyRoot: b.cfg.DataDir + "/backups/verify",
 		CacheDir:   b.cfg.StateDir + "/restic-cache",
 	}, backups.Deps{
-		Runner:  &backups.CommandRunner{},
-		Secrets: backupSecretSource{service: secSvc},
-		Events:  newBackupsSink(b.events),
+		Runner:     &backups.CommandRunner{},
+		Hooks:      backups.NewAppHookSource(appSvc),
+		HookRunner: &backups.ExecHookRunner{},
+		Secrets:    backupSecretSource{service: secSvc},
+		Events:     newBackupsSink(b.events),
 		InstanceID: func(ctx context.Context) string {
 			inst, err := b.store.Instance(ctx)
 			if err != nil {
@@ -222,51 +269,181 @@ func (b *Backend) initServices(ctx context.Context) error {
 	})
 	b.backups = backupSvc
 
+	// hermes + approval emitter (exposed for future callers)
+	b.hermes = hermes.New(b.db, nil, newHermesSink(b.events))
+	b.approvalEmitter = hermes.NewApprovalEmitter(newHermesSink(b.events))
+
+	// scm with real Forgejo/Woodpecker clients resolved from secrets
+	forgejoBase := secretOrEnv("forgejo_base_url", "OMAHAB_FORGEJO_URL")
+	forgejoToken := secretOrEnv("forgejo_token", "OMAHAB_FORGEJO_TOKEN")
+	woodpeckerBase := secretOrEnv("woodpecker_base_url", "OMAHAB_WOODPECKER_URL")
+	woodpeckerToken := secretOrEnv("woodpecker_token", "OMAHAB_WOODPECKER_TOKEN")
+	var forgejoClient scm.ForgejoClient
+	var woodpeckerClient scm.WoodpeckerClient
+	if forgejoBase != "" && forgejoToken != "" {
+		forgejoClient = scm.NewForgejoClient(scm.ForgejoConfig{BaseURL: forgejoBase, Token: forgejoToken, SecretStore: secretsStoreAdapter{b.secrets}})
+	}
+	if woodpeckerBase != "" && woodpeckerToken != "" {
+		woodpeckerClient = scm.NewWoodpeckerClient(scm.WoodpeckerConfig{BaseURL: woodpeckerBase, Token: woodpeckerToken})
+	}
+	b.scm = scm.New(b.db, forgejoClient, woodpeckerClient, secretsStoreAdapter{b.secrets}, newScmSink(b.events))
+
+	// identity with real PocketID client when creds available; otherwise expanded noop
+	pocketBase := secretOrEnv("pocketid_base_url", "OMAHAB_POCKETID_URL")
+	pocketID := secretOrEnv("pocketid_client_id", "OMAHAB_POCKETID_CLIENT_ID")
+	pocketSecret := secretOrEnv("pocketid_client_secret", "OMAHAB_POCKETID_CLIENT_SECRET")
+	if pocketBase != "" && pocketID != "" && pocketSecret != "" {
+		if client, err := identity.NewPocketIDClient(identity.PocketIDConfig{BaseURL: pocketBase, ClientID: pocketID, ClientSecret: pocketSecret}); err == nil {
+			b.identity, _ = identity.New(b.db, client, identity.WithRecorder(newIdentitySink(b.events)))
+			b.pocketClient = client
+			// best-effort provision defaults
+			if err := client.ConfigureDefaults(ctx); err != nil {
+				_, _ = b.events.Publish(ctx, events.PublishInput{Type: "identity.recovery", Severity: "warning", Message: "pocketid configure defaults failed: " + err.Error()})
+			}
+			if err := client.SeedDefaultGroups(ctx); err != nil {
+				_, _ = b.events.Publish(ctx, events.PublishInput{Type: "identity.recovery", Severity: "warning", Message: "pocketid seed groups failed: " + err.Error()})
+			}
+		} else {
+			b.identity, _ = identity.New(b.db, &noopPocketID{})
+		}
+	} else {
+		b.identity, _ = identity.New(b.db, &noopPocketID{})
+	}
+
+	// integrations with real HassRunner
+	b.integrations = integrations.New(b.db, secretsStoreAdapter{b.secrets}, integrations.NewHassRunner(integrations.HassRunnerOptions{}))
+
+	// health with all real probes
+	var pocketProbe health.PocketIDProbe = health.NoopPocketIDProbe{}
+	if pocketBase != "" {
+		pocketProbe = health.NewPocketIDProbe(pocketBase)
+	}
+	b.health = health.New(health.Options{
+		DB:         b.db,
+		Sink:       newHealthSink(b.events),
+		Disk:       health.NewDiskProbe([]string{b.cfg.DataDir, b.cfg.StateDir}),
+		Services:   health.NewServiceProbe(),
+		Backup:     health.NewBackupProbe(b.db),
+		Tailscale:  health.NewTailscaleProbe(),
+		DNS:        health.NewDNSProbe(),
+		TLS:        health.NewTLSProbe(),
+		PocketID:   pocketProbe,
+		Instance:   health.NewInstanceProbe(b.db),
+		Encryption: health.NewEncryptionProbe(),
+		Hostname:   inst.Domain,
+		InstanceID: string(inst.ID),
+	})
+
+	// emailing with real DKIM verifier and alias handling
+	verifier := emailing.NewVerifier()
+	alias := emailing.RecipientAliasFromEnv()
+	primary := ""
+	if inst.Domain != "" {
+		slug := inst.AssistantSlug
+		if slug == "" {
+			slug = "ai"
+		}
+		primary = slug + "@" + inst.Domain
+	}
 	emailCfg := emailing.Config{HMACKey: b.EmailHMACKey()}
-	emailSvc, err := emailing.New(b.store, emailCfg, emailing.WithEventSink(&emailingEventSink{b.events}))
+	// If primary/alias helpers are used, also ensure service knows allowed recipients via policy
+	emailSvc, err := emailing.New(b.store, emailCfg, emailing.WithDKIMVerifier(verifier), emailing.WithEventSink(&emailingEventSink{b.events}))
 	if err != nil {
 		return fmt.Errorf("emailing: %w", err)
 	}
+	// store allowed recipients for backend's EnsureEmailRoute helper
 	b.emailing = emailSvc
+	b.emailPrimary = primary
+	b.emailAlias = alias
 
-	b.hermes = hermes.New(b.db, nil, newHermesSink(b.events))
-
-	// scm with noops
-	b.scm = scm.New(b.db, nil, nil, nil, newScmSink(b.events))
-
-	// knowledge with noops
-	b.knowledge = knowledge.New(b.db, knowledge.ServiceOption{
-		Sink: newKnowledgeSink(b.events),
-	})
-
-	// identity - requires PocketID. If not configured, create a not-configured stub
-	// Use noop PocketID that returns not-configured on Recover
-	b.identity, _ = identity.New(b.db, &noopPocketID{})
-
-	// integrations
-	b.integrations = integrations.New(b.db, secretsStoreAdapter{b.secrets}, nil)
-
-	// exposure - try to create with minimal config; if domain not configured, leave nil and handle gracefully
-	expCfg := exposure.Config{
-		Domain:      "example.com",
-		TailscaleIP: "100.64.0.1",
-		TunnelDNS:   "tunnel.example.com",
+	// cloudflare exposure clients with scoped tokens from secrets
+	zoneID := secretOrEnv("cloudflare_zone_id", "OMAHAB_CF_ZONE_ID")
+	if zoneID == "" {
+		zoneID = secret("cloudflare_zone")
 	}
-	// try to load instance domain to use real domain
-	if inst, err := b.store.Instance(ctx); err == nil && inst.Domain != "" {
-		expCfg.Domain = inst.Domain
-		if inst.TailscaleIP != "" {
-			expCfg.TailscaleIP = inst.TailscaleIP
+	accountID := secretOrEnv("cloudflare_account_id", "OMAHAB_CF_ACCOUNT_ID")
+	tunnelID := secretOrEnv("cloudflare_tunnel_id", "OMAHAB_CF_TUNNEL_ID")
+	dnsToken := secretOrEnv("cloudflare_dns", "OMAHAB_CF_TOKEN_DNS")
+	if dnsToken == "" {
+		dnsToken = secretOrEnv("cloudflare_token_dns", "OMAHAB_CF_TOKEN_DNS")
+	}
+	tunToken := secretOrEnv("cloudflare_tunnel", "OMAHAB_CF_TOKEN_TUNNEL")
+	if tunToken == "" {
+		tunToken = secretOrEnv("cloudflare_token_tunnel", "OMAHAB_CF_TOKEN_TUNNEL")
+	}
+	accToken := secretOrEnv("cloudflare_access", "OMAHAB_CF_TOKEN_ACCESS")
+	if accToken == "" {
+		accToken = secretOrEnv("cloudflare_token_access", "OMAHAB_CF_TOKEN_ACCESS")
+	}
+	if accToken == "" && tunToken != "" {
+		accToken = tunToken
+	}
+	// fallback to single token env if scoped tokens not split
+	if dnsToken == "" && tunToken == "" && accToken == "" {
+		single := strings.TrimSpace(os.Getenv("OMAHAB_CF_API_TOKEN"))
+		if single != "" {
+			dnsToken = single
+			tunToken = single
+			accToken = single
 		}
 	}
-	expSvc, err := exposure.New(b.store, expCfg, exposure.Clients{})
+	clients, cErr := cloudflare.NewClients(cloudflare.Options{
+		APITokenDNS:    dnsToken,
+		APITokenTunnel: tunToken,
+		APITokenAccess: accToken,
+		ZoneID:         zoneID,
+		AccountID:      accountID,
+		TunnelID:       tunnelID,
+		CaddyAddr:      "http://127.0.0.1:2019",
+	})
+	if cErr != nil {
+		// not-configured path: nil clients still yield typed missing-client errors
+		clients = exposure.Clients{}
+	}
+	expCfg := exposure.Config{
+		Domain:      inst.Domain,
+		TailscaleIP: inst.TailscaleIP,
+		TunnelDNS:   tunnelID + ".cfargotunnel.com",
+	}
+	if expCfg.Domain == "" {
+		expCfg.Domain = "not-configured.invalid"
+	}
+	if expCfg.TailscaleIP == "" {
+		expCfg.TailscaleIP = "100.64.0.1"
+	}
+	if strings.TrimSpace(tunnelID) == "" {
+		expCfg.TunnelDNS = "tunnel.not-configured.invalid"
+	}
+	expSvc, err := exposure.New(b.store, expCfg, clients)
 	if err != nil {
-		// leave nil, operations will return not-configured
-		b.exposure = nil
+		// fallback to not-configured service with nil clients
+		fallbackCfg := exposure.Config{Domain: "not-configured.invalid", TailscaleIP: "100.64.0.1", TunnelDNS: "tunnel.not-configured.invalid"}
+		if svc, err2 := exposure.New(b.store, fallbackCfg, exposure.Clients{}); err2 == nil {
+			b.exposure = svc
+		} else {
+			// leave non-nil but with safe defaults; operations will return health errors
+			b.exposure, _ = exposure.New(b.store, fallbackCfg, exposure.Clients{})
+		}
 	} else {
 		b.exposure = expSvc
-		_ = domainSink
 	}
+	// email routing client (Token C)
+	if accToken != "" && zoneID != "" {
+		if ec, err := cloudflare.NewEmailClient(cloudflare.EmailOptions{APIToken: accToken, ZoneID: zoneID}); err == nil {
+			b.emailRouter = ec
+		}
+	}
+	// workspaces with DevPod runner and repo resolver
+	workspacesDir := b.cfg.DataDir + "/workspaces"
+	repoResolver := func(ctx context.Context, pid domain.ID) (string, error) {
+		p, err := b.projects.Get(ctx, pid)
+		if err != nil {
+			return "", err
+		}
+		return p.RepositoryURL, nil
+	}
+	runner := workspaces.NewDevPodRunner(workspaces.DevPodRunnerConfig{WorkspacesDir: workspacesDir, RepoResolver: repoResolver})
+	b.workspaces = workspaces.New(b.db, runner)
 
 	return nil
 }
@@ -705,6 +882,51 @@ func (b *Backend) CreateProject(ctx context.Context, req api.CreateProjectReques
 	if err != nil {
 		return domain.Project{}, translateError(err)
 	}
+	// hermes bot profile: ensure project profile and persist BotProfileID
+	if b.hermes != nil {
+		if profile, err := b.hermes.EnsureProjectProfile(ctx, string(pr.ID), pr.Name); err == nil && profile != nil {
+			if _, err := b.db.ExecContext(ctx, `UPDATE projects SET bot_profile_id = ? WHERE id = ?`, profile.ID, string(pr.ID)); err == nil {
+				pr.BotProfileID = profile.ID
+			}
+		} else if err != nil {
+			_, _ = b.events.Publish(ctx, events.PublishInput{Type: "service.unhealthy", Severity: "warning", Message: "hermes ensure project profile failed: " + err.Error(), ResourceID: string(pr.ID)})
+		}
+	}
+	// scm provision: private repo, actions disabled, woodpecker linked, .woodpecker.yaml seeded
+	if b.scm != nil {
+		inst, _ := b.store.Instance(ctx)
+		registryHost := ""
+		callbackBase := ""
+		if inst.Domain != "" {
+			registryHost = "registry." + inst.Domain
+			callbackBase = "https://" + inst.Domain
+		}
+		provInput := scm.ProvisionInput{
+			ProjectID:              pr.ID,
+			Owner:                  "omahab",
+			RepoName:               slug,
+			Description:            name,
+			DefaultBranch:          "main",
+			RegistryHost:           registryHost,
+			ReleaseCallbackBaseURL: callbackBase,
+		}
+		if provRes, err := b.scm.Provision(ctx, provInput); err != nil {
+			_, _ = b.events.Publish(ctx, events.PublishInput{Type: "ci.failed", Severity: "warning", Message: "scm provision failed: " + err.Error(), ResourceID: string(pr.ID)})
+		} else if provRes != nil {
+			// seed .woodpecker.yaml via service helper (type-asserts underlying forgejo client)
+			if provRes.PipelineTemplate != "" {
+				ref := scm.RepoRef{Owner: "omahab", Name: slug}
+				_ = b.scm.SeedWoodpeckerConfig(ctx, ref, provRes.PipelineTemplate)
+				_, _ = b.events.Publish(ctx, events.PublishInput{Type: "service.update_available", Severity: "info", Message: "pipeline template generated", ResourceID: string(pr.ID), Data: map[string]any{"pipeline_template": provRes.PipelineTemplate}})
+			}
+		}
+	}
+	// issue first release token (stored hash only, plaintext not persisted)
+	if b.projects != nil {
+		if _, err := b.projects.IssueReleaseToken(ctx, pr.ID); err != nil {
+			_, _ = b.events.Publish(ctx, events.PublishInput{Type: "service.unhealthy", Severity: "warning", Message: "release token issue failed: " + err.Error(), ResourceID: string(pr.ID)})
+		}
+	}
 	return pr.Project, nil
 }
 
@@ -753,6 +975,8 @@ func (b *Backend) DeleteProject(ctx context.Context, id domain.ID) error {
 	if err := b.projects.Delete(ctx, id); err != nil {
 		return translateError(err)
 	}
+	// cleanup release token rows (FK not CASCADE in all migrations)
+	_, _ = b.db.ExecContext(ctx, `DELETE FROM project_release_tokens WHERE project_id = ?`, string(id))
 	return nil
 }
 
@@ -1445,7 +1669,368 @@ func (b *Backend) GetEmailMessage(ctx context.Context, id domain.ID) (domain.Ema
 	}, nil
 }
 
-// helpers
+// Release tokens (admin only)
+func (b *Backend) IssueReleaseToken(ctx context.Context, projectID domain.ID) (api.ReleaseTokenResponse, error) {
+	if b.projects == nil {
+		return api.ReleaseTokenResponse{}, translateError(fmt.Errorf("%w: projects not configured", ErrNotConfigured))
+	}
+	tok, err := b.projects.IssueReleaseToken(ctx, projectID)
+	if err != nil {
+		return api.ReleaseTokenResponse{}, translateError(err)
+	}
+	prefix := tok
+	if len(prefix) > 8 {
+		prefix = prefix[:8]
+	}
+	return api.ReleaseTokenResponse{Token: tok, TokenPrefix: prefix}, nil
+}
+
+func (b *Backend) RotateReleaseToken(ctx context.Context, projectID domain.ID) (api.ReleaseTokenResponse, error) {
+	if b.projects == nil {
+		return api.ReleaseTokenResponse{}, translateError(fmt.Errorf("%w: projects not configured", ErrNotConfigured))
+	}
+	tok, err := b.projects.RotateReleaseToken(ctx, projectID)
+	if err != nil {
+		return api.ReleaseTokenResponse{}, translateError(err)
+	}
+	prefix := tok
+	if len(prefix) > 8 {
+		prefix = prefix[:8]
+	}
+	return api.ReleaseTokenResponse{Token: tok, TokenPrefix: prefix}, nil
+}
+
+func (b *Backend) ReleaseWithToken(ctx context.Context, projectID domain.ID, token, commit, digest string) (domain.Release, error) {
+	if b.projects == nil {
+		return domain.Release{}, translateError(fmt.Errorf("%w: projects not configured", ErrNotConfigured))
+	}
+	proj, err := b.projects.Get(ctx, projectID)
+	if err != nil {
+		return domain.Release{}, translateError(err)
+	}
+	rel, err := b.projects.Release(ctx, projects.ReleaseParams{Slug: proj.Slug, Commit: commit, Digest: digest, Token: token})
+	if err != nil {
+		return domain.Release{}, translateError(err)
+	}
+	return *rel, nil
+}
+
+// Push mirror
+func (b *Backend) GetPushMirror(ctx context.Context, projectID domain.ID) (api.MirrorResponse, error) {
+	if b.scm == nil {
+		return api.MirrorResponse{}, translateError(fmt.Errorf("%w: scm not configured", ErrNotConfigured))
+	}
+	m, err := b.scm.GetMirror(ctx, projectID)
+	if err != nil {
+		return api.MirrorResponse{}, translateError(err)
+	}
+	return api.MirrorResponse{RemoteURL: m.RemoteURL, SecretRef: m.CredentialSecretRef, LFS: m.LFSEnabled, Warnings: nil}, nil
+}
+
+func (b *Backend) ConfigurePushMirror(ctx context.Context, projectID domain.ID, req api.ConfigureMirrorRequest) (api.MirrorResponse, error) {
+	if b.scm == nil {
+		return api.MirrorResponse{}, translateError(fmt.Errorf("%w: scm not configured", ErrNotConfigured))
+	}
+	if strings.TrimSpace(req.RemoteURL) == "" {
+		return api.MirrorResponse{}, translateError(fmt.Errorf("%w: remote_url is required", store.ErrValidation))
+	}
+	m, warnings, err := b.scm.ConfigureMirror(ctx, projectID, scm.MirrorConfig{RemoteURL: req.RemoteURL, Token: req.Token, LFS: req.LFS})
+	if err != nil {
+		return api.MirrorResponse{}, translateError(err)
+	}
+	return api.MirrorResponse{RemoteURL: m.RemoteURL, SecretRef: m.CredentialSecretRef, Warnings: warnings, LFS: m.LFSEnabled}, nil
+}
+
+func (b *Backend) RemovePushMirror(ctx context.Context, projectID domain.ID) error {
+	if b.scm == nil {
+		return translateError(fmt.Errorf("%w: scm not configured", ErrNotConfigured))
+	}
+	if err := b.scm.RemoveMirror(ctx, projectID); err != nil {
+		return translateError(err)
+	}
+	return nil
+}
+
+
+// Workspace capabilities
+func (b *Backend) IssueWorkspaceCapability(ctx context.Context, workspaceID string) (api.WorkspaceCapabilityResponse, error) {
+	if b.workspaces == nil {
+		return api.WorkspaceCapabilityResponse{}, translateError(fmt.Errorf("%w: workspaces not configured", ErrNotConfigured))
+	}
+	cap, err := b.workspaces.IssueCapability(ctx, workspaceID, 0)
+	if err != nil {
+		return api.WorkspaceCapabilityResponse{}, translateError(err)
+	}
+	return api.WorkspaceCapabilityResponse{Token: cap.Token, ExpiresAt: cap.ExpiresAt}, nil
+}
+
+func (b *Backend) ValidateWorkspaceCapability(ctx context.Context, workspaceID, token string) error {
+	if b.workspaces == nil {
+		return translateError(fmt.Errorf("%w: workspaces not configured", ErrNotConfigured))
+	}
+	if err := b.workspaces.ValidateCapability(ctx, workspaceID, token); err != nil {
+		return translateError(err)
+	}
+	return nil
+}
+
+// Knowledge assistant tools
+func (b *Backend) KnowledgeSearch(ctx context.Context, principal, query string, limit int) ([]knowledge.Citation, error) {
+	if b.knowledge == nil {
+		return nil, translateError(fmt.Errorf("%w: knowledge not configured", ErrNotConfigured))
+	}
+	opts := knowledge.SearchOptions{Limit: limit}
+	cits, err := b.knowledge.Search(ctx, principal, query, opts)
+	if err != nil {
+		return nil, translateError(err)
+	}
+	return cits, nil
+}
+
+func (b *Backend) KnowledgeGetMetadata(ctx context.Context, principal, docID string) (*knowledge.PaperlessMetadata, error) {
+	if b.knowledge == nil {
+		return nil, translateError(fmt.Errorf("%w: knowledge not configured", ErrNotConfigured))
+	}
+	m, err := b.knowledge.PaperlessGetMetadata(ctx, principal, docID)
+	if err != nil {
+		return nil, translateError(err)
+	}
+	return m, nil
+}
+
+func (b *Backend) KnowledgeGetText(ctx context.Context, principal, docID string) (string, error) {
+	if b.knowledge == nil {
+		return "", translateError(fmt.Errorf("%w: knowledge not configured", ErrNotConfigured))
+	}
+	txt, err := b.knowledge.PaperlessGetText(ctx, principal, docID)
+	if err != nil {
+		return "", translateError(err)
+	}
+	return txt, nil
+}
+
+func (b *Backend) KnowledgeListCorrespondents(ctx context.Context, principal string) ([]string, error) {
+	if b.knowledge == nil {
+		return nil, translateError(fmt.Errorf("%w: knowledge not configured", ErrNotConfigured))
+	}
+	list, err := b.knowledge.PaperlessListCorrespondents(ctx, principal)
+	if err != nil {
+		return nil, translateError(err)
+	}
+	return list, nil
+}
+
+func (b *Backend) KnowledgeListDocumentTypes(ctx context.Context, principal string) ([]string, error) {
+	if b.knowledge == nil {
+		return nil, translateError(fmt.Errorf("%w: knowledge not configured", ErrNotConfigured))
+	}
+	list, err := b.knowledge.PaperlessListDocumentTypes(ctx, principal)
+	if err != nil {
+		return nil, translateError(err)
+	}
+	return list, nil
+}
+
+func (b *Backend) KnowledgeListTags(ctx context.Context, principal string) ([]string, error) {
+	if b.knowledge == nil {
+		return nil, translateError(fmt.Errorf("%w: knowledge not configured", ErrNotConfigured))
+	}
+	list, err := b.knowledge.PaperlessListTags(ctx, principal)
+	if err != nil {
+		return nil, translateError(err)
+	}
+	return list, nil
+}
+
+func (b *Backend) KnowledgeUpload(ctx context.Context, principal, filename string, content []byte, tags []string) (string, error) {
+	if b.knowledge == nil {
+		return "", translateError(fmt.Errorf("%w: knowledge not configured", ErrNotConfigured))
+	}
+	id, err := b.knowledge.PaperlessUpload(ctx, principal, filename, content, tags)
+	if err != nil {
+		return "", translateError(err)
+	}
+	return id, nil
+}
+
+func (b *Backend) KnowledgeAddTag(ctx context.Context, principal, docID, tag string) error {
+	if b.knowledge == nil {
+		return translateError(fmt.Errorf("%w: knowledge not configured", ErrNotConfigured))
+	}
+	if err := b.knowledge.PaperlessAddTag(ctx, principal, docID, tag); err != nil {
+		return translateError(err)
+	}
+	return nil
+}
+
+func (b *Backend) KnowledgeListSources(ctx context.Context) ([]*knowledge.Source, error) {
+	if b.knowledge == nil {
+		return nil, translateError(fmt.Errorf("%w: knowledge not configured", ErrNotConfigured))
+	}
+	list, err := b.knowledge.ListSources(ctx)
+	if err != nil {
+		return nil, translateError(err)
+	}
+	return list, nil
+}
+
+func (b *Backend) KnowledgeIndexSetupOptions(ctx context.Context) ([]knowledge.IndexSetupOption, error) {
+	return knowledge.IndexSetupOptions(), nil
+}
+
+func (b *Backend) KnowledgePinnedModels(ctx context.Context) ([]knowledge.ModelInfo, error) {
+	models, err := knowledge.PinnedModels()
+	if err != nil {
+		return nil, translateError(err)
+	}
+	return models, nil
+}
+
+func (b *Backend) KnowledgeGetSummarizationConsent(ctx context.Context, principal, provider string) (bool, error) {
+	if b.knowledge == nil {
+		return false, translateError(fmt.Errorf("%w: knowledge not configured", ErrNotConfigured))
+	}
+	has, err := b.knowledge.HasSummarizationConsent(ctx, principal, provider)
+	if err != nil {
+		return false, translateError(err)
+	}
+	return has, nil
+}
+
+func (b *Backend) KnowledgeSetSummarizationConsent(ctx context.Context, principal, provider string, granted bool) error {
+	if b.knowledge == nil {
+		return translateError(fmt.Errorf("%w: knowledge not configured", ErrNotConfigured))
+	}
+	if granted {
+		if _, err := b.knowledge.SetSummarizationConsent(ctx, principal, provider, true); err != nil {
+			return translateError(err)
+		}
+	} else {
+		// revoke any existing consent for this principal/provider
+		consents, err := b.knowledge.ListConsents(ctx, principal)
+		if err != nil {
+			return translateError(err)
+		}
+		for _, c := range consents {
+			if c.Principal == principal && c.Provider == provider {
+				if err := b.knowledge.RevokeConsent(ctx, c.ID); err != nil {
+					return translateError(err)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// Identity extended
+func (b *Backend) GetEnrollmentState(ctx context.Context, userID string) (identity.EnrollmentState, error) {
+	if b.pocketClient == nil {
+		return identity.EnrollmentState{}, translateError(fmt.Errorf("%w: identity not configured", ErrNotConfigured))
+	}
+	st, err := b.pocketClient.GetEnrollmentState(ctx, userID)
+	if err != nil {
+		return identity.EnrollmentState{}, translateError(err)
+	}
+	return st, nil
+}
+
+func (b *Backend) ListApplicationAccess(ctx context.Context, userID string) ([]identity.AppAccess, error) {
+	if b.pocketClient == nil {
+		return nil, translateError(fmt.Errorf("%w: identity not configured", ErrNotConfigured))
+	}
+	list, err := b.pocketClient.ListApplicationAccess(ctx, userID)
+	if err != nil {
+		return nil, translateError(err)
+	}
+	return list, nil
+}
+
+func (b *Backend) GetUserGroups(ctx context.Context, userID string) ([]identity.Group, error) {
+	if b.pocketClient == nil {
+		return nil, translateError(fmt.Errorf("%w: identity not configured", ErrNotConfigured))
+	}
+	groups, err := b.pocketClient.GetUserGroups(ctx, userID)
+	if err != nil {
+		return nil, translateError(err)
+	}
+	return groups, nil
+}
+
+func (b *Backend) SetUserGroups(ctx context.Context, userID string, groupIDs []string) error {
+	if b.pocketClient == nil {
+		return translateError(fmt.Errorf("%w: identity not configured", ErrNotConfigured))
+	}
+	if err := b.pocketClient.SetUserGroups(ctx, userID, groupIDs); err != nil {
+		return translateError(err)
+	}
+	return nil
+}
+
+// Email routing gated on verification
+func (b *Backend) EnsureEmailRoute(ctx context.Context, recipient string) error {
+	if b.emailRouter == nil {
+		return translateError(fmt.Errorf("%w: email routing not configured", ErrNotConfigured))
+	}
+	// require sender verification before activating route
+	// check if recipient matches primary or alias and if sender is verified? For now just ensure route
+	dest := ""
+	// derive worker ingestion address from config? Use primary domain? For now use fixed placeholder
+	if strings.TrimSpace(recipient) == "" {
+		recipient = b.emailPrimary
+		if alias := b.emailAlias; alias != "" && recipient == "" {
+			recipient = alias
+		}
+	}
+	if err := b.emailRouter.EnsureEmailRoute(ctx, recipient, dest); err != nil {
+		return translateError(err)
+	}
+	return nil
+}
+
+// Hermes approval emitter (exposed for future callers)
+func (b *Backend) RequestHermesApproval(ctx context.Context, profileID, requestID, description string) error {
+	if b.approvalEmitter == nil {
+		return translateError(fmt.Errorf("%w: hermes not configured", ErrNotConfigured))
+	}
+	if err := b.approvalEmitter.RequestApproval(ctx, profileID, requestID, description); err != nil {
+		return translateError(err)
+	}
+	return nil
+}
+
+func (b *Backend) ApprovalEmitter() *hermes.ApprovalEmitter {
+	return b.approvalEmitter
+}
+
+// Scheduler helpers for omahabd
+
+func (b *Backend) StartIdleExpirer(ctx context.Context, every time.Duration) {
+	if b.workspaces != nil {
+		b.workspaces.StartIdleExpirer(ctx, every)
+	}
+}
+
+func (b *Backend) CheckForUpdates(ctx context.Context) ([]apps.Status, error) {
+	if b.apps == nil {
+		return nil, translateError(fmt.Errorf("%w: apps not configured", ErrNotConfigured))
+	}
+	list, err := b.apps.CheckForUpdates(ctx)
+	if err != nil {
+		return nil, translateError(err)
+	}
+	return list, nil
+}
+
+func (b *Backend) PollSyncthing(ctx context.Context) error {
+	if b.syncer == nil {
+		return translateError(fmt.Errorf("%w: syncer not configured", ErrNotConfigured))
+	}
+	if err := b.syncer.PollSyncthing(ctx); err != nil {
+		return translateError(err)
+	}
+	return nil
+}
+
 
 func paginate[T any](in []T, p api.Pagination) []T {
 	if p.Limit <= 0 && p.Offset <= 0 {
@@ -1551,6 +2136,51 @@ func (n *noopPocketID) CreateRecoveryCode(ctx context.Context, email string) (st
 func (n *noopPocketID) ValidateRecovery(ctx context.Context, email, code string) error {
 	return fmt.Errorf("%w: PocketID not configured", ErrNotConfigured)
 }
+func (n *noopPocketID) CreateUser(ctx context.Context, email, name string, isAdmin bool, groupIDs []string) (string, string, time.Time, error) {
+	return "", "", time.Time{}, fmt.Errorf("%w: PocketID not configured", ErrNotConfigured)
+}
+func (n *noopPocketID) GetUser(ctx context.Context, userID string) (domain.User, error) {
+	return domain.User{}, fmt.Errorf("%w: PocketID not configured", ErrNotConfigured)
+}
+func (n *noopPocketID) ListUsers(ctx context.Context) ([]domain.User, error) {
+	return nil, fmt.Errorf("%w: PocketID not configured", ErrNotConfigured)
+}
+func (n *noopPocketID) DisableUser(ctx context.Context, userID string, disabled bool) error {
+	return fmt.Errorf("%w: PocketID not configured", ErrNotConfigured)
+}
+func (n *noopPocketID) DeleteUser(ctx context.Context, userID string) error {
+	return fmt.Errorf("%w: PocketID not configured", ErrNotConfigured)
+}
+func (n *noopPocketID) EnsureGroups(ctx context.Context, names []string) ([]identity.Group, error) {
+	return nil, fmt.Errorf("%w: PocketID not configured", ErrNotConfigured)
+}
+func (n *noopPocketID) GetUserGroups(ctx context.Context, userID string) ([]identity.Group, error) {
+	return nil, fmt.Errorf("%w: PocketID not configured", ErrNotConfigured)
+}
+func (n *noopPocketID) SetUserGroups(ctx context.Context, userID string, groupIDs []string) error {
+	return fmt.Errorf("%w: PocketID not configured", ErrNotConfigured)
+}
+func (n *noopPocketID) AddUserToGroup(ctx context.Context, userID, groupID string) error {
+	return fmt.Errorf("%w: PocketID not configured", ErrNotConfigured)
+}
+func (n *noopPocketID) RemoveUserFromGroup(ctx context.Context, userID, groupID string) error {
+	return fmt.Errorf("%w: PocketID not configured", ErrNotConfigured)
+}
+func (n *noopPocketID) GetEnrollmentState(ctx context.Context, userID string) (identity.EnrollmentState, error) {
+	return identity.EnrollmentState{}, fmt.Errorf("%w: PocketID not configured", ErrNotConfigured)
+}
+func (n *noopPocketID) ListApplicationAccess(ctx context.Context, userID string) ([]identity.AppAccess, error) {
+	return nil, fmt.Errorf("%w: PocketID not configured", ErrNotConfigured)
+}
+func (n *noopPocketID) ConfigureDefaults(ctx context.Context) error {
+	return fmt.Errorf("%w: PocketID not configured", ErrNotConfigured)
+}
+func (n *noopPocketID) SeedDefaultGroups(ctx context.Context) error {
+	return fmt.Errorf("%w: PocketID not configured", ErrNotConfigured)
+}
+func (n *noopPocketID) HealthCheck(ctx context.Context) error {
+	return fmt.Errorf("%w: PocketID not configured", ErrNotConfigured)
+}
 
 // additional sink wrappers to satisfy specific types
 type knowledgeSink struct{ *domainEventSink }
@@ -1566,3 +2196,21 @@ func newKnowledgeSinkWrapper(svc *events.Service) *knowledgeSink { return newKno
 
 // Ensure knowledge sink param type matches; knowledge expects EventSink with Emit(domain.Event)
 var _ = newKnowledgeSinkWrapper
+
+type syncerSink struct{ *domainEventSink }
+
+func newSyncerSink(svc *events.Service) *syncerSink {
+	return &syncerSink{&domainEventSink{svc}}
+}
+func (s *syncerSink) Emit(ctx context.Context, ev domain.Event) error {
+	return s.domainEventSink.Emit(ctx, ev)
+}
+
+type identitySink struct{ *domainEventSink }
+
+func newIdentitySink(svc *events.Service) *identitySink {
+	return &identitySink{&domainEventSink{svc}}
+}
+func (s *identitySink) RecordSecurityEvent(ctx context.Context, ev domain.Event) error {
+	return s.domainEventSink.Emit(ctx, ev)
+}

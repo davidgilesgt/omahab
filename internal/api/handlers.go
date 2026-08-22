@@ -941,3 +941,414 @@ func (s *Server) handleGetEmailMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, msg)
 }
+
+// --- release tokens (admin only) ---
+
+func (s *Server) handleIssueReleaseToken(w http.ResponseWriter, r *http.Request) {
+	id := domain.ID(chi.URLParam(r, "id"))
+	resp, err := s.backend.IssueReleaseToken(r.Context(), id)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, resp)
+}
+
+func (s *Server) handleRotateReleaseToken(w http.ResponseWriter, r *http.Request) {
+	id := domain.ID(chi.URLParam(r, "id"))
+	resp, err := s.backend.RotateReleaseToken(r.Context(), id)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleReleaseWithToken(w http.ResponseWriter, r *http.Request) {
+	id := domain.ID(chi.URLParam(r, "id"))
+	// Extract Bearer token from Authorization header for per-project release token
+	auth := r.Header.Get("Authorization")
+	token := ""
+	if strings.HasPrefix(auth, "Bearer ") {
+		token = strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+	} else {
+		token = r.Header.Get("X-Release-Token")
+		if token == "" {
+			token = r.URL.Query().Get("token")
+		}
+	}
+	if token == "" {
+		writeError(w, r, errUnauthorized("release token is required"))
+		return
+	}
+	var req CreateReleaseRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	rel, err := s.backend.ReleaseWithToken(r.Context(), id, token, req.Commit, req.Digest)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, rel)
+}
+
+// --- push mirror ---
+
+func (s *Server) handleGetPushMirror(w http.ResponseWriter, r *http.Request) {
+	id := domain.ID(chi.URLParam(r, "id"))
+	m, err := s.backend.GetPushMirror(r.Context(), id)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, m)
+}
+
+func (s *Server) handleConfigurePushMirror(w http.ResponseWriter, r *http.Request) {
+	id := domain.ID(chi.URLParam(r, "id"))
+	var req ConfigureMirrorRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	m, err := s.backend.ConfigurePushMirror(r.Context(), id, req)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, m)
+}
+
+func (s *Server) handleRemovePushMirror(w http.ResponseWriter, r *http.Request) {
+	id := domain.ID(chi.URLParam(r, "id"))
+	if err := s.backend.RemovePushMirror(r.Context(), id); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// --- workspace capabilities ---
+
+func (s *Server) handleIssueWorkspaceCapability(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	resp, err := s.backend.IssueWorkspaceCapability(r.Context(), id)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, resp)
+}
+
+func (s *Server) handleValidateWorkspaceCapability(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var req struct {
+		Token string `json:"token"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.Token) == "" {
+		writeError(w, r, errBadRequest("token is required"))
+		return
+	}
+	if err := s.backend.ValidateWorkspaceCapability(r.Context(), id, req.Token); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"valid": true})
+}
+
+// --- knowledge assistant tools ---
+
+func (s *Server) handleKnowledgeSearch(w http.ResponseWriter, r *http.Request) {
+	var req KnowledgeSearchRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	principal := req.Principal
+	if principal == "" {
+		principal = r.URL.Query().Get("principal")
+	}
+	if principal == "" {
+		principal = r.Header.Get("X-Principal")
+	}
+	cits, err := s.backend.KnowledgeSearch(r.Context(), principal, req.Query, req.Limit)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeList(w, cits)
+}
+
+func (s *Server) handleKnowledgeGetDocument(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	principal := r.URL.Query().Get("principal")
+	if principal == "" {
+		principal = r.Header.Get("X-Principal")
+	}
+	meta, err := s.backend.KnowledgeGetMetadata(r.Context(), principal, id)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	// also include text if available
+	txt, _ := s.backend.KnowledgeGetText(r.Context(), principal, id)
+	writeJSON(w, http.StatusOK, map[string]any{"metadata": meta, "text": txt})
+}
+
+func (s *Server) handleKnowledgeGetText(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	principal := r.URL.Query().Get("principal")
+	if principal == "" {
+		principal = r.Header.Get("X-Principal")
+	}
+	txt, err := s.backend.KnowledgeGetText(r.Context(), principal, id)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"text": txt})
+}
+
+func (s *Server) handleKnowledgeListCorrespondents(w http.ResponseWriter, r *http.Request) {
+	principal := r.URL.Query().Get("principal")
+	if principal == "" {
+		principal = r.Header.Get("X-Principal")
+	}
+	list, err := s.backend.KnowledgeListCorrespondents(r.Context(), principal)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeList(w, list)
+}
+
+func (s *Server) handleKnowledgeListDocumentTypes(w http.ResponseWriter, r *http.Request) {
+	principal := r.URL.Query().Get("principal")
+	if principal == "" {
+		principal = r.Header.Get("X-Principal")
+	}
+	list, err := s.backend.KnowledgeListDocumentTypes(r.Context(), principal)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeList(w, list)
+}
+
+func (s *Server) handleKnowledgeListTags(w http.ResponseWriter, r *http.Request) {
+	principal := r.URL.Query().Get("principal")
+	if principal == "" {
+		principal = r.Header.Get("X-Principal")
+	}
+	list, err := s.backend.KnowledgeListTags(r.Context(), principal)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeList(w, list)
+}
+
+func (s *Server) handleKnowledgeUpload(w http.ResponseWriter, r *http.Request) {
+	// content type may be multipart or json; for test we accept json with base64
+	if strings.Contains(r.Header.Get("Content-Type"), "multipart/form-data") {
+		if err := r.ParseMultipartForm(10 << 20); err != nil {
+			writeError(w, r, errBadRequest("invalid multipart"))
+			return
+		}
+		filename := r.FormValue("filename")
+		if filename == "" {
+			filename = "upload.bin"
+		}
+		principal := r.FormValue("principal")
+		if principal == "" {
+			principal = r.URL.Query().Get("principal")
+		}
+		var content []byte
+		if fh, _, err := r.FormFile("file"); err == nil {
+			content, _ = io.ReadAll(fh)
+			_ = fh.Close()
+		}
+		tags := r.Form["tags"]
+		id, err := s.backend.KnowledgeUpload(r.Context(), principal, filename, content, tags)
+		if err != nil {
+			writeError(w, r, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{"id": id})
+		return
+	}
+	var req KnowledgeUploadRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	id, err := s.backend.KnowledgeUpload(r.Context(), req.Principal, req.Filename, req.Content, req.Tags)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"id": id})
+}
+
+func (s *Server) handleKnowledgeAddTag(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	principal := r.URL.Query().Get("principal")
+	if principal == "" {
+		principal = r.Header.Get("X-Principal")
+	}
+	var req struct {
+		Tag       string `json:"tag"`
+		Principal string `json:"principal"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.Principal != "" {
+		principal = req.Principal
+	}
+	if strings.TrimSpace(req.Tag) == "" {
+		writeError(w, r, errBadRequest("tag is required"))
+		return
+	}
+	if err := s.backend.KnowledgeAddTag(r.Context(), principal, id, req.Tag); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleKnowledgeListSources(w http.ResponseWriter, r *http.Request) {
+	list, err := s.backend.KnowledgeListSources(r.Context())
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeList(w, list)
+}
+
+func (s *Server) handleKnowledgeIndexSetupOptions(w http.ResponseWriter, r *http.Request) {
+	opts, err := s.backend.KnowledgeIndexSetupOptions(r.Context())
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeList(w, opts)
+}
+
+func (s *Server) handleKnowledgePinnedModels(w http.ResponseWriter, r *http.Request) {
+	models, err := s.backend.KnowledgePinnedModels(r.Context())
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeList(w, models)
+}
+
+func (s *Server) handleKnowledgeGetConsent(w http.ResponseWriter, r *http.Request) {
+	principal := r.URL.Query().Get("principal")
+	provider := r.URL.Query().Get("provider")
+	if principal == "" || provider == "" {
+		writeError(w, r, errBadRequest("principal and provider are required"))
+		return
+	}
+	has, err := s.backend.KnowledgeGetSummarizationConsent(r.Context(), principal, provider)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"principal": principal, "provider": provider, "granted": has})
+}
+
+func (s *Server) handleKnowledgeSetConsent(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Principal string `json:"principal"`
+		Provider  string `json:"provider"`
+		Granted   bool   `json:"granted"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.Principal) == "" || strings.TrimSpace(req.Provider) == "" {
+		writeError(w, r, errBadRequest("principal and provider are required"))
+		return
+	}
+	if err := s.backend.KnowledgeSetSummarizationConsent(r.Context(), req.Principal, req.Provider, req.Granted); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"principal": req.Principal, "provider": req.Provider, "granted": req.Granted})
+}
+
+// --- identity extended ---
+
+func (s *Server) handleGetEnrollmentState(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	st, err := s.backend.GetEnrollmentState(r.Context(), id)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+func (s *Server) handleListApplicationAccess(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	list, err := s.backend.ListApplicationAccess(r.Context(), id)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeList(w, list)
+}
+
+func (s *Server) handleGetUserGroups(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	groups, err := s.backend.GetUserGroups(r.Context(), id)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeList(w, groups)
+}
+
+func (s *Server) handleSetUserGroups(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var req struct {
+		GroupIDs []string `json:"group_ids"`
+		Groups   []string `json:"groups"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	gids := req.GroupIDs
+	if len(gids) == 0 {
+		gids = req.Groups
+	}
+	if err := s.backend.SetUserGroups(r.Context(), id, gids); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// --- email routes ---
+
+func (s *Server) handleEnsureEmailRoute(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Recipient string `json:"recipient"`
+	}
+	if r.ContentLength > 0 {
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+	}
+	if req.Recipient == "" {
+		req.Recipient = r.URL.Query().Get("recipient")
+	}
+	if err := s.backend.EnsureEmailRoute(r.Context(), req.Recipient); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}

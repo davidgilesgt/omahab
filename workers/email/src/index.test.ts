@@ -49,4 +49,20 @@ describe("validateEnv", () => {
     expect(validateEnv({ ...base, HMAC_KEY_ID: "key-1" }).hmacKeyId).toBe("key-1");
     expect(() => validateEnv({ ...base, HMAC_KEY_ID: "bad id!" })).toThrow();
   });
+
+  it("accepts optional RECIPIENT_ALIAS sharing domain", () => {
+    const cfg = validateEnv({ ...base, RECIPIENT_ALIAS: "alias@example.com" });
+    expect(cfg.recipientAlias).toBe("alias@example.com");
+    expect(cfg.allowedRecipients.has("alias@example.com")).toBe(true);
+    expect(cfg.allowedRecipients.has("ai@example.com")).toBe(true);
+  });
+
+  it("fails closed on invalid alias", () => {
+    expect(() => validateEnv({ ...base, RECIPIENT_ALIAS: "not-an-email" })).toThrow();
+    expect(() => validateEnv({ ...base, RECIPIENT_ALIAS: "ai@example.com" })).toThrow(/differ/);
+  });
+
+  it("fails closed when alias domain mismatches", () => {
+    expect(() => validateEnv({ ...base, RECIPIENT_ALIAS: "alias@other.com" })).toThrow(/domain/);
+  });
 });

@@ -147,6 +147,7 @@ type Options struct {
 	TLS           TLSProbe
 	PocketID      PocketIDProbe
 	Instance      InstanceProbe
+	Encryption    EncryptionProbe
 	Now           func() time.Time
 	MinInterval   time.Duration // storm suppression: don't re-emit same component within this interval
 	DiskThreshold float64       // percent used that is considered low disk (default 85)
@@ -155,7 +156,6 @@ type Options struct {
 	Hostname      string
 	InstanceID    string
 }
-
 // Service aggregates host health and emits changes without storms.
 type Service struct {
 	db            *sql.DB
@@ -168,6 +168,7 @@ type Service struct {
 	tls           TLSProbe
 	pocketID      PocketIDProbe
 	instance      InstanceProbe
+	encryption    EncryptionProbe
 	now           func() time.Time
 	minInterval   time.Duration
 	diskThreshold float64
@@ -211,6 +212,9 @@ func New(opts Options) *Service {
 	if opts.Instance == nil {
 		opts.Instance = NoopInstanceProbe{}
 	}
+	if opts.Encryption == nil {
+		opts.Encryption = NoopEncryptionProbe{}
+	}
 	if opts.MinInterval == 0 {
 		opts.MinInterval = 15 * time.Minute
 	}
@@ -219,9 +223,6 @@ func New(opts Options) *Service {
 	}
 	if opts.BackupStale == 0 {
 		opts.BackupStale = 24 * time.Hour
-	}
-	if opts.VerifyStale == 0 {
-		opts.VerifyStale = 7 * 24 * time.Hour
 	}
 	return &Service{
 		db:            opts.DB,
@@ -234,6 +235,7 @@ func New(opts Options) *Service {
 		tls:           opts.TLS,
 		pocketID:      opts.PocketID,
 		instance:      opts.Instance,
+		encryption:    opts.Encryption,
 		now:           opts.Now,
 		minInterval:   opts.MinInterval,
 		diskThreshold: opts.DiskThreshold,
@@ -411,6 +413,22 @@ func (s *Service) Check(ctx context.Context) (*Report, error) {
 		checks = append(checks, Check{Name: "instance", Status: "healthy", Message: "instance identity ok"})
 	}
 
+	// Encryption / LUKS
+	if s.encryption != nil {
+		enc, detail, encErr := s.encryption.CheckEncryption(ctx)
+		if encErr != nil {
+			checks = append(checks, Check{Name: "encryption", Status: "unknown", Message: redactDetail(encErr.Error())})
+		} else if !enc {
+			msg := "unencrypted filesystem detected"
+			if detail != "" {
+				msg = detail
+			}
+			checks = append(checks, Check{Name: "encryption", Status: "degraded", Message: msg, Detail: encryptionRecommendation})
+		} else {
+			checks = append(checks, Check{Name: "encryption", Status: "healthy", Message: "encrypted storage ok"})
+		}
+	}
+
 	// Overall healthy if no unhealthy; degraded counts as not healthy? Keep simple: healthy only if all checks healthy or degraded? But spec says differentiate degraded vs unhealthy.
 	// Report.Healthy is true only if every check is healthy. Degraded makes it false as well to surface.
 	for _, c := range checks {
@@ -568,6 +586,8 @@ func componentToEventType(component string) string {
 		return "backup.failed"
 	case component == "backup_verified":
 		return "backup.restored" // using restored type to signal verified vs created; distinct message
+	case component == "encryption":
+		return "host.disk_low"
 	case component == "tailscale" || component == "dns" || component == "tls" || component == "pocketid" || component == "instance":
 		return "service.unhealthy"
 	default:

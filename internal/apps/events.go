@@ -23,6 +23,7 @@ const (
 	EventUninstallFailed = "app.uninstall_failed"
 	EventUnhealthy       = "service.unhealthy"
 	EventHealthy         = "service.healthy"
+	EventUpdateAvailable = "service.update_available"
 )
 
 // Event severities used by this controller.

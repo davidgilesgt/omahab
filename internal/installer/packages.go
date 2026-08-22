@@ -50,8 +50,11 @@ func PackagesForOS(osID string) ([]string, error) {
 }
 
 func (s *Service) runPackagesStep(ctx context.Context, opts InstallOptions) RunResult {
-	_ = opts
-
+	emit := func(line string) {
+		if opts.Emit != nil {
+			opts.Emit(StepLog{Step: StepPackages, Line: line})
+		}
+	}
 	failed := func(err error) RunResult {
 		return RunResult{Step: StepPackages, Status: JournalFailed, Error: err.Error()}
 	}
@@ -79,6 +82,7 @@ func (s *Service) runPackagesStep(ctx context.Context, opts InstallOptions) RunR
 	default:
 		return failed(fmt.Errorf("unsupported OS %q: need debian trixie or ubuntu resolute", info.ID))
 	}
+	emit(fmt.Sprintf("resolved OS %s %s", osID, codename))
 
 	tailscaleKeyURL := fmt.Sprintf("https://pkgs.tailscale.com/stable/%s/%s.noarmor.gpg", osID, codename)
 	tailscaleSourceLine := fmt.Sprintf("deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/%s %s main", osID, codename)
@@ -92,14 +96,22 @@ func (s *Service) runPackagesStep(ctx context.Context, opts InstallOptions) RunR
 		return failed(fmt.Errorf("download file probe not configured"))
 	}
 	if !s.probes.FileExists(tailscaleKeyringPath) {
+		emit("downloading tailscale keyring")
 		if err := s.probes.DownloadFile(ctx, tailscaleKeyURL, tailscaleKeyringPath); err != nil {
 			return failed(fmt.Errorf("download tailscale keyring: %w", err))
 		}
+		emit("downloaded tailscale keyring")
+	} else {
+		emit("tailscale keyring already present")
 	}
 	if !s.probes.FileExists(cloudflareKeyringPath) {
+		emit("downloading cloudflare keyring")
 		if err := s.probes.DownloadFile(ctx, cloudflareKeyringURL, cloudflareKeyringPath); err != nil {
 			return failed(fmt.Errorf("download cloudflare keyring: %w", err))
 		}
+		emit("downloaded cloudflare keyring")
+	} else {
+		emit("cloudflare keyring already present")
 	}
 
 	// 3. Write apt source files — skip when existing content is byte-identical.
@@ -122,9 +134,11 @@ func (s *Service) runPackagesStep(ctx context.Context, opts InstallOptions) RunR
 		return nil
 	}
 
+	emit("writing apt source for tailscale")
 	if err := writeSource(tailscaleSourcePath, tailscaleSourceLine); err != nil {
 		return failed(fmt.Errorf("write tailscale source: %w", err))
 	}
+	emit("writing apt source for cloudflared")
 	if err := writeSource(cloudflareSourcePath, cloudflareSourceLine); err != nil {
 		return failed(fmt.Errorf("write cloudflared source: %w", err))
 	}
@@ -133,9 +147,11 @@ func (s *Service) runPackagesStep(ctx context.Context, opts InstallOptions) RunR
 	if s.probes.APTRefresh == nil {
 		return failed(fmt.Errorf("apt refresh probe not configured"))
 	}
+	emit("running apt update")
 	if err := s.probes.APTRefresh(ctx); err != nil {
 		return failed(fmt.Errorf("apt refresh: %w", err))
 	}
+	emit("apt update completed")
 
 	// 5. APT install.
 	if s.probes.APTInstall == nil {
@@ -145,9 +161,11 @@ func (s *Service) runPackagesStep(ctx context.Context, opts InstallOptions) RunR
 	if err != nil {
 		return failed(err)
 	}
+	emit(fmt.Sprintf("installing packages: %s", strings.Join(pkgs, ", ")))
 	if err := s.probes.APTInstall(ctx, pkgs...); err != nil {
 		return failed(fmt.Errorf("apt install: %w", err))
 	}
+	emit("package installation completed")
 
 	// 6. Write 20auto-upgrades — skip when identical.
 	{
@@ -157,9 +175,12 @@ func (s *Service) runPackagesStep(ctx context.Context, opts InstallOptions) RunR
 			if s.probes.WriteFile == nil {
 				return failed(fmt.Errorf("write file probe not configured"))
 			}
+			emit("writing unattended-upgrades config")
 			if err := s.probes.WriteFile(autoUpgradesPath, []byte(desired), 0o644); err != nil {
 				return failed(fmt.Errorf("write auto-upgrades config: %w", err))
 			}
+		} else {
+			emit("unattended-upgrades config already present")
 		}
 	}
 

@@ -1,0 +1,21 @@
+================================================================
+                     Omahab install receipt                     
+================================================================
+host:      amd64 Debian GNU/Linux 13 (trixie)
+version:   0.1.0
+installed: 2026-08-21T12:00:00Z
+arch:      amd64
+os:        Debian GNU/Linux 13 (trixie)
+----------------------------------------------------------------
+steps:
+  preflight            2s ✓
+  ssh_keys             1s ✓
+  packages             7s ✓
+----------------------------------------------------------------
+next actions:
+  tailscale: sudo tailscale up
+  dashboard: http://<tailscale-ip>:8484
+             http://<hostname>.ts.net:8484
+  health:    omahab doctor
+  docs:      README.md + DESIGN.md §7
+================================================================
