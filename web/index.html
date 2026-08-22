@@ -6,6 +6,28 @@
     <meta name="color-scheme" content="dark light" />
     <meta name="theme-color" content="#171815" />
     <title>Omahab</title>
+    <script>
+      (function() {
+        try {
+          var t = localStorage.getItem("omahab.theme");
+          if (t && t !== "system") {
+            document.documentElement.dataset.theme = t;
+          } else if (!t) {
+            // Respect system preference for initial paint when no explicit choice
+            if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
+              document.documentElement.dataset.theme = "dark";
+            }
+          }
+          // Sync theme-color meta to match
+          var meta = document.querySelector('meta[name="theme-color"]');
+          if (meta) {
+            var theme = document.documentElement.dataset.theme;
+            if (theme === "dark") meta.content = "#0f0f0f";
+            else if (theme === "light") meta.content = "#f4f1e9";
+          }
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

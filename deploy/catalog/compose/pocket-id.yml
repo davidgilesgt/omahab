@@ -47,6 +47,3 @@ secrets:
 volumes:
   pocket_id_data:
     name: pocket_id_data
-networks:
-  omahab:
-    external: true

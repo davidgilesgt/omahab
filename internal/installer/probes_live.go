@@ -430,23 +430,47 @@ func liveActiveSSHSession() (bool, string, error) {
 
 func liveSecondSessionProbe(ctx context.Context) (bool, error) {
 	// Check if there are at least 2 sshd sessions for the current user.
-	// Implemented via "who" or /proc inspection.
+	// Modern Ubuntu 26.04 uses systemd sshd-session with no pts/ in who; fallback to ss and ps.
 	out, err := exec.CommandContext(ctx, "who").Output()
-	if err != nil {
-		return false, err
-	}
-	count := 0
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
+	if err == nil {
+		count := 0
+		for _, line := range strings.Split(string(out), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			if strings.Contains(line, "pts/") || strings.Contains(line, "sshd-session") || strings.Contains(line, "192.168.") {
+				count++
+			}
 		}
-		// who output typically contains pts/ entries
-		if strings.Contains(line, "pts/") {
-			count++
+		if count >= 2 {
+			return true, nil
 		}
 	}
-	return count >= 2, nil
+	// Fallback: count established SSH connections via ss
+	if out2, err2 := exec.CommandContext(ctx, "ss", "-tn", "state", "established").Output(); err2 == nil {
+		lines := strings.Split(string(out2), "\n")
+		cnt := 0
+		for _, l := range lines {
+			if strings.Contains(l, ":22") {
+				cnt++
+			}
+		}
+		if cnt >= 2 {
+			return true, nil
+		}
+	}
+	// Fallback: count sshd processes for user via ps
+	if out3, err3 := exec.CommandContext(ctx, "ps", "-o", "cmd=").Output(); err3 == nil {
+		cnt := strings.Count(string(out3), "sshd-session")
+		if cnt == 0 {
+			cnt = strings.Count(string(out3), "sshd: omahab")
+		}
+		if cnt >= 2 {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // --- systemd rollback timer ---

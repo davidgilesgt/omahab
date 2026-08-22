@@ -32,7 +32,7 @@ func RunPreflight(ctx context.Context, probes Probes) ([]CheckResult, error) {
 	var results []CheckResult
 	add := func(r CheckResult) { results = append(results, r) }
 
-	// 1. Debian 13
+	// 1. OS (Debian 13 or Ubuntu 26.04)
 	add(checkDebian(probes))
 	// 2. Architecture
 	add(checkArch(probes))
@@ -83,25 +83,39 @@ func checkDebian(probes Probes) CheckResult {
 	if err != nil {
 		return CheckResult{Name: "os", Level: LevelFail, Message: fmt.Sprintf("cannot determine OS: %v", err), Remediation: "ensure /etc/os-release is readable", Dirty: false}
 	}
-	if strings.ToLower(info.ID) != "debian" {
+	id := strings.ToLower(info.ID)
+	switch id {
+	case "debian":
+		if info.VersionID != "13" {
+			return CheckResult{
+				Name:        "os",
+				Level:       LevelFail,
+				Message:     fmt.Sprintf("unsupported Debian version %q (need 13)", info.VersionID),
+				Remediation: "install Debian 13 (trixie)",
+				Dirty:       true,
+			}
+		}
+		return CheckResult{Name: "os", Level: LevelPass, Message: fmt.Sprintf("Debian %s (%s)", info.VersionID, info.Codename)}
+	case "ubuntu":
+		if info.VersionID != "26.04" {
+			return CheckResult{
+				Name:        "os",
+				Level:       LevelFail,
+				Message:     fmt.Sprintf("unsupported Ubuntu version %q (need 26.04)", info.VersionID),
+				Remediation: "install Ubuntu 26.04 LTS (resolute)",
+				Dirty:       true,
+			}
+		}
+		return CheckResult{Name: "os", Level: LevelPass, Message: fmt.Sprintf("Ubuntu %s (%s)", info.VersionID, info.Codename)}
+	default:
 		return CheckResult{
 			Name:        "os",
 			Level:       LevelFail,
-			Message:     fmt.Sprintf("unsupported OS %q (need Debian 13)", info.Pretty),
-			Remediation: "install Debian 13 minimal (trixie)",
+			Message:     fmt.Sprintf("unsupported OS %q (need Debian 13 or Ubuntu 26.04)", info.Pretty),
+			Remediation: "install Debian 13 minimal (trixie) or Ubuntu 26.04 LTS (resolute)",
 			Dirty:       true,
 		}
 	}
-	if info.VersionID != "13" {
-		return CheckResult{
-			Name:        "os",
-			Level:       LevelFail,
-			Message:     fmt.Sprintf("unsupported Debian version %q (need 13)", info.VersionID),
-			Remediation: "install Debian 13 (trixie)",
-			Dirty:       true,
-		}
-	}
-	return CheckResult{Name: "os", Level: LevelPass, Message: fmt.Sprintf("Debian %s (%s)", info.VersionID, info.Codename)}
 }
 
 func checkArch(probes Probes) CheckResult {
@@ -148,7 +162,7 @@ func checkContainers(probes Probes) CheckResult {
 				Name:        "containers",
 				Level:       LevelFail,
 				Message:     "Docker is installed",
-				Remediation: "reinstall on a fresh Debian 13 host without Docker/Podman/Kubernetes",
+				Remediation: "reinstall on a fresh Debian 13 or Ubuntu 26.04 host without Docker/Podman/Kubernetes",
 				Dirty:       true,
 			}
 		}
@@ -184,6 +198,10 @@ func checkContainers(probes Probes) CheckResult {
 func checkDataDir(probes Probes) CheckResult {
 	path := "/srv/omahab"
 	if probes.DirExists != nil && probes.DirExists(path) {
+		// If installer state dir exists, we are mid-install or resuming — don't treat existing data dir as dirty
+		if probes.DirExists != nil && probes.DirExists("/var/lib/omahab") {
+			return CheckResult{Name: "data_dir", Level: LevelPass, Message: "/srv/omahab present (install in progress)"}
+		}
 		notEmpty := true
 		if probes.DirNotEmpty != nil {
 			empty, err := probes.DirNotEmpty(path)
@@ -273,18 +291,19 @@ func checkAPTSources(probes Probes) CheckResult {
 	if err != nil {
 		return CheckResult{Name: "apt_sources", Level: LevelWarn, Message: fmt.Sprintf("cannot read APT sources: %v", err)}
 	}
-	// Allow: debian.org, security.debian.org, deb.debian.org, cloudflare, tailscale, docker (warn), etc.
+	// Allow: debian/ubuntu archives, security, cloudflare, tailscale, docker (warn), etc.
 	// Strict: any unknown third-party host is a fail/dirty.
 	allowedHosts := []string{
-		"deb.debian.org", "security.debian.org", "ftp.debian.org", "deb.debian.org",
+		"deb.debian.org", "security.debian.org", "ftp.debian.org",
+		"archive.ubuntu.com", "security.ubuntu.com", "us.archive.ubuntu.com",
 		"download.docker.com", // will be warn, not fail, if present before install
 	}
 	_ = allowedHosts
 	var thirdParty []string
 	for _, s := range sources {
 		line := strings.ToLower(s.Line)
-		// Skip deb lines that are clearly debian
-		if strings.Contains(line, "debian.org") || strings.Contains(line, "debian-security") {
+		// Skip deb lines that are clearly debian or ubuntu
+		if strings.Contains(line, "debian.org") || strings.Contains(line, "debian-security") || strings.Contains(line, "ubuntu.com") {
 			continue
 		}
 		// Extract host from line
@@ -305,7 +324,7 @@ func checkAPTSources(probes Probes) CheckResult {
 		if host == "" {
 			continue
 		}
-		if strings.Contains(line, "debian.org") {
+		if strings.Contains(line, "debian.org") || strings.Contains(line, "ubuntu.com") {
 			continue
 		}
 		thirdParty = append(thirdParty, fmt.Sprintf("%s (%s)", host, s.File))
@@ -315,7 +334,7 @@ func checkAPTSources(probes Probes) CheckResult {
 			Name:        "apt_sources",
 			Level:       LevelFail,
 			Message:     fmt.Sprintf("unexpected third-party APT repositories: %s", strings.Join(thirdParty, ", ")),
-			Remediation: "remove third-party APT sources and reinstall from clean Debian 13",
+			Remediation: "remove third-party APT sources and reinstall from clean Debian 13 or Ubuntu 26.04",
 			Dirty:       true,
 		}
 	}
@@ -418,7 +437,24 @@ func checkDNS(ctx context.Context, probes Probes) CheckResult {
 	if probes.DNSLookup == nil {
 		return CheckResult{Name: "dns", Level: LevelWarn, Message: "cannot check DNS: probe not configured"}
 	}
-	hosts := []string{"deb.debian.org", "security.debian.org", "github.com"}
+	hosts := []string{"github.com"}
+	// Include OS-appropriate archives: Debian or Ubuntu, plus github.
+	if probes.OSRelease != nil {
+		if info, err := probes.OSRelease(); err == nil {
+			switch strings.ToLower(info.ID) {
+			case "ubuntu":
+				hosts = append([]string{"archive.ubuntu.com", "security.ubuntu.com", "us.archive.ubuntu.com"}, hosts...)
+			case "debian":
+				hosts = append([]string{"deb.debian.org", "security.debian.org"}, hosts...)
+			default:
+				hosts = append([]string{"deb.debian.org", "archive.ubuntu.com", "security.debian.org", "security.ubuntu.com"}, hosts...)
+			}
+		} else {
+			hosts = append([]string{"deb.debian.org", "security.debian.org", "archive.ubuntu.com"}, hosts...)
+		}
+	} else {
+		hosts = append([]string{"deb.debian.org", "security.debian.org", "archive.ubuntu.com"}, hosts...)
+	}
 	for _, h := range hosts {
 		addrs, err := probes.DNSLookup(ctx, h)
 		if err != nil {
@@ -447,6 +483,12 @@ func checkHTTPS(ctx context.Context, probes Probes) CheckResult {
 		return CheckResult{Name: "https", Level: LevelWarn, Message: "cannot check HTTPS: probe not configured"}
 	}
 	url := "https://deb.debian.org/"
+	// Use OS-appropriate archive for HTTPS probe.
+	if probes.OSRelease != nil {
+		if info, err := probes.OSRelease(); err == nil && strings.ToLower(info.ID) == "ubuntu" {
+			url = "https://archive.ubuntu.com/"
+		}
+	}
 	status, _, err := probes.HTTPSGet(ctx, url)
 	if err != nil {
 		return CheckResult{
@@ -474,7 +516,7 @@ func checkSSHKeys(probes Probes) CheckResult {
 	// Check that some authorized_keys exists for the invoking user or root.
 	// We probe a few likely users if probes support it.
 	if probes.AuthorizedKeys != nil {
-		for _, u := range []string{"root", "admin", "debian"} {
+		for _, u := range []string{"omahab", "ubuntu", "admin", "debian", "root"} {
 			_, keys, err := probes.AuthorizedKeys(u)
 			if err == nil && len(keys) > 0 {
 				return CheckResult{Name: "ssh_keys", Level: LevelPass, Message: fmt.Sprintf("SSH keys present for %s", u)}

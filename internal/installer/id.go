@@ -19,6 +19,11 @@ func newID() string {
 
 func init() {
 	if envUser == nil {
-		envUser = func() string { return os.Getenv("USER") }
+		envUser = func() string {
+			if u := os.Getenv("SUDO_USER"); u != "" {
+				return u
+			}
+			return os.Getenv("USER")
+		}
 	}
 }

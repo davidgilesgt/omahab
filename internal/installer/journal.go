@@ -27,7 +27,7 @@ type JournalEntry struct {
 	StartedAt    *time.Time `json:"started_at,omitempty"`
 	FinishedAt   *time.Time `json:"finished_at,omitempty"`
 	Error        string     `json:"error,omitempty"`
-	RollbackData string     `json:"-"`
+	RollbackData string     `json:"rollback_data,omitempty"`
 }
 
 // Migrations returns the SQLite migrations owned by the installer controller.

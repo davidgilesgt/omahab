@@ -7,8 +7,8 @@ import (
 )
 
 const (
-	sshdDropInPath = "/etc/ssh/sshd_config.d/99-omahab.conf"
-	sshdBackupPath = "/var/lib/omahab/sshd-99-omahab.conf.bak"
+	sshdDropInPath = "/etc/ssh/sshd_config.d/10-omahab.conf"
+	sshdBackupPath = "/var/lib/omahab/sshd-10-omahab.conf.bak"
 	rollbackAfter  = 10 * time.Minute
 )
 

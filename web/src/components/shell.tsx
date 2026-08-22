@@ -1,86 +1,159 @@
-import { useEffect, useRef, useState, type ChangeEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../auth";
 
 const NAVIGATION = [
-  ["/", "Overview", "⌂"],
-  ["/applications", "Applications", "▦"],
-  ["/projects", "Projects", "⌘"],
-  ["/backups", "Backups", "↺"],
-  ["/events", "Inbox", "●"],
-  ["/sync", "Sync folders", "⇄"],
-  ["/workspaces", "Workspaces", "◇"],
-  ["/people", "People & access", "◎"],
-  ["/providers", "Providers", "◐"],
-  ["/ai", "AI", "✦"],
+  ["/", "Overview", "⌂", "Home overview"],
+  ["/applications", "Applications", "▦", "Platform apps"],
+  ["/projects", "Projects", "⌘", "ONCE projects"],
+  ["/backups", "Backups", "↺", "Backup status"],
+  ["/events", "Inbox", "●", "Event inbox"],
+  ["/sync", "Sync folders", "⇄", "Syncthing folders"],
+  ["/workspaces", "Workspaces", "◇", "Remote workspaces"],
+  ["/people", "People & access", "◎", "Users and access"],
+  ["/providers", "Providers", "◐", "External providers"],
+  ["/ai", "AI", "✦", "AI assistant"],
 ] as const;
 
 export function AppShell({ children }: { children: ReactNode }) {
   const { client, signOut } = useAuth();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const searchRef = useRef<HTMLInputElement>(null);
   const [theme, setTheme] = useState(() => localStorage.getItem("omahab.theme") ?? "system");
-  const eventQuery = useQuery({ queryKey: ["events"], queryFn: client.events, staleTime: 30_000 });
+  const [query, setQuery] = useState("");
+  const [showResults, setShowResults] = useState(false);
+  const eventQuery = useQuery({ queryKey: ["events"], queryFn: client.events, staleTime: Infinity });
   const unread = eventQuery.data?.filter((event) => !event.read_at).length ?? 0;
 
+  // Keep theme in sync without flash - useLayoutEffect would be ideal but useEffect is okay with inline script
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem("omahab.theme", theme);
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) {
+      if (theme === "dark") meta.setAttribute("content", "#0f0f0f");
+      else if (theme === "light") meta.setAttribute("content", "#f4f1e9");
+      else meta.setAttribute("content", "#171815");
+    }
   }, [theme]);
+
+  // Single SSE source for inbox badge - replaces 30s poll
+  useEffect(() => {
+    let cancelled = false;
+    const controller = new AbortController();
+    // Use the client's streamEvents if available, fallback to direct EventSource
+    if (client.streamEvents) {
+      client.streamEvents(controller.signal, (ev) => {
+        if (cancelled) return;
+        queryClient.setQueryData(["events"], (old: any) => {
+          if (!old) return [ev];
+          // Merge or replace based on event id
+          const idx = old.findIndex((e: any) => e.id === ev.id);
+          if (idx >= 0) {
+            const copy = [...old];
+            copy[idx] = ev;
+            return copy;
+          }
+          return [ev, ...old];
+        });
+      }).catch(() => {});
+    }
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [client, queryClient]);
 
   useEffect(() => {
     function handleShortcut(event: KeyboardEvent) {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
         searchRef.current?.focus();
+        setShowResults(true);
       }
+      if (event.key === "Escape") setShowResults(false);
     }
     window.addEventListener("keydown", handleShortcut);
     return () => window.removeEventListener("keydown", handleShortcut);
   }, []);
 
-  function chooseDestination(event: ChangeEvent<HTMLInputElement>) {
-    const match = NAVIGATION.find(([, label]) => label.toLowerCase() === event.currentTarget.value.toLowerCase());
-    if (match) {
-      navigate(match[0]);
-      event.currentTarget.value = "";
-      event.currentTarget.blur();
-    }
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return [];
+    return NAVIGATION.filter(([to, label]) =>
+      label.toLowerCase().includes(q) || to.toLowerCase().includes(q)
+    ).slice(0, 6);
+  }, [query]);
+
+  function chooseDestination(path: string) {
+    navigate(path);
+    setQuery("");
+    setShowResults(false);
+    searchRef.current?.blur();
   }
 
   return (
     <div className="app-frame">
-      <a href="#main-content" className="skip-link">Skip to content</a>
+      <a href="#main-content" className="skip-link" onClick={() => document.getElementById("main-content")?.focus()}>Skip to content</a>
       <aside className="sidebar">
         <NavLink to="/" className="brand" aria-label="Omahab overview">
           <span className="brand-mark">O</span>
           <span><strong>Omahab</strong><small>Control plane</small></span>
         </NavLink>
         <nav aria-label="Primary navigation">
-          {NAVIGATION.map(([to, label, icon]) => (
-            <NavLink key={to} to={to} end={to === "/"} className={({ isActive }) => isActive ? "nav-link active" : "nav-link"}>
-              <span aria-hidden="true" className="nav-icon">{icon}</span>
+          {NAVIGATION.map(([to, label, icon, title]) => (
+            <NavLink key={to} to={to} end={to === "/"} className={({ isActive }) => isActive ? "nav-link active" : "nav-link"} title={title}>
+              <span aria-hidden="true" className="nav-icon" title={title}>{icon}</span>
               <span>{label}</span>
               {to === "/events" && unread > 0 && <span className="nav-badge" aria-label={`${unread} unread`}>{unread}</span>}
             </NavLink>
           ))}
         </nav>
         <div className="sidebar-footer">
-          <span className="privacy-indicator"><span aria-hidden="true" /> Private by default</span>
+          <span className="privacy-indicator" aria-live="polite" title={unread > 0 ? `${unread} unread events` : "Private by default"}>
+            <span aria-hidden="true" style={{ background: unread > 0 ? "var(--warning, #f59e0b)" : "var(--positive, #10b981)" }} />
+            {unread > 0 ? `${unread} unread` : "Private by default"}
+          </span>
           <button type="button" className="text-button" onClick={signOut}>Sign out</button>
         </div>
       </aside>
       <div className="content-frame">
         <header className="topbar">
-          <label className="quick-nav">
-            <span className="sr-only">Go to a page</span>
-            <input ref={searchRef} list="destinations" placeholder="Go to…" onChange={chooseDestination} />
+          <div className="quick-nav" style={{ position: "relative" }}>
+            <label className="sr-only" htmlFor="quick-nav-input">Go to a page</label>
+            <input
+              id="quick-nav-input"
+              ref={searchRef}
+              placeholder="Go to…"
+              value={query}
+              onChange={(e) => { setQuery(e.target.value); setShowResults(true); }}
+              onFocus={() => setShowResults(true)}
+              onBlur={() => setTimeout(() => setShowResults(false), 150)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && filtered.length > 0) {
+                  e.preventDefault();
+                  const first = filtered[0];
+                  if (first) chooseDestination(first[0]);
+                }
+                if (e.key === "Escape") setShowResults(false);
+              }}
+              aria-autocomplete="list"
+              aria-controls="quick-nav-listbox"
+              aria-expanded={showResults && filtered.length > 0}
+            />
             <kbd>Ctrl K</kbd>
-            <datalist id="destinations">
-              {NAVIGATION.map(([, label]) => <option key={label} value={label} />)}
-            </datalist>
-          </label>
+            {showResults && filtered.length > 0 && (
+              <ul id="quick-nav-listbox" role="listbox" style={{ position: "absolute", top: "100%", left: 0, right: 0, background: "var(--surface, #fff)", border: "1px solid var(--border)", borderRadius: 6, marginTop: 4, padding: 4, listStyle: "none", zIndex: 20 }}>
+                {filtered.map(([to, label, icon]) => (
+                  <li key={to} role="option" aria-selected={false} onMouseDown={(e) => { e.preventDefault(); chooseDestination(to); }} style={{ padding: "6px 8px", cursor: "pointer", display: "flex", gap: 8 }}>
+                    <span aria-hidden>{icon}</span> {label} <small style={{ marginLeft: "auto", opacity: 0.6 }}>{to}</small>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
           <label className="theme-control">
             <span className="sr-only">Color theme</span>
             <select value={theme} onChange={(event) => setTheme(event.currentTarget.value)} aria-label="Color theme">

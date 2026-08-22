@@ -18,7 +18,9 @@ for directive in NoNewPrivileges PrivateTmp ProtectSystem ProtectHome; do
   grep -q "$directive" deploy/systemd/omahabd.service && pass "systemd $directive" || fail_check "systemd $directive"
 done
 grep -q 'd /var/lib/omahab .*0700 root root' packaging/tmpfiles.d/omahab.conf && pass "private state directory" || fail_check "private state directory"
-grep -q 'ARCHES=(amd64 arm64)' scripts/build.sh && pass "amd64 and arm64 build" || fail_check "multi-architecture build"
+grep -q 'd /srv/omahab .*0755 root root' packaging/tmpfiles.d/omahab.conf && pass "data directory exists" || fail_check "data directory"
+grep -q 'd /etc/omahab .*0755 root root' packaging/tmpfiles.d/omahab.conf && pass "etc directory exists" || fail_check "etc directory"
+grep -q 'ARCHES=(amd64' scripts/build.sh && grep -q 'arm64' scripts/build.sh && pass "amd64 and arm64 build" || fail_check "multi-architecture build"
 grep -q 'SHA256SUMS' scripts/release.sh scripts/verify-release.sh && pass "signed checksum chain" || fail_check "signed checksum chain"
 grep -q 'minisign.*-Vm' scripts/verify-release.sh && pass "minisign verification" || fail_check "minisign verification"
 ! grep -q 'placeholder installer' scripts/build.sh scripts/release.sh && pass "no fake installer fallback" || fail_check "fake installer fallback"

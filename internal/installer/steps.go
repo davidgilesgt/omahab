@@ -217,7 +217,7 @@ func (s *Service) runPreflightStep(ctx context.Context, opts InstallOptions) Run
 	if err != nil {
 		res.Status = JournalFailed
 		if pe, ok := err.(*PreflightError); ok && pe.IsDirty() {
-			res.Error = fmt.Sprintf("%v: dirty host — reinstall on a fresh Debian 13 host", ErrDirtyHost)
+			res.Error = fmt.Sprintf("%v: dirty host — reinstall on a fresh Debian 13 or Ubuntu 26.04 host", ErrDirtyHost)
 		} else {
 			res.Error = err.Error()
 		}
@@ -266,15 +266,29 @@ func (s *Service) runSSHKeysStep(ctx context.Context, opts InstallOptions) RunRe
 
 	user := opts.TargetUser
 	if user == "" {
-		user = "root"
-		if s.probes.AuthorizedKeys != nil {
-			// Prefer a non-root admin user if present.
-			for _, candidate := range []string{"admin", "debian"} {
-				if _, keys, err := s.probes.AuthorizedKeys(candidate); err == nil && len(keys) > 0 {
-					// keep root as target if admin already has keys? Use admin.
-					_ = keys
-					user = candidate
-					break
+		// Prefer SUDO_USER, then existing admin candidates, then current user.
+		if sudoUser := getEnvUser(); sudoUser != "" {
+			if _, keys, err := s.probes.AuthorizedKeys(sudoUser); err == nil && len(keys) > 0 {
+				user = sudoUser
+			} else if sudoUser != "root" {
+				user = sudoUser
+			}
+		}
+		if user == "" || user == "root" {
+			user = "root"
+			if s.probes.AuthorizedKeys != nil {
+				// Prefer real admin users: omahab (Ubuntu), ubuntu, admin, debian.
+				for _, candidate := range []string{"omahab", "ubuntu", "admin", "debian"} {
+					if _, keys, err := s.probes.AuthorizedKeys(candidate); err == nil && len(keys) > 0 {
+						user = candidate
+						break
+					}
+				}
+				// If no candidate had keys but SUDO_USER was set, use it.
+				if user == "root" {
+					if sudoUser := getEnvUser(); sudoUser != "" && sudoUser != "root" {
+						user = sudoUser
+					}
 				}
 			}
 		}
@@ -334,14 +348,28 @@ func (s *Service) runManifestStep(ctx context.Context, opts InstallOptions) RunR
 		arch, _ = s.probes.Arch()
 	}
 	entries, _ := s.journal.List(ctx)
+	// Capture preflight at install time, but don't re-fail on data_dir that we just created.
+	// Use a filtered preflight that ignores data_dir when state dir exists (mid-install).
 	checks, _ := RunPreflight(ctx, s.probes)
+	// Filter out data_dir fail that is expected after system_prepare
+	var filtered []CheckResult
+	for _, c := range checks {
+		if c.Name == "data_dir" && c.Level == LevelFail && c.Dirty {
+			// If system_prepare already completed, this is not a real dirty host
+			continue
+		}
+		filtered = append(filtered, c)
+	}
+	if len(filtered) == 0 {
+		filtered = checks
+	}
 	m := Manifest{
 		Version:     opts.Version,
 		InstalledAt: nowUTC(s.probes),
 		OS:          osInfo,
 		Arch:        arch,
 		Steps:       entries,
-		Preflight:   checks,
+		Preflight:   filtered,
 	}
 	if err := WriteManifest(s.probes, m); err != nil {
 		return RunResult{Step: StepManifest, Status: JournalFailed, Error: err.Error()}

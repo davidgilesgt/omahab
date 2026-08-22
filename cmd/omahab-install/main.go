@@ -40,8 +40,8 @@ func main() {
 func run(args []string) error {
 	root := &cobra.Command{
 		Use:   "omahab-install",
-		Short: "Install Omahab on a fresh Debian 13 host",
-		Long: `omahab-install prepares a fresh Debian 13 host for Omahab.
+		Short: "Install Omahab on a fresh Debian 13 or Ubuntu 26.04 host",
+		Long: `omahab-install prepares a fresh Debian 13 or Ubuntu 26.04 host for Omahab.
 
 It runs strict preflight checks, configures SSH keys additively,
 hardens sshd with rollback safety, and writes an install manifest.
@@ -57,11 +57,11 @@ Use --json for structured output and --non-interactive for automation.`,
 	root.PersistentFlags().BoolVar(&flagNonInteractive, "non-interactive", false, "never prompt; fail with structured error if input required")
 	root.Flags().StringVar(&flagStateDir, "state-dir", envOr("OMAHAB_STATE_DIR", "/var/lib/omahab"), "state directory (contains control.db and manifest)")
 	root.Flags().StringVar(&flagVersion, "version", envOr("OMAHAB_VERSION", "0.0.0-dev"), "version to record in manifest")
-	root.Flags().StringVar(&flagTargetUser, "target-user", "", "user whose authorized_keys to manage (default: admin or $USER)")
+	root.Flags().StringVar(&flagTargetUser, "target-user", "", "user whose authorized_keys to manage (default: $SUDO_USER, omahab, admin, or $USER)")
 	root.Flags().StringArrayVar(&flagGitHubUsers, "github-user", nil, "import SSH keys from GitHub user (repeatable)")
 	root.Flags().StringVar(&flagKeyFile, "key-file", "", "import SSH keys from file")
 	root.Flags().BoolVar(&flagResume, "resume", false, "resume an interrupted installation")
-	root.Flags().BoolVar(&flagYes, "yes", false, "assume yes to prompts (use with --non-interactive)")
+	root.Flags().BoolVar(&flagYes, "yes", false, "assume yes to prompts (requires --non-interactive)")
 
 	// Also add a dedicated preflight subcommand.
 	preflightCmd := &cobra.Command{
@@ -194,7 +194,7 @@ func doPreflight(cmd *cobra.Command) error {
 	printChecks(out, checks)
 	if err != nil {
 		if pe, ok := err.(*installer.PreflightError); ok && pe.IsDirty() {
-			out.printf("\nDirty host detected — reinstall on a fresh Debian 13 host.\n")
+			out.printf("\nDirty host detected — reinstall on a fresh Debian 13 or Ubuntu 26.04 host.\n")
 		}
 		return err
 	}
@@ -225,6 +225,17 @@ func doManifest(cmd *cobra.Command) error {
 
 func doInstall(cmd *cobra.Command) error {
 	out := newOutput(cmd)
+	// Validate flag combination: --yes requires --non-interactive.
+	if flagYes && !flagNonInteractive {
+		// For convenience, --yes implies --non-interactive, but warn
+		fmt.Fprintln(os.Stderr, "note: --yes implies --non-interactive")
+		flagNonInteractive = true
+		out = newOutput(cmd)
+	}
+	// Clarify TERM=dumb forcing non-interactive.
+	if os.Getenv("TERM") == "dumb" && !flagNonInteractive && !flagJSON {
+		fmt.Fprintln(os.Stderr, "note: TERM=dumb detected, forcing non-interactive mode (use --non-interactive explicitly to suppress)")
+	}
 	ctx := context.Background()
 
 	// Open or create the state database.
@@ -272,7 +283,7 @@ func doInstall(cmd *cobra.Command) error {
 			remed := ""
 			if pe, ok := preErr.(*installer.PreflightError); ok && pe.IsDirty() {
 				code = "dirty_host"
-				remed = "reinstall on a fresh Debian 13 host"
+				remed = "reinstall on a fresh Debian 13 or Ubuntu 26.04 host"
 			}
 			var failed []installer.CheckResult
 			if pe, ok := preErr.(*installer.PreflightError); ok {
@@ -287,7 +298,7 @@ func doInstall(cmd *cobra.Command) error {
 			})
 		} else {
 			if pe, ok := preErr.(*installer.PreflightError); ok && pe.IsDirty() {
-				out.printf("\nDirty host: strict preflight failed — reinstall on a fresh Debian 13 host.\n")
+				out.printf("\nDirty host: strict preflight failed — reinstall on a fresh Debian 13 or Ubuntu 26.04 host.\n")
 			}
 			// In non-interactive mode, always emit actionable failure.
 			if out.nonInteractive {
@@ -372,6 +383,7 @@ func doInstall(cmd *cobra.Command) error {
 
 	if !out.jsonMode {
 		out.printf("Starting installation (version %s)...\n", opts.Version)
+		out.printf("This will take a few minutes; progress is streamed per step.\n")
 		entries, _ := svc.JournalEntries(ctx)
 		for _, e := range entries {
 			if e.Status == installer.JournalCompleted {
@@ -386,7 +398,6 @@ func doInstall(cmd *cobra.Command) error {
 
 	if out.jsonMode {
 		ok := runErr == nil
-		// If runErr is a step error, surface structured info.
 		var failedChecks []installer.CheckResult
 		if se, ok2 := runErr.(*installer.StepError); ok2 {
 			failedChecks = se.Result.Checks
@@ -401,8 +412,7 @@ func doInstall(cmd *cobra.Command) error {
 		if runErr != nil {
 			return runErr
 		}
-		// For sshd, check if confirmation is still needed.
-		checkSecondSessionGate(ctx, out, svc, probes)
+		// Avoid extra printf after JSON - just return, caller can check IsRollbackActive via JSON field
 		return nil
 	}
 
@@ -512,6 +522,7 @@ func secondSessionGate(ctx context.Context, out output, svc *installer.Service, 
 		return nil // nothing staged
 	}
 	out.printf("\nSSH hardening staged. A rollback timer will restore the previous config in 10 minutes if not confirmed.\n")
+	out.printf("Check: systemctl status omahab-ssh-rollback.timer  (deadline in 10m)\n")
 	out.printf("Please open a SECOND SSH session to this host now, then return here and press Enter to confirm.\n")
 	out.printf("If the second session fails, the rollback timer will recover SSH access automatically.\n\n")
 

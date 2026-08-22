@@ -23,7 +23,7 @@ const (
 	CheckCommand CheckKind = "command"
 )
 
-// supportedArchitectures mirrors the supported Debian 13 hosts (amd64 and
+// supportedArchitectures mirrors the supported Debian 13 / Ubuntu 26.04 hosts (amd64 and
 // arm64, DESIGN.md §5.1). Bundles must declare a subset.
 var supportedArchitectures = map[string]bool{
 	"amd64": true,

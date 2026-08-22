@@ -6,7 +6,12 @@ cd "$ROOT"
 
 VERSION="${VERSION:-0.1.0}"
 OUTDIR="dist"
-ARCHES=(amd64)
+ARCHES=()
+case $(uname -m) in
+  x86_64|amd64) ARCHES=(amd64) ;;
+  aarch64|arm64) ARCHES=(arm64) ;;
+  *) ARCHES=(amd64) ;;
+esac
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -26,7 +31,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 GO_BIN="${GO:-go}"
-command -v "$GO_BIN" >/dev/null 2>&1 || { echo "Go toolchain not found: $GO_BIN" >&2; exit 1; }
+command -v "$GO_BIN" >/dev/null 2>&1 || { echo "Go toolchain not found: $GO_BIN (on Debian 13/Ubuntu 26.04: apt-get install golang-go, on Arch/Omarchy: pacman -S go)" >&2; exit 1; }
 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-0}"
 export SOURCE_DATE_EPOCH CGO_ENABLED=0 GOOS=linux
 

@@ -140,9 +140,25 @@ func (b *Backend) initServices(ctx context.Context) error {
 		}
 	}
 	appRunner := apps.NewComposeRunner(nil, b.cfg.DataDir+"/apps")
+	// EnvSource for DOMAIN and other instance vars needed by compose templates (e.g. PUBLIC_APP_URL https://id.${DOMAIN}/)
+	domainEnv := func(ctx context.Context, app domain.Application) ([]string, error) {
+		inst, err := b.store.Instance(ctx)
+		if err != nil {
+			return nil, err
+		}
+		env := []string{"DOMAIN=" + inst.Domain}
+		if inst.Tailnet != "" {
+			env = append(env, "TAILNET="+inst.Tailnet)
+		}
+		if inst.TailscaleIP != "" {
+			env = append(env, "TAILSCALE_IP="+inst.TailscaleIP)
+		}
+		return env, nil
+	}
 	appSvc, err := apps.NewService(b.db, apps.Options{
 		Catalog: catalog, Runner: appRunner,
 		Events: newAppsSink(b.events),
+		Env: domainEnv,
 	})
 	if err != nil {
 		return fmt.Errorf("apps: %w", err)
