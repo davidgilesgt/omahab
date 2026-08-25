@@ -584,6 +584,17 @@ func (b *Backend) GetInstance(ctx context.Context) (domain.Instance, error) {
 	return inst, nil
 }
 
+func (b *Backend) GetDoctor(ctx context.Context) (*health.Report, error) {
+	if b.health == nil {
+		return nil, translateError(fmt.Errorf("%w: health not configured", ErrNotConfigured))
+	}
+	rep, err := b.health.Check(ctx)
+	if err != nil {
+		return nil, translateError(err)
+	}
+	return rep, nil
+}
+
 // Applications
 func (b *Backend) ListApplications(ctx context.Context, p api.Pagination) ([]domain.Application, error) {
 	if b.apps == nil {

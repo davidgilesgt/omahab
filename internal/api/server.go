@@ -136,9 +136,10 @@ func (s *Server) buildRouter() chi.Router {
 		// Enforce Content-Type application/json for mutating methods.
 		r.Use(requireJSONContentType)
 
-		// Status / instance
+		// Status / instance / doctor
 		r.Get("/api/v1/status", s.handleGetStatus)
 		r.Get("/api/v1/instance", s.handleGetInstance)
+		r.Get("/api/v1/doctor", s.handleDoctor)
 
 		// Applications
 		r.Get("/api/v1/catalog", s.handleListCatalog)

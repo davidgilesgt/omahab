@@ -987,7 +987,11 @@ func tailscaleStatusCheck(ctx context.Context, probes installer.Probes) (install
 
 func runTailscaleUp(ctx context.Context, out output, probes installer.Probes) {
 	out.printf("\nRunning %s ...\n", "tailscale up")
-	cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	// Give the user 2 minutes to scan the QR / open the URL. 20s was too short
+	// (users hit Enter and saw no progress because `tailscale up` was killed
+	// before they could approve). 120s covers phone-QR flow without blocking
+	// forever; the guided loop can re-run on demand.
+	cctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 	combined, err := execProbeOutput(cctx, probes, "tailscale", "up")
 	trimmed := strings.TrimSpace(combined)
@@ -1040,8 +1044,16 @@ func runTailscaleUp(ctx context.Context, out output, probes installer.Probes) {
 	if err != nil && trimmed == "" {
 		out.printf("  tailscale up: %v\n", err)
 	} else if err != nil {
-		// e.g. exit 1 but still printed the URL — not fatal for guided flow.
-		out.printf("  tailscale up exited (%v) — URL above is still usable; authorize it in your browser.\n", err)
+		// e.g. timed out after 120s or exited 1 but still printed a URL.
+		// The URL may still be usable, but the daemon stopped polling — a
+		// fresh `tailscale up` is the reliable way to complete auth.
+		if strings.Contains(err.Error(), "deadline") || strings.Contains(err.Error(), "killed") || strings.Contains(err.Error(), "signal") {
+			out.printf("  tailscale up timed out (%v) — if you saw a login URL above, approve it then press Enter to re-check;\n", err)
+			out.printf("  if nothing appeared or the link expired, type 'retry' for a fresh URL.\n")
+		} else {
+			out.printf("  tailscale up exited (%v) — if a login URL is shown above, approve it then press Enter to re-check;\n", err)
+			out.printf("  otherwise type 'retry' for a fresh URL.\n")
+		}
 	} else {
 		out.printf("  tailscale up finished — check status below.\n")
 	}
@@ -1119,7 +1131,8 @@ func guideTailscale(ctx context.Context, out output, probes installer.Probes) er
 		out.printf("\n  %s\n", dim("Open the URL shown above on any device signed into your tailnet,"))
 		out.printf("  %s %s → Machines → Approve, then return here.\n", dim("approve at"), hl("https://login.tailscale.com/admin/machines"))
 		out.printf("  %s\n", dim("Tip: Disable key expiry for this server (machine ⋯ → Disable key expiry)."))
-	fmt.Fprint(out.ui, "\n  Press Enter after approving (or type 'skip' to do later, 'retry' to re-run tailscale up, 'status' to re-check): ")
+		out.printf("  %s\n", dim("After approving, press Enter to re-check — we'll fetch a fresh URL automatically if still not connected."))
+		fmt.Fprint(out.ui, "\n  Press Enter to re-check (type 'retry' for a fresh URL now, 'status' to re-check without new URL, 'skip' to enroll later): ")
 		scanner := bufio.NewScanner(os.Stdin)
 		if !scanner.Scan() {
 			return installer.ErrCancelled
@@ -1137,7 +1150,14 @@ func guideTailscale(ctx context.Context, out output, probes installer.Probes) er
 		case "status", "st":
 			continue
 		case "":
-			// re-check at top of loop
+			// User hit Enter after approving: re-check, but if still NeedsLogin
+			// automatically refresh the URL so a timed-out `tailscale up`
+			// doesn't look like "nothing happened".
+			_, stillLoggedIn, _, stillDetail := tailscaleStatusCheck(ctx, probes)
+			if !stillLoggedIn && (strings.Contains(strings.ToLower(stillDetail), "needslogin") || strings.Contains(strings.ToLower(stillDetail), "needs login") || strings.Contains(stillDetail, "LoggedOut")) {
+				out.printf("  Still not connected — fetching a fresh login URL...\n")
+				runTailscaleUp(ctx, out, probes)
+			}
 			continue
 		default:
 			// treat unknown as re-check

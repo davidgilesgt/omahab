@@ -55,6 +55,16 @@ func (s *Server) handleGetInstance(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, inst)
 }
 
+func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
+	rep, err := s.backend.GetDoctor(r.Context())
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, rep)
+}
+
+
 // --- applications ---
 
 func (s *Server) handleListApplications(w http.ResponseWriter, r *http.Request) {

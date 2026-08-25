@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/omahab/omahab/internal/domain"
+	"github.com/omahab/omahab/internal/health"
 	"github.com/omahab/omahab/internal/identity"
 	"github.com/omahab/omahab/internal/knowledge"
 )
@@ -211,11 +212,11 @@ type KnowledgeUploadRequest struct {
 
 // Backend is the explicit control-plane interface consumed by the HTTP layer.
 // Every dashboard operation has a corresponding method; implementations remain
-// free to compose separate controllers behind this surface.
 type Backend interface {
-	// Status / instance
+	// Status / instance / doctor
 	GetStatus(ctx context.Context) (domain.Status, error)
 	GetInstance(ctx context.Context) (domain.Instance, error)
+	GetDoctor(ctx context.Context) (*health.Report, error)
 
 	// Applications
 	ListApplications(ctx context.Context, p Pagination) ([]domain.Application, error)

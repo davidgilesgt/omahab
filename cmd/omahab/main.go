@@ -618,7 +618,7 @@ func newUpCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "up",
 		Short: "Check liveness without authentication",
-		Long:  "GET /api/v1/up — no Bearer token required. Useful for probes and scripts.",
+		Long:  "GET /up — no Bearer token required (root, not /api/v1). Useful for probes and scripts.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := newContext()
 			defer cancel()

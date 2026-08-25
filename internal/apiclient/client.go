@@ -58,7 +58,13 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body any) 
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
-	full := c.BaseURL + path
+	// /up lives at the root (outside /api/v1). Strip the prefix for that one path
+	// so New("http://host:8484") + "/up" → "http://host:8484/up" not "/api/v1/up".
+	base := c.BaseURL
+	if path == "/up" {
+		base = strings.TrimSuffix(strings.TrimSuffix(base, "/api/v1"), "/api")
+	}
+	full := base + path
 	var rBody io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
