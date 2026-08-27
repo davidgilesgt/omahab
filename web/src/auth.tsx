@@ -3,6 +3,70 @@ import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import { ApiClient, ApiError } from "./api/client";
 
 const TOKEN_KEY = "omahab.session";
+function consumeFragmentToken(): void {
+  try {
+    if (typeof window === "undefined" || !window.location) return;
+    const loc = window.location;
+    const rawHash = loc.hash;
+    if (!rawHash || rawHash.length <= 1) return;
+    const raw = rawHash.slice(1);
+    if (!raw) return;
+    const parts = raw.split("&");
+    let found = false;
+    let tokenValue: string | null = null;
+    const remaining: string[] = [];
+    for (const part of parts) {
+      if (part === "") continue;
+      const eqIdx = part.indexOf("=");
+      let keyRaw: string;
+      let valueRaw: string;
+      if (eqIdx === -1) {
+        keyRaw = part;
+        valueRaw = "";
+      } else {
+        keyRaw = part.slice(0, eqIdx);
+        valueRaw = part.slice(eqIdx + 1);
+      }
+      let key: string;
+      try {
+        key = decodeURIComponent(keyRaw);
+      } catch {
+        key = keyRaw;
+      }
+      if (key === "token") {
+        found = true;
+        if (tokenValue === null) {
+          let decoded: string;
+          try {
+            decoded = decodeURIComponent(valueRaw);
+          } catch {
+            decoded = valueRaw;
+          }
+          const trimmed = decoded.trim();
+          if (trimmed) tokenValue = trimmed;
+        }
+        continue;
+      }
+      remaining.push(part);
+    }
+    if (!found) return;
+    if (tokenValue) {
+      try {
+        sessionStorage.setItem(TOKEN_KEY, tokenValue);
+      } catch {}
+    }
+    const newHash = remaining.length ? `#${remaining.join("&")}` : "";
+    const newUrl = `${loc.pathname}${loc.search}${newHash}`;
+    const currentSuffix = `${loc.pathname}${loc.search}${loc.hash}`;
+    if (newUrl !== currentSuffix) {
+      try {
+        if (typeof history !== "undefined" && typeof history.replaceState === "function") {
+          history.replaceState(history.state, "", newUrl);
+        }
+      } catch {}
+    }
+  } catch {}
+}
 
 interface AuthContextValue {
   token: string | null;
@@ -16,19 +80,36 @@ interface AuthContextValue {
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [token, setToken] = useState<string | null>(() => sessionStorage.getItem(TOKEN_KEY));
+  const [token, setToken] = useState<string | null>(() => {
+    consumeFragmentToken();
+    try {
+      return sessionStorage.getItem(TOKEN_KEY);
+    } catch {
+      return null;
+    }
+  });
   const [authError, setAuthError] = useState<string | null>(null);
   const clearAuthError = useCallback(() => setAuthError(null), []);
   const signIn = useCallback((value: string) => {
-    sessionStorage.setItem(TOKEN_KEY, value);
+    try {
+      sessionStorage.setItem(TOKEN_KEY, value);
+    } catch {}
     setToken(value);
     setAuthError(null);
   }, []);
   const signOut = useCallback(() => {
-    sessionStorage.removeItem(TOKEN_KEY);
+    try {
+      sessionStorage.removeItem(TOKEN_KEY);
+    } catch {}
     setToken(null);
   }, []);
-  const client = useMemo(() => new ApiClient(() => sessionStorage.getItem(TOKEN_KEY)), []);
+  const client = useMemo(() => new ApiClient(() => {
+    try {
+      return sessionStorage.getItem(TOKEN_KEY);
+    } catch {
+      return null;
+    }
+  }), []);
 
   useEffect(() => {
     function handleUnauthorized() {
@@ -100,7 +181,7 @@ export function LoginPage() {
       <section className="login-card" aria-labelledby="login-title">
         <p className="eyebrow">Private control plane</p>
         <h1 id="login-title">Sign in to Omahab</h1>
-        <p className="muted">Use a short-lived bearer credential issued by your Omahab administrator. It remains in this browser tab only.</p>
+        <p className="muted">Use the bearer token issued by your Omahab administrator. It remains in this browser tab only.</p>
         {displayError && <p className="inline-error" role="alert">{displayError}</p>}
         <form onSubmit={submit} className="form-stack">
           <label>

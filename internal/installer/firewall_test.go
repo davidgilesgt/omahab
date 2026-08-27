@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -46,6 +47,7 @@ func TestFirewallNftablesConfTemplate(t *testing.T) {
 		`ct state established,related accept`,
 		`tcp dport 22 accept comment "ssh"`,
 		`udp dport 41641 accept comment "tailscale direct"`,
+		`iifname "tailscale0" tcp dport 8484 accept comment "omahab dashboard via tailscale"`,
 		`icmp type { destination-unreachable, time-exceeded, parameter-problem, echo-request } limit rate 10/second accept`,
 		`ip6 nexthdr ipv6-icmp icmpv6 type { destination-unreachable, time-exceeded, parameter-problem, echo-request, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } limit rate 20/second accept`,
 	}
@@ -78,12 +80,85 @@ func TestFirewallNftablesConfTemplate(t *testing.T) {
 	if strings.Contains(conf, "policy drop") == false {
 		t.Fatalf("missing policy drop")
 	}
+	// Security invariant: TCP 8484 must be admitted only on tailscale0;
+	// public interfaces must remain blocked. Loopback reachability is via
+	// iifname "lo" accept, not a public 8484 rule.
+	if !strings.Contains(conf, `iifname "tailscale0" tcp dport 8484`) {
+		t.Fatalf("NftablesConf must gate 8484 on tailscale0, got:\n%s", conf)
+	}
+	if !strings.Contains(conf, `iifname "lo" accept`) {
+		t.Fatalf("NftablesConf must allow loopback via iifname lo")
+	}
+	// No unrestricted 8484 accept. Every tcp dport 8484 line must be gated by tailscale0.
+	total := strings.Count(conf, "tcp dport 8484")
+	gated := strings.Count(conf, `iifname "tailscale0" tcp dport 8484`)
+	if total != gated || total == 0 {
+		t.Fatalf("NftablesConf must contain only tailscale0-gated 8484 rules: total %d gated %d\nconf:\n%s", total, gated, conf)
+	}
+	if strings.Contains(conf, "0.0.0.0:8484") {
+		t.Fatalf("NftablesConf must not contain 0.0.0.0:8484 literal (listen address is systemd, not firewall)")
+	}
 	// Ensure no forward/output chain touched
 	if strings.Contains(conf, "chain forward") || strings.Contains(conf, "chain output") {
 		t.Fatalf("must not touch forward/output chains")
 	}
 	if !strings.HasSuffix(conf, "\n") {
 		t.Fatalf("NftablesConf should end with newline")
+	}
+}
+
+func TestPackagedOmahabdServiceListensOnIPv4Wildcard(t *testing.T) {
+	t.Parallel()
+	// Locate deploy/systemd/omahabd.service relative to repo root.
+	// When running `go test ./...` the working directory is the package
+	// directory, so we try a few relative candidates and also an absolute
+	// fallback via git root.
+	candidates := []string{
+		"../../deploy/systemd/omahabd.service",
+		"../../../deploy/systemd/omahabd.service",
+		"deploy/systemd/omahabd.service",
+	}
+	var data []byte
+	var lastErr error
+	for _, p := range candidates {
+		b, err := os.ReadFile(p)
+		if err == nil {
+			data = b
+			lastErr = nil
+			break
+		}
+		lastErr = err
+	}
+	if data == nil {
+		// Last resort: try to find repo root via git.
+		t.Fatalf("cannot locate omahabd.service (tried %v): %v", candidates, lastErr)
+	}
+	content := string(data)
+	if !strings.Contains(content, "Environment=OMAHAB_LISTEN=0.0.0.0:8484") {
+		t.Fatalf("packaged omahabd.service must set Environment=OMAHAB_LISTEN=0.0.0.0:8484; got:\n%s", content)
+	}
+	if strings.Contains(content, "Environment=OMAHAB_LISTEN=127.0.0.1") {
+		t.Fatalf("packaged omahabd.service must not set loopback OMAHAB_LISTEN; got:\n%s", content)
+	}
+	if strings.Count(content, "OMAHAB_LISTEN") != 1 {
+		t.Fatalf("packaged omahabd.service must contain exactly one OMAHAB_LISTEN, got %d", strings.Count(content, "OMAHAB_LISTEN"))
+	}
+	// The service must still contain the nftables boundary comment so the
+	// security invariant is visible next to the bind address.
+	if !strings.Contains(content, "tailscale0") {
+		t.Fatalf("packaged omahabd.service should document tailscale0 admission boundary near OMAHAB_LISTEN; got:\n%s", content)
+	}
+	if !strings.Contains(content, `iifname "lo"`) && !strings.Contains(content, "lo may reach 8484") {
+		// Accept either the nft comment phrasing or a direct iifname lo hint;
+		// the firewall file is the source of truth, but the service should
+		// at least mention that loopback remains usable.
+		t.Fatalf("packaged omahabd.service should mention loopback remains usable; got:\n%s", content)
+	}
+	// Ensure no public 8484 accept is implied by binding; we intentionally
+	// bind wildcard but gate via nftables — the service must not add an
+	// unrestricted firewall rule itself.
+	if strings.Contains(content, "0.0.0.0:8484") && !strings.Contains(content, "nftables") {
+		t.Fatalf("packaged service binds 0.0.0.0:8484 but should reference nftables as admission boundary")
 	}
 }
 
@@ -782,7 +857,7 @@ func TestFirewallIdempotentSecondRun(t *testing.T) {
 		CommandOutput: func(_ context.Context, name string, args ...string) (string, error) {
 			return "", nil
 		},
-		Systemctl: func(_ context.Context, args ...string) (string, error) { return "", nil },
+		Systemctl:      func(_ context.Context, args ...string) (string, error) { return "", nil },
 		ServiceActive:  func(name string) (bool, error) { return true, nil },
 		ServiceEnabled: func(name string) (bool, error) { return true, nil },
 	}

@@ -32,9 +32,12 @@ ReadOnlyPaths=/usr/bin/omahabd
 Environment=OMAHAB_ETC_DIR=/etc/omahab
 Environment=OMAHAB_STATE_DIR=/var/lib/omahab
 Environment=OMAHAB_DATA_DIR=/srv/omahab
+Environment=OMAHAB_LISTEN=0.0.0.0:8484
+# Packaged service binds IPv4 wildcard so both 127.0.0.1 and the node's
+# 100.x Tailscale address reach omahabd; nftables is the admission
+# boundary (only iifname "tailscale0" + lo may reach 8484).
 # Never leak secrets via Environment; secrets go via /var/lib/omahab/secrets + tmpfs /run/secrets
 EnvironmentFile=-/etc/omahab/omahabd.env
-
 # --- Sandboxing (hardened but compatible with Docker socket control) ---
 NoNewPrivileges=yes
 PrivateTmp=yes

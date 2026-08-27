@@ -9,7 +9,7 @@
 #
 # The script bundles every step that follows the clone:
 #
-#   1. install the build prerequisites with sudo (ca-certificates, golang-go);
+#   1. install the build prerequisites with sudo (ca-certificates, golang-go, nodejs, npm);
 #   2. compile the Omahab binaries into ~/omahab/dist (no root needed);
 #   3. exec the installer with sudo.
 #
@@ -39,7 +39,7 @@ command -v apt-get >/dev/null 2>&1 ||
 
 echo "omahab-setup: installing build prerequisites"
 sudo apt-get update
-sudo apt-get install -y ca-certificates golang-go
+sudo apt-get install -y ca-certificates golang-go nodejs npm
 
 echo "omahab-setup: building Omahab in $ROOT (this takes several minutes)"
 cd "$ROOT"

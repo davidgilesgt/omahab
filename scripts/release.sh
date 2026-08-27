@@ -89,8 +89,19 @@ go run ./cmd/omahab-cataloggen \
   -out "$OUT/apps-catalog.json"
 cp "$OUT/apps-catalog.json" deploy/catalog/apps-catalog.json
 
+# 1c) Build web dashboard assets deterministically (fail closed if not produced).
+command -v npm >/dev/null 2>&1 || { echo "error: npm not found — install Node.js and npm (on Debian 13/Ubuntu 26.04: apt-get install nodejs npm)" >&2; exit 1; }
+if [[ ! -f web/package-lock.json ]]; then
+  echo "error: web/package-lock.json not found — cannot build dashboard" >&2; exit 1
+fi
+echo "==> building web dashboard (npm ci + npm run build)"
+npm ci --prefix web
+npm run --prefix web build
+if [[ ! -f web/dist/index.html ]]; then
+  echo "error: web/dist/index.html not found after web build — dashboard build failed" >&2; exit 1
+fi
+
 # 2) Build installer binaries with staged assets (each arch embeds arch-specific binaries + catalog)
-#    The installer embeds internal/installer/assets/root, so we stage that
 #    directory per-arch before each go build. This makes the installer bytes
 #    arch-specific (expected) and guarantees the just-generated apps-catalog.json
 #    is embedded. We also rebuild omahab/omahabd per arch so the embedded
@@ -110,16 +121,13 @@ for arch in amd64 arm64; do
 
   echo "==> staging installer assets for $arch into $ASSET_ROOT"
   rm -rf "$ASSET_ROOT"
-  mkdir -p "$ASSET_ROOT/bin" "$ASSET_ROOT/systemd" "$ASSET_ROOT/catalog" "$ASSET_ROOT/tmpfiles.d"
+  mkdir -p "$ASSET_ROOT/bin" "$ASSET_ROOT/systemd" "$ASSET_ROOT/catalog" "$ASSET_ROOT/tmpfiles.d" "$ASSET_ROOT/web"
   cp "$build_target/omahab" "$build_target/omahabd" "$ASSET_ROOT/bin/"
   cp deploy/systemd/omahabd.service deploy/systemd/omahab-backup.service deploy/systemd/omahab-backup.timer deploy/systemd/omahab-verify.service deploy/systemd/omahab-verify.timer deploy/systemd/cloudflared.service "$ASSET_ROOT/systemd/"
   # Copy the entire catalog tree (includes the freshly generated apps-catalog.json).
   cp -r deploy/catalog/. "$ASSET_ROOT/catalog/"
   cp packaging/tmpfiles.d/omahab.conf "$ASSET_ROOT/tmpfiles.d/"
-  if [[ -d web/dist ]]; then
-    mkdir -p "$ASSET_ROOT/web"
-    cp -r web/dist/. "$ASSET_ROOT/web/"
-  fi
+  cp -r web/dist/. "$ASSET_ROOT/web/"
 
   artifact="$OUT/omahab-installer-${VERSION}-${arch}"
   GOOS=linux GOARCH=$arch CGO_ENABLED=0 go build -trimpath \

@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -55,6 +56,52 @@ var (
 	stdinReaderFile *os.File
 	stdinMu         sync.Mutex
 )
+
+// Tailscale settlement polling — bounded poll after `status` or blank Enter
+// so a single Enter can carry through async BackendState/IP propagation.
+// Roughly 12s total with ~1s interval; injected for deterministic tests.
+var (
+	tailscaleSettleInterval = 1 * time.Second
+	tailscaleSettleTimeout  = 12 * time.Second
+	tailscaleSettleSleep    = time.Sleep
+)
+
+const apiTokenPath = "/var/lib/omahab/api.token"
+
+// readAPIToken reads and trims the API token from the host via probes.
+// It returns "" when the probe is not configured, the file cannot be read,
+// or the content is empty/whitespace. Never exposes the token in errors.
+func readAPIToken(probes installer.Probes) string {
+	if probes.ReadFile == nil {
+		return ""
+	}
+	data, err := probes.ReadFile(apiTokenPath)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// dashboardURL builds the Tailscale dashboard URL for ip, appending
+// "#token=<percent-encoded-token>" only when token is non-empty.
+// It never uses "?token=" — fragments are not sent to the server.
+// The token value is percent-encoded for the fragment using QueryEscape
+// with "+" normalized to "%20" (fragment prefers %20 over "+"), ensuring
+// characters like "&", "=", "+", "/", "?", "#", "%" are safely encoded.
+func dashboardURL(ip, token string) string {
+	ip = strings.TrimSpace(ip)
+	if ip == "" {
+		return ""
+	}
+	base := "http://" + ip + ":8484"
+	t := strings.TrimSpace(token)
+	if t == "" {
+		return base
+	}
+	enc := url.QueryEscape(t)
+	enc = strings.ReplaceAll(enc, "+", "%20")
+	return base + "/#token=" + enc
+}
 
 func getStdinReader() *bufio.Reader {
 	stdinMu.Lock()
@@ -745,8 +792,18 @@ func doInstall(cmd *cobra.Command) error {
 		out.printf("If `omahab` is not found, open a new shell or run: hash -r\n")
 		if out.isTTY {
 			if ip := tailscaleIP(ctx, probes); ip != "" {
-				out.printf("\nDashboard: %s\n", "http://"+ip+":8484")
-				out.printQR("Dashboard QR (scan to open):", "http://"+ip+":8484")
+				url := dashboardURL(ip, readAPIToken(probes))
+				// Log tokenless fallback retains non-secret URL; tokenized link is admin credential.
+				if strings.Contains(url, "#token=") {
+					out.printf("\nDashboard: %s\n", url)
+					out.printf("  Administrator access — keep this link private. Anyone with the link has full access.\n")
+					out.printQR("Dashboard QR (scan to open):", url)
+					out.printf("  QR encodes the same private link — do not share or photograph publicly.\n")
+				} else {
+					out.printf("\nDashboard: %s\n", url)
+					out.printf("  Could not read API token — open the URL and log in with the token from %s or ~/.config/omahab/token\n", apiTokenPath)
+					out.printQR("Dashboard QR (scan to open):", url)
+				}
 			}
 		}
 	}
@@ -764,7 +821,7 @@ func doInstall(cmd *cobra.Command) error {
 			out.printf("\nCloudflare guided setup ended: %v\n", err)
 			out.printf("You can retry later via the dashboard at http://<tailscale-ip>:8484 or: omahab doctor\n")
 		}
-		printGuidedSummary(out)
+		printGuidedSummary(ctx, out, probes)
 		return nil
 	}
 
@@ -794,8 +851,8 @@ func stepInScope(step, until string) bool {
 // This is the user-visible hand-off after `omahab-install` finishes the ten
 // journaled host steps.  It now guides through:
 //
-//  1. Tailscale enrollment — the private mesh that makes 127.0.0.1:8484
-//     reachable without opening inbound ports.
+//  1. Tailscale enrollment — the private mesh admitted to port 8484 by
+//     nftables while public interfaces remain blocked.
 //  2. Cloudflare domain + scoped API token — the public edge (DNS + Tunnel +
 //     optional Access) using outbound-only cloudflared.
 //
@@ -831,13 +888,13 @@ func printNextSteps(out output, until string) {
 	}
 
 	out.printf("\n%s\n", bold("Next steps — Tailscale + Cloudflare (5 min)"))
-	out.printf("%s\n", dim("The control API listens on 127.0.0.1:8484 only. Tailscale makes it reachable."))
+	out.printf("%s\n", dim("The packaged control API accepts port 8484 only from loopback and tailscale0."))
 	out.printf("%s\n", dim("cloudflared and the backup/verify timers remain disabled until these are configured."))
 	out.printf("\n")
 
 	// ---- 1. Tailscale --------------------------------------------------
 	out.printf("%s\n", bold("1) Tailscale — private mesh (required first)"))
-	out.printf("   %s\n", dim("Why: all dashboard + API access goes over Tailscale; no inbound ports are opened."))
+	out.printf("   %s\n", dim("Why: dashboard + API access is admitted on tailscale0; public interfaces remain blocked."))
 	out.printf("\n")
 	out.printf("   Run on this host:\n")
 	out.printf("     %s\n", hl("sudo tailscale up"))
@@ -1098,6 +1155,45 @@ func tailscaleStatusCheckWithFeedback(ctx context.Context, out output, probes in
 	return tailscaleStatusCheck(ctx, probes)
 }
 
+// pollTailscaleSettled performs a bounded settlement poll after `status`
+// or blank Enter, reusing the existing TTY progress patterns sequentially
+// (no nested spinner goroutines) and never emitting spinner escape codes
+// when not on a capable TTY — preserving redirected-output safety.
+// It returns the last probe result; callers print success or Still once.
+func pollTailscaleSettled(ctx context.Context, out output, probes installer.Probes) (installed, loggedIn bool, ip, detail string) {
+	attempts := int(tailscaleSettleTimeout / tailscaleSettleInterval)
+	if attempts < 1 {
+		attempts = 1
+	}
+	if attempts > 15 {
+		attempts = 15
+	}
+	var lastInst, lastLog bool
+	var lastIP, lastDetail string
+	for i := range attempts {
+		if ctx.Err() != nil {
+			return lastInst, lastLog, lastIP, lastDetail
+		}
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return lastInst, lastLog, lastIP, lastDetail
+			default:
+			}
+			tailscaleSettleSleep(tailscaleSettleInterval)
+			if ctx.Err() != nil {
+				return lastInst, lastLog, lastIP, lastDetail
+			}
+		}
+		inst, logged, ipStr, det := tailscaleStatusCheckWithFeedback(ctx, out, probes)
+		lastInst, lastLog, lastIP, lastDetail = inst, logged, ipStr, det
+		if logged && ipStr != "" {
+			return inst, logged, ipStr, det
+		}
+	}
+	return lastInst, lastLog, lastIP, lastDetail
+}
+
 func runTailscaleUp(ctx context.Context, out output, probes installer.Probes) {
 	out.printf("\nRunning %s ...\n", "tailscale up")
 	// Give the user 2 minutes to scan the QR / open the URL. 20s was too short
@@ -1195,41 +1291,50 @@ func guideTailscale(ctx context.Context, out output, probes installer.Probes) er
 	}
 
 	out.printf("\n%s\n", bold("1) Tailscale — private mesh (interactive, loops until satisfied)"))
-	out.printf("   %s\n", dim("Why: dashboard + API are on 127.0.0.1:8484 only; Tailscale is the private entry."))
-	out.printf("   %s\n", dim("No inbound ports. Uses outbound DERP + direct UDP 41641 (already allowed in nftables)."))
+	out.printf("   %s\n", dim("Why: dashboard + API access is admitted on tailscale0; public interfaces remain blocked."))
+	out.printf("   %s\n", dim("Tailscale uses outbound DERP + direct UDP 41641 (already allowed in nftables)."))
 
-	// First status check
-	maxRounds := 30 // ~ interactive loop, not time-bound
-	for round := 1; round <= maxRounds; round++ {
-		_, loggedIn, ip, detail := tailscaleStatusCheckWithFeedback(ctx, out, probes)
-		if loggedIn && ip != "" {
-			if out.color {
-				out.printf("\n  \033[32m✓ Tailscale is up — %s (100.x.y.z)\033[0m\n", ip)
-			} else {
-				out.printf("\n  ✓ Tailscale is up — %s\n", ip)
-			}
-			out.printf("    Verify: %s  —  %s\n", hl("tailscale status"), hl("omahab doctor"))
-			out.printf("    Dashboard: %s  or  %s\n", hl("http://"+ip+":8484"), hl("http://<hostname>.<tailnet>.ts.net:8484"))
-			// Terminal QR for the dashboard URL when stderr is a TTY.
-			out.printQR("  Dashboard QR (scan to open):", "http://"+ip+":8484")
-			out.printf("\n  %s\n", bold("Tailscale setup complete — continuing to Cloudflare setup..."))
-			return nil
-		}
-
-		if round == 1 {
-			out.printf("\n  Current: %s\n", detail)
-			if !loggedIn {
-				out.printf("  Not yet enrolled. Will run %s and wait for you to authorize in a browser.\n", hl("tailscale up"))
-				runTailscaleUp(ctx, out, probes)
-				// Fall through to prompt below.
-			}
+	printSuccess := func(ip string) {
+		if out.color {
+			out.printf("\n  \033[32m✓ Tailscale is up — %s (100.x.y.z)\033[0m\n", ip)
 		} else {
-			out.printf("\n  Still: %s\n", detail)
-			if ip != "" {
-				out.printf("  IP seen but BackendState not yet Running: %s\n", ip)
-			}
+			out.printf("\n  ✓ Tailscale is up — %s\n", ip)
 		}
+		out.printf("    Verify: %s  —  %s\n", hl("tailscale status"), hl("omahab doctor"))
+		url := dashboardURL(ip, readAPIToken(probes))
+		if strings.Contains(url, "#token=") {
+			out.printf("    Dashboard: %s  or  %s\n", hl(url), hl("http://<hostname>.<tailnet>.ts.net:8484"))
+			out.printf("      Administrator access — keep this link private. Anyone with the link has full access.\n")
+			out.printQR("  Dashboard QR (scan to open):", url)
+			out.printf("      QR encodes the same private link — do not share publicly.\n")
+		} else {
+			fallback := "http://" + ip + ":8484"
+			if url != "" {
+				fallback = url
+			}
+			out.printf("    Dashboard: %s  or  %s\n", hl(fallback), hl("http://<hostname>.<tailnet>.ts.net:8484"))
+			out.printf("      Could not read API token — log in with token from %s\n", apiTokenPath)
+			out.printQR("  Dashboard QR (scan to open):", fallback)
+		}
+		out.printf("\n  %s\n", bold("Tailscale setup complete — continuing to Cloudflare setup..."))
+	}
 
+	// Initial check before prompting — if already Running, succeed immediately.
+	maxRounds := 30
+	_, loggedIn, ip, detail := tailscaleStatusCheckWithFeedback(ctx, out, probes)
+	if loggedIn && ip != "" {
+		printSuccess(ip)
+		return nil
+	}
+	out.printf("\n  Current: %s\n", detail)
+	if !loggedIn {
+		out.printf("  Not yet enrolled. Will run %s and wait for you to authorize in a browser.\n", hl("tailscale up"))
+		runTailscaleUp(ctx, out, probes)
+	} else if ip != "" {
+		out.printf("  IP seen but BackendState not yet Running: %s\n", ip)
+	}
+
+	for round := 1; round <= maxRounds; round++ {
 		out.printf("\n  %s\n", dim("Open the URL shown above on any device signed into your tailnet,"))
 		out.printf("  %s %s → Machines → Approve, then return here.\n", dim("approve at"), hl("https://login.tailscale.com/admin/machines"))
 		out.printf("  %s\n", dim("Tip: Disable key expiry for this server (machine ⋯ → Disable key expiry)."))
@@ -1248,22 +1353,35 @@ func guideTailscale(ctx context.Context, out output, probes installer.Probes) er
 			return nil
 		case "retry", "up", "again":
 			runTailscaleUp(ctx, out, probes)
-			continue
-		case "status", "st":
-			continue
-		case "":
-			// User hit Enter after approving: re-check, but if still NeedsLogin
-			// automatically refresh the URL so a timed-out `tailscale up`
-			// doesn't look like "nothing happened".
-			_, stillLoggedIn, _, stillDetail := tailscaleStatusCheckWithFeedback(ctx, out, probes)
-			if !stillLoggedIn && (strings.Contains(strings.ToLower(stillDetail), "needslogin") || strings.Contains(strings.ToLower(stillDetail), "needs login") || strings.Contains(stillDetail, "LoggedOut")) {
-				out.printf("  Still not connected — fetching a fresh login URL...\n")
-				runTailscaleUp(ctx, out, probes)
+			_, logged2, ip2, detail2 := tailscaleStatusCheckWithFeedback(ctx, out, probes)
+			if logged2 && ip2 != "" {
+				printSuccess(ip2)
+				return nil
 			}
-			continue
+			out.printf("\n  Still: %s\n", detail2)
+			if ip2 != "" {
+				out.printf("  IP seen but BackendState not yet Running: %s\n", ip2)
+			}
+		case "status", "st", "":
+			_, logged2, ip2, detail2 := pollTailscaleSettled(ctx, out, probes)
+			if logged2 && ip2 != "" {
+				printSuccess(ip2)
+				return nil
+			}
+			out.printf("\n  Still: %s\n", detail2)
+			if ip2 != "" {
+				out.printf("  IP seen but BackendState not yet Running: %s\n", ip2)
+			}
 		default:
-			// treat unknown as re-check
-			continue
+			_, logged2, ip2, detail2 := tailscaleStatusCheckWithFeedback(ctx, out, probes)
+			if logged2 && ip2 != "" {
+				printSuccess(ip2)
+				return nil
+			}
+			out.printf("\n  Still: %s\n", detail2)
+			if ip2 != "" {
+				out.printf("  IP seen but BackendState not yet Running: %s\n", ip2)
+			}
 		}
 	}
 	return fmt.Errorf("tailscale not yet enrolled after %d checks — run `sudo tailscale up` and `omahab doctor` when ready", maxRounds)
@@ -1573,7 +1691,16 @@ func guideCloudflare(ctx context.Context, out output, probes installer.Probes) e
 		} else {
 			out.printf("     Token B (Tunnel+Access): %s skipped — private-only until added\n", hl("—"))
 		}
-		out.printf("\n   Next: open %s (over Tailscale) → Settings → Domain → confirm %s\n", hl("http://<tailscale-ip>:8484"), hl(domain))
+		nextURL := "http://<tailscale-ip>:8484"
+		if ip := tailscaleIP(ctx, probes); ip != "" {
+			if u := dashboardURL(ip, readAPIToken(probes)); u != "" {
+				nextURL = u
+			}
+		}
+		out.printf("\n   Next: open %s (over Tailscale) → Settings → Domain → confirm %s\n", hl(nextURL), hl(domain))
+		if strings.Contains(nextURL, "#token=") {
+			out.printf("   Administrator access — keep this link private. Anyone with the link has full access.\n")
+		}
 		out.printf("   Paste the same token(s) there if the installer did not persist them automatically;\n")
 		out.printf("   the dashboard stores them encrypted in %s (never echoed back).\n", hl("/var/lib/omahab/secrets"))
 		_ = domain
@@ -1583,7 +1710,7 @@ func guideCloudflare(ctx context.Context, out output, probes installer.Probes) e
 	return nil
 }
 
-func printGuidedSummary(out output) {
+func printGuidedSummary(ctx context.Context, out output, probes installer.Probes) {
 	bold := func(s string) string {
 		if out.color {
 			return "\033[1m" + s + "\033[0m"
@@ -1604,6 +1731,22 @@ func printGuidedSummary(out output) {
 	}
 
 	out.printf("\n%s\n", bold("Guided enrollment done."))
+	if ip := tailscaleIP(ctx, probes); ip != "" {
+		url := dashboardURL(ip, readAPIToken(probes))
+		if strings.Contains(url, "#token=") {
+			out.printf("  Dashboard: %s\n", hl(url))
+			out.printf("  %s\n", dim("Administrator access — keep this link private. Anyone with the link has full access."))
+			out.printQR("  Dashboard QR (scan to open):", url)
+			out.printf("  %s\n", dim("QR encodes the same private link — do not share publicly."))
+		} else {
+			out.printf("  Dashboard: %s\n", hl(url))
+			out.printf("  %s\n", dim("Open and log in with your API token."))
+			out.printQR("  Dashboard QR (scan to open):", url)
+		}
+	} else {
+		out.printf("  Dashboard: %s (after Tailscale is up)\n", hl("http://<tailscale-ip>:8484"))
+		out.printf("  %s\n", dim("Run tailscale up, then tailscale ip -4 to find your dashboard address."))
+	}
 	out.printf("  %s\n", hl("omahab doctor           # health including Tailscale + Cloudflare"))
 	out.printf("  %s\n", dim("dig ai.example.com +short  # after exposure is set"))
 	out.printf("  %s\n", hl("sudo systemctl status cloudflared  # becomes active after tunnel is created"))

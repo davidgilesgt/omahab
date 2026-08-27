@@ -37,6 +37,18 @@ export SOURCE_DATE_EPOCH CGO_ENABLED=0 GOOS=linux
 
 ASSET_ROOT="internal/installer/assets/root"
 
+# Build web dashboard assets deterministically (fail closed if not produced).
+command -v npm >/dev/null 2>&1 || { echo "error: npm not found — install Node.js and npm (on Debian 13/Ubuntu 26.04: apt-get install nodejs npm)" >&2; exit 1; }
+if [[ ! -f web/package-lock.json ]]; then
+  echo "error: web/package-lock.json not found — cannot build dashboard" >&2; exit 1
+fi
+echo "==> building web dashboard (npm ci + npm run build)"
+npm ci --prefix web
+npm run --prefix web build
+if [[ ! -f web/dist/index.html ]]; then
+  echo "error: web/dist/index.html not found after web build — dashboard build failed" >&2; exit 1
+fi
+
 for arch in "${ARCHES[@]}"; do
   target="$OUTDIR/$arch"
   mkdir -p "$target"
@@ -61,10 +73,8 @@ for arch in "${ARCHES[@]}"; do
   # catalog that the installer and daemon expect under /usr/share/omahab/catalog/.
   cp -r deploy/catalog/. "$ASSET_ROOT/catalog/"
   cp packaging/tmpfiles.d/omahab.conf "$ASSET_ROOT/tmpfiles.d/"
-  if [[ -d web/dist ]]; then
-    mkdir -p "$ASSET_ROOT/web"
-    cp -r web/dist/. "$ASSET_ROOT/web/"
-  fi
+  mkdir -p "$ASSET_ROOT/web"
+  cp -r web/dist/. "$ASSET_ROOT/web/"
 
   echo "==> building omahab-install for $arch (embedding $ASSET_ROOT)"
   "$GO_BIN" build -trimpath -ldflags "$ldflags" -o "$target/omahab-install" ./cmd/omahab-install

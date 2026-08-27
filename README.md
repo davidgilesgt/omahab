@@ -114,7 +114,7 @@ The installer runs 10 steps in order. Each step is journaled and idempotent. Use
 4. `system_prepare` — creates directories via `systemd-tmpfiles` from `/usr/lib/tmpfiles.d/omahab.conf`: `/var/lib/omahab/secrets`, `/srv/omahab/{apps,projects,sync,backups,workspaces,derived-indexes}`, `/var/log/omahab`, `/var/cache/omahab`.
 5. `packages` — installs `ca-certificates`, `docker.io`, `docker-compose` (Debian) or `docker-compose-v2` (Ubuntu 26.04), `nftables`, `unattended-upgrades`, `tailscale`, `cloudflared`. Downloads vendor keyrings to `/usr/share/keyrings/{tailscale-archive-keyring,cloudflare-main}.gpg`, writes the two `omahab-*.list` sources, enables `unattended-upgrades` via `/etc/apt/apt.conf.d/20auto-upgrades`.
 6. `binaries` — installs `/usr/bin/{omahab,omahabd}` (0755), six systemd units to `/usr/lib/systemd/system/` (`omahabd.service`, `omahab-backup.{service,timer}`, `omahab-verify.{service,timer}`, `cloudflared.service`), `/usr/lib/tmpfiles.d/omahab.conf`, catalog to `/usr/share/omahab/catalog/`, web assets to `/usr/share/omahab/web/` (when built). Runs `systemd-tmpfiles --create`. Assets are embedded in the installer binary (staged by `scripts/build.sh`); dev builds can pass `--asset-dir`.
-7. `firewall` — writes `/etc/nftables.conf` (`table inet omahab`, default-deny inbound, allows `lo`, `established/related`, `ICMP/ICMPv6`, SSH `22`, Tailscale UDP `41641`). Validates with `nft -c` before applying. Backs up any prior config to `/etc/nftables.conf.pre-omahab`. Enables and starts `nftables.service`. Docker forward rules untouched.
+7. `firewall` — writes `/etc/nftables.conf` (`table inet omahab`, default-deny inbound, allows `lo`, `established/related`, `ICMP/ICMPv6`, SSH `22`, Tailscale UDP `41641`, and TCP `8484` only on `tailscale0` (`iifname "tailscale0" tcp dport 8484`); loopback traffic to `8484` remains allowed via `lo`; no public `8484` accept). Validates with `nft -c` before applying. Backs up any prior config to `/etc/nftables.conf.pre-omahab`. Enables and starts `nftables.service`. Docker forward rules untouched.
 8. `services` — runs `systemctl daemon-reload`, enables `tailscaled` and `omahabd`. Does not enable `cloudflared` (needs tunnel enrollment), `omahab-backup.timer` / `omahab-verify.timer` (need a backup repository), or `omahab-clientd` (companion-only).
 9. `daemon` — enables and restarts `omahabd` (`Type=simple`), polls `http://127.0.0.1:8484/up` until `200`, and provisions the generated API token to the administrator's `~/.config/omahab/token` (0600, administrator-owned) so local CLI commands authenticate immediately. It also writes `/etc/omahab/backup.env` (0600, `OMAHAB_SERVER` + `OMAHAB_TOKEN`) for the backup and verify units (`omahab backup create` and `omahab backup verify` without an id verifies the latest snapshot).
 10. `manifest` — writes `/var/lib/omahab/install-manifest.json`.
@@ -164,14 +164,31 @@ run without `--json`) lists the same dashboard path
 (`https://dash.cloudflare.com` → Profile → API Tokens → Create Custom Token),
 the per-token permissions above (DESIGN.md 7.4, `internal/exposure/clients.go`
 `ScopeDNS|Tunnel|Access`), how to verify (`dig ai.example.com`,
-`sudo systemctl status cloudflared`), and that the control API stays on
-`127.0.0.1:8484` (reach it via Tailscale IP or MagicDNS
-`http://<hostname>.<tailnet>.ts.net:8484`). `cloudflared` and the backup timers
-remain disabled until tunnel enrollment and a backup repository are configured
-— by design. Finish with `omahab doctor`.
+`sudo systemctl status cloudflared`), and that the packaged control API listens on
+`0.0.0.0:8484` (IPv4 wildcard, `ss` shows `0.0.0.0:8484`) and is gated by nftables:
+only `tailscale0` (`iifname "tailscale0" tcp dport 8484`) and `lo` may reach `8484`;
+public interfaces remain blocked. The standalone default (`internal/config.DefaultListen`)
+remains `127.0.0.1:8484` for non-packaged runs (`go run`, Docker). Reach the
+dashboard via Tailscale IP or MagicDNS (`http://<hostname>.<tailnet>.ts.net:8484`).
+`cloudflared` and the backup timers remain disabled until tunnel enrollment and a
+backup repository are configured — by design. Finish with `omahab doctor`.
+
+When the installer can read the generated API token at `/var/lib/omahab/api.token`
+and the Tailscale IPv4 address, the final guided summary, the immediate
+post-install dashboard line, the Tailscale success line, and the Cloudflare
+“Next: open” line all use an authenticated fragment URL
+`http://<tailscale-ip>:8484/#token=<percent-encoded-token>` and an identical QR.
+The fragment is never sent to the HTTP server (never `?token=`), is moved to
+`sessionStorage` key `omahab.session` and then stripped from the address bar
+via `history.replaceState` before any API request. **Keep this link private —
+it grants full administrator access.** If the token or IP cannot be read, the
+installer keeps the plain `http://<tailscale-ip>:8484` URL, shows a short note
+to log in manually with the token from `/var/lib/omahab/api.token` or
+`~/.config/omahab/token`, and does not fail the otherwise successful install.
 
 
-`omahabd` listens on `127.0.0.1:8484` only.
+
+Packaged `omahabd` (`deploy/systemd/omahabd.service` sets `OMAHAB_LISTEN=0.0.0.0:8484`) listens on all IPv4 interfaces so both `127.0.0.1:8484` and the node's `100.x` Tailscale address work; nftables remains the admission boundary and permits TCP `8484` only on `tailscale0` (loopback remains usable via `iifname "lo"`); no public `8484` accept rule exists. Non-packaged execution keeps the loopback default (`127.0.0.1:8484`).
 
 Paths on the machine:
 
@@ -231,7 +248,7 @@ All applications run on one private Docker network. No application opens a port 
 
 ## Security model
 
-- The API listens on the loopback address only.
+- Packaged `omahabd` binds `0.0.0.0:8484` (IPv4 wildcard, `ss` shows `0.0.0.0:8484`) so both `127.0.0.1:8484` and the node's `100.x` Tailscale IP work; nftables is the admission boundary — TCP `8484` is allowed only on `tailscale0` (`iifname "tailscale0" tcp dport 8484`) and via `lo`; public interfaces have no `8484` accept rule. Standalone default stays loopback-only (`internal/config.DefaultListen` = `127.0.0.1:8484`).
 - The installer stops when a check fails. It does not continue with an unknown state.
 - Signed releases carry a `SHA256SUMS` file and a minisign signature. The bootstrap script checks both before it runs the installer.
 - The public key is in `release/minisign.pub` and inside the bootstrap script. The private key stays offline.
@@ -256,7 +273,7 @@ go vet ./...
 go test ./...
 ```
 
-You need Go 1.25 or newer, Python 3, and Node.js for the web dashboard.
+You need Go 1.25 or newer, Python 3, and Node.js with npm. `scripts/build.sh` and `scripts/release.sh` run `npm ci` plus the production web build and refuse to emit an installer unless `web/dist/index.html` is embedded.
 
 Repository layout:
 
@@ -281,7 +298,7 @@ Repository layout:
 A signed release makes the bootstrap installation work. Do this before you tell users to use it:
 
 1. Set `MINISIGN_KEY` to the path of the offline private key.
-2. Run `bash scripts/release.sh`. The script builds both CPU types, resolves the image digests, writes `SHA256SUMS`, and signs it.
+2. Run `bash scripts/release.sh`. The script builds the dashboard and both CPU types, refuses API-only installers, resolves the image digests, writes `SHA256SUMS`, and signs it.
 3. Run `bash scripts/verify-release.sh dist/release` to check the release.
 4. Upload all files from `dist/release` to a new GitHub release. Do not mark it as a draft.
 

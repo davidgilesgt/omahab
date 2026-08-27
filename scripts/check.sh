@@ -11,6 +11,22 @@ fail_check() { echo "FAIL: $*" >&2; fail=1; }
 bash -n scripts/build.sh scripts/release.sh scripts/verify-release.sh scripts/check.sh && pass "bash syntax" || fail_check "bash syntax"
 sh -n scripts/install scripts/setup packaging/deb/build.sh && pass "POSIX shell syntax" || fail_check "POSIX shell syntax"
 grep -q 'DefaultListen.*127\.0\.0\.1' internal/config/config.go && pass "loopback API default" || fail_check "loopback API default"
+grep -q 'OMAHAB_LISTEN=0\.0\.0\.0:8484' deploy/systemd/omahabd.service && pass "packaged wildcard listen (0.0.0.0:8484)" || fail_check "packaged wildcard listen (0.0.0.0:8484)"
+! grep -q 'OMAHAB_LISTEN=127\.0\.0\.1' deploy/systemd/omahabd.service && pass "packaged listen not loopback" || fail_check "packaged listen not loopback"
+grep -q 'iifname "tailscale0" tcp dport 8484' internal/installer/firewall.go && pass "nftables tailscale gate for 8484" || fail_check "nftables tailscale gate for 8484"
+grep -q 'iifname "lo" accept' internal/installer/firewall.go && pass "nftables loopback accept" || fail_check "nftables loopback accept"
+# Ensure every tcp dport 8484 rule is gated by tailscale0 (no public accept).
+if grep -q 'tcp dport 8484' internal/installer/firewall.go; then
+  total=$(grep -c 'tcp dport 8484' internal/installer/firewall.go || true)
+  gated=$(grep -c 'iifname "tailscale0" tcp dport 8484' internal/installer/firewall.go || true)
+  if [ "$total" -eq "$gated" ] && [ "$total" -gt 0 ]; then
+    pass "nftables no public 8484 accept (only tailscale0)"
+  else
+    fail_check "nftables no public 8484 accept (found unrestricted 8484 rule)"
+  fi
+else
+  fail_check "nftables no public 8484 accept (missing 8484 rule)"
+fi
 grep -q 'SupplementaryGroups=docker' deploy/systemd/omahabd.service && pass "narrow docker group" || fail_check "narrow docker group"
 ! grep -q 'docker.sock' Dockerfile && pass "Dockerfile has no Docker socket" || fail_check "Dockerfile Docker socket mount"
 grep -q 'RequiresMountsFor=/srv/omahab' deploy/systemd/omahabd.service && pass "data mount ordering" || fail_check "data mount ordering"
@@ -21,6 +37,16 @@ grep -q 'd /var/lib/omahab .*0700 root root' packaging/tmpfiles.d/omahab.conf &&
 grep -q 'd /srv/omahab .*0755 root root' packaging/tmpfiles.d/omahab.conf && pass "data directory exists" || fail_check "data directory"
 grep -q 'd /etc/omahab .*0755 root root' packaging/tmpfiles.d/omahab.conf && pass "etc directory exists" || fail_check "etc directory"
 grep -q 'ARCHES=(amd64' scripts/build.sh && grep -q 'arm64' scripts/build.sh && pass "amd64 and arm64 build" || fail_check "multi-architecture build"
+grep -q 'nodejs npm' scripts/setup && pass "source setup installs dashboard toolchain" || fail_check "source setup dashboard toolchain"
+for script in scripts/build.sh scripts/release.sh; do
+  grep -q 'npm ci --prefix web' "$script" &&
+    grep -q 'npm run --prefix web build' "$script" &&
+    grep -q 'web/dist/index.html' "$script" &&
+    grep -q 'cp -r web/dist/. "$ASSET_ROOT/web/"' "$script" &&
+    ! grep -q 'if \[\[ -d web/dist \]\]' "$script" &&
+    pass "$script requires embedded dashboard assets" ||
+    fail_check "$script dashboard assets are optional"
+done
 grep -q 'SHA256SUMS' scripts/release.sh scripts/verify-release.sh && pass "signed checksum chain" || fail_check "signed checksum chain"
 grep -q 'minisign.*-Vm' scripts/verify-release.sh && pass "minisign verification" || fail_check "minisign verification"
 ! grep -q 'placeholder installer' scripts/build.sh scripts/release.sh && pass "no fake installer fallback" || fail_check "fake installer fallback"
