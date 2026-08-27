@@ -46,7 +46,9 @@ type Probes struct {
 	MkdirAll    func(path string, perm uint32) error
 	StatFile    func(path string) (isDir bool, perm uint32, err error)
 	FileOwner   func(path string) (uid, gid int, err error)
-
+	LookupUser  func(name string) (uid, gid int, homeDir string, err error)
+	Chown       func(path string, uid, gid int) error
+	Chmod       func(path string, perm uint32) error
 	// Processes / services
 	CommandExists  func(name string) bool
 	CommandOutput  func(ctx context.Context, name string, args ...string) (string, error)
@@ -138,6 +140,9 @@ func LiveProbes() Probes {
 		MkdirAll:            liveMkdirAll,
 		StatFile:            liveStatFile,
 		FileOwner:           liveFileOwner,
+		LookupUser:          liveLookupUser,
+		Chown:               liveChown,
+		Chmod:               liveChmod,
 		CommandExists:       liveCommandExists,
 		CommandOutput:       liveCommandOutput,
 		CommandStream:       liveCommandStream,

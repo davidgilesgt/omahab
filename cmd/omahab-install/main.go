@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/x/term"
@@ -44,6 +45,42 @@ var (
 	flagRecoveryKey    string
 	flagRecoveryPath   string
 )
+
+// stable stdin reader: a single buffered reader for os.Stdin is reused
+// across prompts so that per-prompt bufio buffering cannot discard later
+// input (e.g., extra Enters typed during a synchronous status check that
+// should reprompt Cloudflare rather than silently skip).
+var (
+	stdinReader     *bufio.Reader
+	stdinReaderFile *os.File
+	stdinMu         sync.Mutex
+)
+
+func getStdinReader() *bufio.Reader {
+	stdinMu.Lock()
+	defer stdinMu.Unlock()
+	if stdinReader != nil && stdinReaderFile == os.Stdin {
+		return stdinReader
+	}
+	stdinReader = bufio.NewReader(os.Stdin)
+	stdinReaderFile = os.Stdin
+	return stdinReader
+}
+
+func readStdinLine() (string, bool) {
+	r := getStdinReader()
+	line, err := r.ReadString('\n')
+	if err != nil {
+		if err == io.EOF && line != "" {
+			return strings.TrimRight(line, "\r\n"), true
+		}
+		if line == "" {
+			return "", false
+		}
+		return strings.TrimRight(line, "\r\n"), true
+	}
+	return strings.TrimRight(line, "\r\n"), true
+}
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -1015,6 +1052,52 @@ func tailscaleStatusCheck(ctx context.Context, probes installer.Probes) (install
 	return true, false, "", detail
 }
 
+func tailscaleStatusCheckWithFeedback(ctx context.Context, out output, probes installer.Probes) (installed, loggedIn bool, ip, detail string) {
+	// Only animate on a capable TTY; retain a single plain line for TTY without
+	// color and silence for non-TTY so redirected output is not corrupted.
+	if out.caps.IsTTY && out.caps.ColorEnabled && isTerminal(os.Stderr) {
+		type result struct {
+			installed, loggedIn bool
+			ip, detail          string
+		}
+		ch := make(chan result, 1)
+		go func() {
+			i, l, ip, d := tailscaleStatusCheck(ctx, probes)
+			ch <- result{i, l, ip, d}
+		}()
+		frame := 0
+		// Initial frame immediately so a blocked check is visibly responsive.
+		fmt.Fprintf(out.ui, "\r  %s Checking Tailscale status...", tui.GlyphSpinner(out.caps, frame))
+		frame++
+		ticker := time.NewTicker(80 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				// Honor context cancellation; clear exactly once.
+				fmt.Fprint(out.ui, "\r\033[K")
+				select {
+				case r := <-ch:
+					return r.installed, r.loggedIn, r.ip, r.detail
+				default:
+					return false, false, "", ctx.Err().Error()
+				}
+			case r := <-ch:
+				fmt.Fprint(out.ui, "\r\033[K")
+				return r.installed, r.loggedIn, r.ip, r.detail
+			case <-ticker.C:
+				fmt.Fprintf(out.ui, "\r  %s Checking Tailscale status...", tui.GlyphSpinner(out.caps, frame))
+				frame++
+			}
+		}
+	}
+	if out.isTTY {
+		out.printf("  Checking Tailscale status...\n")
+		return tailscaleStatusCheck(ctx, probes)
+	}
+	return tailscaleStatusCheck(ctx, probes)
+}
+
 func runTailscaleUp(ctx context.Context, out output, probes installer.Probes) {
 	out.printf("\nRunning %s ...\n", "tailscale up")
 	// Give the user 2 minutes to scan the QR / open the URL. 20s was too short
@@ -1118,7 +1201,7 @@ func guideTailscale(ctx context.Context, out output, probes installer.Probes) er
 	// First status check
 	maxRounds := 30 // ~ interactive loop, not time-bound
 	for round := 1; round <= maxRounds; round++ {
-		_, loggedIn, ip, detail := tailscaleStatusCheck(ctx, probes)
+		_, loggedIn, ip, detail := tailscaleStatusCheckWithFeedback(ctx, out, probes)
 		if loggedIn && ip != "" {
 			if out.color {
 				out.printf("\n  \033[32m✓ Tailscale is up — %s (100.x.y.z)\033[0m\n", ip)
@@ -1129,6 +1212,7 @@ func guideTailscale(ctx context.Context, out output, probes installer.Probes) er
 			out.printf("    Dashboard: %s  or  %s\n", hl("http://"+ip+":8484"), hl("http://<hostname>.<tailnet>.ts.net:8484"))
 			// Terminal QR for the dashboard URL when stderr is a TTY.
 			out.printQR("  Dashboard QR (scan to open):", "http://"+ip+":8484")
+			out.printf("\n  %s\n", bold("Tailscale setup complete — continuing to Cloudflare setup..."))
 			return nil
 		}
 
@@ -1151,11 +1235,11 @@ func guideTailscale(ctx context.Context, out output, probes installer.Probes) er
 		out.printf("  %s\n", dim("Tip: Disable key expiry for this server (machine ⋯ → Disable key expiry)."))
 		out.printf("  %s\n", dim("After approving, press Enter to re-check — we'll fetch a fresh URL automatically if still not connected."))
 		fmt.Fprint(out.ui, "\n  Press Enter to re-check (type 'retry' for a fresh URL now, 'status' to re-check without new URL, 'skip' to enroll later): ")
-		scanner := bufio.NewScanner(os.Stdin)
-		if !scanner.Scan() {
+		rawLine, ok := readStdinLine()
+		if !ok {
 			return installer.ErrCancelled
 		}
-		line := strings.TrimSpace(scanner.Text())
+		line := strings.TrimSpace(rawLine)
 		low := strings.ToLower(line)
 		switch low {
 		case "skip", "s", "later", "q", "quit", "exit":
@@ -1171,7 +1255,7 @@ func guideTailscale(ctx context.Context, out output, probes installer.Probes) er
 			// User hit Enter after approving: re-check, but if still NeedsLogin
 			// automatically refresh the URL so a timed-out `tailscale up`
 			// doesn't look like "nothing happened".
-			_, stillLoggedIn, _, stillDetail := tailscaleStatusCheck(ctx, probes)
+			_, stillLoggedIn, _, stillDetail := tailscaleStatusCheckWithFeedback(ctx, out, probes)
 			if !stillLoggedIn && (strings.Contains(strings.ToLower(stillDetail), "needslogin") || strings.Contains(strings.ToLower(stillDetail), "needs login") || strings.Contains(stillDetail, "LoggedOut")) {
 				out.printf("  Still not connected — fetching a fresh login URL...\n")
 				runTailscaleUp(ctx, out, probes)
@@ -1306,8 +1390,11 @@ func guideCloudflare(ctx context.Context, out output, probes installer.Probes) e
 			orig := tmpDef.Validate
 			tmpDef.Validate = func(s string) error {
 				t := strings.TrimSpace(s)
-				if t == "" || strings.EqualFold(t, "skip") || strings.EqualFold(t, "s") {
+				if strings.EqualFold(t, "skip") || strings.EqualFold(t, "s") {
 					return nil
+				}
+				if t == "" {
+					return fmt.Errorf("enter an apex domain like example.com or type 'skip' to defer")
 				}
 				return orig(t)
 			}
@@ -1317,17 +1404,16 @@ func guideCloudflare(ctx context.Context, out output, probes installer.Probes) e
 			}
 			raw = strings.TrimSpace(v)
 		} else {
-			fmt.Fprint(out.ui, bold("   Apex domain (Cloudflare URL)")+dim(" e.g. example.com, empty to skip: ")+hl(""))
-			scanner := bufio.NewScanner(os.Stdin)
-			if !scanner.Scan() {
+			fmt.Fprint(out.ui, bold("   Apex domain (Cloudflare URL)")+dim(" e.g. example.com, or 'skip' to defer: ")+hl(""))
+			rawLine, ok := readStdinLine()
+			if !ok {
 				return installer.ErrCancelled
 			}
-			raw = strings.TrimSpace(scanner.Text())
+			raw = strings.TrimSpace(rawLine)
 		}
 		if raw == "" {
-			out.printf("   Skipped Cloudflare setup — you can set it later at %s (Settings → Domain)\n", hl("http://<tailscale-ip>:8484"))
-			out.printf("   Then: %s\n", hl("omahab doctor"))
-			return nil
+			out.printf("   %sDomain is required — enter an apex domain like %s or type %s to skip.%s\n", yellow, hl("example.com"), hl("'skip'"), reset)
+			continue
 		}
 		if strings.EqualFold(raw, "skip") || strings.EqualFold(raw, "s") {
 			out.printf("   Skipped — set domain later in dashboard.\n")
@@ -1369,11 +1455,11 @@ func guideCloudflare(ctx context.Context, out output, probes installer.Probes) e
 			raw = strings.TrimSpace(v)
 		} else {
 			fmt.Fprint(out.ui, "   Paste Token A (or 'skip' to do later, token will be hidden after paste but is echoed while typing): ")
-			scanner := bufio.NewScanner(os.Stdin)
-			if !scanner.Scan() {
+			rawLine, ok := readStdinLine()
+			if !ok {
 				return installer.ErrCancelled
 			}
-			raw = strings.TrimSpace(scanner.Text())
+			raw = strings.TrimSpace(rawLine)
 		}
 		if raw == "" {
 			out.printf("   %sToken A is required for DNS. Either paste a token or type 'skip' to defer.%s\n", yellow, reset)
@@ -1402,11 +1488,11 @@ func guideCloudflare(ctx context.Context, out output, probes installer.Probes) e
 			continue
 		}
 		fmt.Fprint(out.ui, "     Retry? [Enter to paste again, 'skip' to defer]: ")
-		scanner2 := bufio.NewScanner(os.Stdin)
-		if !scanner2.Scan() {
+		rawLine2, ok2 := readStdinLine()
+		if !ok2 {
 			return installer.ErrCancelled
 		}
-		if strings.EqualFold(strings.TrimSpace(scanner2.Text()), "skip") {
+		if strings.EqualFold(strings.TrimSpace(rawLine2), "skip") {
 			break
 		}
 		continue
@@ -1435,11 +1521,11 @@ func guideCloudflare(ctx context.Context, out output, probes installer.Probes) e
 			raw = strings.TrimSpace(v)
 		} else {
 			fmt.Fprint(out.ui, "   Paste Token B (or Enter to skip): ")
-			scanner := bufio.NewScanner(os.Stdin)
-			if !scanner.Scan() {
+			rawLine, ok := readStdinLine()
+			if !ok {
 				return installer.ErrCancelled
 			}
-			raw = strings.TrimSpace(scanner.Text())
+			raw = strings.TrimSpace(rawLine)
 		}
 		if raw == "" {
 			out.printf("   Skipped Token B — you can add it later for shared/public. Private DNS works with Token A alone.\n")
@@ -1465,11 +1551,11 @@ func guideCloudflare(ctx context.Context, out output, probes installer.Probes) e
 			continue
 		}
 		fmt.Fprint(out.ui, "     Retry? [Enter to re-paste, 'skip' to defer]: ")
-		scanner2 := bufio.NewScanner(os.Stdin)
-		if !scanner2.Scan() {
+		rawLine2, ok2 := readStdinLine()
+		if !ok2 {
 			return installer.ErrCancelled
 		}
-		if strings.EqualFold(strings.TrimSpace(scanner2.Text()), "skip") {
+		if strings.EqualFold(strings.TrimSpace(rawLine2), "skip") {
 			break
 		}
 		continue
@@ -1902,7 +1988,7 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-func isTerminal(f *os.File) bool {
+var isTerminal = func(f *os.File) bool {
 	// Use charmbracelet/x/term's proper ioctl check; it correctly handles PTYs
 	// allocated over SSH (including Ghostty's xterm-ghostty TERM) where a
 	// Stat(MODE_CHAR_DEVICE) heuristic can misclassify pipes vs PTYs.

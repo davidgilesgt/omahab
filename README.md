@@ -116,7 +116,7 @@ The installer runs 10 steps in order. Each step is journaled and idempotent. Use
 6. `binaries` — installs `/usr/bin/{omahab,omahabd}` (0755), six systemd units to `/usr/lib/systemd/system/` (`omahabd.service`, `omahab-backup.{service,timer}`, `omahab-verify.{service,timer}`, `cloudflared.service`), `/usr/lib/tmpfiles.d/omahab.conf`, catalog to `/usr/share/omahab/catalog/`, web assets to `/usr/share/omahab/web/` (when built). Runs `systemd-tmpfiles --create`. Assets are embedded in the installer binary (staged by `scripts/build.sh`); dev builds can pass `--asset-dir`.
 7. `firewall` — writes `/etc/nftables.conf` (`table inet omahab`, default-deny inbound, allows `lo`, `established/related`, `ICMP/ICMPv6`, SSH `22`, Tailscale UDP `41641`). Validates with `nft -c` before applying. Backs up any prior config to `/etc/nftables.conf.pre-omahab`. Enables and starts `nftables.service`. Docker forward rules untouched.
 8. `services` — runs `systemctl daemon-reload`, enables `tailscaled` and `omahabd`. Does not enable `cloudflared` (needs tunnel enrollment), `omahab-backup.timer` / `omahab-verify.timer` (need a backup repository), or `omahab-clientd` (companion-only).
-9. `daemon` — enables and restarts `omahabd` (`Type=simple`), polls `http://127.0.0.1:8484/up` until `200`. Writes `/etc/omahab/backup.env` (0600, `OMAHAB_SERVER` + `OMAHAB_TOKEN`) used by the backup and verify units (`omahab backup create` and `omahab backup verify` without an id verifies the latest snapshot).
+9. `daemon` — enables and restarts `omahabd` (`Type=simple`), polls `http://127.0.0.1:8484/up` until `200`, and provisions the generated API token to the administrator's `~/.config/omahab/token` (0600, administrator-owned) so local CLI commands authenticate immediately. It also writes `/etc/omahab/backup.env` (0600, `OMAHAB_SERVER` + `OMAHAB_TOKEN`) for the backup and verify units (`omahab backup create` and `omahab backup verify` without an id verifies the latest snapshot).
 10. `manifest` — writes `/var/lib/omahab/install-manifest.json`.
 
 After a full install, the installer **guides you interactively** when run on a TTY
@@ -125,11 +125,13 @@ and never blocks):
 
 1. **Tailscale — private mesh (loops until satisfied).** The installer checks
    `tailscale status --json` for `BackendState:"Running"` and `tailscale ip -4`
-   for a `100.x.y.z` address. If not enrolled it runs `tailscale up`, prints
-   the `https://login.tailscale.com/a/<code>` URL, and prompts:
+   for a `100.x.y.z` address, with an animated status indicator while each
+   check runs. If not enrolled it runs `tailscale up`, prints the
+   `https://login.tailscale.com/a/<code>` URL, and prompts:
    `Press Enter after approving at https://login.tailscale.com/admin/machines`
    (`skip` to defer, `retry` to re-run `tailscale up`). It re-checks until
-   an IP appears; success shows `http://<tailscale-ip>:8484` / MagicDNS.
+   an IP appears, then explicitly transitions to Cloudflare setup. Cloudflare
+   can be deferred only by typing `skip`; blank input reprompts instead.
 
 2. **Cloudflare — domain + scoped API token(s) (loops until satisfied).**
    Prompts for the apex domain (`example.com` — not `https://…`, not a
@@ -181,6 +183,7 @@ Paths on the machine:
 | `/var/cache/omahab` | Cache |
 | `/etc/omahab` | Configuration |
 | `/etc/omahab/backup.env` | Backup credentials (`OMAHAB_SERVER` + `OMAHAB_TOKEN`), mode 0600, used by backup and verify units |
+| `~/.config/omahab/token` | Administrator CLI bearer token, mode 0600 and administrator-owned; provisioned automatically during install |
 | `/etc/nftables.conf` | Firewall rules (`table inet omahab`). Backup at `/etc/nftables.conf.pre-omahab` |
 | `/usr/bin/omahab` | CLI, mode 0755 |
 | `/usr/bin/omahabd` | Daemon, mode 0755 |

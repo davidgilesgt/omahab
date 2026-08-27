@@ -670,3 +670,781 @@ func TestDaemonWaitHealthyHonorsContext(t *testing.T) {
 		t.Fatalf("error %q should mention cancel", err.Error())
 	}
 }
+func TestDaemonProvisionsUserTokenForOmahab(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	token := "provisions-token-omahab-xyz-999"
+	home := "/home/omahab"
+	tokenPath := home + "/.config/omahab/token"
+	parentDir := home + "/.config"
+	configDir := home + "/.config/omahab"
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	var mkdirCalls []struct {
+		path string
+		perm uint32
+	}
+	var chownCalls []struct {
+		path     string
+		uid, gid int
+	}
+	var chmodCalls []struct {
+		path string
+		perm uint32
+	}
+	var writes []struct {
+		path string
+		data []byte
+		perm uint32
+	}
+
+	probes := Probes{
+		Systemctl: func(ctx context.Context, args ...string) (string, error) { return "", nil },
+		HTTPSGet:  func(ctx context.Context, url string) (int, []byte, error) { return 200, []byte(`{"status":"up"}`), nil },
+		Now:       func() time.Time { return start },
+		ReadFile: func(path string) ([]byte, error) {
+			switch path {
+			case "/var/lib/omahab/api.token":
+				return []byte(token + "\n"), nil
+			case "/etc/omahab/backup.env":
+				return nil, errors.New("not found")
+			case tokenPath:
+				return nil, errors.New("not found")
+			default:
+				return nil, errors.New("unexpected " + path)
+			}
+		},
+		WriteFile: func(path string, data []byte, perm uint32) error {
+			writes = append(writes, struct {
+				path string
+				data []byte
+				perm uint32
+			}{path, append([]byte(nil), data...), perm})
+			return nil
+		},
+		MkdirAll: func(path string, perm uint32) error {
+			mkdirCalls = append(mkdirCalls, struct {
+				path string
+				perm uint32
+			}{path, perm})
+			return nil
+		},
+		StatFile: func(path string) (bool, uint32, error) {
+			return false, 0, errors.New("not found")
+		},
+		FileOwner: func(path string) (int, int, error) {
+			return 0, 0, errors.New("not found")
+		},
+		LookupUser: func(name string) (int, int, string, error) {
+			if name == "omahab" {
+				return 1000, 1000, home, nil
+			}
+			return 0, 0, "", errors.New("unknown user " + name)
+		},
+		Chown: func(path string, uid, gid int) error {
+			chownCalls = append(chownCalls, struct {
+				path     string
+				uid, gid int
+			}{path, uid, gid})
+			return nil
+		},
+		Chmod: func(path string, perm uint32) error {
+			chmodCalls = append(chmodCalls, struct {
+				path string
+				perm uint32
+			}{path, perm})
+			return nil
+		},
+	}
+	svc := newDaemonService(t, probes)
+	res := svc.runDaemonStep(ctx, InstallOptions{TargetUser: "omahab"})
+	if res.Status != JournalCompleted {
+		t.Fatalf("status %q want completed, err %q", res.Status, res.Error)
+	}
+	if strings.Contains(res.Error, token) {
+		t.Fatalf("error leaked token")
+	}
+	// backup.env written
+	foundBackup := false
+	foundToken := false
+	for _, w := range writes {
+		if w.path == "/etc/omahab/backup.env" {
+			foundBackup = true
+			if w.perm != 0o600 {
+				t.Fatalf("backup.env perm %o want 600", w.perm)
+			}
+			want := "OMAHAB_SERVER=http://127.0.0.1:8484\nOMAHAB_TOKEN=" + token + "\n"
+			if string(w.data) != want {
+				t.Fatalf("backup.env content %q want %q", string(w.data), want)
+			}
+		}
+		if w.path == tokenPath {
+			foundToken = true
+			if w.perm != 0o600 {
+				t.Fatalf("token perm %o want 600", w.perm)
+			}
+			if string(w.data) != token+"\n" {
+				t.Fatalf("token file content %q want %q", string(w.data), token+"\n")
+			}
+		}
+	}
+	if !foundBackup {
+		t.Fatalf("backup.env not written, writes %v", writes)
+	}
+	if !foundToken {
+		t.Fatalf("token file not written, writes %v", writes)
+	}
+	// dirs created with 0700
+	foundParent := false
+	foundConfig := false
+	for _, m := range mkdirCalls {
+		if m.path == parentDir && m.perm == 0o700 {
+			foundParent = true
+		}
+		if m.path == configDir && m.perm == 0o700 {
+			foundConfig = true
+		}
+		if m.path == "/var/lib/omahab" {
+			t.Fatalf("should not weaken /var/lib, got mkdir %q", m.path)
+		}
+	}
+	if !foundParent {
+		t.Fatalf("parent .config not mkdir 0700, calls %v", mkdirCalls)
+	}
+	if !foundConfig {
+		t.Fatalf("config dir not mkdir 0700, calls %v", mkdirCalls)
+	}
+	// chown for dirs and token
+	hasChown := func(path string, uid, gid int) bool {
+		for _, c := range chownCalls {
+			if c.path == path && c.uid == uid && c.gid == gid {
+				return true
+			}
+		}
+		return false
+	}
+	if !hasChown(parentDir, 1000, 1000) {
+		t.Fatalf("parent dir not chowned to 1000:1000, calls %v", chownCalls)
+	}
+	if !hasChown(configDir, 1000, 1000) {
+		t.Fatalf("config dir not chowned, calls %v", chownCalls)
+	}
+	if !hasChown(tokenPath, 1000, 1000) {
+		t.Fatalf("token file not chowned, calls %v", chownCalls)
+	}
+	// chmod for dirs/token
+	hasChmod := func(path string, perm uint32) bool {
+		for _, c := range chmodCalls {
+			if c.path == path && c.perm == perm {
+				return true
+			}
+		}
+		return false
+	}
+	if !hasChmod(parentDir, 0o700) {
+		t.Fatalf("parent dir not chmod 0700, calls %v", chmodCalls)
+	}
+	if !hasChmod(configDir, 0o700) {
+		t.Fatalf("config dir not chmod 0700, calls %v", chmodCalls)
+	}
+	if !hasChmod(tokenPath, 0o600) {
+		t.Fatalf("token file not chmod 0600, calls %v", chmodCalls)
+	}
+	if strings.Contains(res.Error, token) {
+		t.Fatalf("leaked token in error")
+	}
+}
+
+func TestDaemonProvisionsUserTokenIdempotent(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	token := "idempotent-token-abc"
+	home := "/home/omahab"
+	tokenPath := home + "/.config/omahab/token"
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	files := map[string][]byte{}
+	var writes []string
+	var mkdirs []string
+
+	probes := Probes{
+		Systemctl: func(ctx context.Context, args ...string) (string, error) { return "", nil },
+		HTTPSGet:  func(ctx context.Context, url string) (int, []byte, error) { return 200, nil, nil },
+		Now:       func() time.Time { return start },
+		ReadFile: func(path string) ([]byte, error) {
+			switch path {
+			case "/var/lib/omahab/api.token":
+				return []byte(token), nil
+			default:
+				if data, ok := files[path]; ok {
+					return append([]byte(nil), data...), nil
+				}
+				return nil, errors.New("not found")
+			}
+		},
+		WriteFile: func(path string, data []byte, perm uint32) error {
+			if perm != 0o600 {
+				t.Fatalf("write perm %o want 600 for %q", perm, path)
+			}
+			writes = append(writes, path)
+			files[path] = append([]byte(nil), data...)
+			return nil
+		},
+		MkdirAll: func(path string, perm uint32) error {
+			mkdirs = append(mkdirs, path)
+			if perm != 0o700 && path != "/etc/omahab" {
+				// allow backup.env parent not checked; only token dirs must be 0700
+				// token dirs
+				if path == home+"/.config" || path == home+"/.config/omahab" {
+					t.Fatalf("mkdir perm %o want 700 for %q", perm, path)
+				}
+			}
+			return nil
+		},
+		StatFile: func(path string) (bool, uint32, error) {
+			if _, ok := files[path]; ok {
+				// token file exists with 0600
+				if path == tokenPath {
+					return false, 0o600, nil
+				}
+				return false, 0o600, nil
+			}
+			return false, 0, errors.New("not found")
+		},
+		FileOwner: func(path string) (int, int, error) {
+			if _, ok := files[path]; ok {
+				// token owned by target
+				return 1000, 1000, nil
+			}
+			return 0, 0, errors.New("not found")
+		},
+		LookupUser: func(name string) (int, int, string, error) {
+			return 1000, 1000, home, nil
+		},
+		Chown: func(path string, uid, gid int) error { return nil },
+		Chmod: func(path string, perm uint32) error { return nil },
+	}
+	svc := newDaemonService(t, probes)
+	res1 := svc.runDaemonStep(ctx, InstallOptions{TargetUser: "omahab"})
+	if res1.Status != JournalCompleted {
+		t.Fatalf("first run %q", res1.Error)
+	}
+	if strings.Contains(res1.Error, token) {
+		t.Fatalf("leaked token")
+	}
+	// count writes for backup.env and token
+	backupWrites := 0
+	tokenWrites := 0
+	for _, p := range writes {
+		if p == "/etc/omahab/backup.env" {
+			backupWrites++
+		}
+		if p == tokenPath {
+			tokenWrites++
+		}
+	}
+	if backupWrites != 1 {
+		t.Fatalf("backup writes %d want 1", backupWrites)
+	}
+	if tokenWrites != 1 {
+		t.Fatalf("token writes %d want 1", tokenWrites)
+	}
+	// second run same token should be idempotent: no additional writes
+	writes = nil
+	mkdirs = nil
+	res2 := svc.runDaemonStep(ctx, InstallOptions{TargetUser: "omahab"})
+	if res2.Status != JournalCompleted {
+		t.Fatalf("second run %q", res2.Error)
+	}
+	if len(writes) != 0 {
+		t.Fatalf("second run should be idempotent, writes %v", writes)
+	}
+	if strings.Contains(res2.Error, token) {
+		t.Fatalf("leaked token second run")
+	}
+}
+
+func TestDaemonProvisionsUserTokenRewritesWhenChanged(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	token1 := "token-one-aaa"
+	token2 := "token-two-bbb"
+	home := "/home/omahab"
+	tokenPath := home + "/.config/omahab/token"
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	files := map[string][]byte{}
+	writeCount := 0
+	probes := Probes{
+		Systemctl: func(ctx context.Context, args ...string) (string, error) { return "", nil },
+		HTTPSGet:  func(ctx context.Context, url string) (int, []byte, error) { return 200, nil, nil },
+		Now:       func() time.Time { return start },
+		ReadFile: func(path string) ([]byte, error) {
+			switch path {
+			case "/var/lib/omahab/api.token":
+				if writeCount == 0 {
+					return []byte(token1), nil
+				}
+				return []byte(token2), nil
+			default:
+				if data, ok := files[path]; ok {
+					return append([]byte(nil), data...), nil
+				}
+				return nil, errors.New("not found")
+			}
+		},
+		WriteFile: func(path string, data []byte, perm uint32) error {
+			writeCount++
+			// actually track per file; but writeCount global counts both files
+			files[path] = append([]byte(nil), data...)
+			return nil
+		},
+		MkdirAll: func(path string, perm uint32) error { return nil },
+		StatFile: func(path string) (bool, uint32, error) {
+			if _, ok := files[path]; ok {
+				return false, 0o600, nil
+			}
+			return false, 0, errors.New("not found")
+		},
+		FileOwner: func(path string) (int, int, error) {
+			if _, ok := files[path]; ok {
+				return 1000, 1000, nil
+			}
+			return 0, 0, errors.New("not found")
+		},
+		LookupUser: func(name string) (int, int, string, error) { return 1000, 1000, home, nil },
+		Chown:      func(path string, uid, gid int) error { return nil },
+		Chmod:      func(path string, perm uint32) error { return nil },
+	}
+	svc := newDaemonService(t, probes)
+	res1 := svc.runDaemonStep(ctx, InstallOptions{TargetUser: "omahab"})
+	if res1.Status != JournalCompleted {
+		t.Fatalf("first %q", res1.Error)
+	}
+	if string(files[tokenPath]) != token1+"\n" {
+		t.Fatalf("first token %q want %q", string(files[tokenPath]), token1+"\n")
+	}
+	// capture writeCount after first
+	afterFirst := writeCount
+	res2 := svc.runDaemonStep(ctx, InstallOptions{TargetUser: "omahab"})
+	if res2.Status != JournalCompleted {
+		t.Fatalf("second %q", res2.Error)
+	}
+	if writeCount <= afterFirst {
+		t.Fatalf("changed token should rewrite, writeCount %d afterFirst %d", writeCount, afterFirst)
+	}
+	if string(files[tokenPath]) != token2+"\n" {
+		t.Fatalf("rewritten token %q want %q", string(files[tokenPath]), token2+"\n")
+	}
+	wantBackup := "OMAHAB_SERVER=http://127.0.0.1:8484\nOMAHAB_TOKEN=" + token2 + "\n"
+	if string(files["/etc/omahab/backup.env"]) != wantBackup {
+		t.Fatalf("backup.env %q want %q", string(files["/etc/omahab/backup.env"]), wantBackup)
+	}
+}
+
+func TestDaemonProvisionsUserTokenEvenWhenBackupEnvUpToDate(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	token := "token-up-to-date-xyz"
+	home := "/home/omahab"
+	tokenPath := home + "/.config/omahab/token"
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	backupContent := "OMAHAB_SERVER=http://127.0.0.1:8484\nOMAHAB_TOKEN=" + token + "\n"
+	files := map[string][]byte{
+		"/etc/omahab/backup.env": []byte(backupContent),
+	}
+	var writes []string
+	probes := Probes{
+		Systemctl: func(ctx context.Context, args ...string) (string, error) { return "", nil },
+		HTTPSGet:  func(ctx context.Context, url string) (int, []byte, error) { return 200, nil, nil },
+		Now:       func() time.Time { return start },
+		ReadFile: func(path string) ([]byte, error) {
+			switch path {
+			case "/var/lib/omahab/api.token":
+				return []byte(token), nil
+			default:
+				if d, ok := files[path]; ok {
+					return append([]byte(nil), d...), nil
+				}
+				return nil, errors.New("not found")
+			}
+		},
+		WriteFile: func(path string, data []byte, perm uint32) error {
+			writes = append(writes, path)
+			files[path] = append([]byte(nil), data...)
+			return nil
+		},
+		MkdirAll: func(path string, perm uint32) error { return nil },
+		StatFile: func(path string) (bool, uint32, error) {
+			if _, ok := files[path]; ok {
+				return false, 0o600, nil
+			}
+			return false, 0, errors.New("not found")
+		},
+		FileOwner: func(path string) (int, int, error) {
+			if _, ok := files[path]; ok {
+				return 1000, 1000, nil
+			}
+			return 0, 0, errors.New("not found")
+		},
+		LookupUser: func(name string) (int, int, string, error) { return 1000, 1000, home, nil },
+		Chown:      func(path string, uid, gid int) error { return nil },
+		Chmod:      func(path string, perm uint32) error { return nil },
+	}
+	svc := newDaemonService(t, probes)
+	res := svc.runDaemonStep(ctx, InstallOptions{TargetUser: "omahab"})
+	if res.Status != JournalCompleted {
+		t.Fatalf("status %q want completed, err %q", res.Status, res.Error)
+	}
+	// backup.env should not be rewritten (already up to date)
+	for _, p := range writes {
+		if p == "/etc/omahab/backup.env" {
+			t.Fatalf("backup.env should not rewrite when up to date, writes %v", writes)
+		}
+	}
+	foundToken := false
+	for _, p := range writes {
+		if p == tokenPath {
+			foundToken = true
+		}
+	}
+	if !foundToken {
+		t.Fatalf("token should be provisioned even when backup.env up to date, writes %v", writes)
+	}
+	if files[tokenPath] == nil || string(files[tokenPath]) != token+"\n" {
+		t.Fatalf("token content %q", string(files[tokenPath]))
+	}
+}
+
+func TestDaemonUserTokenFailureDoesNotLeak(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	token := "super-secret-token-should-not-leak-9999"
+	home := "/home/omahab"
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name  string
+		probe Probes
+	}{
+		{
+			name: "lookup fails",
+			probe: Probes{
+				Systemctl: func(ctx context.Context, args ...string) (string, error) { return "", nil },
+				HTTPSGet:  func(ctx context.Context, url string) (int, []byte, error) { return 200, nil, nil },
+				Now:       func() time.Time { return start },
+				ReadFile: func(path string) ([]byte, error) {
+					if path == "/var/lib/omahab/api.token" {
+						return []byte(token), nil
+					}
+					if path == "/etc/omahab/backup.env" {
+						return nil, errors.New("not found")
+					}
+					return nil, errors.New("not found")
+				},
+				WriteFile:  func(path string, data []byte, perm uint32) error { return nil },
+				MkdirAll:   func(path string, perm uint32) error { return nil },
+				LookupUser: func(name string) (int, int, string, error) { return 0, 0, "", errors.New("lookup failed") },
+				Chown:      func(path string, uid, gid int) error { return nil },
+				Chmod:      func(path string, perm uint32) error { return nil },
+			},
+		},
+		{
+			name: "mkdir fails",
+			probe: Probes{
+				Systemctl: func(ctx context.Context, args ...string) (string, error) { return "", nil },
+				HTTPSGet:  func(ctx context.Context, url string) (int, []byte, error) { return 200, nil, nil },
+				Now:       func() time.Time { return start },
+				ReadFile: func(path string) ([]byte, error) {
+					if path == "/var/lib/omahab/api.token" {
+						return []byte(token), nil
+					}
+					if path == "/etc/omahab/backup.env" {
+						return nil, errors.New("not found")
+					}
+					return nil, errors.New("not found")
+				},
+				WriteFile:  func(path string, data []byte, perm uint32) error { return nil },
+				MkdirAll:   func(path string, perm uint32) error { return errors.New("mkdir failed") },
+				LookupUser: func(name string) (int, int, string, error) { return 1000, 1000, home, nil },
+				Chown:      func(path string, uid, gid int) error { return nil },
+				Chmod:      func(path string, perm uint32) error { return nil },
+			},
+		},
+		{
+			name: "chown dir fails",
+			probe: Probes{
+				Systemctl: func(ctx context.Context, args ...string) (string, error) { return "", nil },
+				HTTPSGet:  func(ctx context.Context, url string) (int, []byte, error) { return 200, nil, nil },
+				Now:       func() time.Time { return start },
+				ReadFile: func(path string) ([]byte, error) {
+					if path == "/var/lib/omahab/api.token" {
+						return []byte(token), nil
+					}
+					if path == "/etc/omahab/backup.env" {
+						return nil, errors.New("not found")
+					}
+					return nil, errors.New("not found")
+				},
+				WriteFile:  func(path string, data []byte, perm uint32) error { return nil },
+				MkdirAll:   func(path string, perm uint32) error { return nil },
+				LookupUser: func(name string) (int, int, string, error) { return 1000, 1000, home, nil },
+				Chown:      func(path string, uid, gid int) error { return errors.New("chown failed") },
+				Chmod:      func(path string, perm uint32) error { return nil },
+			},
+		},
+		{
+			name: "chmod dir fails",
+			probe: Probes{
+				Systemctl: func(ctx context.Context, args ...string) (string, error) { return "", nil },
+				HTTPSGet:  func(ctx context.Context, url string) (int, []byte, error) { return 200, nil, nil },
+				Now:       func() time.Time { return start },
+				ReadFile: func(path string) ([]byte, error) {
+					if path == "/var/lib/omahab/api.token" {
+						return []byte(token), nil
+					}
+					if path == "/etc/omahab/backup.env" {
+						return nil, errors.New("not found")
+					}
+					return nil, errors.New("not found")
+				},
+				WriteFile:  func(path string, data []byte, perm uint32) error { return nil },
+				MkdirAll:   func(path string, perm uint32) error { return nil },
+				LookupUser: func(name string) (int, int, string, error) { return 1000, 1000, home, nil },
+				Chown:      func(path string, uid, gid int) error { return nil },
+				Chmod:      func(path string, perm uint32) error { return errors.New("chmod failed") },
+			},
+		},
+		{
+			name: "write token fails",
+			probe: Probes{
+				Systemctl: func(ctx context.Context, args ...string) (string, error) { return "", nil },
+				HTTPSGet:  func(ctx context.Context, url string) (int, []byte, error) { return 200, nil, nil },
+				Now:       func() time.Time { return start },
+				ReadFile: func(path string) ([]byte, error) {
+					if path == "/var/lib/omahab/api.token" {
+						return []byte(token), nil
+					}
+					if path == "/etc/omahab/backup.env" {
+						return nil, errors.New("not found")
+					}
+					return nil, errors.New("not found")
+				},
+				WriteFile: func(path string, data []byte, perm uint32) error {
+					if path == home+"/.config/omahab/token" {
+						return errors.New("write token failed")
+					}
+					return nil
+				},
+				MkdirAll:   func(path string, perm uint32) error { return nil },
+				LookupUser: func(name string) (int, int, string, error) { return 1000, 1000, home, nil },
+				Chown:      func(path string, uid, gid int) error { return nil },
+				Chmod:      func(path string, perm uint32) error { return nil },
+			},
+		},
+		{
+			name: "chown token fails",
+			probe: Probes{
+				Systemctl: func(ctx context.Context, args ...string) (string, error) { return "", nil },
+				HTTPSGet:  func(ctx context.Context, url string) (int, []byte, error) { return 200, nil, nil },
+				Now:       func() time.Time { return start },
+				ReadFile: func(path string) ([]byte, error) {
+					if path == "/var/lib/omahab/api.token" {
+						return []byte(token), nil
+					}
+					if path == "/etc/omahab/backup.env" {
+						return nil, errors.New("not found")
+					}
+					return nil, errors.New("not found")
+				},
+				WriteFile:  func(path string, data []byte, perm uint32) error { return nil },
+				MkdirAll:   func(path string, perm uint32) error { return nil },
+				LookupUser: func(name string) (int, int, string, error) { return 1000, 1000, home, nil },
+				Chown: func(path string, uid, gid int) error {
+					if path == home+"/.config/omahab/token" {
+						return errors.New("chown token failed")
+					}
+					return nil
+				},
+				Chmod: func(path string, perm uint32) error { return nil },
+			},
+		},
+		{
+			name: "empty home",
+			probe: Probes{
+				Systemctl: func(ctx context.Context, args ...string) (string, error) { return "", nil },
+				HTTPSGet:  func(ctx context.Context, url string) (int, []byte, error) { return 200, nil, nil },
+				Now:       func() time.Time { return start },
+				ReadFile: func(path string) ([]byte, error) {
+					if path == "/var/lib/omahab/api.token" {
+						return []byte(token), nil
+					}
+					if path == "/etc/omahab/backup.env" {
+						return nil, errors.New("not found")
+					}
+					return nil, errors.New("not found")
+				},
+				WriteFile:  func(path string, data []byte, perm uint32) error { return nil },
+				MkdirAll:   func(path string, perm uint32) error { return nil },
+				LookupUser: func(name string) (int, int, string, error) { return 1000, 1000, "", nil },
+				Chown:      func(path string, uid, gid int) error { return nil },
+				Chmod:      func(path string, perm uint32) error { return nil },
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := newDaemonService(t, tc.probe)
+			res := svc.runDaemonStep(ctx, InstallOptions{TargetUser: "omahab"})
+			if res.Status != JournalFailed {
+				t.Fatalf("expected failed for %q got %q", tc.name, res.Status)
+			}
+			if strings.Contains(res.Error, token) {
+				t.Fatalf("error leaked token for %q: %q", tc.name, res.Error)
+			}
+			if res.Error == "" {
+				t.Fatalf("expected error for %q", tc.name)
+			}
+		})
+	}
+}
+
+func TestDaemonProvisionsUserTokenRootFallback(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	token := "root-fallback-token-xyz"
+	home := "/root"
+	tokenPath := home + "/.config/omahab/token"
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	var writes []string
+	probes := Probes{
+		Systemctl: func(ctx context.Context, args ...string) (string, error) { return "", nil },
+		HTTPSGet:  func(ctx context.Context, url string) (int, []byte, error) { return 200, nil, nil },
+		Now:       func() time.Time { return start },
+		ReadFile: func(path string) ([]byte, error) {
+			if path == "/var/lib/omahab/api.token" {
+				return []byte(token), nil
+			}
+			if path == "/etc/omahab/backup.env" {
+				return nil, errors.New("not found")
+			}
+			if path == tokenPath {
+				return nil, errors.New("not found")
+			}
+			return nil, errors.New("unexpected " + path)
+		},
+		WriteFile: func(path string, data []byte, perm uint32) error {
+			writes = append(writes, path)
+			if path == tokenPath && perm != 0o600 {
+				t.Fatalf("perm %o", perm)
+			}
+			if path == tokenPath && string(data) != token+"\n" {
+				t.Fatalf("data %q", string(data))
+			}
+			return nil
+		},
+		MkdirAll: func(path string, perm uint32) error {
+			if perm != 0o700 {
+				t.Fatalf("mkdir perm %o", perm)
+			}
+			return nil
+		},
+		LookupUser: func(name string) (int, int, string, error) {
+			if name == "root" {
+				return 0, 0, "/root", nil
+			}
+			t.Fatalf("expected root lookup got %q", name)
+			return 0, 0, "", errors.New("unexpected")
+		},
+		Chown: func(path string, uid, gid int) error {
+			if uid != 0 || gid != 0 {
+				t.Fatalf("root chown should be 0:0 got %d:%d", uid, gid)
+			}
+			return nil
+		},
+		Chmod: func(path string, perm uint32) error { return nil },
+	}
+	// empty TargetUser should resolve to root via resolveTargetUser (which fallback to root when no AuthorizedKeys probe)
+	svc := newDaemonService(t, probes)
+	res := svc.runDaemonStep(ctx, InstallOptions{})
+	if res.Status != JournalCompleted {
+		t.Fatalf("status %q err %q", res.Status, res.Error)
+	}
+	found := false
+	for _, p := range writes {
+		if p == tokenPath {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("root token not written, writes %v", writes)
+	}
+	if strings.Contains(res.Error, token) {
+		t.Fatalf("leaked token")
+	}
+}
+
+func TestDaemonProvisionsUserTokenCorrectsOwnershipAndMode(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	token := "correct-ownership-token"
+	home := "/home/omahab"
+	tokenPath := home + "/.config/omahab/token"
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	// existing file with same token but wrong perms/owner
+	files := map[string][]byte{
+		tokenPath: []byte(token + "\n"),
+	}
+	var writes []string
+	probes := Probes{
+		Systemctl: func(ctx context.Context, args ...string) (string, error) { return "", nil },
+		HTTPSGet:  func(ctx context.Context, url string) (int, []byte, error) { return 200, nil, nil },
+		Now:       func() time.Time { return start },
+		ReadFile: func(path string) ([]byte, error) {
+			if path == "/var/lib/omahab/api.token" {
+				return []byte(token), nil
+			}
+			if path == "/etc/omahab/backup.env" {
+				return nil, errors.New("not found")
+			}
+			if d, ok := files[path]; ok {
+				return append([]byte(nil), d...), nil
+			}
+			return nil, errors.New("not found")
+		},
+		WriteFile: func(path string, data []byte, perm uint32) error {
+			writes = append(writes, path)
+			files[path] = append([]byte(nil), data...)
+			return nil
+		},
+		MkdirAll: func(path string, perm uint32) error { return nil },
+		StatFile: func(path string) (bool, uint32, error) {
+			if path == tokenPath {
+				return false, 0o644, nil // wrong perm
+			}
+			return false, 0, errors.New("not found")
+		},
+		FileOwner: func(path string) (int, int, error) {
+			if path == tokenPath {
+				return 0, 0, nil // wrong owner (root instead of 1000)
+			}
+			return 0, 0, errors.New("not found")
+		},
+		LookupUser: func(name string) (int, int, string, error) { return 1000, 1000, home, nil },
+		Chown:      func(path string, uid, gid int) error { return nil },
+		Chmod:      func(path string, perm uint32) error { return nil },
+	}
+	svc := newDaemonService(t, probes)
+	res := svc.runDaemonStep(ctx, InstallOptions{TargetUser: "omahab"})
+	if res.Status != JournalCompleted {
+		t.Fatalf("status %q err %q", res.Status, res.Error)
+	}
+	// should have rewritten due to wrong perm/owner
+	found := false
+	for _, p := range writes {
+		if p == tokenPath {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("should rewrite token when perm/owner wrong, writes %v", writes)
+	}
+}

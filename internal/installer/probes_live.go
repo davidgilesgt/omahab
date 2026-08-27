@@ -123,6 +123,26 @@ func liveFileOwner(path string) (int, int, error) {
 	return uid, gid, nil
 }
 
+func liveLookupUser(name string) (int, int, string, error) {
+	u, err := user.Lookup(name)
+	if err != nil {
+		return 0, 0, "", err
+	}
+	uid, err := strconv.Atoi(u.Uid)
+	if err != nil {
+		return 0, 0, "", fmt.Errorf("parse uid %q: %w", u.Uid, err)
+	}
+	gid, err := strconv.Atoi(u.Gid)
+	if err != nil {
+		return 0, 0, "", fmt.Errorf("parse gid %q: %w", u.Gid, err)
+	}
+	return uid, gid, u.HomeDir, nil
+}
+
+func liveChown(path string, uid, gid int) error { return os.Chown(path, uid, gid) }
+
+func liveChmod(path string, perm uint32) error { return os.Chmod(path, os.FileMode(perm)) }
+
 // --- processes ---
 
 func liveCommandExists(name string) bool {

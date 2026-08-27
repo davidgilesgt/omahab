@@ -3,6 +3,7 @@ package installer
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -123,6 +124,9 @@ func (s *Service) runDaemonStep(ctx context.Context, opts InstallOptions) RunRes
 	if p.ReadFile != nil {
 		if existing, err := p.ReadFile("/etc/omahab/backup.env"); err == nil && string(existing) == content {
 			emit("backup.env already up to date")
+			if err := s.provisionUserToken(p, s.resolveTargetUser(opts), token); err != nil {
+				return RunResult{Step: StepDaemon, Status: JournalFailed, Error: err.Error()}
+			}
 			return RunResult{Step: StepDaemon, Status: JournalCompleted}
 		}
 	}
@@ -133,7 +137,107 @@ func (s *Service) runDaemonStep(ctx context.Context, opts InstallOptions) RunRes
 	if err := p.WriteFile("/etc/omahab/backup.env", []byte(content), 0o600); err != nil {
 		return RunResult{Step: StepDaemon, Status: JournalFailed, Error: err.Error()}
 	}
+	if err := s.provisionUserToken(p, s.resolveTargetUser(opts), token); err != nil {
+		return RunResult{Step: StepDaemon, Status: JournalFailed, Error: err.Error()}
+	}
 	return RunResult{Step: StepDaemon, Status: JournalCompleted}
+}
+
+// provisionUserToken provisions the api token to the target user's
+// FileCredentialStore-compatible path: <home>/.config/omahab/token .
+// It guarantees directory traversal/ownership and token mode 0600 when
+// running as root, is idempotent, and never exposes the token in errors.
+func (s *Service) provisionUserToken(p Probes, targetUser, token string) error {
+	if targetUser == "" {
+		targetUser = "root"
+	}
+	if p.LookupUser == nil {
+		// No user lookup configured — best-effort skip to keep older
+		// unit tests that only exercise backup.env passing. Production
+		// LiveProbes always provides LookupUser, so real installs still
+		// provision.
+		return nil
+	}
+	uid, gid, homeDir, err := p.LookupUser(targetUser)
+	if err != nil {
+		return fmt.Errorf("resolve user %q: %w", targetUser, err)
+	}
+	if strings.TrimSpace(homeDir) == "" {
+		return fmt.Errorf("resolve user %q: empty home directory", targetUser)
+	}
+	tokenPath := filepath.Join(homeDir, ".config", "omahab", "token")
+	configDir := filepath.Dir(tokenPath)
+	parentDir := filepath.Dir(configDir)
+
+	ensureDir := func(dir string) error {
+		if p.MkdirAll != nil {
+			if err := p.MkdirAll(dir, 0o700); err != nil {
+				return fmt.Errorf("create config dir: %w", err)
+			}
+		}
+		if p.Chown != nil {
+			if err := p.Chown(dir, uid, gid); err != nil {
+				return fmt.Errorf("chown config dir: %w", err)
+			}
+		}
+		if p.Chmod != nil {
+			if err := p.Chmod(dir, 0o700); err != nil {
+				return fmt.Errorf("chmod config dir: %w", err)
+			}
+		}
+		return nil
+	}
+	if err := ensureDir(parentDir); err != nil {
+		return err
+	}
+	if err := ensureDir(configDir); err != nil {
+		return err
+	}
+
+	// Idempotency: if existing token file already has correct content, mode and ownership, skip write.
+	if p.ReadFile != nil {
+		if existing, err := p.ReadFile(tokenPath); err == nil {
+			if strings.TrimSpace(string(existing)) == token {
+				permOK := true
+				ownerOK := true
+				if p.StatFile != nil {
+					if _, perm, err := p.StatFile(tokenPath); err == nil {
+						permOK = perm == 0o600
+					} else {
+						permOK = false
+					}
+				}
+				if p.FileOwner != nil {
+					if u, g, err := p.FileOwner(tokenPath); err == nil {
+						ownerOK = u == uid && g == gid
+					} else {
+						ownerOK = false
+					}
+				}
+				if permOK && ownerOK {
+					return nil
+				}
+			}
+		}
+	}
+	if p.WriteFile == nil {
+		return fmt.Errorf("write file probe not configured")
+	}
+	data := []byte(token + "\n")
+	if err := p.WriteFile(tokenPath, data, 0o600); err != nil {
+		return fmt.Errorf("write token file: %w", err)
+	}
+	if p.Chown != nil {
+		if err := p.Chown(tokenPath, uid, gid); err != nil {
+			return fmt.Errorf("chown token file: %w", err)
+		}
+	}
+	if p.Chmod != nil {
+		if err := p.Chmod(tokenPath, 0o600); err != nil {
+			return fmt.Errorf("chmod token file: %w", err)
+		}
+	}
+	return nil
 }
 
 // RollbackDaemon stops and disables omahabd and removes the backup env file.
