@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/x/term"
 	"github.com/omahab/omahab/internal/installer"
 	"github.com/omahab/omahab/internal/installer/assets"
 	"github.com/omahab/omahab/internal/tui"
@@ -161,19 +162,19 @@ func newOutput(cmd *cobra.Command) output {
 	if os.Getenv("TERM") == "dumb" {
 		nonInteractive = true
 	}
-	term := os.Getenv("TERM")
+	termEnv := os.Getenv("TERM")
 	noColorEnv := os.Getenv("NO_COLOR")
 	noColorFlag := flagNoColor
 	// NO_COLOR, --no-color, TERM=dumb, or --json disable color.
 	color := true
-	if noColorEnv != "" || noColorFlag || term == "dumb" || jsonMode {
+	if noColorEnv != "" || noColorFlag || termEnv == "dumb" || jsonMode {
 		color = false
 	}
 	// Detect TTY for the UI stream (stderr), not stdout, because UI is on
 	// stderr per the rendering contract. This keeps piped manifest on stdout
 	// clean while still detecting an interactive terminal for QR and glyphs.
 	isTTY := isTerminal(os.Stderr)
-	if term == "dumb" {
+	if termEnv == "dumb" {
 		isTTY = false
 	}
 	if nonInteractive {
@@ -187,7 +188,12 @@ func newOutput(cmd *cobra.Command) output {
 	if data == nil {
 		data = os.Stdout
 	}
-	caps := installer.ResolveCapabilities(isTTY, noColorFlag, term, noColorEnv)
+	caps := installer.ResolveCapabilities(isTTY, noColorFlag, termEnv, noColorEnv)
+	if caps.IsTTY {
+		if w, _, err := term.GetSize(os.Stderr.Fd()); err == nil && w > 0 {
+			caps.Width = w
+		}
+	}
 	// Renderer selection per capability ladder: TUI when TTY+color, else plain byte-stable.
 	// JSON mode always uses JSON emitter for events (handled via Emit func), but keep a
 	// plain renderer for non-event UI (banners/next-steps) to avoid TUI noise on stdout.
@@ -586,9 +592,9 @@ func doInstall(cmd *cobra.Command) error {
 	if !out.jsonMode {
 		out.printf("Starting installation (version %s)...\n", opts.Version)
 		out.printf("This will take a few minutes; progress is streamed per step.\n")
-		// For plain renderer show legacy journal snapshot; for TUI show StepBar strip.
+		// For plain renderer show legacy journal snapshot; for TUI show pinned StepBar frame.
 		if tr, ok := out.renderer.(*tui.TUIRenderer); ok {
-			out.printf("%s\n", tr.StepBar().View())
+			tr.RenderFrame()
 		} else {
 			entries, _ := svc.JournalEntries(ctx)
 			for _, e := range entries {
@@ -601,6 +607,11 @@ func doInstall(cmd *cobra.Command) error {
 		}
 	}
 	_, runErr := svc.Run(ctx, opts)
+	// Finalize any pinned inline frame so later receipt/next-steps output cannot
+	// collide with the progress line. For plain renderer this is a no-op.
+	if tr, ok := out.renderer.(*tui.TUIRenderer); ok {
+		tr.Finalize()
+	}
 
 	if out.jsonMode {
 		// JSON streaming has already written one object per event to out.data
@@ -869,7 +880,7 @@ func printNextSteps(out output, until string) {
 	out.printf("       %s\n", hl("omahab secrets list"))
 	out.printf("       %s\n", hl("sudo cat /etc/omahab/cloudflared/env  # tunnel env (if present)"))
 	out.printf("       %s\n", dim("# When `omahab cloudflare setup` is available it will prompt for domain + tokens and write"))
-	out.printf("       %s\n", dim("# /etc/omahab/cloudflared/config.yml + enable cloudflared atomically." ))
+	out.printf("       %s\n", dim("# /etc/omahab/cloudflared/config.yml + enable cloudflared atomically."))
 	out.printf("\n")
 	out.printf("   %s\n", bold("What Omahab does with them"))
 	out.printf("     • Private (default):  %s → %s (DNS-only, no proxy)\n", hl("ai.example.com"), hl("ai.home.example.com → 100.x.y.z"))
@@ -899,6 +910,7 @@ func printNextSteps(out output, until string) {
 	out.printf("%s %s\n", dim("Recovery:"), dim("SSH or Tailscale IP / *.ts.net remains reachable even if DNS breaks."))
 	out.printf("\n")
 }
+
 // ---------------------------------------------------------------------------
 // Guided post-install enrollment (interactive, runs until satisfied)
 // ---------------------------------------------------------------------------
@@ -1786,7 +1798,6 @@ func promptForRecoveryKey(out output) (key string, path string, err error) {
 	return key, path, scanner.Err()
 }
 
-
 func collectKeysForDisplay(ctx context.Context, probes installer.Probes, opts installer.InstallOptions) []installer.SSHKey {
 	var all []installer.SSHKey
 	for _, gh := range opts.GitHubUsers {
@@ -1846,13 +1857,10 @@ func printChecks(out output, checks []installer.CheckResult) {
 }
 
 func havePipedStdin() bool {
-	fi, err := os.Stdin.Stat()
-	if err != nil {
-		return false
-	}
-	return (fi.Mode() & os.ModeCharDevice) == 0
+	// Distinguish piped stdin from an interactive TTY (including Ghostty SSH PTYs)
+	// via proper ioctl, not Stat char-device heuristic.
+	return !term.IsTerminal(os.Stdin.Fd())
 }
-
 func truncateComment(s string, n int) string {
 	if len(s) <= n {
 		return s
@@ -1895,9 +1903,8 @@ func envOr(key, fallback string) string {
 }
 
 func isTerminal(f *os.File) bool {
-	fi, err := f.Stat()
-	if err != nil {
-		return false
-	}
-	return (fi.Mode() & os.ModeCharDevice) != 0
+	// Use charmbracelet/x/term's proper ioctl check; it correctly handles PTYs
+	// allocated over SSH (including Ghostty's xterm-ghostty TERM) where a
+	// Stat(MODE_CHAR_DEVICE) heuristic can misclassify pipes vs PTYs.
+	return term.IsTerminal(f.Fd())
 }

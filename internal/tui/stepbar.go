@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/omahab/omahab/internal/installer"
 )
 
@@ -22,14 +23,14 @@ const (
 // It is bound to OrderedSteps and updates via events and journal snapshots.
 // --resume pre-checks from journal state, then follows live Stream.
 type StepBar struct {
-	caps       Caps
-	steps      []string
-	state      map[string]StepState
-	startedAt  map[string]time.Time
-	finishedAt map[string]time.Time
-	elapsed    map[string]time.Duration
+	caps        Caps
+	steps       []string
+	state       map[string]StepState
+	startedAt   map[string]time.Time
+	finishedAt  map[string]time.Time
+	elapsed     map[string]time.Duration
 	runningStep string
-	now        func() time.Time
+	now         func() time.Time
 }
 
 // NewStepBar creates a StepBar with initial steps.
@@ -122,7 +123,25 @@ func (s *StepBar) Feed(e installer.Event) {
 }
 
 // View renders the StepBar strip.
+// For interactive TTY it is width-safe (compact) to keep a single pinned line;
+// for plain/log output it returns the full unwrapped strip.
 func (s *StepBar) View() string {
+	parts := s.buildParts()
+	full := strings.Join(parts, " "+GlyphDot()+" ")
+	if !s.caps.IsTTY || !s.caps.ColorEnabled {
+		return full
+	}
+	width := s.caps.Width
+	if width <= 0 {
+		width = 80
+	}
+	if lipgloss.Width(full) <= width {
+		return full
+	}
+	return s.compactView(parts, width)
+}
+
+func (s *StepBar) buildParts() []string {
 	parts := make([]string, 0, len(s.steps))
 	for _, step := range s.steps {
 		st := s.state[step]
@@ -132,12 +151,10 @@ func (s *StepBar) View() string {
 		case StepCompleted:
 			glyph = GlyphStepDone(s.caps)
 			if d, ok := s.elapsed[step]; ok && d > 0 {
-				// Show duration for completed steps if known (rounded)
 				suffix = fmt.Sprintf(" %s", formatDuration(d))
 			}
 		case StepRunning:
 			glyph = GlyphStepRunning(s.caps)
-			// Elapsed for running
 			if t, ok := s.startedAt[step]; ok {
 				d := s.now().Sub(t).Truncate(time.Second)
 				suffix = fmt.Sprintf(" %s", formatDuration(d))
@@ -151,12 +168,77 @@ func (s *StepBar) View() string {
 		default:
 			glyph = GlyphStepPending(s.caps)
 		}
-		// Normalize step name for display (short)
 		part := fmt.Sprintf("%s %s%s", step, glyph, suffix)
-		// When caps non-TTY we fallback glyphs are ASCII like [x]; keep same format
 		parts = append(parts, part)
 	}
-	return strings.Join(parts, " "+GlyphDot()+" ")
+	return parts
+}
+
+func (s *StepBar) compactView(parts []string, width int) string {
+	// Find running index.
+	runningIdx := -1
+	for i, step := range s.steps {
+		if step == s.runningStep {
+			runningIdx = i
+			break
+		}
+	}
+	if runningIdx == -1 {
+		for i, step := range s.steps {
+			if s.state[step] == StepPending {
+				runningIdx = i
+				break
+			}
+		}
+		if runningIdx == -1 {
+			runningIdx = len(s.steps) / 2
+		}
+	}
+	lo := runningIdx - 1
+	if lo < 0 {
+		lo = 0
+	}
+	hi := runningIdx + 1
+	if hi >= len(parts) {
+		hi = len(parts) - 1
+	}
+	var compactParts []string
+	if lo > 0 {
+		compactParts = append(compactParts, parts[0])
+		if lo == 2 {
+			compactParts = append(compactParts, parts[1])
+		} else if lo > 2 {
+			compactParts = append(compactParts, "…")
+		}
+	}
+	for i := lo; i <= hi; i++ {
+		compactParts = append(compactParts, parts[i])
+	}
+	if hi < len(parts)-1 {
+		if hi == len(parts)-3 {
+			compactParts = append(compactParts, parts[len(parts)-2])
+		} else if hi < len(parts)-3 {
+			compactParts = append(compactParts, "…")
+		}
+		compactParts = append(compactParts, parts[len(parts)-1])
+	}
+	candidate := strings.Join(compactParts, " "+GlyphDot()+" ")
+	if lipgloss.Width(candidate) <= width {
+		return candidate
+	}
+	completed := 0
+	for _, st := range s.state {
+		if st == StepCompleted {
+			completed++
+		}
+	}
+	runningPart := parts[runningIdx]
+	summary := fmt.Sprintf("%d/%d", completed, len(s.steps))
+	minimal := fmt.Sprintf("%s %s %s", runningPart, GlyphDot(), summary)
+	if lipgloss.Width(minimal) <= width {
+		return minimal
+	}
+	return runningPart
 }
 
 func formatDuration(d time.Duration) string {

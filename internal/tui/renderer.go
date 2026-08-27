@@ -9,6 +9,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/omahab/omahab/internal/installer"
 )
 
@@ -18,11 +19,11 @@ import (
 //
 // Contract: UI on stderr, data on stdout, tea.WithOutput(os.Stderr), never alt-screen.
 type TUIRenderer struct {
-	caps      Caps
-	w         io.Writer
-	checklist *PreflightChecklist
-	stepbar   *StepBar
-	// spinner tick for checklist/stepbar
+	caps       Caps
+	w          io.Writer
+	checklist  *PreflightChecklist
+	stepbar    *StepBar
+	frameLines int
 }
 
 func NewTUIRenderer(w io.Writer, caps Caps) *TUIRenderer {
@@ -44,31 +45,31 @@ func NewTUIRendererWithJournal(w io.Writer, caps Caps, entries []installer.Journ
 	return r
 }
 
-// Render implements installer.Renderer.
+// Render implements installer.Renderer with a pinned inline StepBar frame for
+// interactive TTYs and plain append-only output for non-TTY.
+// Detail lines (PreflightCheck, StepLog, [ok]/[fail]) clear the pinned frame
+// before printing so the transcript stays readable. The frame is width-safe
+// via StepBar's compact View and is finalized after svc.Run so later receipt
+// output cannot collide.
 func (r *TUIRenderer) Render(e installer.Event) {
 	switch v := e.(type) {
 	case installer.PreflightCheck:
+		r.clearFrame()
 		r.checklist.Feed(v)
-		// Also reflect in stepbar as running preflight? StepBar handles StepStarted separately.
-		// For plain checklist rendering, we emit line directly to preserve transcript.
-		// Inline but transcript-safe: just print the check line once.
 		line := r.renderCheckLine(v.Result)
 		fmt.Fprintln(r.w, line)
 	case installer.StepStarted:
 		r.stepbar.Feed(v)
 		r.checklist.Feed(v)
-		// Print StepBar strip for running step? But to avoid noisy output every start,
-		// we print a concise start line and let StepBar be rendered on demand.
-		// We also emit a START marker that is not alt-screen.
 		if v.Step == installer.StepPreflight {
+			r.clearFrame()
 			fmt.Fprintln(r.w, "Running preflight checks...")
 		} else {
-			// Show StepBar snapshot on step start
-			fmt.Fprintln(r.w, r.stepbar.View())
+			r.renderFrame()
 		}
 	case installer.StepLog:
+		r.clearFrame()
 		r.stepbar.Feed(v)
-		// Streamed logs indented; preserves banner truth
 		line := strings.TrimRight(v.Line, "\n")
 		if line != "" {
 			if strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t") {
@@ -77,18 +78,21 @@ func (r *TUIRenderer) Render(e installer.Event) {
 				fmt.Fprintf(r.w, "       %s\n", line)
 			}
 		}
+		// Keep pinned progress visible after streamed logs; otherwise long
+		// package/daemon logs would hide the bar until next StepStarted/Finished.
+		r.renderFrame()
 	case installer.StepFinished:
+		// Clear any pinned frame before the status line so [ok]/[fail] is not
+		// overwritten and remains in the transcript.
+		r.clearFrame()
 		r.stepbar.Feed(v)
 		r.checklist.Feed(v)
-		// For preflight, checklist already printed each check; now freeze and optionally print summary.
 		if v.Result.Step == installer.StepPreflight {
 			r.checklist.Freeze()
-			// Append LUKS recommendation if checklist passed (mirrors plain emitter)
 			if v.Result.Status == installer.JournalCompleted {
 				fmt.Fprintln(r.w, "  Recommendation: enable LUKS on bare metal and encrypted Proxmox storage for VMs (DESIGN.md §9) — offline disk access bypasses OS controls.")
 			}
 		} else {
-			// Generic step completion: print ok/fail with stepbar snapshot
 			switch v.Result.Status {
 			case installer.JournalCompleted:
 				fmt.Fprintf(r.w, "  [ok] %s\n", v.Result.Step)
@@ -105,15 +109,110 @@ func (r *TUIRenderer) Render(e installer.Event) {
 			default:
 				fmt.Fprintf(r.w, "  [%s] %s\n", v.Result.Status, v.Result.Step)
 			}
-			// Show updated StepBar after each finish
-			fmt.Fprintln(r.w, r.stepbar.View())
+			r.renderFrame()
 		}
 	case installer.PromptNeeded:
-		// Prompts are handled via forms, not via Render; no output here.
 		_ = v
 	default:
-		// Unknown event: ignore
 	}
+}
+
+// clearFrame removes the pinned StepBar frame from the current cursor
+// position without leaving duplicate lines. For the width-safe single-line
+// frame we only need to clear the current line; the width guarantee ensures
+// the frame never wraps to multiple rows, so \r\033[K is sufficient and
+// deterministic. If a multi-line frame ever appears, clear all rows.
+func (r *TUIRenderer) clearFrame() {
+	if r.frameLines == 0 {
+		return
+	}
+	if r.frameLines == 1 {
+		fmt.Fprint(r.w, "\r\033[K")
+	} else {
+		fmt.Fprint(r.w, "\r\033[K")
+		for i := 1; i < r.frameLines; i++ {
+			fmt.Fprint(r.w, "\033[A\r\033[K")
+		}
+	}
+	r.frameLines = 0
+}
+
+// renderFrame draws the StepBar as a pinned inline frame. On interactive TTY
+// it uses \r\033[K to update the same physical line in place; on plain
+// output it appends with a newline for log-friendly transcripts.
+func (r *TUIRenderer) renderFrame() {
+	view := r.stepbar.View()
+	if !r.caps.IsTTY || !r.caps.ColorEnabled {
+		fmt.Fprintln(r.w, view)
+		return
+	}
+	// Width-safe view should be single line; compute rows for safety.
+	width := r.caps.Width
+	if width <= 0 {
+		width = 80
+	}
+	lines := 1
+	if w := lipgloss.Width(view); w > width {
+		lines = (w + width - 1) / width
+	}
+	// If a frame is already pinned, overwrite it in place.
+	if r.frameLines > 0 {
+		r.clearFrame()
+	}
+	if lines == 1 {
+		fmt.Fprintf(r.w, "\r\033[K%s", view)
+	} else {
+		// Deterministic wrapping for rare overflow: split at width.
+		wrapped := wrapView(view, width)
+		fmt.Fprintf(r.w, "\r\033[K%s", strings.Join(wrapped, "\n"))
+		lines = len(wrapped)
+	}
+	r.frameLines = lines
+}
+
+// Finalize commits any pinned frame with a trailing newline so later output
+// (receipt, next-steps) starts on a fresh line and cannot collide.
+func (r *TUIRenderer) Finalize() {
+	if r.frameLines > 0 {
+		fmt.Fprintln(r.w, "")
+		r.frameLines = 0
+	}
+}
+
+// RenderFrame exposes renderFrame for initial banner rendering in
+// cmd/omahab-install without duplicating the pinned-frame logic.
+func (r *TUIRenderer) RenderFrame() { r.renderFrame() }
+
+func wrapView(view string, width int) []string {
+	if width <= 0 {
+		return []string{view}
+	}
+	var out []string
+	// Simple width-aware wrap on the dot separator where possible.
+	parts := strings.Split(view, " "+GlyphDot()+" ")
+	var cur string
+	for _, p := range parts {
+		sep := ""
+		if cur != "" {
+			sep = " " + GlyphDot() + " "
+		}
+		candidate := cur + sep + p
+		if lipgloss.Width(candidate) <= width {
+			cur = candidate
+		} else {
+			if cur != "" {
+				out = append(out, cur)
+			}
+			cur = p
+		}
+	}
+	if cur != "" {
+		out = append(out, cur)
+	}
+	if len(out) == 0 {
+		out = []string{view}
+	}
+	return out
 }
 
 func (r *TUIRenderer) renderCheckLine(c installer.CheckResult) string {
@@ -170,6 +269,7 @@ func RunSecondSessionGate(ctx context.Context, caps Caps, probes installer.Probe
 	_, err := p.Run()
 	return err
 }
+
 type tickMsg time.Time
 type pollResultMsg struct {
 	confirmed bool

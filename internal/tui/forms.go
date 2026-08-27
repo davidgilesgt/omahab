@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/huh"
+	"github.com/charmbracelet/x/term"
 	"github.com/omahab/omahab/internal/installer"
 )
 
@@ -30,11 +31,9 @@ func IsDumb(caps Caps) bool {
 	if os.Getenv("TERM") == "dumb" {
 		return true
 	}
-	// Piped stdin: not a char device
-	if fi, err := os.Stdin.Stat(); err == nil {
-		if (fi.Mode() & os.ModeCharDevice) == 0 {
-			return true
-		}
+	// Piped stdin: use proper TTY check, not Stat char device heuristic
+	if !term.IsTerminal(os.Stdin.Fd()) {
+		return true
 	}
 	return false
 }

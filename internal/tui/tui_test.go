@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"os"
 	"strings"
 	"testing"
@@ -237,6 +238,153 @@ func TestStylesAccent(t *testing.T) {
 	}
 }
 
+func TestStepBarCompactWidthSafe(t *testing.T) {
+	// Non-TTY full view should remain unwrapped for log-friendly transcripts.
+	capsPlain := Caps{IsTTY: false, ColorEnabled: false, Width: 80}
+	sbPlain := NewStepBar(capsPlain, nil)
+	sbPlain.LoadJournal([]installer.JournalEntry{
+		{Step: installer.StepPreflight, Status: installer.JournalCompleted, StartedAt: ptrTime(time.Now().Add(-30 * time.Second)), FinishedAt: ptrTime(time.Now().Add(-28 * time.Second))},
+		{Step: installer.StepSSHKeys, Status: installer.JournalCompleted, StartedAt: ptrTime(time.Now().Add(-28 * time.Second)), FinishedAt: ptrTime(time.Now().Add(-27 * time.Second))},
+		{Step: installer.StepSSHDHardening, Status: installer.JournalCompleted, StartedAt: ptrTime(time.Now().Add(-27 * time.Second)), FinishedAt: ptrTime(time.Now().Add(-26 * time.Second))},
+		{Step: installer.StepSystemPrepare, Status: installer.JournalCompleted, StartedAt: ptrTime(time.Now().Add(-26 * time.Second)), FinishedAt: ptrTime(time.Now().Add(-25 * time.Second))},
+		{Step: installer.StepPackages, Status: installer.JournalCompleted, StartedAt: ptrTime(time.Now().Add(-25 * time.Second)), FinishedAt: ptrTime(time.Now().Add(-20 * time.Second))},
+		{Step: installer.StepBinaries, Status: installer.JournalCompleted, StartedAt: ptrTime(time.Now().Add(-20 * time.Second)), FinishedAt: ptrTime(time.Now().Add(-15 * time.Second))},
+		{Step: installer.StepFirewall, Status: installer.JournalCompleted, StartedAt: ptrTime(time.Now().Add(-15 * time.Second)), FinishedAt: ptrTime(time.Now().Add(-14 * time.Second))},
+		{Step: installer.StepServices, Status: installer.JournalRunning, StartedAt: ptrTime(time.Now())},
+	})
+	plainView := sbPlain.View()
+	if len(plainView) <= 80 {
+		t.Fatalf("plain full view expected to exceed 80 for 11 steps, got %d: %q", len(plainView), plainView)
+	}
+	// TTY view must be width-safe single line via compact.
+	capsTTY := Caps{IsTTY: true, ColorEnabled: true, Width: 80}
+	sbTTY := NewStepBar(capsTTY, nil)
+	// Copy state from plain
+	sbTTY.LoadJournal([]installer.JournalEntry{
+		{Step: installer.StepPreflight, Status: installer.JournalCompleted, StartedAt: ptrTime(time.Now().Add(-30 * time.Second)), FinishedAt: ptrTime(time.Now().Add(-28 * time.Second))},
+		{Step: installer.StepSSHKeys, Status: installer.JournalCompleted, StartedAt: ptrTime(time.Now().Add(-28 * time.Second)), FinishedAt: ptrTime(time.Now().Add(-27 * time.Second))},
+		{Step: installer.StepSSHDHardening, Status: installer.JournalCompleted, StartedAt: ptrTime(time.Now().Add(-27 * time.Second)), FinishedAt: ptrTime(time.Now().Add(-26 * time.Second))},
+		{Step: installer.StepSystemPrepare, Status: installer.JournalCompleted, StartedAt: ptrTime(time.Now().Add(-26 * time.Second)), FinishedAt: ptrTime(time.Now().Add(-25 * time.Second))},
+		{Step: installer.StepPackages, Status: installer.JournalCompleted, StartedAt: ptrTime(time.Now().Add(-25 * time.Second)), FinishedAt: ptrTime(time.Now().Add(-20 * time.Second))},
+		{Step: installer.StepBinaries, Status: installer.JournalCompleted, StartedAt: ptrTime(time.Now().Add(-20 * time.Second)), FinishedAt: ptrTime(time.Now().Add(-15 * time.Second))},
+		{Step: installer.StepFirewall, Status: installer.JournalCompleted, StartedAt: ptrTime(time.Now().Add(-15 * time.Second)), FinishedAt: ptrTime(time.Now().Add(-14 * time.Second))},
+		{Step: installer.StepServices, Status: installer.JournalRunning, StartedAt: ptrTime(time.Now())},
+	})
+	ttyView := sbTTY.View()
+	if len(ttyView) > 80 {
+		t.Fatalf("TTY compact view must fit within 80, got %d: %q", len(ttyView), ttyView)
+	}
+	if strings.Contains(ttyView, "\n") {
+		t.Fatalf("TTY compact view must be single line, got %q", ttyView)
+	}
+	// Plain should contain all steps, TTY compact may use ellipsis but must still show running step.
+	if !strings.Contains(plainView, "preflight") || !strings.Contains(plainView, "manifest") {
+		t.Fatalf("plain view missing steps: %q", plainView)
+	}
+	if !strings.Contains(ttyView, "services") {
+		t.Fatalf("compact view should preserve running step, got %q", ttyView)
+	}
+	// Compact must not duplicate neighbor parts at boundaries (lo==1 and hi==len-2).
+	for _, step := range installer.OrderedSteps {
+		if c := strings.Count(ttyView, step); c > 1 {
+			t.Fatalf("compact view duplicated step %q %d times, got %q", step, c, ttyView)
+		}
+	}
+	// Explicit narrow boundary cases: running at index 1 (lo==1) and at len-2 (hi==len-2).
+	narrowCaps := Caps{IsTTY: true, ColorEnabled: true, Width: 40}
+	sbN1 := NewStepBar(narrowCaps, []string{"a", "b", "c", "d", "e", "f", "g"})
+	sbN1.Feed(installer.StepStarted{Step: "b"})
+	v1 := sbN1.View()
+	if strings.Count(v1, "b") != 1 || strings.Count(v1, "a") != 1 {
+		t.Fatalf("narrow lo==1 duplicated, got %q", v1)
+	}
+	sbN2 := NewStepBar(narrowCaps, []string{"a", "b", "c", "d", "e", "f", "g"})
+	sbN2.Feed(installer.StepStarted{Step: "e"})
+	v2 := sbN2.View()
+	if strings.Count(v2, "e") != 1 || strings.Count(v2, "g") != 1 {
+		t.Fatalf("narrow hi==len-2 duplicated, got %q", v2)
+	}
+}
+func TestTUIRendererPinnedFrame(t *testing.T) {
+	capsTTY := Caps{IsTTY: true, ColorEnabled: true, Width: 80}
+	var buf bytes.Buffer
+	r := NewTUIRenderer(&buf, capsTTY)
+	base := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	r.StepBar().SetNow(func() time.Time { return base })
+	// Initial StepStarted should render pinned frame in-place (no newline, uses \r)
+	r.Render(installer.StepStarted{Step: installer.StepSSHKeys})
+	first := buf.String()
+	if !strings.Contains(first, "\r") {
+		t.Fatalf("TTY pinned frame should use carriage return, got %q", first)
+	}
+	if strings.Count(first, "\n") != 0 {
+		t.Fatalf("TTY pinned frame should not append newline on start, got %q", first)
+	}
+	if !strings.Contains(first, "ssh_keys") {
+		t.Fatalf("frame missing step name, got %q", first)
+	}
+	buf.Reset()
+	// StepLog is detail: must clear frame before printing, preserve line, and re-render frame so progress survives long logs
+	r.Render(installer.StepLog{Step: installer.StepSSHKeys, Line: "downloading packages..."})
+	second := buf.String()
+	if !strings.Contains(second, "\033[K") {
+		t.Fatalf("detail should clear pinned frame with \\033[K, got %q", second)
+	}
+	if !strings.Contains(second, "downloading") {
+		t.Fatalf("detail line must remain readable, got %q", second)
+	}
+	// Frame must survive the log: after the log line the bar is re-pinned in-place
+	if !strings.Contains(second, "ssh_keys") {
+		t.Fatalf("frame should survive StepLog and be re-rendered, got %q", second)
+	}
+	if strings.Count(second, "\r") < 2 {
+		t.Fatalf("StepLog should clear and re-render frame (at least 2 \\r), got %q", second)
+	}
+	// After detail, frame is re-pinned, next progress should still be in-place
+	buf.Reset()
+	r.Render(installer.StepFinished{Result: installer.RunResult{Step: installer.StepSSHKeys, Status: installer.JournalCompleted}})
+	third := buf.String()
+	if !strings.Contains(third, "[ok]") {
+		t.Fatalf("finish should contain [ok], got %q", third)
+	}
+	if !strings.Contains(third, "\r") {
+		t.Fatalf("finish should re-render pinned frame in-place, got %q", third)
+	}
+	if strings.Count(third, "ssh_keys") > 2 {
+		t.Fatalf("should not duplicate frame lines via Fprintln, got %q", third)
+	}
+	buf.Reset()
+	r.Finalize()
+	final := buf.String()
+	if final != "\n" {
+		t.Fatalf("Finalize must commit frame with single newline, got %q", final)
+	}
+}
+
+func TestTUIRendererPlainAppendOnly(t *testing.T) {
+	capsPlain := Caps{IsTTY: false, ColorEnabled: false, Width: 80}
+	var buf bytes.Buffer
+	r := NewTUIRenderer(&buf, capsPlain)
+	r.StepBar().SetNow(func() time.Time { return time.Now() })
+	r.Render(installer.StepStarted{Step: installer.StepSSHKeys})
+	first := buf.String()
+	if strings.Contains(first, "\r") {
+		t.Fatalf("plain (non-TTY) should not use in-place \\r, got %q", first)
+	}
+	if !strings.Contains(first, "\n") {
+		t.Fatalf("plain should append with newline, got %q", first)
+	}
+	buf.Reset()
+	r.Render(installer.StepLog{Step: installer.StepSSHKeys, Line: "plain log line"})
+	second := buf.String()
+	if strings.Contains(second, "\033[K") {
+		t.Fatalf("plain should not clear frame, got %q", second)
+	}
+	if !strings.Contains(second, "plain log line") {
+		t.Fatalf("plain detail missing, got %q", second)
+	}
+}
+
 // Golden-file tests against canned event streams (files in testdata)
 func TestGoldenFiles(t *testing.T) {
 	// checklist golden
@@ -269,7 +417,6 @@ func TestGoldenFiles(t *testing.T) {
 		t.Fatalf("read stepbar golden: %v", err)
 	}
 	if stepGot != strings.TrimSpace(string(stepWantB)) && stepGot != string(stepWantB) {
-		// Allow trimmed compare due to newline handling
 		if strings.TrimSpace(stepGot) != strings.TrimSpace(string(stepWantB)) {
 			t.Fatalf("stepbar golden mismatch:\n got %q\n want %q", stepGot, string(stepWantB))
 		}
@@ -298,8 +445,6 @@ func TestGoldenFiles(t *testing.T) {
 	// resume golden
 	sb2 := NewStepBar(caps2, nil)
 	n := time.Now()
-	// For deterministic compare, we cannot use time.Now() vs golden which was generated with time.Now()
-	// Instead we check only that resume.golden exists and contains expected completed markers
 	resumeWantB, err := os.ReadFile("testdata/resume.golden")
 	if err != nil {
 		t.Fatalf("read resume golden: %v", err)
@@ -308,7 +453,6 @@ func TestGoldenFiles(t *testing.T) {
 	if !strings.Contains(resumeContent, "preflight") || !strings.Contains(resumeContent, "[x]") {
 		t.Fatalf("resume golden seems invalid: %q", resumeContent)
 	}
-	// Also verify sb2 resume pre-check logic still holds (as in earlier test)
 	sb2.LoadJournal([]installer.JournalEntry{
 		{Step: installer.StepPreflight, Status: installer.JournalCompleted, StartedAt: ptrTime(n.Add(-30 * time.Second)), FinishedAt: ptrTime(n.Add(-28 * time.Second))},
 		{Step: installer.StepSSHKeys, Status: installer.JournalCompleted, StartedAt: ptrTime(n.Add(-28 * time.Second)), FinishedAt: ptrTime(n.Add(-27 * time.Second))},
