@@ -2,6 +2,7 @@ package installer
 
 import (
 	"context"
+	"io"
 	"net"
 	"time"
 )
@@ -49,6 +50,7 @@ type Probes struct {
 	// Processes / services
 	CommandExists  func(name string) bool
 	CommandOutput  func(ctx context.Context, name string, args ...string) (string, error)
+	CommandStream  func(ctx context.Context, combined io.Writer, name string, args ...string) error
 	RunningPids    func() ([]int, error)
 	ProcessCmdline func(pid int) (string, error)
 	ListeningPorts func() ([]int, error)
@@ -138,6 +140,7 @@ func LiveProbes() Probes {
 		FileOwner:           liveFileOwner,
 		CommandExists:       liveCommandExists,
 		CommandOutput:       liveCommandOutput,
+		CommandStream:       liveCommandStream,
 		RunningPids:         liveRunningPids,
 		ProcessCmdline:      liveProcessCmdline,
 		ListeningPorts:      liveListeningPorts,

@@ -136,6 +136,13 @@ func liveCommandOutput(ctx context.Context, name string, args ...string) (string
 	return string(out), err
 }
 
+func liveCommandStream(ctx context.Context, combined io.Writer, name string, args ...string) error {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Stdout = combined
+	cmd.Stderr = combined
+	return cmd.Run()
+}
+
 func liveRunningPids() ([]int, error) {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {

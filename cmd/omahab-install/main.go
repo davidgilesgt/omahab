@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -911,6 +912,23 @@ func execProbeOutput(ctx context.Context, probes installer.Probes, name string, 
 	return string(out), err
 }
 
+func execProbeStream(ctx context.Context, probes installer.Probes, combined io.Writer, name string, args ...string) (string, error) {
+	var captured bytes.Buffer
+	stream := io.MultiWriter(combined, &captured)
+	if probes.CommandStream != nil {
+		err := probes.CommandStream(ctx, stream, name, args...)
+		return captured.String(), err
+	}
+
+	output, err := execProbeOutput(ctx, probes, name, args...)
+	if output != "" {
+		if _, writeErr := io.WriteString(combined, output); err == nil && writeErr != nil {
+			err = writeErr
+		}
+	}
+	return output, err
+}
+
 func tailscaleInstalled(ctx context.Context, probes installer.Probes) bool {
 	if probes.CommandExists != nil {
 		return probes.CommandExists("tailscale")
@@ -993,51 +1011,39 @@ func runTailscaleUp(ctx context.Context, out output, probes installer.Probes) {
 	// forever; the guided loop can re-run on demand.
 	cctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
-	combined, err := execProbeOutput(cctx, probes, "tailscale", "up")
+	combined, err := execProbeStream(cctx, probes, out.ui, "tailscale", "up")
 	trimmed := strings.TrimSpace(combined)
-	if trimmed != "" {
-		// Show the URL or message tailscale prints. Highlight the login URL if present.
-		lines := strings.Split(trimmed, "\n")
-		for _, l := range lines {
-			l = strings.TrimSpace(l)
-			if l == "" {
+	if combined != "" && !strings.HasSuffix(combined, "\n") {
+		out.printf("\n")
+	}
+	if trimmed != "" && out.isTTY {
+		// The command output has already been streamed. Find its login URL so
+		// interactive terminals still get the optional phone-scannable QR.
+		for _, line := range strings.Split(trimmed, "\n") {
+			if !strings.Contains(line, "https://login.tailscale.com") {
 				continue
 			}
-			if strings.Contains(l, "https://login.tailscale.com") {
-				if out.color {
-					out.printf("  \033[36m%s\033[0m\n", l)
-				} else {
-					out.printf("  %s\n", l)
+			url := ""
+			for _, field := range strings.Fields(line) {
+				if strings.HasPrefix(field, "https://login.tailscale.com") {
+					url = strings.TrimRight(field, ".,;)")
+					break
 				}
-				// QR for the login URL when stderr is a TTY (phone scan).
-				if out.isTTY {
-					// Extract the first https:// URL from the line.
-					url := ""
-					for _, field := range strings.Fields(l) {
-						if strings.HasPrefix(field, "https://login.tailscale.com") {
-							// Trim trailing punctuation
-							url = strings.TrimRight(field, ".,;)")
-							break
-						}
-					}
-					if url == "" {
-						// Fallback: try to find any https://
-						idx := strings.Index(l, "https://")
-						if idx >= 0 {
-							rest := l[idx:]
-							if sp := strings.IndexAny(rest, " \t\n\r\"'"); sp >= 0 {
-								url = rest[:sp]
-							} else {
-								url = rest
-							}
-						}
-					}
-					if url != "" {
-						out.printQR("  Tailscale login QR (scan with phone):", url)
+			}
+			if url == "" {
+				idx := strings.Index(line, "https://")
+				if idx >= 0 {
+					rest := line[idx:]
+					if sp := strings.IndexAny(rest, " \t\n\r\"'"); sp >= 0 {
+						url = rest[:sp]
+					} else {
+						url = rest
 					}
 				}
-			} else {
-				out.printf("  %s\n", l)
+			}
+			if url != "" {
+				out.printQR("  Tailscale login QR (scan with phone):", url)
+				break
 			}
 		}
 	}
@@ -1498,6 +1504,7 @@ func printGuidedSummary(out output) {
 		}
 		return s
 	}
+
 	out.printf("\n%s\n", bold("Guided enrollment done."))
 	out.printf("  %s\n", hl("omahab doctor           # health including Tailscale + Cloudflare"))
 	out.printf("  %s\n", dim("dig ai.example.com +short  # after exposure is set"))
@@ -1506,7 +1513,6 @@ func printGuidedSummary(out output) {
 	out.printf("  Recovery: SSH or %s / %s stays reachable even if DNS breaks.\n", hl("tailscale IP"), hl("*.ts.net"))
 	out.printf("\n")
 }
-
 
 func checkSecondSessionGate(ctx context.Context, out output, svc *installer.Service, probes installer.Probes) {
 	active, err := installer.IsRollbackActive(ctx, probes)
