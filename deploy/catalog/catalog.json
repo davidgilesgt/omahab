@@ -170,7 +170,7 @@
       "displayName": "Forgejo",
       "description": "Canonical Git forge. Private by default. Forgejo is the source of truth; GitHub mirror is read-only via push mirror.",
       "category": "platform",
-      "enabledByDefault": true,
+      "enabledByDefault": false,
       "failureDomain": "git",
       "composeFile": "compose/forgejo.yml",
       "supportedArchitectures": ["amd64", "arm64"],
@@ -267,7 +267,7 @@
       "displayName": "Woodpecker CI",
       "description": "CI for Forgejo. Single runner family; isolated server + agent. Forgejo Actions disabled to avoid dual pipeline systems.",
       "category": "platform",
-      "enabledByDefault": true,
+      "enabledByDefault": false,
       "failureDomain": "ci",
       "composeFile": "compose/woodpecker.yml",
       "supportedArchitectures": ["amd64", "arm64"],
@@ -363,7 +363,7 @@
       "displayName": "Hermes",
       "description": "Default AI assistant backend and project bots. Stable profile 'default' mapped to user-chosen display name (default AI). Remote gateway for WebSocket/JSON-RPC.",
       "category": "platform",
-      "enabledByDefault": true,
+      "enabledByDefault": false,
       "failureDomain": "hermes",
       "composeFile": "compose/hermes.yml",
       "supportedArchitectures": ["amd64", "arm64"],
@@ -462,8 +462,8 @@
       "images": {
         "immich-server": "ghcr.io/immich-app/immich-server@sha256:${IMMICH_SERVER_DIGEST:?pinned digest required}",
         "immich-machine-learning": "ghcr.io/immich-app/immich-machine-learning@sha256:${IMMICH_ML_DIGEST:?pinned digest required}",
-        "postgres": "ghcr.io/tensorchord/pgvecto-rs@sha256:${IMMICH_PGVECTO_DIGEST:?pinned digest required}",
-        "redis": "docker.io/library/redis@sha256:${REDIS_DIGEST:?pinned digest required}"
+        "immich-postgres": "ghcr.io/immich-app/postgres@sha256:${IMMICH_POSTGRES_DIGEST:?pinned digest required}",
+        "valkey": "docker.io/valkey/valkey@sha256:${VALKEY_DIGEST:?pinned digest required}"
       },
       "resources": {
         "memoryMinMiB": 2048,
@@ -476,19 +476,19 @@
         {
           "volume": "immich_postgres_data",
           "mountPath": "/var/lib/postgresql/data",
-          "description": "Immich Postgres + pgvecto.rs vectors",
+          "description": "Immich Postgres + VectorChord",
           "backup": true
         },
         {
           "hostPath": "/srv/omahab/apps/immich/library",
-          "mountPath": "/usr/src/app/upload",
+          "mountPath": "/data",
           "description": "Original uploaded media (host bind)",
           "backup": true
         },
         {
           "volume": "immich_redis_data",
           "mountPath": "/data",
-          "description": "Redis AOF (ephemeral - not critical backup)",
+          "description": "Valkey AOF (ephemeral - not critical backup)",
           "backup": false
         },
         {
@@ -562,7 +562,7 @@
       "displayName": "Paperless-ngx",
       "description": "Document management system of record. REST API for retrieval. Supports native OIDC and local embedding indexing via separate worker (failure-isolated).",
       "category": "platform",
-      "enabledByDefault": true,
+      "enabledByDefault": false,
       "failureDomain": "paperless",
       "composeFile": "compose/paperless.yml",
       "supportedArchitectures": ["amd64", "arm64"],
@@ -672,7 +672,7 @@
       "displayName": "Karakeep",
       "description": "Bookmark, article, video and RSS archiving with full-text and semantic search. Agent skills for Hermes.",
       "category": "platform",
-      "enabledByDefault": true,
+      "enabledByDefault": false,
       "failureDomain": "karakeep",
       "composeFile": "compose/karakeep.yml",
       "supportedArchitectures": ["amd64", "arm64"],
@@ -868,7 +868,7 @@
       "displayName": "LiteLLM Model Gateway",
       "description": "OpenAI-compatible model gateway and credential broker for provider API keys and where supported subscription OAuth (ChatGPT, Grok). Projects receive aliases omahab/fast, omahab/balanced, omahab/reasoning, not upstream creds.",
       "category": "gateway",
-      "enabledByDefault": true,
+      "enabledByDefault": false,
       "failureDomain": "gateway",
       "composeFile": "compose/litellm.yml",
       "supportedArchitectures": ["amd64", "arm64"],

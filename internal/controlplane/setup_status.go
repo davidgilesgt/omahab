@@ -9,6 +9,7 @@ import (
 
 	"github.com/omahab/omahab/internal/api"
 	"github.com/omahab/omahab/internal/apps"
+	"github.com/omahab/omahab/internal/domain"
 	"github.com/omahab/omahab/internal/store"
 )
 
@@ -206,33 +207,11 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (api.SetupStatus, error) {
 					as.Detail = "not installed"
 					anyPending = true
 				} else {
-					switch st.ObservedState {
-					case apps.ObservedRunning:
-						as.Status = "running"
-						// running is success
-					case apps.ObservedFailed:
-						as.Status = "failed"
-						as.Detail = st.Error
-						if as.Detail == "" {
-							as.Detail = "failed"
-						}
+					as = classifyCoreApp(st)
+					switch as.Status {
+					case "failed":
 						anyFailed = true
-					case apps.ObservedProvisioning:
-						as.Status = "pending"
-						as.Detail = "provisioning"
-						anyPending = true
-					case apps.ObservedStopped:
-						// Stopped default app is arguably pending/fixable, but treat as pending
-						as.Status = "pending"
-						as.Detail = "stopped"
-						anyPending = true
-					case apps.ObservedAbsent:
-						as.Status = "pending"
-						as.Detail = "absent"
-						anyPending = true
-					default:
-						as.Status = "pending"
-						as.Detail = st.ObservedState
+					case "pending":
 						anyPending = true
 					}
 				}
@@ -421,6 +400,45 @@ func deriveSetupState(checks []api.SetupCheck, domainSentinel bool, cfDNSPresent
 		return "attention"
 	}
 	return "complete"
+}
+
+func classifyCoreApp(st apps.Status) api.SetupAppStatus {
+	as := api.SetupAppStatus{BundleID: st.BundleID}
+	switch st.ObservedState {
+	case apps.ObservedRunning:
+		switch st.Health {
+		case domain.HealthHealthy:
+			as.Status = "running"
+		case domain.HealthUnhealthy:
+			as.Status = "failed"
+			as.Detail = st.Error
+			if as.Detail == "" {
+				as.Detail = "unhealthy"
+			}
+		default:
+			as.Status = "pending"
+			as.Detail = "health " + string(st.Health)
+		}
+	case apps.ObservedFailed:
+		as.Status = "failed"
+		as.Detail = st.Error
+		if as.Detail == "" {
+			as.Detail = "failed"
+		}
+	case apps.ObservedProvisioning:
+		as.Status = "pending"
+		as.Detail = "provisioning"
+	case apps.ObservedStopped:
+		as.Status = "pending"
+		as.Detail = "stopped"
+	case apps.ObservedAbsent:
+		as.Status = "pending"
+		as.Detail = "absent"
+	default:
+		as.Status = "pending"
+		as.Detail = st.ObservedState
+	}
+	return as
 }
 
 // Ensure GetSetupStatus satisfies api.Backend at compile time.

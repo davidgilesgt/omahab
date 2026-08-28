@@ -12,9 +12,10 @@ import (
 const DaemonHealthURL = "http://127.0.0.1:8484/up"
 
 // waitHealthy polls DaemonHealthURL via probes.HTTPSGet until a 200 is
-// observed. It uses probes.Now to enforce a 120s deadline and a 2s poll
-// interval. When probes.Now is nil it falls back to time.Now. The loop
-// honours ctx cancellation and returns an error mentioning
+// observed. It uses probes.Now to enforce a 120s deadline and probes.Sleep
+// for a 2s poll interval between failed probes. When probes.Now is nil it
+// falls back to time.Now. When probes.Sleep is nil no sleep is performed.
+// The loop honours ctx cancellation and returns an error mentioning
 // `journalctl -u omahabd -n 50 --no-pager` on deadline expiry.
 func waitHealthy(ctx context.Context, p Probes) error {
 	return waitHealthyWithEmit(ctx, p, nil)
@@ -28,7 +29,6 @@ func waitHealthyWithEmit(ctx context.Context, p Probes, emit func(string)) error
 	if nowFn == nil {
 		nowFn = time.Now
 	}
-	isFake := p.Now != nil
 	start := nowFn()
 	deadline := start.Add(120 * time.Second)
 
@@ -61,19 +61,9 @@ func waitHealthyWithEmit(ctx context.Context, p Probes, emit func(string)) error
 			return fmt.Errorf("omahabd failed to become healthy within 120s; check `journalctl -u omahabd -n 50 --no-pager`")
 		}
 
-		if !isFake {
-			select {
-			case <-ctx.Done():
-				return fmt.Errorf("health check cancelled: %w", ctx.Err())
-			case <-time.After(2 * time.Second):
-			}
-		} else {
-			// Fake Now path: drive timing off the injected clock so tests are instant.
-			// No real sleep; next iteration will advance Now and eventually hit deadline.
-			select {
-			case <-ctx.Done():
-				return fmt.Errorf("health check cancelled: %w", ctx.Err())
-			default:
+		if p.Sleep != nil {
+			if err := p.Sleep(ctx, 2*time.Second); err != nil {
+				return fmt.Errorf("health check cancelled: %w", err)
 			}
 		}
 	}

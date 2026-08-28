@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Generate runtime catalog deploy/catalog/apps-catalog.json from curated catalog + pinned digests.
-# Required keys: caddy, pocket-id — missing/invalid digest fails closed.
-# Other keys: on digest failure, log skip and omit from digests, and cataloggen will skip bundles needing those images.
+# Required keys: enabled-by-default images (caddy, pocket-id, and all Immich images).
+# Missing/invalid digest for a required key fails closed before writing the catalog.
+# Optional keys: on digest failure, log skip and omit from digests; cataloggen skips those bundles.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -41,8 +42,9 @@ KEYS=(
   woodpecker-agent
   hermes
   immich-server
-  immich-ml
-  immich-pgvecto
+  immich-machine-learning
+  immich-postgres
+  valkey
   paperless-ngx
   gotenberg
   tika
@@ -56,7 +58,7 @@ KEYS=(
 )
 get_repo() {
   case "$1" in
-    caddy) echo "docker.io/library/caddy:alpine" ;;
+    caddy) echo "ghcr.io/caddybuilds/caddy-cloudflare:alpine" ;;
     pocket-id) echo "ghcr.io/pocket-id/pocket-id:latest" ;;
     forgejo) echo "codeberg.org/forgejo/forgejo:11" ;;
     postgres) echo "docker.io/library/postgres:16-alpine" ;;
@@ -65,8 +67,9 @@ get_repo() {
     woodpecker-agent) echo "docker.io/woodpeckerci/woodpecker-agent:latest" ;;
     hermes) echo "ghcr.io/omahab/hermes:latest" ;;
     immich-server) echo "ghcr.io/immich-app/immich-server:release" ;;
-    immich-ml) echo "ghcr.io/immich-app/immich-machine-learning:release" ;;
-    immich-pgvecto) echo "ghcr.io/immich-app/pgvecto:release" ;;
+    immich-machine-learning) echo "ghcr.io/immich-app/immich-machine-learning:release" ;;
+    immich-postgres) echo "ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0" ;;
+    valkey) echo "docker.io/valkey/valkey:9" ;;
     paperless-ngx) echo "ghcr.io/paperless-ngx/paperless-ngx:latest" ;;
     gotenberg) echo "docker.io/gotenberg/gotenberg:latest" ;;
     tika) echo "docker.io/apache/tika:latest" ;;
@@ -81,7 +84,8 @@ get_repo() {
   esac
 }
 
-REQUIRED_KEYS=("caddy" "pocket-id")
+# Enabled-by-default images must resolve; optional bundles may be skipped.
+REQUIRED_KEYS=("caddy" "pocket-id" "immich-server" "immich-machine-learning" "immich-postgres" "valkey")
 
 is_required() {
   local k="$1"
@@ -93,48 +97,55 @@ is_required() {
   return 1
 }
 
+hash_manifest() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 | awk '{print $NF}'
+  else
+    echo ""
+  fi
+}
+
 HAS_SKOPEO=false
 HAS_DOCKER=false
 if command -v skopeo >/dev/null 2>&1; then HAS_SKOPEO=true; fi
-if command -v docker >/dev/null 2>&1; then HAS_DOCKER=true; fi
+if command -v docker >/dev/null 2>&1 && docker buildx version >/dev/null 2>&1; then HAS_DOCKER=true; fi
+
+if [[ "$HAS_SKOPEO" == "false" && "$HAS_DOCKER" == "false" ]]; then
+  echo "error: neither skopeo nor docker buildx is available to resolve image digests" >&2
+  echo "  install skopeo, or docker with buildx, then retry (e.g. skopeo inspect --raw docker://ghcr.io/caddybuilds/caddy-cloudflare:alpine)" >&2
+  exit 1
+fi
+
+RAW_TMP="$(mktemp)"
+trap 'rm -f "$RAW_TMP"' EXIT
 
 IMAGES_JSON="{"
 first=1
 for key in "${KEYS[@]}"; do
   repo="$(get_repo "$key")"
   digest=""
-  if command -v skopeo >/dev/null 2>&1; then
-    digest="$(skopeo inspect --format '{{.Digest}}' "docker://$repo" 2>/dev/null || true)"
-  elif command -v docker >/dev/null 2>&1; then
-    digest="$(docker manifest inspect "$repo" 2>/dev/null | grep -o '"digest": "sha256:[a-f0-9]\{64\}"' | head -n1 | cut -d'"' -f4 || true)"
-    if [[ -z "$digest" ]]; then
-      digest="$(docker pull --quiet "$repo" 2>/dev/null | grep -o 'sha256:[a-f0-9]\{64\}' | head -n1 || true)"
+  if [[ "$HAS_SKOPEO" == "true" ]]; then
+    if skopeo inspect --raw "docker://$repo" >"$RAW_TMP" 2>/dev/null && [[ -s "$RAW_TMP" ]]; then
+      h="$(hash_manifest < "$RAW_TMP")"
+      if [[ "$h" =~ ^[a-f0-9]{64}$ ]]; then
+        digest="sha256:$h"
+      fi
     fi
+  fi
+  if [[ -z "$digest" && "$HAS_DOCKER" == "true" ]]; then
+    digest="$(docker buildx imagetools inspect "$repo" --format '{{.Manifest.Digest}}' 2>/dev/null || true)"
+    digest="${digest//$'\n'/}"
+    digest="${digest//$'\r'/}"
   fi
   if [[ -z "$digest" ]]; then
     if is_required "$key"; then
-      if [[ "$HAS_SKOPEO" == "false" && "$HAS_DOCKER" == "false" ]]; then
-        fake=""
-        if command -v sha256sum >/dev/null 2>&1; then
-          fake="$(printf "%s" "$key" | sha256sum | cut -d' ' -f1)"
-        elif command -v shasum >/dev/null 2>&1; then
-          fake="$(printf "%s" "$key" | shasum -a 256 | cut -d' ' -f1)"
-        elif command -v openssl >/dev/null 2>&1; then
-          fake="$(printf "%s" "$key" | openssl dgst -sha256 | awk '{print $2}')"
-        fi
-        if [[ "$fake" =~ ^[a-f0-9]{64}$ ]]; then
-          digest="sha256:$fake"
-          echo "warning: using fake digest for required $key ($digest) — offline mode (no skopeo/docker)" >&2
-        else
-          echo "error: digest unavailable for required $key ($repo) — refusing to emit placeholder" >&2
-          echo "  query registries first (e.g., skopeo inspect docker://$repo) and ensure ghcr.io/omahab/* images are pushed" >&2
-          exit 1
-        fi
-      else
-        echo "error: digest unavailable for required $key ($repo) — refusing to emit placeholder" >&2
-        echo "  query registries first (e.g., skopeo inspect docker://$repo) and ensure ghcr.io/omahab/* images are pushed" >&2
-        exit 1
-      fi
+      echo "error: digest unavailable for required $key ($repo) — refusing to emit placeholder" >&2
+      echo "  query registries first (e.g., skopeo inspect --raw docker://$repo) and ensure the image exists" >&2
+      exit 1
     else
       echo "skip bundle images for $key ($repo) — digest unavailable" >&2
       continue
@@ -172,7 +183,7 @@ for rk in "${REQUIRED_KEYS[@]}"; do
 done
 
 TMP_DIGESTS="$(mktemp)"
-trap 'rm -f "$TMP_DIGESTS"' EXIT
+trap 'rm -f "$RAW_TMP" "$TMP_DIGESTS"' EXIT
 printf '%s\n' "$IMAGES_JSON" > "$TMP_DIGESTS"
 
 # Also stage digests for callers that want OUT (release.sh)
@@ -181,9 +192,9 @@ if [[ -n "$OUT" ]]; then
   printf '%s\n' "$IMAGES_JSON" > "$OUT/image-digests.json"
 fi
 
-# 2) Run cataloggen — it will skip bundles whose image keys are not in digest map
+# 2) Run cataloggen — it will skip optional bundles whose image keys are not in digest map
 echo "==> generating runtime catalog deploy/catalog/apps-catalog.json"
-go run ./cmd/omahab-cataloggen \
+env -u GOOS -u GOARCH go run ./cmd/omahab-cataloggen \
   -catalog deploy/catalog/catalog.json \
   -compose-dir deploy/catalog \
   -digests "$TMP_DIGESTS" \
@@ -202,9 +213,13 @@ if ! grep -q '"id": "pocket-id"' deploy/catalog/apps-catalog.json; then
   echo "error: generated catalog missing required bundle pocket-id" >&2
   exit 1
 fi
+if ! grep -q '"id": "immich"' deploy/catalog/apps-catalog.json; then
+  echo "error: generated catalog missing required bundle immich" >&2
+  exit 1
+fi
 
 # Clean trap
-rm -f "$TMP_DIGESTS"
+rm -f "$RAW_TMP" "$TMP_DIGESTS"
 trap - EXIT
 
 echo "==> catalog generated successfully"

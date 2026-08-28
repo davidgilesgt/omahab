@@ -113,33 +113,33 @@ func run(args []string) error {
 	}
 
 	var bundles []apps.Bundle
+	enabledRequired := map[string]bool{}
+	for _, cb := range doc.Bundles {
+		if cb.EnabledByDefault {
+			enabledRequired[cb.Name] = false
+		}
+	}
 	for _, cb := range doc.Bundles {
 		b, err := convert(cb, *composeDir, digests)
 		if err != nil {
 			if strings.Contains(err.Error(), "no resolved digest") {
+				if cb.EnabledByDefault {
+					return fmt.Errorf("bundle %q: %w", cb.Name, err)
+				}
 				fmt.Fprintf(os.Stderr, "warning: skip bundle %q: %v\n", cb.Name, err)
 				continue
 			}
 			return fmt.Errorf("bundle %q: %w", cb.Name, err)
 		}
+		if _, ok := enabledRequired[b.ID]; ok {
+			enabledRequired[b.ID] = true
+		}
 		bundles = append(bundles, b)
 	}
-	// Fail if required bundles are absent after skipping.
-	hasCaddy := false
-	hasPocketID := false
-	for _, b := range bundles {
-		if b.ID == "caddy" {
-			hasCaddy = true
+	for id, present := range enabledRequired {
+		if !present {
+			return fmt.Errorf("generated catalog missing required bundle %q", id)
 		}
-		if b.ID == "pocket-id" {
-			hasPocketID = true
-		}
-	}
-	if !hasCaddy {
-		return fmt.Errorf("generated catalog missing required bundle %q", "caddy")
-	}
-	if !hasPocketID {
-		return fmt.Errorf("generated catalog missing required bundle %q", "pocket-id")
 	}
 	if _, err := apps.NewCatalog(bundles...); err != nil {
 		return fmt.Errorf("generated catalog rejected by validation: %w", err)
@@ -344,6 +344,14 @@ func maxAllowed(allowed []string) domain.Exposure {
 }
 
 func healthCheck(cb curatedBundle, primary string) apps.HealthCheck {
+	if test := cb.HealthCheck.Test; len(test) > 0 {
+		if test[0] == "CMD-SHELL" && len(test) > 1 {
+			return apps.HealthCheck{Kind: apps.CheckCommand, Service: primary, Command: []string{"sh", "-c", test[1]}}
+		}
+		if test[0] == "CMD" && len(test) > 1 {
+			return apps.HealthCheck{Kind: apps.CheckCommand, Service: primary, Command: test[1:]}
+		}
+	}
 	if endpoint := cb.HealthCheck.Endpoint; endpoint != "" {
 		if u, err := url.Parse(endpoint); err == nil && u.Host != "" {
 			hc := apps.HealthCheck{Kind: apps.CheckHTTP, Path: u.Path}
@@ -354,14 +362,6 @@ func healthCheck(cb curatedBundle, primary string) apps.HealthCheck {
 				fmt.Sscanf(port, "%d", &hc.Port)
 			}
 			return hc
-		}
-	}
-	if test := cb.HealthCheck.Test; len(test) > 0 {
-		if test[0] == "CMD-SHELL" && len(test) > 1 {
-			return apps.HealthCheck{Kind: apps.CheckCommand, Service: primary, Command: []string{"sh", "-c", test[1]}}
-		}
-		if test[0] == "CMD" && len(test) > 1 {
-			return apps.HealthCheck{Kind: apps.CheckCommand, Service: primary, Command: test[1:]}
 		}
 	}
 	return apps.HealthCheck{Kind: apps.CheckNone}

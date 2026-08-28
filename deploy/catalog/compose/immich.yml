@@ -1,5 +1,5 @@
 # Immich — curated Omahab bundle
-# Includes server + ML (isolated but co-deployed), postgres (pgvecto.rs), redis.
+# Includes server + ML (isolated but co-deployed), Postgres/VectorChord, Valkey.
 # Library on host bind /srv/omahab/apps/immich/library for restic backup efficiency.
 name: omahab-immich
 networks:
@@ -24,12 +24,11 @@ services:
       DB_PASSWORD_FILE: /run/secrets/immich_db_password
       REDIS_HOSTNAME: immich-redis
       IMMICH_MACHINE_LEARNING_URL: "http://immich-machine-learning:3003"
-      UPLOAD_LOCATION: /usr/src/app/upload
       IMMICH_PUBLIC_URL: "https://photos.${DOMAIN:?domain required}/"
     secrets:
       - immich_db_password
     volumes:
-      - /srv/omahab/apps/immich/library:/usr/src/app/upload
+      - /srv/omahab/apps/immich/library:/data
     networks:
       - omahab
     healthcheck:
@@ -65,7 +64,7 @@ services:
           memory: 2G
 
   immich-postgres:
-    image: ghcr.io/tensorchord/pgvecto-rs@sha256:${IMMICH_PGVECTO_DIGEST:?pinned digest required}
+    image: ghcr.io/immich-app/postgres@sha256:${IMMICH_POSTGRES_DIGEST:?pinned digest required}
     restart: unless-stopped
     expose:
       - "5432"
@@ -88,7 +87,7 @@ services:
       start_period: 20s
 
   immich-redis:
-    image: docker.io/library/redis@sha256:${REDIS_DIGEST:?pinned digest required}
+    image: docker.io/valkey/valkey@sha256:${VALKEY_DIGEST:?pinned digest required}
     restart: unless-stopped
     expose:
       - "6379"

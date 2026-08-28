@@ -9,7 +9,7 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/cloudflared tunnel --config /etc/omahab/cloudflared/config.yml run
+ExecStart=/usr/bin/cloudflared tunnel run
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=5

@@ -347,6 +347,17 @@ func liveDiskInfo(path string) (DiskInfo, error) {
 
 func liveNow() time.Time { return time.Now().UTC() }
 
+func liveSleep(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 func liveDNSLookup(ctx context.Context, host string) ([]string, error) {
 	addrs, err := net.DefaultResolver.LookupHost(ctx, host)
 	if err != nil {

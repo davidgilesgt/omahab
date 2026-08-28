@@ -68,10 +68,10 @@ type Probes struct {
 
 	// Time / network
 	Now       func() time.Time
+	Sleep     func(ctx context.Context, d time.Duration) error
 	DNSLookup func(ctx context.Context, host string) ([]string, error)
 	HTTPSGet  func(ctx context.Context, url string) (status int, body []byte, err error)
 	DialTCP   func(ctx context.Context, address string) (net.Conn, error)
-
 	// SSH
 	SSHDConfigTest      func(ctx context.Context) error
 	SSHDReload          func(ctx context.Context) error
@@ -155,6 +155,7 @@ func LiveProbes() Probes {
 		MemInfo:             liveMemInfo,
 		DiskInfo:            liveDiskInfo,
 		Now:                 liveNow,
+		Sleep:               liveSleep,
 		DNSLookup:           liveDNSLookup,
 		HTTPSGet:            liveHTTPSGet,
 		DialTCP:             liveDialTCP,

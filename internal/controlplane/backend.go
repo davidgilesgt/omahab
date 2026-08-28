@@ -438,12 +438,6 @@ func (b *Backend) bindPocketID(ctx context.Context) error {
 	}
 	b.pocketClient = client
 	b.identity = ident
-	if err := client.ConfigureDefaults(ctx); err != nil {
-		_, _ = b.events.Publish(ctx, events.PublishInput{Type: "identity.recovery", Severity: "warning", Message: "pocketid configure defaults failed: " + err.Error()})
-	}
-	if err := client.SeedDefaultGroups(ctx); err != nil {
-		_, _ = b.events.Publish(ctx, events.PublishInput{Type: "identity.recovery", Severity: "warning", Message: "pocketid seed groups failed: " + err.Error()})
-	}
 	return nil
 }
 

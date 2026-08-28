@@ -34,6 +34,8 @@ func mapAPIError(err error) error {
 			return fmt.Errorf("%w: %s", ErrRateLimited, ae.Error())
 		case http.StatusBadRequest, http.StatusUnprocessableEntity:
 			return fmt.Errorf("%w: %s", store.ErrValidation, ae.Error())
+		case http.StatusConflict:
+			return fmt.Errorf("%w: %s", store.ErrConflict, ae.Error())
 		}
 	}
 	return err
@@ -55,6 +57,8 @@ func mapHTTPStatus(status int, body string) error {
 		return fmt.Errorf("%w: %d %s", ErrRateLimited, status, msg)
 	case http.StatusBadRequest, http.StatusUnprocessableEntity:
 		return fmt.Errorf("%w: %d %s", store.ErrValidation, status, msg)
+	case http.StatusConflict:
+		return fmt.Errorf("%w: %d %s", store.ErrConflict, status, msg)
 	default:
 		return fmt.Errorf("cloudflare: %d %s", status, msg)
 	}

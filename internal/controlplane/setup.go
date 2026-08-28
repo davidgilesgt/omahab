@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -30,9 +29,20 @@ import (
 	"github.com/omahab/omahab/internal/store"
 )
 
-var secretPatternRe = regexp.MustCompile(`(_password|_key|_secret|_api_key)$`)
+var (
+	secretPatternRe         = regexp.MustCompile(`(_password|_key|_secret|_api_key)$`)
+	errWaitingForEnrollment = errors.New("waiting for enrollment")
+)
 
 func (b *Backend) ensureTailscaleIP(ctx context.Context) error {
+	if b.store != nil {
+		if inst, err := b.store.Instance(ctx); err == nil {
+			ipStr := strings.TrimSpace(inst.TailscaleIP)
+			if parsed := net.ParseIP(ipStr); parsed != nil && parsed.To4() != nil {
+				return nil
+			}
+		}
+	}
 	deadline := time.Now().Add(90 * time.Second)
 	var lastErr error
 	var lastOut string
@@ -159,48 +169,45 @@ func (b *Backend) RunSetupReconciler(ctx context.Context) error {
 		b.setupMu.Unlock()
 	}()
 
-	// Phase 1: Preconditions
-	if err := b.setupPhasePreconditions(ctx); err != nil {
-		emitSetupFailed(ctx, b.events, "preconditions", err)
-		return nil
+	type phase struct {
+		name string
+		run  func(context.Context) error
 	}
-
-	// Phase 2: Tunnel
-	if err := b.setupPhaseTunnel(ctx); err != nil {
-		emitSetupFailed(ctx, b.events, "tunnel", err)
+	phases := []phase{
+		{"preconditions", b.setupPhasePreconditions},
+		{"tunnel", b.setupPhaseTunnel},
+		{"secrets", b.setupPhaseSecrets},
+		{"core_apps", b.setupPhaseCoreApps},
+		{"oidc", b.setupPhaseOIDC},
+		{"exposure", b.setupPhaseExposure},
 	}
-
-	// Phase 3: Secrets materialization
-	if err := b.setupPhaseSecrets(ctx); err != nil {
-		emitSetupFailed(ctx, b.events, "secrets", err)
+	for _, p := range phases {
+		if err := p.run(ctx); err != nil {
+			if errors.Is(err, errWaitingForEnrollment) {
+				b.setupMu.Lock()
+				b.setupLastErr = ""
+				b.setupMu.Unlock()
+				return nil
+			}
+			b.setupMu.Lock()
+			b.setupLastErr = err.Error()
+			b.setupMu.Unlock()
+			emitSetupFailed(ctx, b.events, p.name, err)
+			return nil
+		}
 	}
-
-	// Phase 4: Core apps
-	if err := b.setupPhaseCoreApps(ctx); err != nil {
-		emitSetupFailed(ctx, b.events, "core_apps", err)
-	}
-
-	// Phase 5: OIDC prerequisites
-	if err := b.setupPhaseOIDC(ctx); err != nil {
-		emitSetupFailed(ctx, b.events, "oidc", err)
-	}
-
-	// Phase 6: Exposure records + DNS
-	if err := b.setupPhaseExposure(ctx); err != nil {
-		emitSetupFailed(ctx, b.events, "exposure", err)
-	}
-
-	// Phase 7: Firewall
 	b.setupPhaseFirewall(ctx)
 
 	b.setupMu.Lock()
 	b.setupLastErr = ""
 	b.setupMu.Unlock()
-	_, _ = b.events.Publish(ctx, events.PublishInput{
-		Type:     "setup.reconciled",
-		Severity: "info",
-		Message:  "setup reconciler completed",
-	})
+	if b.events != nil {
+		_, _ = b.events.Publish(ctx, events.PublishInput{
+			Type:     "setup.reconciled",
+			Severity: "info",
+			Message:  "setup reconciler completed",
+		})
+	}
 	return nil
 }
 
@@ -228,10 +235,10 @@ func (b *Backend) setupPhasePreconditions(ctx context.Context) error {
 	}
 	domainName := strings.TrimSpace(inst.Domain)
 	if domainName == "" || domainName == "example.com" || domainName == "not-configured.invalid" {
-		return fmt.Errorf("waiting_for_cloudflare: domain not configured (%q)", domainName)
+		return fmt.Errorf("%w: domain not configured (%q)", errWaitingForEnrollment, domainName)
 	}
 	if b.secrets == nil {
-		return fmt.Errorf("waiting_for_cloudflare: secrets not configured")
+		return fmt.Errorf("%w: secrets not configured", errWaitingForEnrollment)
 	}
 	if v, err := b.secrets.RevealByName(ctx, "platform-app", "cloudflare_dns"); err == nil && strings.TrimSpace(v) != "" {
 		return nil
@@ -242,7 +249,7 @@ func (b *Backend) setupPhasePreconditions(ctx context.Context) error {
 	if strings.TrimSpace(os.Getenv("OMAHAB_CF_TOKEN_DNS")) != "" || strings.TrimSpace(os.Getenv("OMAHAB_CF_API_TOKEN")) != "" {
 		return nil
 	}
-	return fmt.Errorf("waiting_for_cloudflare: cloudflare_dns secret missing")
+	return fmt.Errorf("%w: cloudflare_dns secret missing", errWaitingForEnrollment)
 }
 
 // Phase 2: Tunnel
@@ -253,27 +260,25 @@ func (b *Backend) setupPhaseTunnel(ctx context.Context) error {
 	if b.secrets == nil {
 		return nil
 	}
-	tunnelToken := ""
+	// Token B authorizes the Cloudflare API; it is never the connector token.
+	apiToken := ""
 	if v, err := b.secrets.RevealByName(ctx, "platform-app", "cloudflare_tunnel"); err == nil {
-		tunnelToken = strings.TrimSpace(v)
+		apiToken = strings.TrimSpace(v)
 	}
-	if tunnelToken == "" {
+	if apiToken == "" {
 		if v, err := b.secrets.RevealByName(ctx, "platform-app", "cloudflare_token_tunnel"); err == nil {
-			tunnelToken = strings.TrimSpace(v)
+			apiToken = strings.TrimSpace(v)
 		}
 	}
-	if tunnelToken == "" {
+	if apiToken == "" {
 		if v := strings.TrimSpace(os.Getenv("OMAHAB_CF_TOKEN_TUNNEL")); v != "" {
-			tunnelToken = v
+			apiToken = v
 		} else if v := strings.TrimSpace(os.Getenv("OMAHAB_CF_API_TOKEN")); v != "" {
-			tunnelToken = v
+			apiToken = v
 		}
 	}
-	if tunnelToken == "" {
+	if apiToken == "" {
 		log.Printf("setup tunnel: skipped (no tunnel token, private-only install)")
-		return nil
-	}
-	if v, err := b.secrets.RevealByName(ctx, "platform-app", "cloudflare_tunnel_id"); err == nil && strings.TrimSpace(v) != "" {
 		return nil
 	}
 	accountID := ""
@@ -285,7 +290,7 @@ func (b *Backend) setupPhaseTunnel(ctx context.Context) error {
 			accountID = v
 		}
 	}
-	if accountID == "" && tunnelToken != "" {
+	if accountID == "" {
 		dnsToken := ""
 		if v, err := b.secrets.RevealByName(ctx, "platform-app", "cloudflare_dns"); err == nil {
 			dnsToken = strings.TrimSpace(v)
@@ -320,87 +325,119 @@ func (b *Backend) setupPhaseTunnel(ctx context.Context) error {
 	if accountID == "" {
 		return fmt.Errorf("tunnel: cloudflare_account_id missing")
 	}
-	creator := cloudflare.NewTunnelCreator(accountID, tunnelToken, nil, "")
+	creator := cloudflare.NewTunnelCreator(accountID, apiToken, nil, "")
 	if creator == nil {
 		return fmt.Errorf("tunnel: failed to create tunnel client")
 	}
-	id, token, err := creator.CreateTunnel(ctx, "omahab")
+	id, connectorToken, err := creator.EnsureTunnel(ctx, "omahab")
+	if err != nil && errors.Is(err, store.ErrConflict) {
+		fallback := "omahab"
+		if inst, ierr := b.store.Instance(ctx); ierr == nil {
+			fallback = tunnelFallbackName(string(inst.ID))
+		}
+		id, connectorToken, err = creator.EnsureTunnel(ctx, fallback)
+	}
 	if err != nil {
-		return fmt.Errorf("create tunnel: %w", err)
+		return fmt.Errorf("ensure tunnel: %w", err)
+	}
+	id = strings.TrimSpace(id)
+	connectorToken = strings.TrimSpace(connectorToken)
+	if id == "" || connectorToken == "" {
+		return fmt.Errorf("ensure tunnel: empty id or connector token")
 	}
 	if err := upsertSecret(ctx, b.secrets, "platform-app", "cloudflare_tunnel_id", id); err != nil {
 		return fmt.Errorf("store tunnel id: %w", err)
 	}
-	if strings.TrimSpace(token) != "" {
-		if err := upsertSecret(ctx, b.secrets, "platform-app", "cloudflare_tunnel_token", token); err != nil {
-			log.Printf("setup tunnel: failed to store tunnel token: %v", err)
-		}
+	if err := upsertSecret(ctx, b.secrets, "platform-app", "cloudflare_tunnel_token", connectorToken); err != nil {
+		return fmt.Errorf("store tunnel connector token: %w", err)
 	}
-	if err := writeCloudflaredConfig(id, token, accountID); err != nil {
-		log.Printf("setup tunnel: write cloudflared config failed (best-effort): %v", err)
-	} else {
-		_ = exec.CommandContext(ctx, "systemctl", "reset-failed", "cloudflared").Run()
-		cmd := exec.CommandContext(ctx, "systemctl", "enable", "--now", "cloudflared")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			log.Printf("setup tunnel: systemctl enable --now cloudflared failed (best-effort): %v output=%s", err, string(out))
-		} else {
-			log.Printf("setup tunnel: cloudflared enabled")
-		}
+	if err := writeCloudflaredTokenEnv(connectorToken); err != nil {
+		return fmt.Errorf("write cloudflared env: %w", err)
 	}
+	if out, err := exec.CommandContext(ctx, "systemctl", "reset-failed", "cloudflared").CombinedOutput(); err != nil {
+		return fmt.Errorf("systemctl reset-failed cloudflared: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	if out, err := exec.CommandContext(ctx, "systemctl", "enable", "--now", "cloudflared").CombinedOutput(); err != nil {
+		return fmt.Errorf("systemctl enable --now cloudflared: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	log.Printf("setup tunnel: cloudflared enabled")
 	if err := b.refreshExposure(ctx); err != nil {
 		log.Printf("setup tunnel: refreshExposure failed: %v", err)
 	}
 	return nil
 }
 
-func writeCloudflaredConfig(tunnelID, token, accountID string) error {
-	dir := "/etc/omahab/cloudflared"
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	credsPath := filepath.Join(dir, "credentials.json")
-	if strings.TrimSpace(token) != "" {
-		creds := map[string]string{
-			"AccountTag":   accountID,
-			"TunnelID":     tunnelID,
-			"TunnelName":   "omahab",
-			"TunnelSecret": token,
-		}
-		b, _ := json.Marshal(creds)
-		if err := os.WriteFile(credsPath, b, 0o600); err != nil {
-			return err
-		}
-	}
-	cfgPath := filepath.Join(dir, "config.yml")
-	var cfgContent string
-	if strings.TrimSpace(token) != "" && fileExists(credsPath) {
-		cfgContent = fmt.Sprintf("tunnel: %s\ncredentials-file: %s\n", tunnelID, credsPath)
-	} else if strings.TrimSpace(token) != "" {
-		cfgContent = fmt.Sprintf("tunnel: %s\ntunnelToken: %s\n", tunnelID, token)
-	} else {
-		cfgContent = fmt.Sprintf("tunnel: %s\n", tunnelID)
-	}
-	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0o600); err != nil {
-		return err
-	}
-	// Chown to cloudflared user if it exists (ignore error if not present yet).
-	if u, err := user.Lookup("cloudflared"); err == nil {
-		if uid, err1 := strconv.Atoi(u.Uid); err1 == nil {
-			if gid, err2 := strconv.Atoi(u.Gid); err2 == nil {
-				_ = os.Chown(dir, uid, gid)
-				_ = os.Chown(cfgPath, uid, gid)
-				if fileExists(credsPath) {
-					_ = os.Chown(credsPath, uid, gid)
-				}
+var cloudflaredDir = "/etc/omahab/cloudflared"
+
+func tunnelFallbackName(instanceID string) string {
+	var alnum strings.Builder
+	for _, r := range instanceID {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			alnum.WriteRune(r)
+			if alnum.Len() == 8 {
+				break
 			}
 		}
 	}
+	if alnum.Len() == 0 {
+		return "omahab"
+	}
+	return "omahab-" + alnum.String()
+}
+
+func writeCloudflaredTokenEnv(token string) error {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return fmt.Errorf("cloudflared connector token is required")
+	}
+	if err := os.MkdirAll(cloudflaredDir, 0o700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(cloudflaredDir, ".env-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.WriteString("TUNNEL_TOKEN=" + token + "\n"); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	uid, gid, ok := lookupCloudflaredIDs()
+	if ok {
+		_ = os.Chown(cloudflaredDir, uid, gid)
+		_ = os.Chown(tmpName, uid, gid)
+	}
+	envPath := filepath.Join(cloudflaredDir, "env")
+	if err := os.Rename(tmpName, envPath); err != nil {
+		return err
+	}
+	if ok {
+		_ = os.Chown(envPath, uid, gid)
+	}
+	_ = os.Remove(filepath.Join(cloudflaredDir, "credentials.json"))
+	_ = os.Remove(filepath.Join(cloudflaredDir, "config.yml"))
 	return nil
 }
 
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
+func lookupCloudflaredIDs() (uid, gid int, ok bool) {
+	u, err := user.Lookup("cloudflared")
+	if err != nil {
+		return 0, 0, false
+	}
+	uid, err1 := strconv.Atoi(u.Uid)
+	gid, err2 := strconv.Atoi(u.Gid)
+	if err1 != nil || err2 != nil {
+		return 0, 0, false
+	}
+	return uid, gid, true
 }
 
 // storeService is an interface for secrets.Service methods we need.
@@ -575,6 +612,11 @@ func (b *Backend) setupPhaseCoreApps(ctx context.Context) error {
 	_ = b.writeBootstrapCaddyJSON(ctx, dnsToken)
 	ensureDockerNetwork(ctx)
 
+	domainName := ""
+	if inst, err := b.store.Instance(ctx); err == nil {
+		domainName = strings.TrimSpace(inst.Domain)
+	}
+
 	bundles := b.apps.CatalogBundles()
 	defaultBundles := []apps.Bundle{}
 	for _, bd := range bundles {
@@ -592,57 +634,113 @@ func (b *Backend) setupPhaseCoreApps(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("topo sort: %w", err)
 	}
-	installed := map[string]bool{}
-	list, err := b.apps.List(ctx)
-	if err == nil {
-		for _, st := range list {
-			installed[st.BundleID] = true
-		}
-	} else {
-		log.Printf("setup core apps: list failed: %v", err)
-	}
-	failed := map[string]bool{}
 	for _, bd := range sorted {
-		if installed[bd.ID] {
-			continue
+		if err := b.ensureDefaultApp(ctx, bd, domainName); err != nil {
+			return fmt.Errorf("%s: %w", bd.ID, err)
 		}
-		skip := false
-		for _, dep := range bd.Dependencies {
-			if failed[dep] {
-				skip = true
-				log.Printf("setup core apps: skipping %s due to failed dependency %s", bd.ID, dep)
-				break
-			}
-			foundDefault := false
-			for _, d := range defaultBundles {
-				if d.ID == dep {
-					foundDefault = true
-					break
-				}
-			}
-			if foundDefault && !installed[dep] {
-				skip = true
-				log.Printf("setup core apps: skipping %s due to missing dependency %s not installed", bd.ID, dep)
-				break
-			}
+		log.Printf("setup core apps: %s running and healthy", bd.ID)
+	}
+	return nil
+}
+
+func defaultInstallRequest(bundle apps.Bundle, domainName string) apps.InstallRequest {
+	req := apps.InstallRequest{
+		BundleID: bundle.ID,
+		Name:     bundle.ID,
+		Exposure: bundle.DefaultExposure,
+	}
+	if req.Exposure == "" {
+		req.Exposure = domain.ExposurePrivate
+	}
+	if req.Exposure == domain.ExposurePrivate {
+		return req
+	}
+	domainName = strings.TrimSpace(domainName)
+	if route := strings.TrimSpace(bundle.Route); route != "" {
+		if domainName != "" {
+			req.Hostname = route + "." + domainName
 		}
-		if skip {
-			failed[bd.ID] = true
-			continue
+		return req
+	}
+	if domainName != "" {
+		req.Hostname = "omahab." + domainName
+	}
+	return req
+}
+
+func (b *Backend) ensureDefaultApp(ctx context.Context, bundle apps.Bundle, domainName string) error {
+	list, err := b.apps.List(ctx)
+	if err != nil {
+		return fmt.Errorf("list apps: %w", err)
+	}
+	var existing *apps.Status
+	for i := range list {
+		if list[i].BundleID == bundle.ID {
+			st := list[i]
+			existing = &st
+			break
 		}
-		_, err := b.apps.Install(ctx, apps.InstallRequest{
-			BundleID: bd.ID,
-			Name:     bd.ID,
-			Exposure: bd.DefaultExposure,
-		})
+	}
+	if existing == nil {
+		st, err := b.apps.Install(ctx, defaultInstallRequest(bundle, domainName))
 		if err != nil {
-			log.Printf("setup core apps: install %s failed: %v", bd.ID, err)
-			emitSetupFailed(ctx, b.events, "core_apps:"+bd.ID, err)
-			failed[bd.ID] = true
-			continue
+			return err
 		}
-		installed[bd.ID] = true
-		log.Printf("setup core apps: installed %s", bd.ID)
+		return requireRunningHealthy(st)
+	}
+	switch existing.ObservedState {
+	case apps.ObservedRunning:
+		if existing.Digest == bundle.Digest {
+			if existing.Health == domain.HealthHealthy {
+				return nil
+			}
+			st, err := b.apps.CheckHealth(ctx, existing.ID)
+			if err != nil {
+				return err
+			}
+			return requireRunningHealthy(st)
+		}
+		st, err := b.apps.Update(ctx, existing.ID, bundle.Digest)
+		if err != nil {
+			return err
+		}
+		if st.ObservedState == apps.ObservedRunning && st.Health != domain.HealthHealthy {
+			st, err = b.apps.CheckHealth(ctx, existing.ID)
+			if err != nil {
+				return err
+			}
+		}
+		return requireRunningHealthy(st)
+	case apps.ObservedStopped:
+		st, err := b.apps.Start(ctx, existing.ID)
+		if err != nil {
+			return err
+		}
+		if st.ObservedState == apps.ObservedRunning {
+			st, err = b.apps.CheckHealth(ctx, existing.ID)
+			if err != nil {
+				return err
+			}
+		}
+		return requireRunningHealthy(st)
+	default:
+		if err := b.apps.Uninstall(ctx, existing.ID); err != nil {
+			return err
+		}
+		st, err := b.apps.Install(ctx, defaultInstallRequest(bundle, domainName))
+		if err != nil {
+			return err
+		}
+		return requireRunningHealthy(st)
+	}
+}
+
+func requireRunningHealthy(st apps.Status) error {
+	if st.ObservedState != apps.ObservedRunning {
+		return fmt.Errorf("app %s is %s, want running", st.BundleID, st.ObservedState)
+	}
+	if st.Health != domain.HealthHealthy {
+		return fmt.Errorf("app %s health is %s, want healthy", st.BundleID, st.Health)
 	}
 	return nil
 }
@@ -716,9 +814,21 @@ func topoSortBundles(bundles []apps.Bundle) ([]apps.Bundle, error) {
 
 // Phase 5: OIDC prerequisites
 func (b *Backend) setupPhaseOIDC(ctx context.Context) error {
-	_ = b.bindPocketID(ctx)
+	bindErr := b.bindPocketID(ctx)
+	if bindErr != nil {
+		if b.apps != nil {
+			if list, lerr := b.apps.List(ctx); lerr == nil {
+				for _, st := range list {
+					if st.BundleID == "pocket-id" {
+						return fmt.Errorf("pocket-id admin API not configured: %w", bindErr)
+					}
+				}
+			}
+		}
+		log.Printf("setup oidc: skipped (pocket-id not configured)")
+		return nil
+	}
 	if b.pocketClient == nil {
-		// If pocket-id is installed but API not configured, fail hard; otherwise skip (private-only).
 		if b.apps != nil {
 			if list, err := b.apps.List(ctx); err == nil {
 				for _, st := range list {
@@ -732,6 +842,27 @@ func (b *Backend) setupPhaseOIDC(ctx context.Context) error {
 		return nil
 	}
 	if err := b.pocketClient.HealthCheck(ctx); err != nil {
+		return fmt.Errorf("pocket-id health: %w", err)
+	}
+	if err := b.pocketClient.ConfigureDefaults(ctx); err != nil {
+		return fmt.Errorf("pocket-id configure defaults: %w", err)
+	}
+	if err := b.pocketClient.SeedDefaultGroups(ctx); err != nil {
+		return fmt.Errorf("pocket-id seed groups: %w", err)
+	}
+	hermesRunning := false
+	if b.apps != nil {
+		if list, err := b.apps.List(ctx); err == nil {
+			for _, st := range list {
+				if st.BundleID == "hermes" && st.ObservedState == apps.ObservedRunning {
+					hermesRunning = true
+					break
+				}
+			}
+		}
+	}
+	if !hermesRunning {
+		return nil
 	}
 	inst, err := b.store.Instance(ctx)
 	if err != nil {
@@ -754,10 +885,10 @@ func (b *Backend) setupPhaseOIDC(ctx context.Context) error {
 	}
 	if strings.TrimSpace(clientSecret) != "" {
 		if err := upsertSecret(ctx, b.secrets, "platform-app", "hermes_oidc_client_secret", clientSecret); err != nil {
-			log.Printf("setup oidc: store client secret failed: %v", err)
+			return fmt.Errorf("store hermes_oidc_client_secret: %w", err)
 		}
 	}
-	log.Printf("setup oidc: hermes client ensured %s", clientID)
+	log.Printf("setup oidc: hermes client ensured")
 	return nil
 }
 

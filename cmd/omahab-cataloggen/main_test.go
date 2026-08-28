@@ -298,3 +298,134 @@ func TestConvertRealCatalogRestoreHooksMapped(t *testing.T) {
 	t.Fatal("no bundle with restore.hooks found in real catalog")
 }
 
+func TestHealthCheckPrefersCommandOverEndpoint(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"catalog.json": `{"bundles":[{
+			"name": "demo", "displayName": "Demo", "composeFile": "compose/demo.yml",
+			"supportedArchitectures": ["amd64"],
+			"images": {"demo": "docker.io/example/demo@sha256:${DEMO_DIGEST:?required}"},
+			"healthCheck": {
+				"test": ["CMD-SHELL", "wget --spider http://127.0.0.1:2019/config/ || exit 1"],
+				"endpoint": "http://127.0.0.1:2019/config/"
+			},
+			"exposure": {"default": "private", "allowed": ["private"]}
+		}]}`,
+		"compose/demo.yml": "services:\n  demo:\n    image: docker.io/example/demo@sha256:${DEMO_DIGEST:?required}\n",
+	})
+	var doc curatedDoc
+	raw, err := os.ReadFile(filepath.Join(root, "catalog.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	b, err := convert(doc.Bundles[0], root, map[string]string{"demo": "sha256:" + strings.Repeat("a", 64)})
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	if b.HealthCheck.Kind != apps.CheckCommand {
+		t.Fatalf("want command health check, got %+v", b.HealthCheck)
+	}
+	if b.HealthCheck.Service != "demo" {
+		t.Fatalf("service = %q want demo", b.HealthCheck.Service)
+	}
+	if len(b.HealthCheck.Command) != 3 || b.HealthCheck.Command[0] != "sh" || b.HealthCheck.Command[1] != "-c" {
+		t.Fatalf("command = %q", b.HealthCheck.Command)
+	}
+}
+
+func TestRunFailsOnMissingEnabledByDefaultDigest(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"catalog.json": `{"bundles":[{
+			"name": "caddy", "displayName": "Caddy", "composeFile": "compose/caddy.yml",
+			"enabledByDefault": true,
+			"supportedArchitectures": ["amd64"],
+			"images": {"caddy": "ghcr.io/caddybuilds/caddy-cloudflare@sha256:${CADDY_DIGEST:?required}"},
+			"healthCheck": {"test": ["CMD-SHELL", "caddy version"]},
+			"exposure": {"default": "public", "allowed": ["public"]}
+		}]}`,
+		"compose/caddy.yml": "services:\n  caddy:\n    image: ghcr.io/caddybuilds/caddy-cloudflare@sha256:${CADDY_DIGEST:?required}\n",
+		"digests.json":      `{"other":"sha256:` + strings.Repeat("b", 64) + `"}`,
+	})
+	out := filepath.Join(root, "apps-catalog.json")
+	err := run([]string{
+		"-catalog", filepath.Join(root, "catalog.json"),
+		"-compose-dir", root,
+		"-digests", filepath.Join(root, "digests.json"),
+		"-out", out,
+	})
+	if err == nil {
+		t.Fatal("run succeeded without required digest")
+	}
+	if !strings.Contains(err.Error(), "caddy") {
+		t.Fatalf("error %q should name the default bundle", err)
+	}
+	if _, statErr := os.Stat(out); statErr == nil {
+		t.Fatal("must not write catalog when a default digest is missing")
+	}
+}
+
+func TestConvertRealCatalogDefaultsAndHealth(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "deploy", "catalog", "catalog.json"))
+	if err != nil {
+		t.Skipf("real catalog not present: %v", err)
+	}
+	var doc curatedDoc
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parse real catalog: %v", err)
+	}
+	realComposeDir := filepath.Join("..", "..", "deploy", "catalog")
+	digests := map[string]string{}
+	for _, cb := range doc.Bundles {
+		for key := range cb.Images {
+			digests[key] = "sha256:" + strings.Repeat("a", 64)
+		}
+	}
+	var defaults []string
+	var immich apps.Bundle
+	var caddy apps.Bundle
+	for _, cb := range doc.Bundles {
+		b, err := convert(cb, realComposeDir, digests)
+		if err != nil {
+			t.Fatalf("convert %s: %v", cb.Name, err)
+		}
+		if b.Default {
+			defaults = append(defaults, b.ID)
+		}
+		switch b.ID {
+		case "caddy":
+			caddy = b
+		case "immich":
+			immich = b
+		}
+		if (b.ID == "caddy" || b.ID == "immich" || b.ID == "pocket-id") && b.HealthCheck.Kind != apps.CheckCommand {
+			t.Fatalf("%s health check kind = %q want command: %+v", b.ID, b.HealthCheck.Kind, b.HealthCheck)
+		}
+	}
+	wantDefaults := "caddy,pocket-id,immich"
+	if got := strings.Join(defaults, ","); got != wantDefaults {
+		t.Fatalf("default bundles = %q want %q", got, wantDefaults)
+	}
+	if caddy.HealthCheck.Kind != apps.CheckCommand || caddy.HealthCheck.Service != "caddy" {
+		t.Fatalf("caddy health = %+v", caddy.HealthCheck)
+	}
+	if immich.Image != "ghcr.io/immich-app/immich-server" {
+		t.Fatalf("immich image = %q", immich.Image)
+	}
+	if !strings.Contains(immich.Compose, "ghcr.io/immich-app/postgres@") {
+		t.Fatalf("immich compose missing postgres repo:\n%s", immich.Compose)
+	}
+	if !strings.Contains(immich.Compose, "docker.io/valkey/valkey@") {
+		t.Fatalf("immich compose missing valkey repo:\n%s", immich.Compose)
+	}
+	if strings.Contains(immich.Compose, "pgvecto") || strings.Contains(immich.Compose, "tensorchord") {
+		t.Fatalf("immich compose still references pgvecto.rs:\n%s", immich.Compose)
+	}
+	if strings.Contains(immich.Compose, "docker.io/library/redis@") {
+		t.Fatalf("immich compose still reuses generic redis:\n%s", immich.Compose)
+	}
+	if strings.Contains(immich.Compose, "/usr/src/app/upload") {
+		t.Fatalf("immich compose still uses stale upload path:\n%s", immich.Compose)
+	}
+}

@@ -670,6 +670,167 @@ func TestDaemonWaitHealthyHonorsContext(t *testing.T) {
 		t.Fatalf("error %q should mention cancel", err.Error())
 	}
 }
+
+func TestWaitHealthyLiveStyleSleepsOnce(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return start }
+	// Use non-nil Now to mimic LiveProbes production style.
+	sleepCalls := 0
+	var sleepDur time.Duration
+	sleepFn := func(ctx context.Context, d time.Duration) error {
+		sleepCalls++
+		sleepDur = d
+		return nil
+	}
+	polls := 0
+	probes := Probes{
+		Now:   nowFn,
+		Sleep: sleepFn,
+		HTTPSGet: func(ctx context.Context, url string) (int, []byte, error) {
+			polls++
+			if polls == 1 {
+				return 0, nil, errors.New("connection refused")
+			}
+			return 200, []byte(`{"status":"up"}`), nil
+		},
+	}
+	if err := waitHealthy(ctx, probes); err != nil {
+		t.Fatalf("waitHealthy = %v, want nil", err)
+	}
+	if polls != 2 {
+		t.Fatalf("polls = %d want 2", polls)
+	}
+	if sleepCalls != 1 {
+		t.Fatalf("sleepCalls = %d want 1", sleepCalls)
+	}
+	if sleepDur != 2*time.Second {
+		t.Fatalf("sleepDur = %v want 2s", sleepDur)
+	}
+}
+
+func TestWaitHealthyNoSleepOnImmediateSuccess(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	sleepCalls := 0
+	probes := Probes{
+		Now: func() time.Time { return start },
+		Sleep: func(ctx context.Context, d time.Duration) error {
+			sleepCalls++
+			return nil
+		},
+		HTTPSGet: func(ctx context.Context, url string) (int, []byte, error) {
+			return 200, []byte(`ok`), nil
+		},
+	}
+	if err := waitHealthy(ctx, probes); err != nil {
+		t.Fatalf("waitHealthy = %v, want nil", err)
+	}
+	if sleepCalls != 0 {
+		t.Fatalf("sleepCalls = %d want 0, successful first probe must not sleep", sleepCalls)
+	}
+}
+
+func TestWaitHealthySleepCancellation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	sleepCalls := 0
+	polls := 0
+	probes := Probes{
+		Now: func() time.Time { return start },
+		Sleep: func(ctx context.Context, d time.Duration) error {
+			sleepCalls++
+			return context.Canceled
+		},
+		HTTPSGet: func(ctx context.Context, url string) (int, []byte, error) {
+			polls++
+			return 500, []byte("not ready"), nil
+		},
+	}
+	err := waitHealthy(ctx, probes)
+	if err == nil {
+		t.Fatal("expected cancelled error, got nil")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "cancel") {
+		t.Fatalf("error %q should mention cancel", err.Error())
+	}
+	if sleepCalls != 1 {
+		t.Fatalf("sleepCalls = %d want 1", sleepCalls)
+	}
+	if polls != 1 {
+		t.Fatalf("polls = %d want 1, Sleep cancellation must prevent second HTTPSGet (no third request)", polls)
+	}
+}
+
+func TestWaitHealthyTimeoutBounded(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	nowCalls := 0
+	nowFn := func() time.Time {
+		if nowCalls == 0 {
+			nowCalls++
+			return start
+		}
+		return start.Add(121 * time.Second)
+	}
+	sleepCalls := 0
+	polls := 0
+	probes := Probes{
+		Now: nowFn,
+		Sleep: func(ctx context.Context, d time.Duration) error {
+			sleepCalls++
+			return nil
+		},
+		HTTPSGet: func(ctx context.Context, url string) (int, []byte, error) {
+			polls++
+			return 500, []byte("not ready"), nil
+		},
+	}
+	err := waitHealthy(ctx, probes)
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	if !strings.Contains(err.Error(), "journalctl -u omahabd -n 50 --no-pager") {
+		t.Fatalf("error %q should contain journalctl hint", err.Error())
+	}
+	if polls != 1 {
+		t.Fatalf("polls = %d want 1, timeout must be bounded without tight loop", polls)
+	}
+	if sleepCalls != 0 {
+		t.Fatalf("sleepCalls = %d want 0, deadline hit before sleep", sleepCalls)
+	}
+}
+
+func TestLiveProbesSleepConfigured(t *testing.T) {
+	t.Parallel()
+	p := LiveProbes()
+	if p.Sleep == nil {
+		t.Fatal("LiveProbes().Sleep is nil, production would busy-poll")
+	}
+	// Verify liveSleep is cancellation-aware without waiting 2s.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	err := p.Sleep(ctx, 2*time.Second)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("liveSleep with cancelled ctx should return error")
+	}
+	if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		// Also accept wrapped ctx error via string check
+		if !strings.Contains(strings.ToLower(err.Error()), "cancel") {
+			t.Fatalf("liveSleep error %v should be cancellation", err)
+		}
+	}
+	if elapsed > 200*time.Millisecond {
+		t.Fatalf("liveSleep with cancelled context took %v, should return quickly", elapsed)
+	}
+}
+
 func TestDaemonProvisionsUserTokenForOmahab(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
