@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/omahab/omahab/internal/api"
@@ -37,8 +38,6 @@ import (
 )
 
 var _ api.Backend = (*Backend)(nil)
-
-// Backend implements api.Backend with explicit adapters.
 type Backend struct {
 	cfg       config.Config
 	store     *store.Store
@@ -62,6 +61,7 @@ type Backend struct {
 	identity     *identity.Service
 	integrations *integrations.Service
 	exposure     *exposure.Service
+	exposureMu   sync.Mutex
 
 	masterKey [32]byte
 	apiToken  string
@@ -72,6 +72,12 @@ type Backend struct {
 	emailAlias      string
 	approvalEmitter *hermes.ApprovalEmitter
 	pocketClient    *identity.PocketIDClient
+
+	// setup reconciler single-flight state
+	setupMu      sync.Mutex
+	setupRunning bool
+	setupLastErr string
+	setupLastRun time.Time
 }
 
 // Options for New
@@ -120,6 +126,14 @@ func New(ctx context.Context, st *store.Store, opts Options) (*Backend, error) {
 	if err := b.initServices(ctx); err != nil {
 		return nil, err
 	}
+	// Start setup reconciler in background (best-effort, single-flight).
+	go func() {
+		bg := context.Background()
+		// Use timeout so startup does not hang forever on external APIs.
+		cctx, cancel := context.WithTimeout(bg, 5*time.Minute)
+		defer cancel()
+		_ = b.RunSetupReconciler(cctx)
+	}()
 	return b, nil
 }
 
@@ -192,6 +206,15 @@ func (b *Backend) initServices(ctx context.Context) error {
 		}
 		if inst.TailscaleIP != "" {
 			env = append(env, "TAILSCALE_IP="+inst.TailscaleIP)
+		}
+		// Hermes OIDC env injected when reconciler has provisioned client.
+		if b.secrets != nil {
+			if v, err := b.secrets.RevealByName(ctx, "platform-app", "hermes_oidc_client_id"); err == nil && strings.TrimSpace(v) != "" {
+				env = append(env, "HERMES_OIDC_CLIENT_ID="+strings.TrimSpace(v))
+			}
+			if v, err := b.secrets.RevealByName(ctx, "platform-app", "hermes_oidc_client_secret"); err == nil && strings.TrimSpace(v) != "" {
+				env = append(env, "HERMES_OIDC_CLIENT_SECRET="+strings.TrimSpace(v))
+			}
 		}
 		return env, nil
 	}
@@ -355,8 +378,52 @@ func (b *Backend) initServices(ctx context.Context) error {
 	b.emailing = emailSvc
 	b.emailPrimary = primary
 	b.emailAlias = alias
+	// cloudflare exposure: refreshable at runtime via refreshExposure.
+	if err := b.refreshExposure(ctx); err != nil {
+		_, _ = b.events.Publish(ctx, events.PublishInput{
+			Type:     "exposure.refresh_failed",
+			Severity: "warning",
+			Message:  "exposure refresh failed: " + err.Error(),
+		})
+	}
+	// workspaces with DevPod runner and repo resolver
+	workspacesDir := b.cfg.DataDir + "/workspaces"
+	repoResolver := func(ctx context.Context, pid domain.ID) (string, error) {
+		p, err := b.projects.Get(ctx, pid)
+		if err != nil {
+			return "", err
+		}
+		return p.RepositoryURL, nil
+	}
+	runner := workspaces.NewDevPodRunner(workspaces.DevPodRunnerConfig{WorkspacesDir: workspacesDir, RepoResolver: repoResolver})
+	b.workspaces = workspaces.New(b.db, runner)
 
-	// cloudflare exposure clients with scoped tokens from secrets
+	return nil
+}
+
+func (b *Backend) refreshExposure(ctx context.Context) error {
+	b.exposureMu.Lock()
+	defer b.exposureMu.Unlock()
+	if b.secrets == nil || b.store == nil {
+		return fmt.Errorf("controlplane: secrets or store not initialized")
+	}
+	inst, _ := b.store.Instance(ctx)
+	secret := func(name string) string {
+		v, err := b.secrets.RevealByName(ctx, "platform-app", name)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return ""
+			}
+			return ""
+		}
+		return strings.TrimSpace(v)
+	}
+	secretOrEnv := func(name, env string) string {
+		if v := secret(name); v != "" {
+			return v
+		}
+		return strings.TrimSpace(os.Getenv(env))
+	}
 	zoneID := secretOrEnv("cloudflare_zone_id", "OMAHAB_CF_ZONE_ID")
 	if zoneID == "" {
 		zoneID = secret("cloudflare_zone")
@@ -378,7 +445,6 @@ func (b *Backend) initServices(ctx context.Context) error {
 	if accToken == "" && tunToken != "" {
 		accToken = tunToken
 	}
-	// fallback to single token env if scoped tokens not split
 	if dnsToken == "" && tunToken == "" && accToken == "" {
 		single := strings.TrimSpace(os.Getenv("OMAHAB_CF_API_TOKEN"))
 		if single != "" {
@@ -388,16 +454,18 @@ func (b *Backend) initServices(ctx context.Context) error {
 		}
 	}
 	clients, cErr := cloudflare.NewClients(cloudflare.Options{
-		APITokenDNS:    dnsToken,
-		APITokenTunnel: tunToken,
-		APITokenAccess: accToken,
-		ZoneID:         zoneID,
-		AccountID:      accountID,
-		TunnelID:       tunnelID,
-		CaddyAddr:      "http://127.0.0.1:2019",
+		APITokenDNS:     dnsToken,
+		APITokenTunnel:  tunToken,
+		APITokenAccess:  accToken,
+		ZoneID:          zoneID,
+		AccountID:       accountID,
+		TunnelID:        tunnelID,
+		CaddyAddr:       "http://127.0.0.1:2019",
+		Domain:          inst.Domain,
+		DNSToken:        dnsToken,
+		CaddyConfigPath: "/etc/omahab/caddy.json",
 	})
 	if cErr != nil {
-		// not-configured path: nil clients still yield typed missing-client errors
 		clients = exposure.Clients{}
 	}
 	expCfg := exposure.Config{
@@ -416,36 +484,34 @@ func (b *Backend) initServices(ctx context.Context) error {
 	}
 	expSvc, err := exposure.New(b.store, expCfg, clients)
 	if err != nil {
-		// fallback to not-configured service with nil clients
 		fallbackCfg := exposure.Config{Domain: "not-configured.invalid", TailscaleIP: "100.64.0.1", TunnelDNS: "tunnel.not-configured.invalid"}
 		if svc, err2 := exposure.New(b.store, fallbackCfg, exposure.Clients{}); err2 == nil {
 			b.exposure = svc
 		} else {
-			// leave non-nil but with safe defaults; operations will return health errors
 			b.exposure, _ = exposure.New(b.store, fallbackCfg, exposure.Clients{})
 		}
-	} else {
-		b.exposure = expSvc
+		if err != nil && cErr == nil {
+			return err
+		}
+		return cErr
 	}
-	// email routing client (Token C)
+	b.exposure = expSvc
 	if accToken != "" && zoneID != "" {
 		if ec, err := cloudflare.NewEmailClient(cloudflare.EmailOptions{APIToken: accToken, ZoneID: zoneID}); err == nil {
 			b.emailRouter = ec
+		} else {
+			b.emailRouter = nil
 		}
+	} else {
+		b.emailRouter = nil
 	}
-	// workspaces with DevPod runner and repo resolver
-	workspacesDir := b.cfg.DataDir + "/workspaces"
-	repoResolver := func(ctx context.Context, pid domain.ID) (string, error) {
-		p, err := b.projects.Get(ctx, pid)
-		if err != nil {
-			return "", err
-		}
-		return p.RepositoryURL, nil
-	}
-	runner := workspaces.NewDevPodRunner(workspaces.DevPodRunnerConfig{WorkspacesDir: workspacesDir, RepoResolver: repoResolver})
-	b.workspaces = workspaces.New(b.db, runner)
+	return cErr
+}
 
-	return nil
+func (b *Backend) getExposure() *exposure.Service {
+	b.exposureMu.Lock()
+	defer b.exposureMu.Unlock()
+	return b.exposure
 }
 
 // APIToken returns raw token (for server)
@@ -582,6 +648,40 @@ func (b *Backend) GetInstance(ctx context.Context) (domain.Instance, error) {
 		return domain.Instance{}, translateError(err)
 	}
 	return inst, nil
+}
+
+func (b *Backend) UpdateInstance(ctx context.Context, domainName string, assistantName string) (domain.Instance, error) {
+	domainName = strings.TrimSpace(strings.ToLower(domainName))
+	assistantName = strings.TrimSpace(assistantName)
+	if domainName == "" {
+		return domain.Instance{}, translateError(store.Validation("domain is required"))
+	}
+	inst, err := b.store.Instance(ctx)
+	if err != nil {
+		return domain.Instance{}, translateError(err)
+	}
+	inst.Domain = domainName
+	if assistantName != "" {
+		inst.AssistantName = assistantName
+		// slug derived from name (lowercase, hyphenated)
+		slug := strings.ToLower(strings.ReplaceAll(assistantName, " ", "-"))
+		if slug != "" {
+			inst.AssistantSlug = slug
+		}
+	}
+	saved, err := b.store.SaveInstance(ctx, inst)
+	if err != nil {
+		return domain.Instance{}, translateError(err)
+	}
+	// Refresh exposure with new domain (best-effort, log on failure).
+	if err := b.refreshExposure(ctx); err != nil {
+		_, _ = b.events.Publish(ctx, events.PublishInput{
+			Type:     "exposure.refresh_failed",
+			Severity: "warning",
+			Message:  "exposure refresh after UpdateInstance failed: " + err.Error(),
+		})
+	}
+	return saved, nil
 }
 
 func (b *Backend) GetDoctor(ctx context.Context) (*health.Report, error) {
@@ -764,7 +864,7 @@ func (b *Backend) DoApplicationAction(ctx context.Context, id domain.ID, action 
 
 // Exposure
 func (b *Backend) GetExposure(ctx context.Context, resourceType string, id domain.ID) (api.ExposureState, error) {
-	if b.exposure == nil {
+	if b.getExposure() == nil {
 		return api.ExposureState{}, translateError(fmt.Errorf("%w: exposure not configured (Cloudflare credentials missing)", ErrNotConfigured))
 	}
 	// Try to map resourceType to exposure service; we treat id as service hostname or id
@@ -789,7 +889,7 @@ func (b *Backend) GetExposure(ctx context.Context, resourceType string, id domai
 }
 
 func (b *Backend) ListExposure(ctx context.Context) ([]api.ExposureState, error) {
-	if b.exposure == nil {
+	if b.getExposure() == nil {
 		// Without Cloudflare, still return empty list (metadata only)
 		return []api.ExposureState{}, nil
 	}
@@ -817,7 +917,7 @@ func (b *Backend) ListExposure(ctx context.Context) ([]api.ExposureState, error)
 }
 
 func (b *Backend) UpdateExposure(ctx context.Context, resourceType string, id domain.ID, exposure domain.Exposure) (api.ExposureState, error) {
-	if b.exposure == nil {
+	if b.getExposure() == nil {
 		return api.ExposureState{}, translateError(fmt.Errorf("%w: exposure not configured (Cloudflare credentials missing)", ErrNotConfigured))
 	}
 	if !exposure.Valid() {
@@ -1084,6 +1184,15 @@ func (b *Backend) CreateSecret(ctx context.Context, req api.CreateSecretRequest)
 	if err != nil {
 		return domain.Secret{}, translateError(err)
 	}
+	if strings.HasPrefix(req.Name, "cloudflare_") {
+		if err := b.refreshExposure(ctx); err != nil {
+			_, _ = b.events.Publish(ctx, events.PublishInput{
+				Type:     "exposure.refresh_failed",
+				Severity: "warning",
+				Message:  "exposure refresh after secret create failed: " + err.Error(),
+			})
+		}
+	}
 	return *s, nil
 }
 
@@ -1091,6 +1200,15 @@ func (b *Backend) UpdateSecret(ctx context.Context, id domain.ID, req api.Update
 	s, err := b.secrets.Rotate(ctx, id, req.Value)
 	if err != nil {
 		return domain.Secret{}, translateError(err)
+	}
+	if strings.HasPrefix(string(s.Name), "cloudflare_") {
+		if err := b.refreshExposure(ctx); err != nil {
+			_, _ = b.events.Publish(ctx, events.PublishInput{
+				Type:     "exposure.refresh_failed",
+				Severity: "warning",
+				Message:  "exposure refresh after secret update failed: " + err.Error(),
+			})
+		}
 	}
 	return *s, nil
 }
@@ -1352,30 +1470,48 @@ func (b *Backend) DeleteWorkspace(ctx context.Context, id domain.ID) error {
 
 // Users (glue)
 func (b *Backend) ListUsers(ctx context.Context, p api.Pagination) ([]domain.User, error) {
-	rows, err := b.db.QueryContext(ctx, `SELECT id, email, name, groups_json, disabled, created_at, updated_at FROM controlplane_users ORDER BY email`)
+	rows, err := b.db.QueryContext(ctx, `SELECT id, email, name, groups_json, disabled, created_at, updated_at, pocket_user_id FROM controlplane_users ORDER BY email`)
 	if err != nil {
-		return nil, translateError(err)
+		if strings.Contains(err.Error(), "no such column") {
+			rows, err = b.db.QueryContext(ctx, `SELECT id, email, name, groups_json, disabled, created_at, updated_at FROM controlplane_users ORDER BY email`)
+		}
+		if err != nil {
+			return nil, translateError(err)
+		}
 	}
 	defer rows.Close()
 	var out []domain.User
 	for rows.Next() {
 		var id, email, name, groupsJSON, created, updated string
+		var pocketID sql.NullString
 		var disabled int
-		if err := rows.Scan(&id, &email, &name, &groupsJSON, &disabled, &created, &updated); err != nil {
-			return nil, translateError(err)
+		// Try scanning with pocket_user_id, fallback to without if column missing (handled above).
+		// Determine column count by attempting 8-column scan first.
+		var scanErr error
+		// Attempt to scan 8 columns; if rows has only 7, fallback scan will have been used, but we already handled fallback query.
+		// So here we can attempt 8 and if fails due to mismatched columns, try 7.
+		cols, _ := rows.Columns()
+		if len(cols) == 8 {
+			scanErr = rows.Scan(&id, &email, &name, &groupsJSON, &disabled, &created, &updated, &pocketID)
+		} else {
+			scanErr = rows.Scan(&id, &email, &name, &groupsJSON, &disabled, &created, &updated)
+		}
+		if scanErr != nil {
+			return nil, translateError(scanErr)
 		}
 		var groups []string
 		_ = json.Unmarshal([]byte(groupsJSON), &groups)
 		ct, _ := store.ParseTime(created)
 		ut, _ := store.ParseTime(updated)
 		out = append(out, domain.User{
-			ID:        domain.ID(id),
-			Email:     email,
-			Name:      name,
-			Groups:    groups,
-			Disabled:  disabled == 1,
-			CreatedAt: ct,
-			UpdatedAt: ut,
+			ID:           domain.ID(id),
+			Email:        email,
+			Name:         name,
+			Groups:       groups,
+			Disabled:     disabled == 1,
+			CreatedAt:    ct,
+			UpdatedAt:    ut,
+			PocketUserID: pocketID.String,
 		})
 	}
 	return paginate(out, p), nil
@@ -1385,27 +1521,37 @@ func (b *Backend) GetUser(ctx context.Context, id domain.ID) (domain.User, error
 	var email, name, groupsJSON, created, updated string
 	var disabled int
 	var did string
-	err := b.db.QueryRowContext(ctx, `SELECT id, email, name, groups_json, disabled, created_at, updated_at FROM controlplane_users WHERE id = ?`, string(id)).Scan(&did, &email, &name, &groupsJSON, &disabled, &created, &updated)
+	var pocketID sql.NullString
+	err := b.db.QueryRowContext(ctx, `SELECT id, email, name, groups_json, disabled, created_at, updated_at, pocket_user_id FROM controlplane_users WHERE id = ?`, string(id)).Scan(&did, &email, &name, &groupsJSON, &disabled, &created, &updated, &pocketID)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return domain.User{}, translateError(fmt.Errorf("%w: user %q not found", store.ErrNotFound, id))
+		if strings.Contains(err.Error(), "no such column") {
+			err = b.db.QueryRowContext(ctx, `SELECT id, email, name, groups_json, disabled, created_at, updated_at FROM controlplane_users WHERE id = ?`, string(id)).Scan(&did, &email, &name, &groupsJSON, &disabled, &created, &updated)
+			pocketID = sql.NullString{}
 		}
-		return domain.User{}, translateError(err)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return domain.User{}, translateError(fmt.Errorf("%w: user %q not found", store.ErrNotFound, id))
+			}
+			return domain.User{}, translateError(err)
+		}
 	}
 	var groups []string
 	_ = json.Unmarshal([]byte(groupsJSON), &groups)
 	ct, _ := store.ParseTime(created)
 	ut, _ := store.ParseTime(updated)
 	return domain.User{
-		ID:        domain.ID(did),
-		Email:     email,
-		Name:      name,
-		Groups:    groups,
-		Disabled:  disabled == 1,
-		CreatedAt: ct,
-		UpdatedAt: ut,
+		ID:           domain.ID(did),
+		Email:        email,
+		Name:         name,
+		Groups:       groups,
+		Disabled:     disabled == 1,
+		CreatedAt:    ct,
+		UpdatedAt:    ut,
+		PocketUserID: pocketID.String,
 	}, nil
 }
+
+
 
 func (b *Backend) CreateUser(ctx context.Context, req api.CreateUserRequest) (domain.User, error) {
 	if !domain.ValidEmail(req.Email) {
@@ -1424,7 +1570,61 @@ func (b *Backend) CreateUser(ctx context.Context, req api.CreateUserRequest) (do
 		}
 		return domain.User{}, translateError(err)
 	}
-	return b.GetUser(ctx, domain.ID(id))
+	var enrollmentURL string
+	var enrollmentExpiresAt time.Time
+	var pocketUserID string
+	if b.pocketClient != nil && b.identity != nil {
+		isAdmin := false
+		for _, g := range req.Groups {
+			if g == "admins" || g == "admin" {
+				isAdmin = true
+				break
+			}
+		}
+		groupIDs := []string{}
+		if len(req.Groups) > 0 {
+			if groups, gerr := b.pocketClient.EnsureGroups(ctx, req.Groups); gerr == nil {
+				for _, grp := range groups {
+					groupIDs = append(groupIDs, grp.ID)
+				}
+			} else {
+				// fallback: treat provided groups as IDs if EnsureGroups fails for other reason
+				groupIDs = req.Groups
+			}
+		}
+		pid, url, exp, cerr := b.pocketClient.CreateUser(ctx, req.Email, req.Name, isAdmin, groupIDs)
+		if cerr == nil {
+			pocketUserID = pid
+			enrollmentURL = url
+			enrollmentExpiresAt = exp
+			_, _ = b.db.ExecContext(ctx, `UPDATE controlplane_users SET pocket_user_id = ? WHERE id = ?`, pocketUserID, id)
+		} else if errors.Is(cerr, identity.ErrNotConfigured) || strings.Contains(cerr.Error(), "not configured") {
+			// noop client → current behavior unchanged
+		} else {
+			_, _ = b.events.Publish(ctx, events.PublishInput{
+				Type:     "identity.create_user_failed",
+				Severity: "warning",
+				Message:  "PocketID CreateUser failed for " + req.Email + ": " + cerr.Error(),
+			})
+		}
+	}
+	u, err := b.GetUser(ctx, domain.ID(id))
+	if err != nil {
+		return domain.User{}, err
+	}
+	if enrollmentURL != "" {
+		u.EnrollmentURL = &enrollmentURL
+		if !enrollmentExpiresAt.IsZero() {
+			t := enrollmentExpiresAt
+			u.EnrollmentExpiresAt = &t
+		}
+		if pocketUserID != "" {
+			u.PocketUserID = pocketUserID
+		}
+	} else if pocketUserID != "" {
+		u.PocketUserID = pocketUserID
+	}
+	return u, nil
 }
 
 func (b *Backend) UpdateUser(ctx context.Context, id domain.ID, req api.UpdateUserRequest) (domain.User, error) {
@@ -2191,6 +2391,9 @@ func (n *noopPocketID) SeedDefaultGroups(ctx context.Context) error {
 }
 func (n *noopPocketID) HealthCheck(ctx context.Context) error {
 	return fmt.Errorf("%w: PocketID not configured", ErrNotConfigured)
+}
+func (n *noopPocketID) EnsureOIDCClient(ctx context.Context, name string, callbackURLs []string) (string, string, error) {
+	return "", "", fmt.Errorf("%w: PocketID not configured", ErrNotConfigured)
 }
 
 // additional sink wrappers to satisfy specific types

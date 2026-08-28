@@ -57,9 +57,19 @@ type curatedBundle struct {
 		Supported bool `json:"supported"`
 	} `json:"oidc"`
 	Exposure struct {
-		Default string   `json:"default"`
-		Allowed []string `json:"allowed"`
+		Default    string   `json:"default"`
+		Allowed    []string `json:"allowed"`
+		CaddyRoute string   `json:"caddyRoute"`
 	} `json:"exposure"`
+	EnabledByDefault bool     `json:"enabledByDefault"`
+	Dependencies     []string `json:"dependencies"`
+	Secrets          struct {
+		SecretFiles []struct {
+			Source string `json:"source"`
+			Target string `json:"target"`
+			Env    string `json:"env"`
+		} `json:"secretFiles"`
+	} `json:"secrets"`
 }
 
 type curatedDoc struct {
@@ -187,7 +197,6 @@ func convert(cb curatedBundle, composeDir string, digests map[string]string) (ap
 	if primaryRepo == "" {
 		return apps.Bundle{}, fmt.Errorf("primary image key %q not present in images", primary)
 	}
-
 	b := apps.Bundle{
 		ID:            cb.Name,
 		Name:          cb.DisplayName,
@@ -212,6 +221,22 @@ func convert(cb curatedBundle, composeDir string, digests map[string]string) (ap
 	b.Backup = apps.BackupHooks{
 		PreBackup:   hookArgv(cb.Backup.PreHooks, cb.Name),
 		PostRestore: hookArgv(cb.Restore.Hooks, cb.Name),
+	}
+	b.Default = cb.EnabledByDefault
+	route := strings.TrimSpace(cb.Exposure.CaddyRoute)
+	if route == "edge" {
+		route = ""
+	} else {
+		route = strings.TrimSuffix(route, ".{{.Domain}}")
+	}
+	b.Route = route
+	if len(cb.Dependencies) > 0 {
+		b.Dependencies = append([]string(nil), cb.Dependencies...)
+	}
+	for _, sf := range cb.Secrets.SecretFiles {
+		if s := strings.TrimSpace(sf.Source); s != "" {
+			b.SecretSources = append(b.SecretSources, s)
+		}
 	}
 	return b, nil
 }

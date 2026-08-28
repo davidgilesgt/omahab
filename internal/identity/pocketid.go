@@ -211,10 +211,47 @@ type pocketUserGroupDto struct {
 	Users              []pocketUserDto          `json:"users"`
 	AllowedOidcClients []pocketOidcClientDto    `json:"allowedOidcClients"`
 }
-
 type pocketOidcClientDto struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+}
+
+// pocketOidcClientDetailDto holds full OIDC client fields as returned by
+// Pocket ID's /api/oidc/clients endpoints. Field names vary between
+// pocket-id versions; we accept multiple aliases via custom unmarshalling
+// through a map fallback in EnsureOIDCClient, but the typed fields cover
+// the common camelCase names.
+type pocketOidcClientDetailDto struct {
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	ClientID     string   `json:"clientId"`
+	ClientSecret string   `json:"clientSecret"`
+	CallbackURLs []string `json:"callbackUrls"`
+	// Alternate snake case aliases (some versions use these)
+	ClientIDAlt     string   `json:"client_id"`
+	ClientSecretAlt string   `json:"client_secret"`
+	CallbackURLsAlt []string `json:"callback_urls"`
+}
+
+func (d *pocketOidcClientDetailDto) effectiveClientID() string {
+	if d.ClientID != "" {
+		return d.ClientID
+	}
+	return d.ClientIDAlt
+}
+
+func (d *pocketOidcClientDetailDto) effectiveClientSecret() string {
+	if d.ClientSecret != "" {
+		return d.ClientSecret
+	}
+	return d.ClientSecretAlt
+}
+
+func (d *pocketOidcClientDetailDto) effectiveCallbacks() []string {
+	if len(d.CallbackURLs) > 0 {
+		return d.CallbackURLs
+	}
+	return d.CallbackURLsAlt
 }
 
 type paginatedUsersDto struct {
@@ -714,6 +751,143 @@ func (c *PocketIDClient) RemoveUserFromGroup(ctx context.Context, userID, groupI
 		return nil
 	}
 	return c.SetUserGroups(ctx, userID, ids)
+}
+
+// EnsureOIDCClient ensures an OIDC client with the given name and callbacks exists.
+// It is idempotent: if a client with the same name already exists it returns its credentials,
+// otherwise it creates one via POST /api/oidc/clients. The exact field names vary across
+// pocket-id versions; both camelCase and snake_case are accepted via flexible unmarshaling.
+func (c *PocketIDClient) EnsureOIDCClient(ctx context.Context, name string, callbackURLs []string) (string, string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", "", store.Validation("oidc client name is required")
+	}
+	for i, u := range callbackURLs {
+		callbackURLs[i] = strings.TrimSpace(u)
+		if callbackURLs[i] == "" {
+			return "", "", store.Validation("callback URL must not be empty")
+		}
+	}
+	if len(callbackURLs) == 0 {
+		return "", "", store.Validation("at least one callback URL is required")
+	}
+	if err := c.ensureConfigured(); err != nil {
+		return "", "", err
+	}
+	// Try to list existing clients and find by name (idempotent GET).
+	existing := c.listOIDCClients(ctx)
+	for _, cl := range existing {
+		if strings.EqualFold(strings.TrimSpace(cl.Name), name) {
+			cid := cl.effectiveClientID()
+			sec := cl.effectiveClientSecret()
+			if cid != "" {
+				// If secret is empty, try to fetch full client.
+				if sec == "" {
+					if full, err := c.getOIDCClient(ctx, cl.ID); err == nil && full != nil {
+						if v := full.effectiveClientID(); v != "" {
+							cid = v
+						}
+						if v := full.effectiveClientSecret(); v != "" {
+							sec = v
+						}
+					}
+				}
+				return cid, sec, nil
+			}
+		}
+	}
+	// Not found: create new client. Try camelCase first, fallback snake_case handled by server.
+	payload := map[string]any{
+		"name":         name,
+		"callbackUrls": callbackURLs,
+	}
+	// Some versions expect callbackURLs field.
+	altPayload := map[string]any{
+		"name":          name,
+		"callback_urls": callbackURLs,
+		"callbackUrls":  callbackURLs,
+	}
+	_ = altPayload
+	var created pocketOidcClientDetailDto
+	err := c.doJSON(ctx, http.MethodPost, "/api/oidc/clients", payload, &created)
+	if err != nil {
+		// Retry with alternate payload shape if validation failed (try snake case explicitly)
+		if errors.Is(err, store.ErrValidation) {
+			var created2 pocketOidcClientDetailDto
+			if err2 := c.doJSON(ctx, http.MethodPost, "/api/oidc/clients", map[string]any{"name": name, "callback_urls": callbackURLs}, &created2); err2 == nil {
+				created = created2
+				err = nil
+			}
+		}
+	}
+	if err != nil {
+		return "", "", err
+	}
+	cid := created.effectiveClientID()
+	sec := created.effectiveClientSecret()
+	if cid == "" {
+		cid = strings.TrimSpace(created.ID)
+	}
+	// If server didn't return secret, try to fetch it.
+	if sec == "" && cid != "" && created.ID != "" {
+		if full, err := c.getOIDCClient(ctx, created.ID); err == nil && full != nil {
+			if v := full.effectiveClientSecret(); v != "" {
+				sec = v
+			}
+			if v := full.effectiveClientID(); v != "" {
+				cid = v
+			}
+		}
+	}
+	if cid == "" {
+		return "", "", fmt.Errorf("pocket-id ensure oidc client %q: empty client id in response", name)
+	}
+	return cid, sec, nil
+}
+
+func (c *PocketIDClient) listOIDCClients(ctx context.Context) []pocketOidcClientDetailDto {
+	// Try paginated envelope first, then plain array.
+	var paginated struct {
+		Data []pocketOidcClientDetailDto `json:"data"`
+	}
+	if err := c.doJSON(ctx, http.MethodGet, "/api/oidc/clients", nil, &paginated); err == nil && len(paginated.Data) > 0 {
+		return paginated.Data
+	}
+	var plain []pocketOidcClientDetailDto
+	if err := c.doJSON(ctx, http.MethodGet, "/api/oidc/clients", nil, &plain); err == nil && len(plain) > 0 {
+		return plain
+	}
+	// As fallback, try map envelope with "oidcClients" key (some versions).
+	var mapEnv map[string]json.RawMessage
+	if err := c.doJSON(ctx, http.MethodGet, "/api/oidc/clients", nil, &mapEnv); err == nil {
+		for _, key := range []string{"oidcClients", "clients", "results"} {
+			if raw, ok := mapEnv[key]; ok {
+				var arr []pocketOidcClientDetailDto
+				if json.Unmarshal(raw, &arr) == nil && len(arr) > 0 {
+					return arr
+				}
+				var pag struct {
+					Data []pocketOidcClientDetailDto `json:"data"`
+				}
+				if json.Unmarshal(raw, &pag) == nil && len(pag.Data) > 0 {
+					return pag.Data
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (c *PocketIDClient) getOIDCClient(ctx context.Context, id string) (*pocketOidcClientDetailDto, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, store.Validation("oidc client id is required")
+	}
+	var dto pocketOidcClientDetailDto
+	if err := c.doJSON(ctx, http.MethodGet, "/api/oidc/clients/"+url.PathEscape(id), nil, &dto); err != nil {
+		return nil, err
+	}
+	return &dto, nil
 }
 
 // Ensure PocketIDClient satisfies PocketID interface.

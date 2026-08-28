@@ -23,7 +23,7 @@
       "composeFile": "compose/caddy.yml",
       "supportedArchitectures": ["amd64", "arm64"],
       "images": {
-        "caddy": "docker.io/library/caddy@sha256:${CADDY_DIGEST:?pinned digest required - substituted from signed release manifest}"
+        "caddy": "ghcr.io/caddybuilds/caddy-cloudflare@sha256:${CADDY_DIGEST:?pinned digest required - substituted from signed release manifest}"
       },
       "resources": {
         "memoryMinMiB": 128,

@@ -147,11 +147,14 @@ type EmailMessage struct {
 }
 
 type User struct {
-	ID        ID        `json:"id"`
-	Email     string    `json:"email"`
-	Name      string    `json:"name"`
-	Groups    []string  `json:"groups"`
-	Disabled  bool      `json:"disabled"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID                  ID         `json:"id"`
+	Email               string     `json:"email"`
+	Name                string     `json:"name"`
+	Groups              []string   `json:"groups"`
+	Disabled            bool       `json:"disabled"`
+	CreatedAt           time.Time  `json:"created_at"`
+	UpdatedAt           time.Time  `json:"updated_at"`
+	EnrollmentURL       *string    `json:"enrollment_url,omitempty"`
+	EnrollmentExpiresAt *time.Time `json:"enrollment_expires_at,omitempty"`
+	PocketUserID        string     `json:"pocket_user_id,omitempty"`
 }

@@ -58,6 +58,8 @@ type PocketID interface {
 	SeedDefaultGroups(ctx context.Context) error
 	// HealthCheck verifies Pocket ID reachability.
 	HealthCheck(ctx context.Context) error
+	// EnsureOIDCClient ensures an OIDC client with name and callback URLs exists, returning client ID and secret.
+	EnsureOIDCClient(ctx context.Context, name string, callbackURLs []string) (clientID string, clientSecret string, err error)
 }
 
 // EventRecorder records security events for audit.

@@ -139,8 +139,8 @@ func (s *Server) buildRouter() chi.Router {
 		// Status / instance / doctor
 		r.Get("/api/v1/status", s.handleGetStatus)
 		r.Get("/api/v1/instance", s.handleGetInstance)
+		r.Put("/api/v1/instance", s.withBodyLimit(defaultBodyLimit, s.handleUpdateInstance))
 		r.Get("/api/v1/doctor", s.handleDoctor)
-
 		// Applications
 		r.Get("/api/v1/catalog", s.handleListCatalog)
 		r.Get("/api/v1/applications", s.handleListApplications)
@@ -231,28 +231,32 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/api/v1/knowledge/consent", s.handleKnowledgeGetConsent)
 		r.Put("/api/v1/knowledge/consent", s.withBodyLimit(defaultBodyLimit, s.handleKnowledgeSetConsent))
 
-		// Users / identity recovery
-		r.Get("/api/v1/users", s.handleListUsers)
-		r.Post("/api/v1/users", s.withBodyLimit(defaultBodyLimit, s.handleCreateUser))
-		r.Get("/api/v1/users/{id}", s.handleGetUser)
-		r.Patch("/api/v1/users/{id}", s.withBodyLimit(defaultBodyLimit, s.handleUpdateUser))
-		r.Delete("/api/v1/users/{id}", s.handleDeleteUser)
-		r.Post("/api/v1/users/{id}/recovery", s.handleCreateUserRecovery)
-		r.Post("/api/v1/identity/recover", s.withBodyLimit(defaultBodyLimit, s.handleIdentityRecover))
-		r.Get("/api/v1/users/{id}/enrollment", s.handleGetEnrollmentState)
-		r.Get("/api/v1/users/{id}/app-access", s.handleListApplicationAccess)
-		r.Get("/api/v1/users/{id}/groups", s.handleGetUserGroups)
-		r.Put("/api/v1/users/{id}/groups", s.withBodyLimit(defaultBodyLimit, s.handleSetUserGroups))
-		// Provider credentials
-		r.Get("/api/v1/provider-credentials", s.handleListProviderCredentials)
-		r.Post("/api/v1/provider-credentials", s.withBodyLimit(defaultBodyLimit, s.handleCreateProviderCredential))
-		r.Get("/api/v1/provider-credentials/{id}", s.handleGetProviderCredential)
-		r.Delete("/api/v1/provider-credentials/{id}", s.handleDeleteProviderCredential)
+		// Setup (first-run provisioning)
+		r.Get("/api/v1/setup", s.handleGetSetup)
+		r.Post("/api/v1/setup/reconcile", s.withBodyLimit(defaultBodyLimit, s.handleTriggerSetupReconcile))
 
-		// Email (authenticated read + route activation gated on verification)
-		r.Get("/api/v1/email/messages", s.handleListEmailMessages)
-		r.Get("/api/v1/email/messages/{id}", s.handleGetEmailMessage)
-		r.Post("/api/v1/email/routes", s.withBodyLimit(defaultBodyLimit, s.handleEnsureEmailRoute))
+ 		// Users / identity recovery
+ 		r.Get("/api/v1/users", s.handleListUsers)
+ 		r.Post("/api/v1/users", s.withBodyLimit(defaultBodyLimit, s.handleCreateUser))
+ 		r.Get("/api/v1/users/{id}", s.handleGetUser)
+ 		r.Patch("/api/v1/users/{id}", s.withBodyLimit(defaultBodyLimit, s.handleUpdateUser))
+ 		r.Delete("/api/v1/users/{id}", s.handleDeleteUser)
+ 		r.Post("/api/v1/users/{id}/recovery", s.handleCreateUserRecovery)
+ 		r.Post("/api/v1/identity/recover", s.withBodyLimit(defaultBodyLimit, s.handleIdentityRecover))
+ 		r.Get("/api/v1/users/{id}/enrollment", s.handleGetEnrollmentState)
+ 		r.Get("/api/v1/users/{id}/app-access", s.handleListApplicationAccess)
+ 		r.Get("/api/v1/users/{id}/groups", s.handleGetUserGroups)
+ 		r.Put("/api/v1/users/{id}/groups", s.withBodyLimit(defaultBodyLimit, s.handleSetUserGroups))
+ 		// Provider credentials
+ 		r.Get("/api/v1/provider-credentials", s.handleListProviderCredentials)
+ 		r.Post("/api/v1/provider-credentials", s.withBodyLimit(defaultBodyLimit, s.handleCreateProviderCredential))
+ 		r.Get("/api/v1/provider-credentials/{id}", s.handleGetProviderCredential)
+ 		r.Delete("/api/v1/provider-credentials/{id}", s.handleDeleteProviderCredential)
+
+ 		// Email (authenticated read + route activation gated on verification)
+ 		r.Get("/api/v1/email/messages", s.handleListEmailMessages)
+ 		r.Get("/api/v1/email/messages/{id}", s.handleGetEmailMessage)
+ 		r.Post("/api/v1/email/routes", s.withBodyLimit(defaultBodyLimit, s.handleEnsureEmailRoute))
 	})
 
 	return r

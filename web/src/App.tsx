@@ -4,6 +4,7 @@ import { AppShell } from "./components/shell";
 import { ApplicationsPage, BackupsPage, EventsPage, OverviewPage, ProjectsPage } from "./views/operations";
 import { PeoplePage, ProvidersPage, SyncFoldersPage, WorkspacesPage } from "./views/administration";
 import { ChatPage } from "./views/chat";
+import { SetupPage } from "./views/setup";
 
 function DashboardRoutes() {
   return (
@@ -11,6 +12,7 @@ function DashboardRoutes() {
       <AppShell>
         <Routes>
           <Route path="/" element={<OverviewPage />} />
+          <Route path="/setup" element={<SetupPage />} />
           <Route path="/applications" element={<ApplicationsPage />} />
           <Route path="/projects" element={<ProjectsPage />} />
           <Route path="/backups" element={<BackupsPage />} />

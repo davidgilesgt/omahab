@@ -37,6 +37,7 @@ var (
 	digestRe    = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	volumeName  = regexp.MustCompile(`^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$`)
 	imageLineRe = regexp.MustCompile(`(?m)^[ \t-]*image:[ \t]*(\S+)`)
+	routeRe     = regexp.MustCompile(`^[a-z0-9-]*$`)
 )
 
 // ValidDigest reports whether d is a canonical pinned sha256 digest.
@@ -117,6 +118,10 @@ type Bundle struct {
 	Backup          BackupHooks      `json:"backup,omitempty"`
 	OIDC            OIDCConfig       `json:"oidc,omitempty"`
 	Resources       ResourceGuidance `json:"resources,omitempty"`
+	Default         bool             `json:"default"`
+	Route           string           `json:"route"`
+	Dependencies    []string         `json:"dependencies,omitempty"`
+	SecretSources   []string         `json:"secret_sources,omitempty"`
 }
 
 // exposureRank orders exposure so requests can be checked against a bundle's
@@ -220,7 +225,35 @@ func (b Bundle) validate() (Bundle, error) {
 	if b.Resources.MemoryMB < 0 {
 		problems = append(problems, "resources.memory_mb must not be negative")
 	}
-
+	if !routeRe.MatchString(b.Route) {
+		problems = append(problems, fmt.Sprintf("route %q must match ^[a-z0-9-]*$", b.Route))
+	}
+	if len(b.Route) > 63 {
+		problems = append(problems, fmt.Sprintf("route %q must be at most 63 chars", b.Route))
+	}
+	seenDep := map[string]bool{}
+	for _, dep := range b.Dependencies {
+		if !validSlug(dep) || len(dep) < 2 {
+			problems = append(problems, fmt.Sprintf("dependency %q must be 2-63 chars of [a-z0-9-], starting with a letter and ending alphanumeric", dep))
+		}
+		if dep == b.ID {
+			problems = append(problems, fmt.Sprintf("dependency %q cannot be self", dep))
+		}
+		if seenDep[dep] {
+			problems = append(problems, fmt.Sprintf("dependency %q listed twice", dep))
+		}
+		seenDep[dep] = true
+	}
+	seenSecret := map[string]bool{}
+	for _, src := range b.SecretSources {
+		if strings.TrimSpace(src) == "" {
+			problems = append(problems, "secret source must not be empty")
+		}
+		if seenSecret[src] {
+			problems = append(problems, fmt.Sprintf("secret source %q listed twice", src))
+		}
+		seenSecret[src] = true
+	}
 	if len(problems) > 0 {
 		return Bundle{}, &ValidationError{Problems: problems}
 	}
@@ -340,6 +373,13 @@ func NewCatalog(bundles ...Bundle) (*Catalog, error) {
 		}
 		c.byID[nb.ID] = nb
 		c.order = append(c.order, nb.ID)
+	}
+	for _, b := range c.byID {
+		for _, dep := range b.Dependencies {
+			if _, ok := c.byID[dep]; !ok {
+				return nil, invalid("bundle %q depends on unknown bundle %q", b.ID, dep)
+			}
+		}
 	}
 	return c, nil
 }

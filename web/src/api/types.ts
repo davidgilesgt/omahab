@@ -122,6 +122,9 @@ export interface User {
   disabled: boolean;
   created_at: string;
   updated_at: string;
+  enrollment_url?: string | null;
+  enrollment_expires_at?: string | null;
+  pocket_user_id?: string | null;
 }
 
 export interface ProviderCredential {
@@ -140,6 +143,39 @@ export interface RecoverySession {
   expires_at: string;
   login_url?: string | null;
   code?: string | null;
+}
+
+export interface Instance {
+  id: ID;
+  domain: string;
+  tailnet: string;
+  tailscale_ip: string;
+  assistant_name: string;
+  assistant_slug: string;
+  created_at: string;
+}
+
+export interface Secret {
+  id: ID;
+  scope: string;
+  name: string;
+  version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SetupCheck {
+  id: string;
+  status: "ok" | "pending" | "failed" | "skipped";
+  detail?: string;
+  apps?: { bundle_id: string; status: string }[];
+  passkey_count?: number;
+  target?: number;
+}
+
+export interface SetupStatus {
+  state: "waiting_for_cloudflare" | "reconciling" | "attention" | "complete";
+  checks: SetupCheck[];
 }
 
 export interface ListEnvelope<T> {

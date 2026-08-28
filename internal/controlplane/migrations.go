@@ -174,5 +174,11 @@ CREATE TABLE IF NOT EXISTS controlplane_meta (
 ) STRICT;
 `,
 		},
+		{
+			Name: "controlplane-004-pocket-user-id",
+			SQL: `
+ALTER TABLE controlplane_users ADD COLUMN pocket_user_id TEXT NOT NULL DEFAULT '';
+`,
+		},
 	}
 }

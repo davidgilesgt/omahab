@@ -40,6 +40,15 @@ type Options struct {
 	// CaddyAddr is the Caddy admin endpoint for the local edge, e.g.
 	// http://127.0.0.1:2019. Empty → Edge client is nil.
 	CaddyAddr string
+
+	// Domain is the apex domain for Caddy TLS automation (used for edge config rendering).
+	Domain string
+
+	// DNSToken is the Cloudflare DNS token for Caddy DNS-01 (Token A). Empty → edge config fails closed.
+	DNSToken string
+
+	// CaddyConfigPath is the host path for rendered Caddy JSON (default /etc/omahab/caddy.json).
+	CaddyConfigPath string
 }
 
 func newCFClient(token string, httpClient *http.Client, baseURL string) *cloudflare.Client {
@@ -87,7 +96,11 @@ func NewClients(o Options) (exposure.Clients, error) {
 	}
 
 	if o.CaddyAddr != "" {
-		c.Edge = newEdgeClient(o.CaddyAddr, o.HTTPClient)
+		cfgPath := o.CaddyConfigPath
+		if cfgPath == "" {
+			cfgPath = "/etc/omahab/caddy.json"
+		}
+		c.Edge = newEdgeClient(o.CaddyAddr, o.HTTPClient, o.Domain, o.DNSToken, cfgPath)
 	}
 
 	return c, nil

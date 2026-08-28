@@ -7,6 +7,7 @@ import type {
   Exposure,
   ExposureState,
   IndexSetupOption,
+  Instance,
   KnowledgeConsent,
   ListEnvelope,
   ModelInfo,
@@ -14,6 +15,8 @@ import type {
   ProviderCredential,
   RecoverySession,
   Release,
+  Secret,
+  SetupStatus,
   Status,
   SyncFolder,
   User,
@@ -125,11 +128,20 @@ export class ApiClient {
   stopWorkspace = (id: string) => this.request<Workspace>(`/workspaces/${encodeURIComponent(id)}/stop`, { method: "POST", body: JSON.stringify({}) });
 
   users = () => this.list<User>("/users");
-  createUser = (input: { name: string; email: string }) => this.request<User>("/users", { method: "POST", body: JSON.stringify(input) });
+  createUser = (input: { name: string; email: string; groups?: string[] }) => this.request<User>("/users", { method: "POST", body: JSON.stringify(input) });
   setUserDisabled = (id: string, disabled: boolean) =>
     this.request<User>(`/users/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ disabled }) });
   beginRecovery = (id: string) =>
     this.request<RecoverySession>(`/users/${encodeURIComponent(id)}/recovery`, { method: "POST", body: JSON.stringify({}) });
+
+  instance = () => this.request<Instance>("/instance");
+  updateInstance = (input: { domain: string; assistant_name?: string }) =>
+    this.request<Instance>("/instance", { method: "PUT", body: JSON.stringify(input) });
+  createSecret = (input: { scope: string; name: string; value: string }) =>
+    this.request<Secret>("/secrets", { method: "POST", body: JSON.stringify(input) });
+
+  setup = () => this.request<SetupStatus>("/setup");
+  reconcileSetup = () => this.request<void>("/setup/reconcile", { method: "POST", body: JSON.stringify({}) });
 
   providerCredentials = () => this.list<ProviderCredential>("/provider-credentials");
   createProviderCredential = (input: { provider: string; kind: string; value: string; name?: string }) =>

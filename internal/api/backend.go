@@ -148,6 +148,14 @@ type CreateUserRequest struct {
 	Groups []string `json:"groups,omitempty"`
 }
 
+// UserEnrollmentFields documents the additional fields returned on user creation when Pocket ID is configured.
+// The domain.User payload now carries enrollment_url, enrollment_expires_at and pocket_user_id.
+type UserEnrollmentFields struct {
+	EnrollmentURL       *string    `json:"enrollment_url,omitempty"`
+	EnrollmentExpiresAt *time.Time `json:"enrollment_expires_at,omitempty"`
+	PocketUserID        string     `json:"pocket_user_id,omitempty"`
+}
+
 type UpdateUserRequest struct {
 	Name     *string   `json:"name,omitempty"`
 	Groups   *[]string `json:"groups,omitempty"`
@@ -216,8 +224,8 @@ type Backend interface {
 	// Status / instance / doctor
 	GetStatus(ctx context.Context) (domain.Status, error)
 	GetInstance(ctx context.Context) (domain.Instance, error)
+	UpdateInstance(ctx context.Context, domain string, assistantName string) (domain.Instance, error)
 	GetDoctor(ctx context.Context) (*health.Report, error)
-
 	// Applications
 	ListApplications(ctx context.Context, p Pagination) ([]domain.Application, error)
 	InstallApplication(ctx context.Context, req InstallApplicationRequest) (domain.Application, error)
@@ -334,6 +342,34 @@ type Backend interface {
 	GetUserGroups(ctx context.Context, userID string) ([]identity.Group, error)
 	SetUserGroups(ctx context.Context, userID string, groupIDs []string) error
 
+	// Setup aggregates first-run provisioning state.
+	GetSetupStatus(ctx context.Context) (SetupStatus, error)
+	TriggerSetupReconcile(ctx context.Context) (bool, error)
+
 	// Email routing gated on verification
 	EnsureEmailRoute(ctx context.Context, recipient string) error
 }
+
+// SetupStatus is the aggregated first-run setup checklist state.
+// State is one of waiting_for_cloudflare, reconciling, attention, complete.
+type SetupStatus struct {
+	State  string       `json:"state"`
+	Checks []SetupCheck `json:"checks"`
+}
+
+// SetupCheck is one checklist entry. Status is ok|pending|failed|skipped.
+type SetupCheck struct {
+	ID           string            `json:"id"`
+	Status       string            `json:"status"`
+	Detail       string            `json:"detail,omitempty"`
+	Apps         []SetupAppStatus  `json:"apps,omitempty"`
+	PasskeyCount *int              `json:"passkey_count,omitempty"`
+	Target       *int              `json:"target,omitempty"`
+}
+
+// SetupAppStatus tracks one default bundle in the core_apps check.
+type SetupAppStatus struct {
+	BundleID string `json:"bundle_id"`
+	Status   string `json:"status"`
+	Detail   string `json:"detail,omitempty"`
+ }

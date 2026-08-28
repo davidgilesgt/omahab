@@ -55,6 +55,22 @@ func (s *Server) handleGetInstance(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, inst)
 }
 
+func (s *Server) handleUpdateInstance(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Domain        string `json:"domain"`
+		AssistantName string `json:"assistant_name"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	inst, err := s.backend.UpdateInstance(r.Context(), req.Domain, req.AssistantName)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, inst)
+}
+
 func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
 	rep, err := s.backend.GetDoctor(r.Context())
 	if err != nil {
@@ -63,7 +79,6 @@ func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, rep)
 }
-
 
 // --- applications ---
 
@@ -1342,7 +1357,31 @@ func (s *Server) handleSetUserGroups(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// --- email routes ---
+// --- setup ---
+
+func (s *Server) handleGetSetup(w http.ResponseWriter, r *http.Request) {
+	st, err := s.backend.GetSetupStatus(r.Context())
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+func (s *Server) handleTriggerSetupReconcile(w http.ResponseWriter, r *http.Request) {
+	already, err := s.backend.TriggerSetupReconcile(r.Context())
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	if already {
+		writeJSON(w, http.StatusAccepted, map[string]any{"status": "reconciling", "already_running": true})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "reconciling", "already_running": false})
+}
+
+ // --- email routes ---
 
 func (s *Server) handleEnsureEmailRoute(w http.ResponseWriter, r *http.Request) {
 	var req struct {

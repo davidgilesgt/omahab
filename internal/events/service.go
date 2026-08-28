@@ -42,6 +42,8 @@ var allowedTypes = map[string]bool{
 	"health.unhealthy":             true,
 	"identity.recovery":            true,
 	"applications.catalog_missing": true,
+	"setup.step_failed":            true,
+	"setup.reconciled":             true,
 }
 
 // Allowed severities.

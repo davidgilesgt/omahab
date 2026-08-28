@@ -5,6 +5,7 @@ import { useAuth } from "../auth";
 import { useEventStream } from "./useEventStream";
 const NAVIGATION = [
   ["/", "Overview", "⌂", "Home overview"],
+  ["/setup", "Setup", "✓", "Continue setup"],
   ["/applications", "Applications", "▦", "Platform apps"],
   ["/projects", "Projects", "⌘", "ONCE projects"],
   ["/backups", "Backups", "↺", "Backup status"],
@@ -25,7 +26,12 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [showResults, setShowResults] = useState(false);
   const eventQuery = useQuery({ queryKey: ["events"], queryFn: client.events, staleTime: Infinity });
   const unread = eventQuery.data?.filter((event) => !event.read_at).length ?? 0;
-
+  const setupQuery = useQuery({ queryKey: ["setup"], queryFn: client.setup, retry: false, staleTime: 30_000 });
+  const visibleNavigation = useMemo(() => {
+    const state = setupQuery.data?.state;
+    if (!state || state === "complete") return NAVIGATION.filter(([to]) => to !== "/setup");
+    return [...NAVIGATION];
+  }, [setupQuery.data]);
   useEventStream();
   // Keep theme in sync without flash - useLayoutEffect would be ideal but useEffect is okay with inline script
   useEffect(() => {
@@ -56,10 +62,10 @@ export function AppShell({ children }: { children: ReactNode }) {
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return [];
-    return NAVIGATION.filter(([to, label]) =>
+    return visibleNavigation.filter(([to, label]) =>
       label.toLowerCase().includes(q) || to.toLowerCase().includes(q)
     ).slice(0, 6);
-  }, [query]);
+  }, [query, visibleNavigation]);
 
   function chooseDestination(path: string) {
     navigate(path);
@@ -77,7 +83,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           <span><strong>Omahab</strong><small>Control plane</small></span>
         </NavLink>
         <nav aria-label="Primary navigation">
-          {NAVIGATION.map(([to, label, icon, title]) => (
+          {visibleNavigation.map(([to, label, icon, title]) => (
             <NavLink key={to} to={to} end={to === "/"} className={({ isActive }) => isActive ? "nav-link active" : "nav-link"} title={title}>
               <span aria-hidden="true" className="nav-icon" title={title}>{icon}</span>
               <span>{label}</span>

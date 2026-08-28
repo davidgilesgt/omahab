@@ -1,0 +1,243 @@
+import { useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useAuth } from "../auth";
+import type { SetupStatus } from "../api/types";
+import { ErrorState, LoadingState, PageHeader, Section, StatusPill } from "../components/ui";
+import { useToast } from "../components/toast";
+import { CopyButton } from "../components/copyButton";
+
+function Checklist({ setup }: { setup: SetupStatus }) {
+  return (
+    <Section title="Setup checklist" description="Progress through first-run setup.">
+      <ul className="activity-list">
+        {setup.checks.map((check) => (
+          <li key={check.id} style={{ display: "flex", gap: 8, alignItems: "flex-start", flexDirection: "column" }}>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", width: "100%" }}>
+              <StatusPill value={check.status} />
+              <strong>{check.id}</strong>
+              {check.detail && <span style={{ opacity: 0.7, fontSize: "0.9em" }}>{check.detail}</span>}
+            </div>
+            {check.id === "core_apps" && check.apps && check.apps.length > 0 && (
+              <ul style={{ marginLeft: 16, listStyle: "none", padding: 0, width: "100%" }}>
+                {check.apps.map((app) => (
+                  <li key={app.bundle_id} style={{ display: "flex", gap: 8, alignItems: "center", padding: "4px 0" }}>
+                    <StatusPill value={app.status} />
+                    <span>{app.bundle_id}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {check.id === "admin_passkeys" && typeof check.passkey_count === "number" && (
+              <span style={{ marginLeft: 16, opacity: 0.8 }}>
+                {check.passkey_count}/{check.target ?? 2} passkeys registered
+              </span>
+            )}
+          </li>
+        ))}
+      </ul>
+    </Section>
+  );
+}
+
+export function SetupPage() {
+  const { client } = useAuth();
+  const toast = useToast();
+  const queryClient = useQueryClient();
+
+  const setupQuery = useQuery({
+    queryKey: ["setup"],
+    queryFn: client.setup,
+    refetchInterval: (query) => {
+      const data = query.state.data as SetupStatus | undefined;
+      if (data && data.state === "reconciling") return 5000;
+      // also poll when waiting or attention? spec says poll while reconciling only
+      return false;
+    },
+  });
+
+  const usersQuery = useQuery({ queryKey: ["users"], queryFn: client.users });
+  const instanceQuery = useQuery({ queryKey: ["instance"], queryFn: client.instance });
+
+  const [domain, setDomain] = useState("");
+  const [dnsToken, setDnsToken] = useState("");
+  const [tunnelToken, setTunnelToken] = useState("");
+  const [zoneId, setZoneId] = useState("");
+  const [accountId, setAccountId] = useState("");
+
+  const [inviteName, setInviteName] = useState("");
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [enrollmentUrl, setEnrollmentUrl] = useState<string | null>(null);
+  const [enrollmentExpires, setEnrollmentExpires] = useState<string | null>(null);
+
+  const reconcileMutation = useMutation({
+    mutationFn: client.reconcileSetup,
+    onSuccess: () => {
+      toast.success("Reconciliation started");
+      void queryClient.invalidateQueries({ queryKey: ["setup"] });
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Reconciliation failed"),
+  });
+
+  const cloudflareMutation = useMutation({
+    mutationFn: async () => {
+      if (!domain.trim()) throw new Error("Domain is required");
+      await client.updateInstance({ domain: domain.trim() });
+      const secrets: Array<{ name: string; value: string }> = [];
+      if (dnsToken.trim()) secrets.push({ name: "cloudflare_dns", value: dnsToken.trim() });
+      if (tunnelToken.trim()) secrets.push({ name: "cloudflare_tunnel", value: tunnelToken.trim() });
+      if (zoneId.trim()) secrets.push({ name: "cloudflare_zone_id", value: zoneId.trim() });
+      if (accountId.trim()) secrets.push({ name: "cloudflare_account_id", value: accountId.trim() });
+      for (const s of secrets) {
+        await client.createSecret({ scope: "platform-app", name: s.name, value: s.value });
+      }
+      await client.reconcileSetup();
+    },
+    onSuccess: () => {
+      toast.success("Cloudflare configuration saved, reconciliation started");
+      void queryClient.invalidateQueries({ queryKey: ["setup"] });
+      void queryClient.invalidateQueries({ queryKey: ["instance"] });
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Save failed"),
+  });
+
+  const inviteMutation = useMutation({
+    mutationFn: async () => {
+      if (!inviteEmail.trim() || !inviteName.trim()) throw new Error("Name and email required");
+      const user = await client.createUser({ name: inviteName.trim(), email: inviteEmail.trim() });
+      return user;
+    },
+    onSuccess: (user) => {
+      toast.success("Invite created");
+      if (user.enrollment_url) {
+        setEnrollmentUrl(user.enrollment_url);
+        setEnrollmentExpires(user.enrollment_expires_at ?? null);
+      }
+      void queryClient.invalidateQueries({ queryKey: ["users"] });
+      void queryClient.invalidateQueries({ queryKey: ["setup"] });
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Invite failed"),
+  });
+
+  if (setupQuery.isLoading) return <LoadingState label="Loading setup status" />;
+  if (setupQuery.isError) return <ErrorState error={setupQuery.error} retry={() => void setupQuery.refetch()} />;
+  const setup = setupQuery.data;
+  if (!setup) return <LoadingState label="Loading setup status" />;
+
+  const hasUsers = (usersQuery.data?.length ?? 0) > 0;
+  const instanceDomain = instanceQuery.data?.domain ?? "";
+  const sshHost = instanceDomain || (typeof window !== "undefined" ? window.location.hostname : "your-server");
+  const recoveryEmail = usersQuery.data?.[0]?.email ?? inviteEmail ?? "admin@example.com";
+
+  // Find passkey count from checks
+  const adminCheck = setup.checks.find((c) => c.id === "admin_passkeys");
+  const passkeyCount = adminCheck?.passkey_count ?? 0;
+  const passkeyTarget = adminCheck?.target ?? 2;
+
+  return (
+    <div className="page">
+      <PageHeader
+        eyebrow="Setup"
+        title="Continue setup"
+        description="Complete Cloudflare, app provisioning, and passkey enrollment."
+        actions={
+          <button className="button secondary" type="button" onClick={() => void reconcileMutation.mutate()} disabled={reconcileMutation.isPending}>
+            {reconcileMutation.isPending ? "Retrying…" : "Retry reconcile"}
+          </button>
+        }
+      />
+
+      {setup.state === "waiting_for_cloudflare" && (
+        <Section title="Cloudflare" description="Enter your domain and scoped API tokens to enable DNS and tunnel.">
+          <div className="form-stack">
+            <label className="field">
+              <span>Domain</span>
+              <input value={domain} onChange={(e) => setDomain(e.target.value)} placeholder="example.com" />
+            </label>
+            <label className="field">
+              <span>Token A (DNS, Zone:Read — cloudflare_dns)</span>
+              <input type="password" value={dnsToken} onChange={(e) => setDnsToken(e.target.value)} placeholder="dns token" />
+            </label>
+            <label className="field">
+              <span>Token B (Tunnel — cloudflare_tunnel)</span>
+              <input type="password" value={tunnelToken} onChange={(e) => setTunnelToken(e.target.value)} placeholder="tunnel token (optional)" />
+            </label>
+            <label className="field">
+              <span>Zone ID (optional — cloudflare_zone_id)</span>
+              <input value={zoneId} onChange={(e) => setZoneId(e.target.value)} placeholder="zone id" />
+            </label>
+            <label className="field">
+              <span>Account ID (optional — cloudflare_account_id)</span>
+              <input value={accountId} onChange={(e) => setAccountId(e.target.value)} placeholder="account id" />
+            </label>
+            <button className="button primary" type="button" onClick={() => void cloudflareMutation.mutate()} disabled={cloudflareMutation.isPending}>
+              {cloudflareMutation.isPending ? "Saving…" : "Save and reconcile"}
+            </button>
+            {cloudflareMutation.isError && (
+              <p className="inline-error" role="alert">{cloudflareMutation.error instanceof Error ? cloudflareMutation.error.message : "Save failed"}</p>
+            )}
+          </div>
+        </Section>
+      )}
+
+      <Checklist setup={setup} />
+
+      <Section title="Admin passkeys" description="Invite an admin and register passkeys via Pocket ID.">
+        {!hasUsers ? (
+          <div className="form-stack">
+            <p>No admin user yet. Invite the first administrator:</p>
+            <label className="field">
+              <span>Name</span>
+              <input value={inviteName} onChange={(e) => setInviteName(e.target.value)} placeholder="Alice" />
+            </label>
+            <label className="field">
+              <span>Email</span>
+              <input type="email" value={inviteEmail} onChange={(e) => setInviteEmail(e.target.value)} placeholder="alice@example.com" />
+            </label>
+            <button className="button primary" type="button" onClick={() => void inviteMutation.mutate()} disabled={inviteMutation.isPending}>
+              {inviteMutation.isPending ? "Inviting…" : "Create admin and get enrollment link"}
+            </button>
+            {inviteMutation.isError && (
+              <p className="inline-error" role="alert">{inviteMutation.error instanceof Error ? inviteMutation.error.message : "Invite failed"}</p>
+            )}
+          </div>
+        ) : (
+          <p>{usersQuery.data?.length ?? 0} user(s) registered.</p>
+        )}
+
+        {enrollmentUrl && (
+          <div style={{ marginTop: 12, padding: 12, border: "1px solid var(--border, #ddd)", borderRadius: 6 }}>
+            <p>
+              <strong>Enrollment link:</strong> <a href={enrollmentUrl} target="_blank" rel="noreferrer">{enrollmentUrl}</a>{" "}
+              <CopyButton text={enrollmentUrl} label="Copy" />
+            </p>
+            {enrollmentExpires && <small>Expires {enrollmentExpires}</small>}
+            <p style={{ marginTop: 8 }}><small>Open this link in the admin’s browser to register a passkey on Pocket ID.</small></p>
+          </div>
+        )}
+
+        <div style={{ marginTop: 12 }}>
+          <span>Passkeys: {passkeyCount}/{passkeyTarget}</span>
+          <button className="button secondary" type="button" style={{ marginLeft: 8 }} onClick={() => { void setupQuery.refetch(); void usersQuery.refetch(); }}>
+            Refresh
+          </button>
+        </div>
+      </Section>
+
+      <Section title="Recovery" description="Test recovery while you have root access.">
+        <p>Run on the server as root to test recovery for {recoveryEmail}:</p>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", background: "var(--surface-muted, #f6f6f6)", padding: 8, borderRadius: 6 }}>
+          <code style={{ flex: 1, wordBreak: "break-all" }}>ssh {sshHost} sudo omahab identity recover {recoveryEmail}</code>
+          <CopyButton text={`ssh ${sshHost} sudo omahab identity recover ${recoveryEmail}`} label="Copy" />
+        </div>
+        <p style={{ marginTop: 8 }}>
+          Status:{" "}
+          {setup.checks.find((c) => c.id === "recovery_tested")?.status === "ok" ? (
+            <StatusPill value="ok" />
+          ) : (
+            <StatusPill value={setup.checks.find((c) => c.id === "recovery_tested")?.status ?? "pending"} />
+          )}
+        </p>
+      </Section>
+    </div>
+  );
+}

@@ -9,8 +9,9 @@ networks:
     external: true
 services:
   caddy:
-    image: docker.io/library/caddy@sha256:${CADDY_DIGEST:?pinned digest required - release substitution missing}
+    image: ghcr.io/caddybuilds/caddy-cloudflare@sha256:${CADDY_DIGEST:?pinned digest required - release substitution missing}
     restart: unless-stopped
+    command: ["caddy", "run", "--config", "/etc/caddy/caddy.json"]
     # Edge is the only bundle that publishes host ports. All other bundles use `expose` and are reachable via Caddy.
     ports:
       - "80:80"
@@ -19,8 +20,10 @@ services:
     volumes:
       - caddy_data:/data
       - caddy_config:/config
-      - /etc/omahab/Caddyfile:/etc/caddy/Caddyfile:ro
+      - /etc/omahab/caddy.json:/etc/caddy/caddy.json:ro
       - /var/lib/omahab/caddy:/var/lib/caddy:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - omahab
     healthcheck:

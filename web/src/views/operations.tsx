@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../auth";
 import type { Application, Backup, Exposure, Project, Release } from "../api/types";
@@ -70,6 +71,7 @@ export function OverviewPage() {
   const applications = useQuery({ queryKey: ["applications"], queryFn: client.applications });
   const backups = useQuery({ queryKey: ["backups"], queryFn: client.backups });
   const events = useQuery({ queryKey: ["events"], queryFn: client.events });
+  const setup = useQuery({ queryKey: ["setup"], queryFn: client.setup, retry: false, staleTime: 30_000 });
 
   if (status.isLoading) return <LoadingState label="Checking your server" />;
   if (status.isError) return <ErrorState error={status.error} retry={() => void status.refetch()} />;
@@ -81,9 +83,13 @@ export function OverviewPage() {
     undefined,
   );
   const unread = events.data?.filter((event) => !event.read_at) ?? [];
-
   return (
     <div className="page">
+      {setup.data && setup.data.state !== "complete" && (
+        <div className="banner-card" style={{ background: "var(--warning-muted, #fff3cd)", border: "1px solid var(--warning, #f59e0b)", padding: 12, borderRadius: 8, marginBottom: 16 }}>
+          <strong>Setup is not finished</strong> — <Link to="/setup">Continue setup</Link>
+        </div>
+      )}
       <PageHeader eyebrow="At a glance" title="Your server" description="Health, recovery readiness, and changes that need attention." />
       <div className="metric-strip">
         <article><span>Control plane</span><strong><StatusPill value={status.data.health} /></strong><small>Version {status.data.version}</small></article>

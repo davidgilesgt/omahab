@@ -63,6 +63,29 @@ paths:
               schema: { $ref: '#/components/schemas/Instance' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '500': { $ref: '#/components/responses/Error' }
+    put:
+      summary: Update instance identity
+      operationId: updateInstance
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [domain]
+              properties:
+                domain: { type: string, example: example.com }
+                assistant_name: { type: string, example: My Assistant }
+              additionalProperties: false
+      responses:
+        '200':
+          description: Updated instance
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Instance' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/Error' }
 
   /api/v1/catalog:
     get:
@@ -965,6 +988,47 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
 
+  /api/v1/setup:
+    get:
+      summary: Get first-run setup status
+      operationId: getSetup
+      responses:
+        '200':
+          description: Setup status
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SetupStatus' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/Error' }
+
+  /api/v1/setup/reconcile:
+    post:
+      summary: Trigger setup reconciler
+      operationId: triggerSetupReconcile
+      responses:
+        '200':
+          description: Reconcile started
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, example: reconciling }
+                  already_running: { type: boolean }
+        '202':
+          description: Reconcile already running
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, example: reconciling }
+                  already_running: { type: boolean }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/Error' }
+
   /api/v1/users/{id}/enrollment:
     get:
       summary: Get enrollment state per user (proxy from PocketID)
@@ -1236,6 +1300,9 @@ components:
         disabled: { type: boolean }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+        enrollment_url: { type: string, format: uri, nullable: true, description: "Expiring Pocket ID enrollment link returned only on user creation when Pocket ID is configured" }
+        enrollment_expires_at: { type: string, format: date-time, nullable: true, description: "Expiry of enrollment_url when present" }
+        pocket_user_id: { type: string, nullable: true, description: "Pocket ID user ID when provisioned" }
 
     ProviderCredential:
       type: object
@@ -1407,6 +1474,32 @@ components:
         id: { type: string }
         name: { type: string }
         friendly_name: { type: string }
+
+    SetupStatus:
+      type: object
+      required: [state, checks]
+      properties:
+        state: { type: string, enum: [waiting_for_cloudflare, reconciling, attention, complete] }
+        checks: { type: array, items: { $ref: '#/components/schemas/SetupCheck' } }
+
+    SetupCheck:
+      type: object
+      required: [id, status]
+      properties:
+        id: { type: string }
+        status: { type: string, enum: [ok, pending, failed, skipped] }
+        detail: { type: string }
+        apps: { type: array, items: { $ref: '#/components/schemas/SetupAppStatus' } }
+        passkey_count: { type: integer }
+        target: { type: integer }
+
+    SetupAppStatus:
+      type: object
+      required: [bundle_id, status]
+      properties:
+        bundle_id: { type: string }
+        status: { type: string, enum: [running, failed, pending] }
+        detail: { type: string }
 
     CreateProjectRequest:
       type: object

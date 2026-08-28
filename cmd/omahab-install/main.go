@@ -1442,6 +1442,52 @@ func verifyCloudflareTokenLive(ctx context.Context, token string) (ok bool, stat
 	return false, parsed.Result.Status, fmt.Sprintf("token status %q", parsed.Result.Status)
 }
 
+func resolveCloudflareZone(ctx context.Context, domain, token string) (zoneID, accountID string, err error) {
+	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	u := "https://api.cloudflare.com/client/v4/zones?name=" + url.QueryEscape(strings.TrimSpace(domain))
+	req, err := http.NewRequestWithContext(cctx, http.MethodGet, u, nil)
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(token))
+	req.Header.Set("Accept", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", "", fmt.Errorf("zone lookup failed: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", "", fmt.Errorf("HTTP %d — zone lookup failed (body: %s)", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var parsed struct {
+		Success bool `json:"success"`
+		Errors  []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+		Result []struct {
+			ID      string `json:"id"`
+			Account struct {
+				ID string `json:"id"`
+			} `json:"account"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return "", "", fmt.Errorf("zone lookup decode failed: %v", err)
+	}
+	if !parsed.Success {
+		msg := ""
+		if len(parsed.Errors) > 0 {
+			msg = parsed.Errors[0].Message
+		}
+		return "", "", fmt.Errorf("zone lookup not successful: %s", msg)
+	}
+	if len(parsed.Result) == 0 {
+		return "", "", fmt.Errorf("zone not found — domain not on this Cloudflare account or token lacks Zone:Read")
+	}
+	return parsed.Result[0].ID, parsed.Result[0].Account.ID, nil
+}
 func guideCloudflare(ctx context.Context, out output, probes installer.Probes) error {
 	if out.nonInteractive || out.jsonMode || !isTerminal(os.Stdin) {
 		return nil
@@ -1691,21 +1737,108 @@ func guideCloudflare(ctx context.Context, out output, probes installer.Probes) e
 		} else {
 			out.printf("     Token B (Tunnel+Access): %s skipped — private-only until added\n", hl("—"))
 		}
+		// Resolve zone/account IDs with Token A when available.
+		var zoneID, accountID string
+		if tokenA != "" {
+			out.printf("   Resolving Cloudflare zone for %s ...\n", hl(domain))
+			zid, aid, err := resolveCloudflareZone(ctx, domain, tokenA)
+			if err != nil {
+				out.printf("   %sWarning: could not resolve zone/account: %v%s\n", yellow, err, reset)
+				out.printf("     %sRemediation: domain not on this Cloudflare account / token lacks Zone:Read — you can set them later in the dashboard.%s\n", dim(""), reset)
+			} else {
+				zoneID = zid
+				accountID = aid
+				out.printf("   %s✓ resolved zone %s account %s%s\n", "\033[32m", hl(zoneID), hl(accountID), reset)
+			}
+		}
+		// Persist through freshly started daemon (StepDaemon already ran; admin token at ~/.config/omahab/token).
+		apiToken := readAPIToken(probes)
+		if apiToken == "" {
+			out.printf("   %sNote: daemon API token not readable — complete setup in dashboard.%s\n", yellow, reset)
+			nextURL := "http://<tailscale-ip>:8484"
+			if ip := tailscaleIP(ctx, probes); ip != "" {
+				if u := dashboardURL(ip, apiToken); u != "" {
+					nextURL = u
+				}
+			}
+			out.printf("\n   Next: open %s (over Tailscale) → Settings → Domain → confirm %s\n", hl(nextURL), hl(domain))
+			if strings.Contains(nextURL, "#token=") {
+				out.printf("   Administrator access — keep this link private. Anyone with the link has full access.\n")
+			}
+			return nil
+		}
+		// Helper to do authenticated JSON request with 10s timeout.
+		doAPI := func(method, path string, body any) (int, []byte, error) {
+			var buf bytes.Buffer
+			if body != nil {
+				if err := json.NewEncoder(&buf).Encode(body); err != nil {
+					return 0, nil, err
+				}
+			}
+			cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			url := "http://127.0.0.1:8484" + path
+			req, err := http.NewRequestWithContext(cctx, method, url, &buf)
+			if err != nil {
+				return 0, nil, err
+			}
+			req.Header.Set("Authorization", "Bearer "+apiToken)
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Accept", "application/json")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return 0, nil, err
+			}
+			defer resp.Body.Close()
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+			return resp.StatusCode, b, nil
+		}
+		// PUT /api/v1/instance {domain}
+		status, body, err := doAPI(http.MethodPut, "/api/v1/instance", map[string]string{"domain": domain})
+		if err != nil {
+			out.printf("   %sWarning: could not persist domain via API: %v%s\n", yellow, err, reset)
+		} else if status < 200 || status >= 300 {
+			out.printf("   %sWarning: PUT /api/v1/instance returned %d: %s%s\n", yellow, status, strings.TrimSpace(string(body)), reset)
+		} else {
+			out.printf("   %s✓ persisted domain %s via API%s\n", "\033[32m", hl(domain), reset)
+		}
+		// POST secrets helper
+		postSecret := func(name, value string) {
+			if strings.TrimSpace(value) == "" {
+				return
+			}
+			st, b2, err2 := doAPI(http.MethodPost, "/api/v1/secrets", map[string]string{"scope": "platform-app", "name": name, "value": value})
+			if err2 != nil {
+				out.printf("   %sWarning: could not persist secret %s: %v%s\n", yellow, name, err2, reset)
+				return
+			}
+			if st < 200 || st >= 300 {
+				// 409 conflict means already exists — try update via PUT /secrets/{id}? Instead try to list and update.
+				// For now report; dashboard can overwrite.
+				out.printf("   %sNote: POST secret %s returned %d: %s%s\n", yellow, name, st, strings.TrimSpace(string(b2)), reset)
+				return
+			}
+			out.printf("   %s✓ persisted secret %s%s\n", "\033[32m", name, reset)
+		}
+		postSecret("cloudflare_dns", tokenA)
+		postSecret("cloudflare_tunnel", tokenB)
+		if zoneID != "" {
+			postSecret("cloudflare_zone_id", zoneID)
+		}
+		if accountID != "" {
+			postSecret("cloudflare_account_id", accountID)
+		}
 		nextURL := "http://<tailscale-ip>:8484"
 		if ip := tailscaleIP(ctx, probes); ip != "" {
-			if u := dashboardURL(ip, readAPIToken(probes)); u != "" {
+			if u := dashboardURL(ip, apiToken); u != "" {
 				nextURL = u
 			}
 		}
-		out.printf("\n   Next: open %s (over Tailscale) → Settings → Domain → confirm %s\n", hl(nextURL), hl(domain))
+		out.printf("\n   Next: open %s (over Tailscale) → dashboard will continue setup automatically.\n", hl(nextURL))
 		if strings.Contains(nextURL, "#token=") {
 			out.printf("   Administrator access — keep this link private. Anyone with the link has full access.\n")
 		}
-		out.printf("   Paste the same token(s) there if the installer did not persist them automatically;\n")
-		out.printf("   the dashboard stores them encrypted in %s (never echoed back).\n", hl("/var/lib/omahab/secrets"))
-		_ = domain
-		_ = tokenA
-		_ = tokenB
+		out.printf("   Secrets are stored encrypted in %s (never echoed back).\n", hl("/var/lib/omahab/secrets"))
 	}
 	return nil
 }
