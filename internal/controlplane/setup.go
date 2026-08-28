@@ -355,7 +355,11 @@ func (b *Backend) setupPhaseTunnel(ctx context.Context) error {
 		return fmt.Errorf("write cloudflared env: %w", err)
 	}
 	if out, err := exec.CommandContext(ctx, "systemctl", "reset-failed", "cloudflared").CombinedOutput(); err != nil {
-		return fmt.Errorf("systemctl reset-failed cloudflared: %v: %s", err, strings.TrimSpace(string(out)))
+		msg := strings.TrimSpace(string(out))
+		lower := strings.ToLower(msg)
+		if !strings.Contains(lower, "not loaded") && !strings.Contains(lower, "not found") {
+			return fmt.Errorf("systemctl reset-failed cloudflared: %v: %s", err, msg)
+		}
 	}
 	if out, err := exec.CommandContext(ctx, "systemctl", "enable", "--now", "cloudflared").CombinedOutput(); err != nil {
 		return fmt.Errorf("systemctl enable --now cloudflared: %v: %s", err, strings.TrimSpace(string(out)))
