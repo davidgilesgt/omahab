@@ -698,12 +698,18 @@ func (b *Backend) ensureDefaultApp(ctx context.Context, bundle apps.Bundle, doma
 	switch existing.ObservedState {
 	case apps.ObservedRunning:
 		if existing.Digest == bundle.Digest {
-			if existing.Health == domain.HealthHealthy {
-				return nil
-			}
 			st, err := b.apps.CheckHealth(ctx, existing.ID)
-			if err != nil {
-				return err
+			if err != nil || st.Health != domain.HealthHealthy {
+				st, err = b.apps.Start(ctx, existing.ID)
+				if err != nil {
+					return err
+				}
+				if st.ObservedState == apps.ObservedRunning {
+					st, err = b.apps.CheckHealth(ctx, existing.ID)
+					if err != nil {
+						return err
+					}
+				}
 			}
 			return requireRunningHealthy(st)
 		}
