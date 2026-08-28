@@ -9,7 +9,8 @@ ConditionPathExists=/etc/omahab
 StartLimitIntervalSec=60
 StartLimitBurst=5
 [Service]
-Type=simple # binary does not sd_notify
+Type=simple
+# binary does not sd_notify
 ExecStart=/usr/bin/omahabd --config /etc/omahab/config.json
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure

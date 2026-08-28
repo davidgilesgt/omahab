@@ -338,6 +338,7 @@ func TestServiceRunEmitsEvents(t *testing.T) {
 		"systemd/cloudflared.service":         {Data: []byte("[Unit]\nDescription=test")},
 		"tmpfiles.d/omahab.conf":              {Data: []byte("test")},
 		"catalog/catalog.json":                {Data: []byte(`{"apps":[]}`)},
+		"catalog/apps-catalog.json":           {Data: []byte(`{"bundles":[]}`)},
 	})
 	opts := InstallOptions{Version: "0.0.0-test", UntilStep: StepManifest, StateDir: stateDir, RecoveryKey: pub, Emit: emit}
 	if _, err := svc.Run(ctx, opts); err != nil {

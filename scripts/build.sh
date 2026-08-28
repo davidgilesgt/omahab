@@ -49,6 +49,13 @@ if [[ ! -f web/dist/index.html ]]; then
   echo "error: web/dist/index.html not found after web build — dashboard build failed" >&2; exit 1
 fi
 
+echo "==> generating runtime catalog (scripts/gen-catalog.sh)"
+bash scripts/gen-catalog.sh
+if [[ ! -f deploy/catalog/apps-catalog.json ]]; then
+  echo "error: deploy/catalog/apps-catalog.json not found after catalog generation — refusing to stage assets" >&2
+  exit 1
+fi
+
 for arch in "${ARCHES[@]}"; do
   target="$OUTDIR/$arch"
   mkdir -p "$target"

@@ -797,6 +797,16 @@ func (s *Server) handleCreateUserRecovery(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusCreated, rec)
 }
 
+func (s *Server) handleIssueUserEnrollment(w http.ResponseWriter, r *http.Request) {
+	id := domain.ID(chi.URLParam(r, "id"))
+	u, err := s.backend.IssueUserEnrollment(r.Context(), id)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, u)
+}
+
 func (s *Server) handleIdentityRecover(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Email string `json:"email"`

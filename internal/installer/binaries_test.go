@@ -600,10 +600,11 @@ func TestBinariesInstallPaths(t *testing.T) {
 		"systemd/omahab-verify.timer":   &fstest.MapFile{Data: []byte("5")},
 		"systemd/cloudflared.service":   &fstest.MapFile{Data: []byte("6")},
 		"tmpfiles.d/omahab.conf":        &fstest.MapFile{Data: []byte("7")},
-		"catalog/a.json":                &fstest.MapFile{Data: []byte("{}")},
-		"catalog/b.json":                &fstest.MapFile{Data: []byte("{}")},
-		"catalog/nested/c.yml":          &fstest.MapFile{Data: []byte("c")},
-		"web/app/index.html":            &fstest.MapFile{Data: []byte("html")},
+		"catalog/a.json":                  &fstest.MapFile{Data: []byte("{}")},
+		"catalog/b.json":                  &fstest.MapFile{Data: []byte("{}")},
+		"catalog/apps-catalog.json":       &fstest.MapFile{Data: []byte("{}")},
+		"catalog/nested/c.yml":            &fstest.MapFile{Data: []byte("c")},
+		"web/app/index.html":              &fstest.MapFile{Data: []byte("html")},
 	}
 	m, err := InstallPaths(assets)
 	if err != nil {
@@ -621,6 +622,7 @@ func TestBinariesInstallPaths(t *testing.T) {
 		"/usr/lib/tmpfiles.d/omahab.conf":              0o644,
 		"/usr/share/omahab/catalog/a.json":             0o644,
 		"/usr/share/omahab/catalog/b.json":             0o644,
+		"/usr/share/omahab/catalog/apps-catalog.json":  0o644,
 		"/usr/share/omahab/catalog/nested/c.yml":       0o644,
 		"/usr/share/omahab/web/app/index.html":         0o644,
 	}
@@ -639,6 +641,7 @@ func TestBinariesInstallPaths(t *testing.T) {
 		"systemd/cloudflared.service":   &fstest.MapFile{Data: []byte("6")},
 		"tmpfiles.d/omahab.conf":        &fstest.MapFile{Data: []byte("7")},
 		"catalog/x.json":                &fstest.MapFile{Data: []byte("{}")},
+		"catalog/apps-catalog.json":     &fstest.MapFile{Data: []byte("{}")},
 	}
 	m2, err := InstallPaths(assets2)
 	if err != nil {
@@ -647,8 +650,8 @@ func TestBinariesInstallPaths(t *testing.T) {
 	if _, ok := m2["/usr/share/omahab/web/app/index.html"]; ok {
 		t.Fatal("unexpected web entry when web absent")
 	}
-	if len(m2) != 10 { // 2 bins + 6 units + 1 tmpfiles + 1 catalog
-		t.Fatalf("expected 10 entries without web, got %d: %v", len(m2), m2)
+	if len(m2) != 11 { // 2 bins + 6 units + 1 tmpfiles + 2 catalog
+		t.Fatalf("expected 11 entries without web, got %d: %v", len(m2), m2)
 	}
 	// Missing required should error and mention missing
 	bad := fstest.MapFS{
@@ -685,6 +688,7 @@ func TestBinariesSHA256BestEffort(t *testing.T) {
 		"systemd/cloudflared.service":   &fstest.MapFile{Data: []byte("6")},
 		"tmpfiles.d/omahab.conf":        &fstest.MapFile{Data: []byte("7")},
 		"catalog/c.json":                &fstest.MapFile{Data: []byte("{}")},
+		"catalog/apps-catalog.json":     &fstest.MapFile{Data: []byte("{}")},
 	}
 
 	// SHA256File fails for one binary — step should still complete
@@ -767,6 +771,7 @@ func TestBinariesWriteFailurePropagation(t *testing.T) {
 		"systemd/cloudflared.service":   &fstest.MapFile{Data: []byte("6")},
 		"tmpfiles.d/omahab.conf":        &fstest.MapFile{Data: []byte("7")},
 		"catalog/c.json":                &fstest.MapFile{Data: []byte("{}")},
+		"catalog/apps-catalog.json":     &fstest.MapFile{Data: []byte("{}")},
 	}
 	svc := newBinariesService(t, Probes{
 		MkdirAll: func(p string, perm uint32) error { return errors.New("mkdir failed") },

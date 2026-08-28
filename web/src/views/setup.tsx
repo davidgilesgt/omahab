@@ -103,20 +103,42 @@ export function SetupPage() {
   const inviteMutation = useMutation({
     mutationFn: async () => {
       if (!inviteEmail.trim() || !inviteName.trim()) throw new Error("Name and email required");
-      const user = await client.createUser({ name: inviteName.trim(), email: inviteEmail.trim() });
+      const user = await client.createUser({ name: inviteName.trim(), email: inviteEmail.trim(), groups: ["admins"] });
       return user;
     },
     onSuccess: (user) => {
-      toast.success("Invite created");
       if (user.enrollment_url) {
         setEnrollmentUrl(user.enrollment_url);
         setEnrollmentExpires(user.enrollment_expires_at ?? null);
+        toast.success("Invite created");
+      } else {
+        toast.error("Pocket ID is not ready — wait until core apps include pocket-id, then use Get enrollment link");
       }
       void queryClient.invalidateQueries({ queryKey: ["users"] });
       void queryClient.invalidateQueries({ queryKey: ["setup"] });
     },
     onError: (err) => toast.error(err instanceof Error ? err.message : "Invite failed"),
   });
+
+  const enrollmentMutation = useMutation({
+    mutationFn: async () => {
+      const user = usersQuery.data?.[0];
+      if (!user) throw new Error("No user");
+      const updated = await client.issueEnrollment(user.id);
+      return updated;
+    },
+    onSuccess: (user) => {
+      if (user.enrollment_url) {
+        setEnrollmentUrl(user.enrollment_url);
+        setEnrollmentExpires(user.enrollment_expires_at ?? null);
+        toast.success("Enrollment link ready");
+      }
+      void queryClient.invalidateQueries({ queryKey: ["users"] });
+      void queryClient.invalidateQueries({ queryKey: ["setup"] });
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Enrollment failed"),
+  });
+
 
   if (setupQuery.isLoading) return <LoadingState label="Loading setup status" />;
   if (setupQuery.isError) return <ErrorState error={setupQuery.error} retry={() => void setupQuery.refetch()} />;
@@ -132,6 +154,10 @@ export function SetupPage() {
   const adminCheck = setup.checks.find((c) => c.id === "admin_passkeys");
   const passkeyCount = adminCheck?.passkey_count ?? 0;
   const passkeyTarget = adminCheck?.target ?? 2;
+  const coreAppsCheck = setup.checks.find((c) => c.id === "core_apps");
+  const isCoreAppsOk = coreAppsCheck?.status === "ok";
+  const isIdentityNotConfigured = adminCheck?.detail?.includes("identity not configured");
+  const inviteDisabled = inviteMutation.isPending || !isCoreAppsOk || !!isIdentityNotConfigured;
 
   return (
     <div className="page">
@@ -193,15 +219,26 @@ export function SetupPage() {
               <span>Email</span>
               <input type="email" value={inviteEmail} onChange={(e) => setInviteEmail(e.target.value)} placeholder="alice@example.com" />
             </label>
-            <button className="button primary" type="button" onClick={() => void inviteMutation.mutate()} disabled={inviteMutation.isPending}>
+            <button className="button primary" type="button" onClick={() => void inviteMutation.mutate()} disabled={inviteDisabled}>
               {inviteMutation.isPending ? "Inviting…" : "Create admin and get enrollment link"}
             </button>
+            {(!isCoreAppsOk || isIdentityNotConfigured) && (
+              <p className="inline-error" role="alert">Complete core apps and Pocket ID setup first — check the checklist above.</p>
+            )}
             {inviteMutation.isError && (
               <p className="inline-error" role="alert">{inviteMutation.error instanceof Error ? inviteMutation.error.message : "Invite failed"}</p>
             )}
           </div>
         ) : (
-          <p>{usersQuery.data?.length ?? 0} user(s) registered.</p>
+          <div>
+            <p>{usersQuery.data?.length ?? 0} user(s) registered.</p>
+            <button className="button primary" type="button" onClick={() => void enrollmentMutation.mutate()} disabled={enrollmentMutation.isPending}>
+              {enrollmentMutation.isPending ? "Getting link…" : "Get enrollment link"}
+            </button>
+            {enrollmentMutation.isError && (
+              <p className="inline-error" role="alert">{enrollmentMutation.error instanceof Error ? enrollmentMutation.error.message : "Enrollment failed"}</p>
+            )}
+          </div>
         )}
 
         {enrollmentUrl && (

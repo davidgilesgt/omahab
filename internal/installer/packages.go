@@ -184,6 +184,56 @@ func (s *Service) runPackagesStep(ctx context.Context, opts InstallOptions) RunR
 		}
 	}
 
+	// 7. Ensure cloudflared system user and data dir (for User=cloudflared unit).
+	{
+		// Check if user exists via LookupUser or getent.
+		userExists := false
+		if s.probes.LookupUser != nil {
+			if _, _, _, err := s.probes.LookupUser("cloudflared"); err == nil {
+				userExists = true
+			}
+		} else if s.probes.CommandOutput != nil {
+			if _, err := s.probes.CommandOutput(ctx, "getent", "passwd", "cloudflared"); err == nil {
+				userExists = true
+			}
+		}
+		if !userExists {
+			emit("creating cloudflared system user")
+			if s.probes.CommandOutput != nil {
+				if _, err := s.probes.CommandOutput(ctx, "useradd", "--system", "--home-dir", "/var/lib/cloudflared", "--create-home", "--shell", "/usr/sbin/nologin", "cloudflared"); err != nil {
+					emit(fmt.Sprintf("useradd cloudflared failed (best-effort): %v", err))
+				} else {
+					emit("created cloudflared user")
+				}
+			}
+		} else {
+			emit("cloudflared user already present")
+		}
+		// Ensure /var/lib/cloudflared exists with correct perms.
+		if s.probes.CommandOutput != nil {
+			if _, err := s.probes.CommandOutput(ctx, "install", "-d", "-m", "0700", "-o", "cloudflared", "-g", "cloudflared", "/var/lib/cloudflared"); err != nil {
+				// Fallback via MkdirAll + Chown if install fails or user not yet resolvable.
+				if s.probes.MkdirAll != nil {
+					_ = s.probes.MkdirAll("/var/lib/cloudflared", 0o700)
+				}
+				if s.probes.LookupUser != nil {
+					if uid, gid, _, err2 := s.probes.LookupUser("cloudflared"); err2 == nil {
+						if s.probes.Chown != nil {
+							_ = s.probes.Chown("/var/lib/cloudflared", uid, gid)
+						}
+					}
+				}
+			}
+		} else if s.probes.MkdirAll != nil {
+			_ = s.probes.MkdirAll("/var/lib/cloudflared", 0o700)
+			if s.probes.LookupUser != nil && s.probes.Chown != nil {
+				if uid, gid, _, err := s.probes.LookupUser("cloudflared"); err == nil {
+					_ = s.probes.Chown("/var/lib/cloudflared", uid, gid)
+				}
+			}
+		}
+	}
+
 	return RunResult{Step: StepPackages, Status: JournalCompleted}
 }
 

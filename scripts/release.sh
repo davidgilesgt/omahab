@@ -19,75 +19,10 @@ echo "==> Go release $VERSION channel $CHANNEL epoch $SOURCE_DATE_EPOCH out $OUT
 # Go toolchain is required for catalog generation and installer builds.
 command -v go >/dev/null 2>&1 || { echo "error: go not found, cannot build" >&2; exit 1; }
 
-# 1) Resolve image digests — fail closed if any unavailable
-declare -A IMAGE_REPOS=(
-  [caddy]="docker.io/library/caddy:alpine"
-  [pocket-id]="ghcr.io/pocket-id/pocket-id:latest"
-  [forgejo]="codeberg.org/forgejo/forgejo:11"
-  [postgres]="docker.io/library/postgres:16-alpine"
-  [redis]="docker.io/library/redis:7-alpine"
-  [woodpecker-server]="docker.io/woodpeckerci/woodpecker-server:latest"
-  [woodpecker-agent]="docker.io/woodpeckerci/woodpecker-agent:latest"
-  [hermes]="ghcr.io/omahab/hermes:latest"
-  [immich-server]="ghcr.io/immich-app/immich-server:release"
-  [immich-ml]="ghcr.io/immich-app/immich-machine-learning:release"
-  [immich-pgvecto]="ghcr.io/immich-app/pgvecto:release"
-  [paperless-ngx]="ghcr.io/paperless-ngx/paperless-ngx:latest"
-  [gotenberg]="docker.io/gotenberg/gotenberg:latest"
-  [tika]="docker.io/apache/tika:latest"
-  [karakeep]="ghcr.io/karakeep-app/karakeep:latest"
-  [meilisearch]="docker.io/getmeili/meilisearch:latest"
-  [karakeep-chrome]="docker.io/browserless/chrome:latest"
-  [syncthing]="docker.io/syncthing/syncthing:latest"
-  [litellm]="ghcr.io/berriai/litellm:main-latest"
-  [embedding-worker]="ghcr.io/omahab/embedding-worker:latest"
-  [ntfy]="docker.io/binwiederhier/ntfy:latest"
-)
-IMAGES_JSON="{"
-first=1
-for key in "${!IMAGE_REPOS[@]}"; do
-  repo="${IMAGE_REPOS[$key]}"
-  digest=""
-  if command -v skopeo >/dev/null 2>&1; then
-    digest="$(skopeo inspect --format '{{.Digest}}' "docker://$repo" 2>/dev/null || true)"
-  elif command -v docker >/dev/null 2>&1; then
-    # Try docker manifest inspect
-    digest="$(docker manifest inspect "$repo" 2>/dev/null | grep -o '"digest": "sha256:[a-f0-9]\{64\}"' | head -n1 | cut -d'"' -f4 || true)"
-    if [[ -z "$digest" ]]; then
-      # Fallback: try to pull and inspect
-      digest="$(docker pull --quiet "$repo" 2>/dev/null | grep -o 'sha256:[a-f0-9]\{64\}' | head -n1 || true)"
-    fi
-  fi
-  if [[ -z "$digest" ]]; then
-    echo "error: digest unavailable for $key ($repo) — refusing to emit placeholder" >&2
-    echo "  query registries first (e.g., skopeo inspect docker://$repo) and ensure ghcr.io/omahab/* images are pushed" >&2
-    exit 1
-  fi
-  if ! [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]; then
-    echo "error: invalid digest for $key: $digest" >&2; exit 1
-  fi
-  if [[ "$digest" == "sha256:0000000000000000000000000000000000000000000000000000000000000000" ]]; then
-    echo "error: digest for $key is all-zero placeholder — rejected" >&2; exit 1
-  fi
-  if (( first )); then first=0; else IMAGES_JSON+=","; fi
-  IMAGES_JSON+="\"$key\": \"$digest\""
-done
-IMAGES_JSON+="}"
+# 1) Resolve image digests and generate runtime catalog (delegated to gen-catalog.sh)
+#    Required keys caddy/pocket-id fail closed; other keys are skipped if unavailable.
+bash scripts/gen-catalog.sh --out "$OUT"
 
-# 1b) Generate the runtime application catalog from the curated bundle
-#     definitions and the resolved digests, and stage it where the Debian
-#     packaging and the daemon (via /usr/share/omahab/catalog/) expect it.
-#     Validation is fail-closed: bundles whose images are not digest-pinned
-#     are rejected here, not at deploy time.
-#     This MUST happen BEFORE the installer is built because the installer
-#     embeds deploy/catalog/apps-catalog.json via internal/installer/assets/root.
-printf '%s\n' "$IMAGES_JSON" > "$OUT/image-digests.json"
-go run ./cmd/omahab-cataloggen \
-  -catalog deploy/catalog/catalog.json \
-  -compose-dir deploy/catalog \
-  -digests "$OUT/image-digests.json" \
-  -out "$OUT/apps-catalog.json"
-cp "$OUT/apps-catalog.json" deploy/catalog/apps-catalog.json
 
 # 1c) Build web dashboard assets deterministically (fail closed if not produced).
 command -v npm >/dev/null 2>&1 || { echo "error: npm not found — install Node.js and npm (on Debian 13/Ubuntu 26.04: apt-get install nodejs npm)" >&2; exit 1; }

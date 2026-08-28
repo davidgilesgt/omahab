@@ -217,6 +217,11 @@ func (b *Backend) initServices(ctx context.Context) error {
 			if v, err := b.secrets.RevealByName(ctx, "platform-app", "hermes_oidc_client_secret"); err == nil && strings.TrimSpace(v) != "" {
 				env = append(env, "HERMES_OIDC_CLIENT_SECRET="+strings.TrimSpace(v))
 			}
+			if app.BundleID == "pocket-id" {
+				if v, err := b.secrets.RevealByName(ctx, "platform-app", "pocketid_api_key"); err == nil && strings.TrimSpace(v) != "" {
+					env = append(env, "STATIC_API_KEY="+strings.TrimSpace(v))
+				}
+			}
 		}
 		return env, nil
 	}
@@ -313,35 +318,24 @@ func (b *Backend) initServices(ctx context.Context) error {
 	}
 	b.scm = scm.New(b.db, forgejoClient, woodpeckerClient, secretsStoreAdapter{b.secrets}, newScmSink(b.events))
 
-	// identity with real PocketID client when creds available; otherwise expanded noop
-	pocketBase := secretOrEnv("pocketid_base_url", "OMAHAB_POCKETID_URL")
-	pocketID := secretOrEnv("pocketid_client_id", "OMAHAB_POCKETID_CLIENT_ID")
-	pocketSecret := secretOrEnv("pocketid_client_secret", "OMAHAB_POCKETID_CLIENT_SECRET")
-	if pocketBase != "" && pocketID != "" && pocketSecret != "" {
-		if client, err := identity.NewPocketIDClient(identity.PocketIDConfig{BaseURL: pocketBase, ClientID: pocketID, ClientSecret: pocketSecret}); err == nil {
-			b.identity, _ = identity.New(b.db, client, identity.WithRecorder(newIdentitySink(b.events)))
-			b.pocketClient = client
-			// best-effort provision defaults
-			if err := client.ConfigureDefaults(ctx); err != nil {
-				_, _ = b.events.Publish(ctx, events.PublishInput{Type: "identity.recovery", Severity: "warning", Message: "pocketid configure defaults failed: " + err.Error()})
-			}
-			if err := client.SeedDefaultGroups(ctx); err != nil {
-				_, _ = b.events.Publish(ctx, events.PublishInput{Type: "identity.recovery", Severity: "warning", Message: "pocketid seed groups failed: " + err.Error()})
-			}
-		} else {
-			b.identity, _ = identity.New(b.db, &noopPocketID{})
-		}
-	} else {
-		b.identity, _ = identity.New(b.db, &noopPocketID{})
-	}
+	// identity with real PocketID client when api key available; otherwise noop
+	b.identity, _ = identity.New(b.db, &noopPocketID{})
+	_ = b.bindPocketID(ctx)
 
 	// integrations with real HassRunner
 	b.integrations = integrations.New(b.db, secretsStoreAdapter{b.secrets}, integrations.NewHassRunner(integrations.HassRunnerOptions{}))
 
 	// health with all real probes
 	var pocketProbe health.PocketIDProbe = health.NoopPocketIDProbe{}
-	if pocketBase != "" {
-		pocketProbe = health.NewPocketIDProbe(pocketBase)
+	if b.pocketClient != nil {
+		// Use loopback base for health check when pocket-id client is configured
+		pocketProbe = health.NewPocketIDProbe("http://127.0.0.1:1411")
+		// Prefer explicit base from secret/env if present
+		if v, err := b.secrets.RevealByName(ctx, "platform-app", "pocketid_base_url"); err == nil && strings.TrimSpace(v) != "" {
+			pocketProbe = health.NewPocketIDProbe(strings.TrimSpace(v))
+		} else if v := strings.TrimSpace(os.Getenv("OMAHAB_POCKETID_URL")); v != "" {
+			pocketProbe = health.NewPocketIDProbe(v)
+		}
 	}
 	b.health = health.New(health.Options{
 		DB:         b.db,
@@ -400,6 +394,56 @@ func (b *Backend) initServices(ctx context.Context) error {
 	runner := workspaces.NewDevPodRunner(workspaces.DevPodRunnerConfig{WorkspacesDir: workspacesDir, RepoResolver: repoResolver})
 	b.workspaces = workspaces.New(b.db, runner)
 
+	return nil
+}
+
+func (b *Backend) bindPocketID(ctx context.Context) error {
+	if b.secrets == nil || b.store == nil {
+		return fmt.Errorf("secrets or store not initialized")
+	}
+	apiKey := ""
+	if v, err := b.secrets.RevealByName(ctx, "platform-app", "pocketid_api_key"); err == nil && strings.TrimSpace(v) != "" {
+		apiKey = strings.TrimSpace(v)
+	}
+	if apiKey == "" {
+		apiKey = strings.TrimSpace(os.Getenv("OMAHAB_POCKETID_API_KEY"))
+	}
+	if apiKey == "" {
+		return fmt.Errorf("%w: pocketid_api_key not configured", ErrNotConfigured)
+	}
+	base := ""
+	if v, err := b.secrets.RevealByName(ctx, "platform-app", "pocketid_base_url"); err == nil && strings.TrimSpace(v) != "" {
+		base = strings.TrimSpace(v)
+	}
+	if base == "" {
+		base = strings.TrimSpace(os.Getenv("OMAHAB_POCKETID_URL"))
+	}
+	if base == "" {
+		base = "http://127.0.0.1:1411"
+	}
+	publicURL := base
+	if inst, err := b.store.Instance(ctx); err == nil {
+		domain := strings.TrimSpace(inst.Domain)
+		if domain != "" && domain != "example.com" && domain != "not-configured.invalid" {
+			publicURL = "https://id." + domain
+		}
+	}
+	client, err := identity.NewPocketIDClient(identity.PocketIDConfig{BaseURL: base, PublicURL: publicURL, APIKey: apiKey})
+	if err != nil {
+		return err
+	}
+	ident, err := identity.New(b.db, client, identity.WithRecorder(newIdentitySink(b.events)))
+	if err != nil {
+		return err
+	}
+	b.pocketClient = client
+	b.identity = ident
+	if err := client.ConfigureDefaults(ctx); err != nil {
+		_, _ = b.events.Publish(ctx, events.PublishInput{Type: "identity.recovery", Severity: "warning", Message: "pocketid configure defaults failed: " + err.Error()})
+	}
+	if err := client.SeedDefaultGroups(ctx); err != nil {
+		_, _ = b.events.Publish(ctx, events.PublishInput{Type: "identity.recovery", Severity: "warning", Message: "pocketid seed groups failed: " + err.Error()})
+	}
 	return nil
 }
 
@@ -1204,7 +1248,10 @@ func (b *Backend) CreateSecret(ctx context.Context, req api.CreateSecretRequest)
 	if strings.TrimSpace(req.Value) == "" {
 		return domain.Secret{}, translateError(fmt.Errorf("%w: value is required", store.ErrValidation))
 	}
-	s, err := b.secrets.Put(ctx, req.Scope, req.Name, req.Value)
+	if err := upsertSecret(ctx, b.secrets, req.Scope, req.Name, req.Value); err != nil {
+		return domain.Secret{}, translateError(err)
+	}
+	s, err := b.secrets.GetByName(ctx, req.Scope, req.Name)
 	if err != nil {
 		return domain.Secret{}, translateError(err)
 	}
@@ -1525,6 +1572,9 @@ func (b *Backend) ListUsers(ctx context.Context, p api.Pagination) ([]domain.Use
 		}
 		var groups []string
 		_ = json.Unmarshal([]byte(groupsJSON), &groups)
+		if groups == nil {
+			groups = []string{}
+		}
 		ct, _ := store.ParseTime(created)
 		ut, _ := store.ParseTime(updated)
 		out = append(out, domain.User{
@@ -1561,6 +1611,9 @@ func (b *Backend) GetUser(ctx context.Context, id domain.ID) (domain.User, error
 	}
 	var groups []string
 	_ = json.Unmarshal([]byte(groupsJSON), &groups)
+	if groups == nil {
+		groups = []string{}
+	}
 	ct, _ := store.ParseTime(created)
 	ut, _ := store.ParseTime(updated)
 	return domain.User{
@@ -1581,6 +1634,15 @@ func (b *Backend) CreateUser(ctx context.Context, req api.CreateUserRequest) (do
 	}
 	if strings.TrimSpace(req.Name) == "" {
 		return domain.User{}, translateError(fmt.Errorf("%w: name is required", store.ErrValidation))
+	}
+	if req.Groups == nil {
+		req.Groups = []string{}
+	}
+	if len(req.Groups) == 0 {
+		var count int
+		if err := b.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM controlplane_users`).Scan(&count); err == nil && count == 0 {
+			req.Groups = []string{"admins"}
+		}
 	}
 	id := store.NewID()
 	now := store.FormatTime(time.Now().UTC())
@@ -1623,11 +1685,9 @@ func (b *Backend) CreateUser(ctx context.Context, req api.CreateUserRequest) (do
 		} else if errors.Is(cerr, identity.ErrNotConfigured) || strings.Contains(cerr.Error(), "not configured") {
 			// noop client → current behavior unchanged
 		} else {
-			_, _ = b.events.Publish(ctx, events.PublishInput{
-				Type:     "identity.create_user_failed",
-				Severity: "warning",
-				Message:  "PocketID CreateUser failed for " + req.Email + ": " + cerr.Error(),
-			})
+			// Do not swallow Pocket ID errors when client is configured: rollback and return.
+			_, _ = b.db.ExecContext(ctx, `DELETE FROM controlplane_users WHERE id = ?`, id)
+			return domain.User{}, translateError(cerr)
 		}
 	}
 	u, err := b.GetUser(ctx, domain.ID(id))
@@ -1690,6 +1750,61 @@ func (b *Backend) DeleteUser(ctx context.Context, id domain.ID) error {
 		return translateError(fmt.Errorf("%w: user %q not found", store.ErrNotFound, id))
 	}
 	return nil
+}
+
+func (b *Backend) IssueUserEnrollment(ctx context.Context, id domain.ID) (domain.User, error) {
+	u, err := b.GetUser(ctx, id)
+	if err != nil {
+		return domain.User{}, err
+	}
+	// Try to bind Pocket ID if not yet configured (best-effort)
+	if b.pocketClient == nil {
+		_ = b.bindPocketID(ctx)
+	}
+	if strings.TrimSpace(u.PocketUserID) == "" {
+		if b.pocketClient == nil {
+			return domain.User{}, translateError(fmt.Errorf("%w: identity not configured", ErrNotConfigured))
+		}
+		isAdmin := false
+		for _, g := range u.Groups {
+			if g == "admins" || g == "admin" {
+				isAdmin = true
+				break
+			}
+		}
+		groupIDs := []string{}
+		if len(u.Groups) > 0 {
+			if groups, gerr := b.pocketClient.EnsureGroups(ctx, u.Groups); gerr == nil {
+				for _, grp := range groups {
+					groupIDs = append(groupIDs, grp.ID)
+				}
+			} else {
+				groupIDs = u.Groups
+			}
+		}
+		pid, url, exp, cerr := b.pocketClient.CreateUser(ctx, u.Email, u.Name, isAdmin, groupIDs)
+		if cerr != nil {
+			return domain.User{}, translateError(cerr)
+		}
+		_, _ = b.db.ExecContext(ctx, `UPDATE controlplane_users SET pocket_user_id = ? WHERE id = ?`, pid, string(id))
+		u.PocketUserID = pid
+		u.EnrollmentURL = &url
+		t := exp
+		u.EnrollmentExpiresAt = &t
+		return u, nil
+	}
+	// Existing pocket user: issue new one-time token
+	if b.pocketClient == nil {
+		return domain.User{}, translateError(fmt.Errorf("%w: identity not configured", ErrNotConfigured))
+	}
+	url, exp, err := b.pocketClient.IssueEnrollment(ctx, u.PocketUserID)
+	if err != nil {
+		return domain.User{}, translateError(err)
+	}
+	u.EnrollmentURL = &url
+	t := exp
+	u.EnrollmentExpiresAt = &t
+	return u, nil
 }
 
 func (b *Backend) CreateRecoverySession(ctx context.Context, email string) (api.RecoverySession, error) {

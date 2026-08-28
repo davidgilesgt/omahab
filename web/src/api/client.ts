@@ -133,6 +133,7 @@ export class ApiClient {
     this.request<User>(`/users/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ disabled }) });
   beginRecovery = (id: string) =>
     this.request<RecoverySession>(`/users/${encodeURIComponent(id)}/recovery`, { method: "POST", body: JSON.stringify({}) });
+  issueEnrollment = (id: string) => this.request<User>(`/users/${encodeURIComponent(id)}/enrollment`, { method: "POST", body: JSON.stringify({}) });
 
   instance = () => this.request<Instance>("/instance");
   updateInstance = (input: { domain: string; assistant_name?: string }) =>

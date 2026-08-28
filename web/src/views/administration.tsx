@@ -245,14 +245,32 @@ export function PeoplePage() {
   const [editingUser, setEditingUser] = useState<User | null>(null);
   const [editGroups, setEditGroups] = useState<string[]>([]);
   const [toggleTarget, setToggleTarget] = useState<User | null>(null);
+  const [enrollmentUrl, setEnrollmentUrl] = useState<string | null>(null);
+  const [enrollmentExpires, setEnrollmentExpires] = useState<string | null>(null);
   const create = useMutation({
     mutationFn: (input: { name: string; email: string; groups: string[] }) =>
       (client.createUser as unknown as (i: { name: string; email: string; groups: string[] }) => Promise<User>)(input),
-    onSuccess: () => {
+    onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["users"] });
+      if (data.enrollment_url) {
+        setEnrollmentUrl(data.enrollment_url);
+        setEnrollmentExpires(data.enrollment_expires_at ?? null);
+      }
       toast.success("Invite sent");
     },
     onError: (err) => toast.error(err instanceof Error ? err.message : "Invite failed"),
+  });
+  const enrollment = useMutation({
+    mutationFn: (id: string) => client.issueEnrollment(id),
+    onSuccess: (data) => {
+      if (data.enrollment_url) {
+        setEnrollmentUrl(data.enrollment_url);
+        setEnrollmentExpires(data.enrollment_expires_at ?? null);
+        toast.success("Enrollment link ready");
+      }
+      void queryClient.invalidateQueries({ queryKey: ["users"] });
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Enrollment failed"),
   });
   const update = useMutation({
     mutationFn: ({ id, disabled }: { id: string; disabled: boolean }) => client.setUserDisabled(id, disabled),
@@ -309,19 +327,20 @@ export function PeoplePage() {
 
   function openGroupEditor(user: User) {
     setEditingUser(user);
-    setEditGroups([...user.groups]);
+    setEditGroups([...(user.groups ?? [])]);
   }
 
   return (
     <div className="page">
       <PageHeader eyebrow="Identity" title="People and recovery" description="Pocket ID enrollment and short-lived recovery. Omahab never verifies passwords or passkeys itself." />
       {recovery && <section className="recovery-banner" role="status"><div><strong>Recovery session created</strong><p>Expires {formatDate(recovery.expires_at)}. Share it only with the intended person over a trusted channel.</p>{recovery.login_url && <a href={recovery.login_url} target="_blank" rel="noreferrer">Open recovery sign-in</a>}{recovery.code && <><output className="recovery-code" aria-label="One-time recovery code">{recovery.code}</output> <CopyButton text={recovery.code} label="Copy code" /></>}</div><button className="icon-button" type="button" onClick={() => setRecovery(null)} aria-label="Dismiss">×</button></section>}
+      {enrollmentUrl && <section className="recovery-banner" role="status"><div><strong>Enrollment link</strong><p><a href={enrollmentUrl} target="_blank" rel="noreferrer">{enrollmentUrl}</a> <CopyButton text={enrollmentUrl} label="Copy" /></p>{enrollmentExpires && <small>Expires {enrollmentExpires}</small>}<p><small>Open this link in the user’s browser to register a passkey.</small></p></div><button className="icon-button" type="button" onClick={() => setEnrollmentUrl(null)} aria-label="Dismiss">×</button></section>}
       <div className="split-grid wide-primary">
         <Section title="Users" description="Disable access without deleting identity history.">
           {query.isLoading ? <LoadingState label="Loading users" /> : query.isError ? <ErrorState error={query.error} retry={() => void query.refetch()} /> : !users.length ? <EmptyState title="No users" description="Invite the first person to begin Pocket ID enrollment." /> : (
-            <div className="compact-list">{users.map((user) => <div key={user.id}><div><strong>{user.name}</strong><span>{user.email} <CopyButton text={user.email} label="Copy" /></span><small>{user.groups.join(", ") || "No groups"}</small></div><StatusPill value={user.disabled ? "disabled" : "active"} /><div className="row-actions"><button className="button ghost" type="button" onClick={() => openGroupEditor(user)}>Groups</button><button className="button ghost" type="button" disabled={recover.isPending || user.disabled} onClick={() => recover.mutate(user.id)}>Recover</button><button className="button secondary" type="button" disabled={update.isPending} onClick={() => setToggleTarget(user)}>{user.disabled ? "Enable" : "Disable"}</button></div></div>)}</div>
+            <div className="compact-list">{users.map((user) => <div key={user.id}><div><strong>{user.name}</strong><span>{user.email} <CopyButton text={user.email} label="Copy" /></span><small>{(user.groups ?? []).join(", ") || "No groups"}</small></div><StatusPill value={user.disabled ? "disabled" : "active"} /><div className="row-actions"><button className="button ghost" type="button" onClick={() => openGroupEditor(user)}>Groups</button><button className="button ghost" type="button" disabled={recover.isPending || user.disabled} onClick={() => recover.mutate(user.id)}>Recover</button><button className="button ghost" type="button" disabled={enrollment.isPending} onClick={() => enrollment.mutate(user.id)}>Enrollment link</button><button className="button secondary" type="button" disabled={update.isPending} onClick={() => setToggleTarget(user)}>{user.disabled ? "Enable" : "Disable"}</button></div></div>)}</div>
           )}
-          <OperationError error={update.error ?? recover.error ?? updateGroups.error} />
+          <OperationError error={update.error ?? recover.error ?? updateGroups.error ?? enrollment.error} />
         </Section>
         <Section title="Invite user" description="The person completes passkey enrollment through Pocket ID.">
           <form className="form-stack" onSubmit={submit}>

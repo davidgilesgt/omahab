@@ -116,9 +116,30 @@ func run(args []string) error {
 	for _, cb := range doc.Bundles {
 		b, err := convert(cb, *composeDir, digests)
 		if err != nil {
+			if strings.Contains(err.Error(), "no resolved digest") {
+				fmt.Fprintf(os.Stderr, "warning: skip bundle %q: %v\n", cb.Name, err)
+				continue
+			}
 			return fmt.Errorf("bundle %q: %w", cb.Name, err)
 		}
 		bundles = append(bundles, b)
+	}
+	// Fail if required bundles are absent after skipping.
+	hasCaddy := false
+	hasPocketID := false
+	for _, b := range bundles {
+		if b.ID == "caddy" {
+			hasCaddy = true
+		}
+		if b.ID == "pocket-id" {
+			hasPocketID = true
+		}
+	}
+	if !hasCaddy {
+		return fmt.Errorf("generated catalog missing required bundle %q", "caddy")
+	}
+	if !hasPocketID {
+		return fmt.Errorf("generated catalog missing required bundle %q", "pocket-id")
 	}
 	if _, err := apps.NewCatalog(bundles...); err != nil {
 		return fmt.Errorf("generated catalog rejected by validation: %w", err)

@@ -14,7 +14,7 @@ func TestSeedDefaultGroups(t *testing.T) {
 	t.Run("success idempotent", func(t *testing.T) {
 		calls := 0
 		c, srv := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("Authorization") != basicAuthHeader("test-id", "test-secret") {
+			if r.Header.Get("X-API-KEY") != "test-secret" {
 				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
@@ -71,7 +71,7 @@ func TestConfigureDefaults(t *testing.T) {
 	t.Run("success disables email OTP and enforces webauthn", func(t *testing.T) {
 		var gotPut map[string]string
 		c, srv := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("Authorization") != basicAuthHeader("test-id", "test-secret") {
+			if r.Header.Get("X-API-KEY") != "test-secret" {
 				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
@@ -152,9 +152,9 @@ func TestConfigureDefaults(t *testing.T) {
 			t.Fatalf("want not configured, got %v", err)
 		}
 	})
-	t.Run("basic auth verified", func(t *testing.T) {
+	t.Run("api key verified", func(t *testing.T) {
 		c, srv := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("Authorization") != basicAuthHeader("test-id", "test-secret") {
+			if r.Header.Get("X-API-KEY") != "test-secret" {
 				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
@@ -179,7 +179,7 @@ func TestConfigureDefaults(t *testing.T) {
 func TestGetEnrollmentState(t *testing.T) {
 	t.Run("has passkey", func(t *testing.T) {
 		c, srv := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("Authorization") != basicAuthHeader("test-id", "test-secret") {
+			if r.Header.Get("X-API-KEY") != "test-secret" {
 				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
@@ -235,7 +235,7 @@ func TestGetEnrollmentState(t *testing.T) {
 	})
 	t.Run("auth header required", func(t *testing.T) {
 		c, srv := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("Authorization") != basicAuthHeader("test-id", "test-secret") {
+			if r.Header.Get("X-API-KEY") != "test-secret" {
 				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
@@ -258,7 +258,7 @@ func TestGetEnrollmentState(t *testing.T) {
 func TestListApplicationAccess(t *testing.T) {
 	t.Run("deduplicates clients across groups", func(t *testing.T) {
 		c, srv := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("Authorization") != basicAuthHeader("test-id", "test-secret") {
+			if r.Header.Get("X-API-KEY") != "test-secret" {
 				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
@@ -364,7 +364,7 @@ func TestListApplicationAccess(t *testing.T) {
 func TestProvisioningGroupAddRemove(t *testing.T) {
 	t.Run("add and remove via provisioning", func(t *testing.T) {
 		c, srv := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("Authorization") != basicAuthHeader("test-id", "test-secret") {
+			if r.Header.Get("X-API-KEY") != "test-secret" {
 				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
@@ -420,7 +420,7 @@ func TestEnsureGroupAndUpdateAppAccess(t *testing.T) {
 	})
 	t.Run("update app access", func(t *testing.T) {
 		c, srv := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("Authorization") != basicAuthHeader("test-id", "test-secret") {
+			if r.Header.Get("X-API-KEY") != "test-secret" {
 				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}

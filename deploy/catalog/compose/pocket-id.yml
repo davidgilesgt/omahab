@@ -11,12 +11,15 @@ services:
     restart: unless-stopped
     expose:
       - "1411"
+    ports:
+      - "127.0.0.1:1411:1411"
     environment:
       # omahabd templates non-secret env; secrets via *_FILE -> /run/secrets
       PUID: "1000"
       PGID: "1000"
-      PUBLIC_APP_URL: "https://id.${DOMAIN:?domain required}/"
+      APP_URL: "https://id.${DOMAIN:?domain required}/"
       TRUST_PROXY: "true"
+      STATIC_API_KEY: "${STATIC_API_KEY:?static api key required}"
       ENCRYPTION_KEY_FILE: /run/secrets/pocket_id_encryption_key
       MAXMIND_LICENSE_FILE: /run/secrets/maxmind_license
     secrets:

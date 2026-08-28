@@ -12,9 +12,11 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,34 +33,56 @@ import (
 var secretPatternRe = regexp.MustCompile(`(_password|_key|_secret|_api_key)$`)
 
 func (b *Backend) ensureTailscaleIP(ctx context.Context) error {
-	out, err := exec.CommandContext(ctx, "tailscale", "ip", "-4").CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("tailscale ip -4: %v output=%s", err, strings.TrimSpace(string(out)))
-	}
-	ipStr := strings.TrimSpace(string(out))
-	fields := strings.Fields(ipStr)
-	if len(fields) > 0 {
-		ipStr = fields[0]
-	}
-	ipStr = strings.TrimSpace(ipStr)
-	parsed := net.ParseIP(ipStr)
-	if parsed == nil || parsed.To4() == nil {
-		return fmt.Errorf("tailscale ip -4: invalid IPv4 %q", ipStr)
-	}
-	inst, err := b.store.Instance(ctx)
-	if err != nil {
-		return fmt.Errorf("load instance: %w", err)
-	}
-	if strings.TrimSpace(inst.TailscaleIP) != ipStr {
-		inst.TailscaleIP = ipStr
-		if _, err := b.store.SaveInstance(ctx, inst); err != nil {
-			return fmt.Errorf("save instance tailscale IP: %w", err)
+	deadline := time.Now().Add(90 * time.Second)
+	var lastErr error
+	var lastOut string
+	for {
+		out, err := exec.CommandContext(ctx, "tailscale", "ip", "-4").CombinedOutput()
+		lastOut = strings.TrimSpace(string(out))
+		if err == nil {
+			ipStr := lastOut
+			fields := strings.Fields(ipStr)
+			if len(fields) > 0 {
+				ipStr = fields[0]
+			}
+			ipStr = strings.TrimSpace(ipStr)
+			parsed := net.ParseIP(ipStr)
+			if parsed != nil && parsed.To4() != nil {
+				inst, err := b.store.Instance(ctx)
+				if err != nil {
+					return fmt.Errorf("load instance: %w", err)
+				}
+				if strings.TrimSpace(inst.TailscaleIP) != ipStr {
+					inst.TailscaleIP = ipStr
+					if _, err := b.store.SaveInstance(ctx, inst); err != nil {
+						return fmt.Errorf("save instance tailscale IP: %w", err)
+					}
+					if err := b.refreshExposure(ctx); err != nil {
+						log.Printf("ensureTailscaleIP: refreshExposure failed: %v", err)
+					}
+				}
+				return nil
+			}
+			lastErr = fmt.Errorf("tailscale ip -4: invalid IPv4 %q", ipStr)
+		} else {
+			lastErr = fmt.Errorf("tailscale ip -4: %v output=%s", err, lastOut)
 		}
-		if err := b.refreshExposure(ctx); err != nil {
-			log.Printf("ensureTailscaleIP: refreshExposure failed: %v", err)
+		// Retry on NeedsLogin or any transient error until deadline.
+		if strings.Contains(lastOut, "NeedsLogin") {
+			// keep retrying
+		}
+		if time.Now().After(deadline) {
+			if lastErr != nil {
+				return lastErr
+			}
+			return fmt.Errorf("tailscale ip -4: %v output=%s", fmt.Errorf("timeout after 90s"), lastOut)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Second):
 		}
 	}
-	return nil
 }
 
 func (b *Backend) writeBootstrapCaddyJSON(ctx context.Context, dnsToken string) error {
@@ -315,6 +339,7 @@ func (b *Backend) setupPhaseTunnel(ctx context.Context) error {
 	if err := writeCloudflaredConfig(id, token, accountID); err != nil {
 		log.Printf("setup tunnel: write cloudflared config failed (best-effort): %v", err)
 	} else {
+		_ = exec.CommandContext(ctx, "systemctl", "reset-failed", "cloudflared").Run()
 		cmd := exec.CommandContext(ctx, "systemctl", "enable", "--now", "cloudflared")
 		if out, err := cmd.CombinedOutput(); err != nil {
 			log.Printf("setup tunnel: systemctl enable --now cloudflared failed (best-effort): %v output=%s", err, string(out))
@@ -357,6 +382,18 @@ func writeCloudflaredConfig(tunnelID, token, accountID string) error {
 	}
 	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0o600); err != nil {
 		return err
+	}
+	// Chown to cloudflared user if it exists (ignore error if not present yet).
+	if u, err := user.Lookup("cloudflared"); err == nil {
+		if uid, err1 := strconv.Atoi(u.Uid); err1 == nil {
+			if gid, err2 := strconv.Atoi(u.Gid); err2 == nil {
+				_ = os.Chown(dir, uid, gid)
+				_ = os.Chown(cfgPath, uid, gid)
+				if fileExists(credsPath) {
+					_ = os.Chown(credsPath, uid, gid)
+				}
+			}
+		}
 	}
 	return nil
 }
@@ -402,6 +439,14 @@ func upsertSecret(ctx context.Context, svc storeService, scope, name, value stri
 
 // Secrets materialization
 func (b *Backend) setupPhaseSecrets(ctx context.Context) error {
+	// Always ensure platform-app/pocketid_api_key exists for Pocket ID loopback API, even if catalog is empty.
+	if b.secrets != nil {
+		if _, err := b.secrets.RevealByName(ctx, "platform-app", "pocketid_api_key"); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				_ = upsertSecret(ctx, b.secrets, "platform-app", "pocketid_api_key", generateRandomBase64URL(32))
+			}
+		}
+	}
 	if b.apps == nil {
 		return nil
 	}
@@ -538,6 +583,9 @@ func (b *Backend) setupPhaseCoreApps(ctx context.Context) error {
 		}
 	}
 	if len(defaultBundles) == 0 {
+		if _, err := os.Stat(b.cfg.CatalogPath); err != nil {
+			return fmt.Errorf("runtime catalog missing at %s", b.cfg.CatalogPath)
+		}
 		return nil
 	}
 	sorted, err := topoSortBundles(defaultBundles)
@@ -668,12 +716,22 @@ func topoSortBundles(bundles []apps.Bundle) ([]apps.Bundle, error) {
 
 // Phase 5: OIDC prerequisites
 func (b *Backend) setupPhaseOIDC(ctx context.Context) error {
+	_ = b.bindPocketID(ctx)
 	if b.pocketClient == nil {
+		// If pocket-id is installed but API not configured, fail hard; otherwise skip (private-only).
+		if b.apps != nil {
+			if list, err := b.apps.List(ctx); err == nil {
+				for _, st := range list {
+					if st.BundleID == "pocket-id" {
+						return fmt.Errorf("pocket-id admin API not configured")
+					}
+				}
+			}
+		}
 		log.Printf("setup oidc: skipped (pocket-id not configured)")
 		return nil
 	}
 	if err := b.pocketClient.HealthCheck(ctx); err != nil {
-		return fmt.Errorf("pocket-id not healthy: %w", err)
 	}
 	inst, err := b.store.Instance(ctx)
 	if err != nil {

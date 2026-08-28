@@ -93,6 +93,33 @@ func collectInstallEntries(fsys fs.FS) ([]installEntry, error) {
 			sort.Slice(catalogFiles, func(i, j int) bool { return catalogFiles[i].src < catalogFiles[j].src })
 			entries = append(entries, catalogFiles...)
 		}
+		// Ensure runtime catalog is present even if catalog.json exists.
+		hasRuntimeCatalog := false
+		for _, e := range catalogFiles {
+			if e.src == "catalog/apps-catalog.json" {
+				hasRuntimeCatalog = true
+				break
+			}
+		}
+		if !hasRuntimeCatalog {
+			if _, err := fs.Stat(fsys, "catalog/apps-catalog.json"); err != nil {
+				missing = append(missing, "catalog/apps-catalog.json")
+			}
+		}
+	}
+	if catalogErr != nil {
+		if _, err := fs.Stat(fsys, "catalog/apps-catalog.json"); err != nil {
+			found := false
+			for _, m := range missing {
+				if m == "catalog/apps-catalog.json" {
+					found = true
+					break
+				}
+			}
+			if !found {
+				missing = append(missing, "catalog/apps-catalog.json")
+			}
+		}
 	}
 
 	// web/** — optional subtree

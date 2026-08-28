@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
 	"strings"
 
 	"github.com/omahab/omahab/internal/api"
@@ -166,13 +167,15 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (api.SetupStatus, error) {
 		}
 	}
 	if len(defaultBundles) == 0 {
-		// No defaults — treat as skipped/ok depending on catalog presence.
 		if b.apps == nil {
 			coreCheck.Status = "pending"
 			coreCheck.Detail = "apps service not configured"
+		} else if _, err := os.Stat(b.cfg.CatalogPath); err != nil {
+			coreCheck.Status = "failed"
+			coreCheck.Detail = "runtime catalog missing at " + b.cfg.CatalogPath
 		} else {
-			coreCheck.Status = "ok"
-			coreCheck.Detail = "no default bundles"
+			coreCheck.Status = "pending"
+			coreCheck.Detail = "no default bundles in catalog"
 		}
 	} else {
 		// Build installed map by BundleID
@@ -258,9 +261,15 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (api.SetupStatus, error) {
 	passCheck := api.SetupCheck{ID: "admin_passkeys"}
 	target := 2
 	passCheck.Target = &target
-	// Find first admin user: ordered by created_at ASC limit 1
+	// Find first admin user: ordered by created_at ASC limit 1; use pocket_user_id for Pocket ID queries
 	var userID string
-	err := b.db.QueryRowContext(ctx, `SELECT id FROM controlplane_users ORDER BY created_at ASC LIMIT 1`).Scan(&userID)
+	var pocketID sql.NullString
+	err := b.db.QueryRowContext(ctx, `SELECT id, pocket_user_id FROM controlplane_users ORDER BY created_at ASC LIMIT 1`).Scan(&userID, &pocketID)
+	if err != nil && strings.Contains(err.Error(), "no such column") {
+		// Fallback for old schema without pocket_user_id
+		err = b.db.QueryRowContext(ctx, `SELECT id FROM controlplane_users ORDER BY created_at ASC LIMIT 1`).Scan(&userID)
+		pocketID = sql.NullString{}
+	}
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			zero := 0
@@ -274,46 +283,51 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (api.SetupStatus, error) {
 			passCheck.Detail = "user query failed: " + err.Error()
 		}
 	} else {
-		// Try to get enrollment state; if pocketClient not configured, treat as pending
-		var cnt int
-		var got bool
-		if b.pocketClient != nil {
-			if st, err := b.pocketClient.GetEnrollmentState(ctx, userID); err == nil {
-				cnt = st.CredentialCount
-				got = true
-			} else {
-				// Log detail but keep pending
-				passCheck.Detail = "enrollment query failed: " + err.Error()
-			}
+		enrollmentID := strings.TrimSpace(pocketID.String)
+		if enrollmentID == "" {
+			zero := 0
+			passCheck.PasskeyCount = &zero
+			passCheck.Status = "pending"
+			passCheck.Detail = "identity not configured"
 		} else {
-			// Try via backend helper which wraps pocketClient (may return not-configured)
-			if st, err := b.GetEnrollmentState(ctx, userID); err == nil {
-				cnt = st.CredentialCount
-				got = true
+			var cnt int
+			var got bool
+			if b.pocketClient != nil {
+				if st, err := b.pocketClient.GetEnrollmentState(ctx, enrollmentID); err == nil {
+					cnt = st.CredentialCount
+					got = true
+				} else {
+					passCheck.Detail = "enrollment query failed: " + err.Error()
+				}
 			} else {
-				if passCheck.Detail == "" {
-					passCheck.Detail = "identity not configured"
+				if st, err := b.GetEnrollmentState(ctx, enrollmentID); err == nil {
+					cnt = st.CredentialCount
+					got = true
+				} else {
+					if passCheck.Detail == "" {
+						passCheck.Detail = "identity not configured"
+					}
 				}
 			}
-		}
-		if got {
-			passCheck.PasskeyCount = &cnt
-			if cnt >= target {
-				passCheck.Status = "ok"
-				passCheck.Detail = "passkeys enrolled"
-			} else {
-				passCheck.Status = "pending"
-				if passCheck.Detail == "" {
-					passCheck.Detail = "need 2 passkeys"
+			if got {
+				passCheck.PasskeyCount = &cnt
+				if cnt >= target {
+					passCheck.Status = "ok"
+					passCheck.Detail = "passkeys enrolled"
+				} else {
+					passCheck.Status = "pending"
+					if passCheck.Detail == "" {
+						passCheck.Detail = "need 2 passkeys"
+					}
 				}
-			}
-		} else {
-			if passCheck.PasskeyCount == nil {
-				zero := 0
-				passCheck.PasskeyCount = &zero
-			}
-			if passCheck.Status == "" {
-				passCheck.Status = "pending"
+			} else {
+				if passCheck.PasskeyCount == nil {
+					zero := 0
+					passCheck.PasskeyCount = &zero
+				}
+				if passCheck.Status == "" {
+					passCheck.Status = "pending"
+				}
 			}
 		}
 	}

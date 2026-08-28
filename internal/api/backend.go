@@ -295,6 +295,7 @@ type Backend interface {
 	DeleteUser(ctx context.Context, id domain.ID) error
 	CreateRecoverySession(ctx context.Context, email string) (RecoverySession, error)
 	CreateUserRecoverySession(ctx context.Context, userID domain.ID) (RecoverySession, error)
+	IssueUserEnrollment(ctx context.Context, id domain.ID) (domain.User, error)
 
 	// Provider credentials (metadata only)
 	ListProviderCredentials(ctx context.Context, p Pagination) ([]ProviderCredential, error)

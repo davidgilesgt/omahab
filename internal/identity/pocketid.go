@@ -41,23 +41,22 @@ type AppAccess struct {
 }
 
 // PocketIDConfig holds the configuration for the PocketID admin API client.
-// The admin API uses HTTP Basic authentication with an API client id/secret
-// on /api/... endpoints (see github.com/stonith404/pocket-id).
+// The admin API uses X-API-KEY authentication (STATIC_API_KEY) on /api/... endpoints.
 type PocketIDConfig struct {
-	BaseURL      string
-	ClientID     string
-	ClientSecret string
-	HTTPClient   *http.Client
+	BaseURL    string
+	PublicURL  string
+	APIKey     string
+	HTTPClient *http.Client
 }
 
 // PocketIDClient is a stdlib net/http adapter for Pocket ID.
 // It converts Pocket ID's JSON DTOs to domain types at the boundary and
 // never leaks SDK types.
 type PocketIDClient struct {
-	baseURL      string
-	clientID     string
-	clientSecret string
-	httpClient   *http.Client
+	baseURL   string
+	publicURL string
+	apiKey    string
+	httpClient *http.Client
 }
 
 // NewPocketIDClient creates a new PocketID client.
@@ -76,25 +75,34 @@ func NewPocketIDClient(cfg PocketIDConfig) (*PocketIDClient, error) {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return nil, fmt.Errorf("invalid PocketID BaseURL scheme %q: must be http or https", u.Scheme)
 	}
-	if strings.TrimSpace(cfg.ClientID) == "" || strings.TrimSpace(cfg.ClientSecret) == "" {
-		return nil, fmt.Errorf("%w: ClientID and ClientSecret are required", ErrNotConfigured)
+	apiKey := strings.TrimSpace(cfg.APIKey)
+	if apiKey == "" {
+		return nil, fmt.Errorf("%w: APIKey is required", ErrNotConfigured)
+	}
+	publicURL := strings.TrimSpace(cfg.PublicURL)
+	if publicURL != "" {
+		publicURL = strings.TrimRight(publicURL, "/")
+		if pu, err := url.Parse(publicURL); err != nil {
+			return nil, fmt.Errorf("invalid PocketID PublicURL %q: %w", publicURL, err)
+		} else if pu.Scheme != "http" && pu.Scheme != "https" {
+			return nil, fmt.Errorf("invalid PocketID PublicURL scheme %q: must be http or https", pu.Scheme)
+		}
 	}
 	hc := cfg.HTTPClient
 	if hc == nil {
 		hc = &http.Client{Timeout: 10 * time.Second}
 	}
 	return &PocketIDClient{
-		baseURL:      base,
-		clientID:     cfg.ClientID,
-		clientSecret: cfg.ClientSecret,
-		httpClient:   hc,
+		baseURL:    base,
+		publicURL:  publicURL,
+		apiKey:     apiKey,
+		httpClient: hc,
 	}, nil
 }
 
 func (c *PocketIDClient) isConfigured() bool {
-	return c != nil && c.baseURL != "" && c.clientID != "" && c.clientSecret != ""
+	return c != nil && c.baseURL != "" && c.apiKey != ""
 }
-
 func (c *PocketIDClient) ensureConfigured() error {
 	if !c.isConfigured() {
 		return fmt.Errorf("%w: PocketID client not configured", ErrNotConfigured)
@@ -102,7 +110,14 @@ func (c *PocketIDClient) ensureConfigured() error {
 	return nil
 }
 
-// doJSON performs a JSON request with Basic auth and decodes the response.
+func (c *PocketIDClient) enrollmentBase() string {
+	if strings.TrimSpace(c.publicURL) != "" {
+		return strings.TrimRight(c.publicURL, "/")
+	}
+	return strings.TrimRight(c.baseURL, "/")
+}
+
+// doJSON performs a JSON request with X-API-KEY auth and decodes the response.
 func (c *PocketIDClient) doJSON(ctx context.Context, method, path string, reqBody any, respBody any) error {
 	if err := c.ensureConfigured(); err != nil {
 		return err
@@ -120,7 +135,7 @@ func (c *PocketIDClient) doJSON(ctx context.Context, method, path string, reqBod
 	if err != nil {
 		return fmt.Errorf("create request %s %s: %w", method, path, err)
 	}
-	req.SetBasicAuth(c.clientID, c.clientSecret)
+	req.Header.Set("X-API-KEY", c.apiKey)
 	req.Header.Set("Accept", "application/json")
 	if reqBody != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -318,7 +333,7 @@ func (c *PocketIDClient) CreateRecoveryCode(ctx context.Context, email string) (
 		return "", "", time.Time{}, err
 	}
 	expiresAt := time.Now().UTC().Add(ttl)
-	u := c.baseURL + "/lc/" + code
+	u := c.enrollmentBase() + "/lc/" + code
 	return code, u, expiresAt, nil
 }
 
@@ -385,6 +400,24 @@ func (c *PocketIDClient) createOneTimeToken(ctx context.Context, userID string, 
 	return code, nil
 }
 
+// IssueEnrollment creates a one-time enrollment URL for an existing Pocket ID user.
+func (c *PocketIDClient) IssueEnrollment(ctx context.Context, pocketUserID string) (string, time.Time, error) {
+	if strings.TrimSpace(pocketUserID) == "" {
+		return "", time.Time{}, store.Validation("pocketUserID is required")
+	}
+	if err := c.ensureConfigured(); err != nil {
+		return "", time.Time{}, err
+	}
+	ttl := DefaultRecoveryTTL
+	code, err := c.createOneTimeToken(ctx, pocketUserID, ttl)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	expiresAt := time.Now().UTC().Add(ttl)
+	u := c.enrollmentBase() + "/lc/" + code
+	return u, expiresAt, nil
+}
+
 // CreateUser creates a Pocket ID user and returns an expiring enrollment URL.
 // It sets the user as not yet enrolled; the caller must deliver the enrollment
 // link to the user. disableEmailOTP is honored by provisioning defaults, not per-call.
@@ -426,7 +459,7 @@ func (c *PocketIDClient) CreateUser(ctx context.Context, email, name string, isA
 		return created.ID, "", time.Time{}, err
 	}
 	expiresAt := time.Now().UTC().Add(ttl)
-	enrollmentURL := c.baseURL + "/lc/" + code
+	enrollmentURL := c.enrollmentBase() + "/lc/" + code
 	return created.ID, enrollmentURL, expiresAt, nil
 }
 

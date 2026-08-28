@@ -2,7 +2,6 @@ package identity
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -14,18 +13,17 @@ import (
 	"github.com/omahab/omahab/internal/store"
 )
 
-func basicAuthHeader(id, secret string) string {
-	return "Basic " + base64.StdEncoding.EncodeToString([]byte(id+":"+secret))
+func apiKeyHeader(key string) string {
+	return key
 }
 
 func newTestClient(t *testing.T, handler http.HandlerFunc) (*PocketIDClient, *httptest.Server) {
 	t.Helper()
 	srv := httptest.NewServer(handler)
 	c, err := NewPocketIDClient(PocketIDConfig{
-		BaseURL:      srv.URL,
-		ClientID:     "test-id",
-		ClientSecret: "test-secret",
-		HTTPClient:   srv.Client(),
+		BaseURL:    srv.URL,
+		APIKey:     "test-secret",
+		HTTPClient: srv.Client(),
 	})
 	if err != nil {
 		t.Fatalf("NewPocketIDClient: %v", err)
@@ -40,12 +38,11 @@ func TestNewPocketIDClient(t *testing.T) {
 		wantErr bool
 		isNotConfigured bool
 	}{
-		{"ok", PocketIDConfig{BaseURL: "https://pocket.example.com", ClientID: "a", ClientSecret: "b"}, false, false},
-		{"missing base", PocketIDConfig{BaseURL: "", ClientID: "a", ClientSecret: "b"}, true, true},
-		{"missing id", PocketIDConfig{BaseURL: "https://pocket.example.com", ClientID: "", ClientSecret: "b"}, true, true},
-		{"missing secret", PocketIDConfig{BaseURL: "https://pocket.example.com", ClientID: "a", ClientSecret: ""}, true, true},
-		{"bad scheme", PocketIDConfig{BaseURL: "ftp://pocket.example.com", ClientID: "a", ClientSecret: "b"}, true, false},
-		{"trailing slash trimmed", PocketIDConfig{BaseURL: "https://pocket.example.com/", ClientID: "a", ClientSecret: "b"}, false, false},
+		{"ok", PocketIDConfig{BaseURL: "https://pocket.example.com", APIKey: "b"}, false, false},
+		{"missing base", PocketIDConfig{BaseURL: "", APIKey: "b"}, true, true},
+		{"missing api key", PocketIDConfig{BaseURL: "https://pocket.example.com", APIKey: ""}, true, true},
+		{"bad scheme", PocketIDConfig{BaseURL: "ftp://pocket.example.com", APIKey: "b"}, true, false},
+		{"trailing slash trimmed", PocketIDConfig{BaseURL: "https://pocket.example.com/", APIKey: "b"}, false, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -85,7 +82,7 @@ func TestCreateRecoveryCode(t *testing.T) {
 			name:  "success",
 			email: email,
 			handler: func(w http.ResponseWriter, r *http.Request) {
-				if r.Header.Get("Authorization") != basicAuthHeader("test-id", "test-secret") {
+				if r.Header.Get("X-API-KEY") != "test-secret" {
 					http.Error(w, `{"error":"unauthorized","code":"invalid_api_key"}`, http.StatusUnauthorized)
 					return
 				}
@@ -106,10 +103,10 @@ func TestCreateRecoveryCode(t *testing.T) {
 			checkExpiry:   true,
 		},
 		{
-			name:  "basic auth missing",
+			name:  "api key missing",
 			email: email,
 			handler: func(w http.ResponseWriter, r *http.Request) {
-				if r.Header.Get("Authorization") != basicAuthHeader("test-id", "test-secret") {
+				if r.Header.Get("X-API-KEY") != "test-secret" {
 					http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 					return
 				}
@@ -122,7 +119,7 @@ func TestCreateRecoveryCode(t *testing.T) {
 			name:  "user not found",
 			email: "missing@example.com",
 			handler: func(w http.ResponseWriter, r *http.Request) {
-				if r.Header.Get("Authorization") != basicAuthHeader("test-id", "test-secret") {
+				if r.Header.Get("X-API-KEY") != "test-secret" {
 					http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 					return
 				}
@@ -148,7 +145,7 @@ func TestCreateRecoveryCode(t *testing.T) {
 			name:  "token empty",
 			email: email,
 			handler: func(w http.ResponseWriter, r *http.Request) {
-				if r.Header.Get("Authorization") != basicAuthHeader("test-id", "test-secret") {
+				if r.Header.Get("X-API-KEY") != "test-secret" {
 					http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 					return
 				}
@@ -180,7 +177,7 @@ func TestCreateRecoveryCode(t *testing.T) {
 			name:  "expiry handling within bounds",
 			email: email,
 			handler: func(w http.ResponseWriter, r *http.Request) {
-				if r.Header.Get("Authorization") != basicAuthHeader("test-id", "test-secret") {
+				if r.Header.Get("X-API-KEY") != "test-secret" {
 					http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 					return
 				}
@@ -205,14 +202,13 @@ func TestCreateRecoveryCode(t *testing.T) {
 			handler := tc.handler
 			c, srv := newTestClient(t, handler)
 			defer srv.Close()
-			// For basic auth missing case, create client with wrong secret
-			if tc.name == "basic auth missing" {
+			// For api key missing case, create client with wrong secret
+			if tc.name == "api key missing" {
 				var err error
 				c, err = NewPocketIDClient(PocketIDConfig{
-					BaseURL:      srv.URL,
-					ClientID:     "wrong",
-					ClientSecret: "wrong",
-					HTTPClient:   srv.Client(),
+					BaseURL:    srv.URL,
+					APIKey:     "wrong",
+					HTTPClient: srv.Client(),
 				})
 				if err != nil {
 					t.Fatalf("NewPocketIDClient wrong: %v", err)
@@ -262,7 +258,7 @@ func TestCreateRecoveryCode(t *testing.T) {
 }
 
 func TestCreateRecoveryCodeNotConfigured(t *testing.T) {
-	c := &PocketIDClient{baseURL: "", clientID: "", clientSecret: "", httpClient: http.DefaultClient}
+	c := &PocketIDClient{baseURL: "", apiKey: "", httpClient: http.DefaultClient}
 	_, _, _, err := c.CreateRecoveryCode(context.Background(), "a@b.com")
 	if err == nil || !isStoreNotConfigured(err) {
 		t.Fatalf("want ErrNotConfigured, got %v", err)
@@ -307,7 +303,7 @@ func TestValidateRecovery(t *testing.T) {
 			email: "alice@example.com",
 			code:  "ABC123",
 			handler: func(w http.ResponseWriter, r *http.Request) {
-				if r.Header.Get("Authorization") != basicAuthHeader("test-id", "test-secret") {
+				if r.Header.Get("X-API-KEY") != "test-secret" {
 					http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 					return
 				}
@@ -368,7 +364,7 @@ func TestValidateRecovery(t *testing.T) {
 			if tc.errIs != nil && err != nil && !isStoreError(err, tc.errIs) {
 				t.Fatalf("want %v, got %v", tc.errIs, err)
 			}
-			// Verify basic auth when handler checks it – if we didn't get error about auth, we succeeded.
+			// Verify X-API-KEY when handler checks it – if we didn't get error about auth, we succeeded.
 		})
 	}
 }
@@ -387,7 +383,7 @@ func TestCreateUser(t *testing.T) {
 			email: "bob@example.com",
 			displayName: "Bob",
 			handler: func(w http.ResponseWriter, r *http.Request) {
-				if r.Header.Get("Authorization") != basicAuthHeader("test-id", "test-secret") {
+				if r.Header.Get("X-API-KEY") != "test-secret" {
 					http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 					return
 				}
@@ -489,7 +485,7 @@ func TestCreateUser(t *testing.T) {
 func TestHealthCheck(t *testing.T) {
 	t.Run("success via users", func(t *testing.T) {
 		c, srv := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("Authorization") != basicAuthHeader("test-id", "test-secret") {
+			if r.Header.Get("X-API-KEY") != "test-secret" {
 				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
@@ -506,7 +502,7 @@ func TestHealthCheck(t *testing.T) {
 	})
 	t.Run("fallback to app config", func(t *testing.T) {
 		c, srv := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("Authorization") != basicAuthHeader("test-id", "test-secret") {
+			if r.Header.Get("X-API-KEY") != "test-secret" {
 				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
@@ -545,7 +541,7 @@ func TestHealthCheck(t *testing.T) {
 func TestGetUserAndListUsers(t *testing.T) {
 	t.Run("get user success", func(t *testing.T) {
 		c, srv := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("Authorization") != basicAuthHeader("test-id", "test-secret") {
+			if r.Header.Get("X-API-KEY") != "test-secret" {
 				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
@@ -604,7 +600,7 @@ func TestGetUserAndListUsers(t *testing.T) {
 func TestDisableDeleteUser(t *testing.T) {
 	t.Run("disable success", func(t *testing.T) {
 		c, srv := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("Authorization") != basicAuthHeader("test-id", "test-secret") {
+			if r.Header.Get("X-API-KEY") != "test-secret" {
 				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
@@ -646,7 +642,7 @@ func TestDisableDeleteUser(t *testing.T) {
 func TestGroupOperations(t *testing.T) {
 	t.Run("list groups success", func(t *testing.T) {
 		c, srv := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("Authorization") != basicAuthHeader("test-id", "test-secret") {
+			if r.Header.Get("X-API-KEY") != "test-secret" {
 				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
@@ -710,7 +706,7 @@ func TestGroupOperations(t *testing.T) {
 			if r.Method != http.MethodPut || r.URL.Path != "/api/users/u1/user-groups" {
 				t.Fatalf("path %s method %s", r.URL.Path, r.Method)
 			}
-			if r.Header.Get("Authorization") != basicAuthHeader("test-id", "test-secret") {
+			if r.Header.Get("X-API-KEY") != "test-secret" {
 				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
@@ -786,7 +782,7 @@ func TestErrorMapping(t *testing.T) {
 }
 
 func TestNotConfiguredPropagation(t *testing.T) {
-	c := &PocketIDClient{baseURL: "", clientID: "", clientSecret: "", httpClient: http.DefaultClient}
+	c := &PocketIDClient{baseURL: "", apiKey: "", httpClient: http.DefaultClient}
 	tests := []struct {
 		name string
 		fn   func() error

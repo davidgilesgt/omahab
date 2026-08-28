@@ -1771,8 +1771,6 @@ func guideCloudflare(ctx context.Context, out output, probes installer.Probes) e
 				return
 			}
 			if st < 200 || st >= 300 {
-				// 409 conflict means already exists — try update via PUT /secrets/{id}? Instead try to list and update.
-				// For now report; dashboard can overwrite.
 				out.printf("   %sNote: POST secret %s returned %d: %s%s\n", yellow, name, st, strings.TrimSpace(string(b2)), reset)
 				return
 			}
