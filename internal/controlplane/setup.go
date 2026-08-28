@@ -544,6 +544,8 @@ func (b *Backend) setupPhaseSecrets(ctx context.Context) error {
 	for _, src := range sources {
 		path := filepath.Join(dir, src)
 		if _, err := os.Stat(path); err == nil {
+			// Docker bind-mounts these into the container; PUID 1000 must read them.
+			_ = os.Chmod(path, 0o644)
 			continue
 		}
 		var content string
@@ -559,10 +561,10 @@ func (b *Backend) setupPhaseSecrets(ctx context.Context) error {
 			}
 			if pwd == "" {
 				pwd = generateRandomBase64URL(32)
-				if err := os.WriteFile(pwdPath, []byte(pwd), 0o600); err != nil {
+				if err := os.WriteFile(pwdPath, []byte(pwd), 0o644); err != nil {
 					return fmt.Errorf("write litellm_db_password: %w", err)
 				}
-				_ = os.Chmod(pwdPath, 0o600)
+				_ = os.Chmod(pwdPath, 0o644)
 			}
 			content = fmt.Sprintf("postgresql://litellm:%s@litellm-postgres:5432/litellm", pwd)
 		default:
@@ -572,10 +574,10 @@ func (b *Backend) setupPhaseSecrets(ctx context.Context) error {
 				content = generateRandomBase64URL(32)
 			}
 		}
-		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 			return fmt.Errorf("write secret %s: %w", src, err)
 		}
-		_ = os.Chmod(path, 0o600)
+		_ = os.Chmod(path, 0o644)
 	}
 	return nil
 }
