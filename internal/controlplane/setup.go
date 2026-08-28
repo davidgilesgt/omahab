@@ -510,6 +510,8 @@ func (b *Backend) setupPhaseSecrets(ctx context.Context) error {
 			}
 		}
 	}
+	// Compose bind-mounts this path; Docker refuses a missing source even when unused.
+	sourcesSet["maxmind_license"] = true
 	if len(sourcesSet) == 0 {
 		return nil
 	}
@@ -539,7 +541,6 @@ func (b *Backend) setupPhaseSecrets(ctx context.Context) error {
 		return fmt.Errorf("mkdir secrets dir: %w", err)
 	}
 	_ = os.Chmod(dir, 0o700)
-
 	for _, src := range sources {
 		path := filepath.Join(dir, src)
 		if _, err := os.Stat(path); err == nil {

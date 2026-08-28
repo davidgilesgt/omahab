@@ -142,6 +142,12 @@
             "target": "/run/secrets/pocket_id_encryption_key",
             "env": "ENCRYPTION_KEY_FILE",
             "description": "Application encryption key projected via file, not env var."
+          },
+          {
+            "source": "maxmind_license",
+            "target": "/run/secrets/maxmind_license",
+            "env": "MAXMIND_LICENSE_FILE",
+            "description": "Optional MaxMind license; an empty file is valid when unused."
           }
         ],
         "notes": "Upstream supports *_FILE for secrets; omahabd projects via Docker secrets / tmpfs (/run/secrets) with 0400 root ownership."
