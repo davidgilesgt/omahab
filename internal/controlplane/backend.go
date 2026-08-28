@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"strings"
 	"sync"
@@ -38,6 +39,7 @@ import (
 )
 
 var _ api.Backend = (*Backend)(nil)
+
 type Backend struct {
 	cfg       config.Config
 	store     *store.Store
@@ -221,7 +223,7 @@ func (b *Backend) initServices(ctx context.Context) error {
 	appSvc, err := apps.NewService(b.db, apps.Options{
 		Catalog: catalog, Runner: appRunner,
 		Events: newAppsSink(b.events),
-		Env: domainEnv,
+		Env:    domainEnv,
 	})
 	if err != nil {
 		return fmt.Errorf("apps: %w", err)
@@ -453,10 +455,35 @@ func (b *Backend) refreshExposure(ctx context.Context) error {
 			accToken = single
 		}
 	}
+	if dnsToken != "" && zoneID == "" {
+		if zid, aid, err := cloudflare.ResolveZone(ctx, inst.Domain, dnsToken, nil); err == nil {
+			if strings.TrimSpace(zid) != "" {
+				zoneID = zid
+				_ = upsertSecret(ctx, b.secrets, "platform-app", "cloudflare_zone_id", zid)
+			}
+			if strings.TrimSpace(aid) != "" && strings.TrimSpace(accountID) == "" {
+				accountID = aid
+				_ = upsertSecret(ctx, b.secrets, "platform-app", "cloudflare_account_id", aid)
+			}
+		} else {
+			log.Printf("refreshExposure: ResolveZone failed: %v", err)
+		}
+	}
+	effectiveTunToken := tunToken
+	if strings.TrimSpace(accountID) == "" || strings.TrimSpace(tunnelID) == "" {
+		effectiveTunToken = ""
+	}
+	effectiveAccToken := accToken
+	if strings.TrimSpace(accountID) == "" {
+		effectiveAccToken = ""
+	}
+	if strings.TrimSpace(inst.TailscaleIP) == "" {
+		return fmt.Errorf("tailscale IP not recorded")
+	}
 	clients, cErr := cloudflare.NewClients(cloudflare.Options{
 		APITokenDNS:     dnsToken,
-		APITokenTunnel:  tunToken,
-		APITokenAccess:  accToken,
+		APITokenTunnel:  effectiveTunToken,
+		APITokenAccess:  effectiveAccToken,
 		ZoneID:          zoneID,
 		AccountID:       accountID,
 		TunnelID:        tunnelID,
@@ -476,15 +503,12 @@ func (b *Backend) refreshExposure(ctx context.Context) error {
 	if expCfg.Domain == "" {
 		expCfg.Domain = "not-configured.invalid"
 	}
-	if expCfg.TailscaleIP == "" {
-		expCfg.TailscaleIP = "100.64.0.1"
-	}
 	if strings.TrimSpace(tunnelID) == "" {
 		expCfg.TunnelDNS = "tunnel.not-configured.invalid"
 	}
 	expSvc, err := exposure.New(b.store, expCfg, clients)
 	if err != nil {
-		fallbackCfg := exposure.Config{Domain: "not-configured.invalid", TailscaleIP: "100.64.0.1", TunnelDNS: "tunnel.not-configured.invalid"}
+		fallbackCfg := exposure.Config{Domain: "not-configured.invalid", TailscaleIP: inst.TailscaleIP, TunnelDNS: "tunnel.not-configured.invalid"}
 		if svc, err2 := exposure.New(b.store, fallbackCfg, exposure.Clients{}); err2 == nil {
 			b.exposure = svc
 		} else {
@@ -1551,8 +1575,6 @@ func (b *Backend) GetUser(ctx context.Context, id domain.ID) (domain.User, error
 	}, nil
 }
 
-
-
 func (b *Backend) CreateUser(ctx context.Context, req api.CreateUserRequest) (domain.User, error) {
 	if !domain.ValidEmail(req.Email) {
 		return domain.User{}, translateError(fmt.Errorf("%w: invalid email %q", store.ErrValidation, req.Email))
@@ -1962,7 +1984,6 @@ func (b *Backend) RemovePushMirror(ctx context.Context, projectID domain.ID) err
 	return nil
 }
 
-
 // Workspace capabilities
 func (b *Backend) IssueWorkspaceCapability(ctx context.Context, workspaceID string) (api.WorkspaceCapabilityResponse, error) {
 	if b.workspaces == nil {
@@ -2241,7 +2262,6 @@ func (b *Backend) PollSyncthing(ctx context.Context) error {
 	}
 	return nil
 }
-
 
 func paginate[T any](in []T, p api.Pagination) []T {
 	if p.Limit <= 0 && p.Offset <= 0 {

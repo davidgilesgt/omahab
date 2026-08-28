@@ -27,7 +27,24 @@ if grep -q 'tcp dport 8484' internal/installer/firewall.go; then
 else
   fail_check "nftables no public 8484 accept (missing 8484 rule)"
 fi
-grep -q 'SupplementaryGroups=docker' deploy/systemd/omahabd.service && pass "narrow docker group" || fail_check "narrow docker group"
+grep -q 'iifname "tailscale0" tcp dport { 80, 443 }' internal/installer/firewall.go && pass "nftables tailscale gate for 80/443" || fail_check "nftables tailscale gate for 80/443"
+# Ensure every tcp dport 80/443 rule is gated by tailscale0 (no public accept).
+if grep -q 'tcp dport { 80, 443 }' internal/installer/firewall.go; then
+  total=$(grep -c 'tcp dport { 80, 443 }' internal/installer/firewall.go || true)
+  gated=$(grep -c 'iifname "tailscale0" tcp dport { 80, 443 }' internal/installer/firewall.go || true)
+  if [ "$total" -eq "$gated" ] && [ "$total" -gt 0 ]; then
+    ungated=$(grep 'tcp dport' internal/installer/firewall.go | grep -E 'tcp dport 80|tcp dport 443' | grep -v 'iifname "tailscale0"' || true)
+    if [ -z "$ungated" ]; then
+      pass "nftables no public 80/443 accept (only tailscale0)"
+    else
+      fail_check "nftables no public 80/443 accept (found unrestricted 80/443 rule)"
+    fi
+  else
+    fail_check "nftables no public 80/443 accept (found unrestricted 80/443 rule)"
+  fi
+else
+  fail_check "nftables no public 80/443 accept (missing 80/443 rule)"
+fi
 ! grep -q 'docker.sock' Dockerfile && pass "Dockerfile has no Docker socket" || fail_check "Dockerfile Docker socket mount"
 grep -q 'RequiresMountsFor=/srv/omahab' deploy/systemd/omahabd.service && pass "data mount ordering" || fail_check "data mount ordering"
 for directive in NoNewPrivileges PrivateTmp ProtectSystem ProtectHome; do

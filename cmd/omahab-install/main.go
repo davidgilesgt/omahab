@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/x/term"
+	"github.com/omahab/omahab/internal/cloudflare"
 	"github.com/omahab/omahab/internal/installer"
 	"github.com/omahab/omahab/internal/installer/assets"
 	"github.com/omahab/omahab/internal/tui"
@@ -1443,50 +1444,7 @@ func verifyCloudflareTokenLive(ctx context.Context, token string) (ok bool, stat
 }
 
 func resolveCloudflareZone(ctx context.Context, domain, token string) (zoneID, accountID string, err error) {
-	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	u := "https://api.cloudflare.com/client/v4/zones?name=" + url.QueryEscape(strings.TrimSpace(domain))
-	req, err := http.NewRequestWithContext(cctx, http.MethodGet, u, nil)
-	if err != nil {
-		return "", "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(token))
-	req.Header.Set("Accept", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", "", fmt.Errorf("zone lookup failed: %v", err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", "", fmt.Errorf("HTTP %d — zone lookup failed (body: %s)", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-	var parsed struct {
-		Success bool `json:"success"`
-		Errors  []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
-		Result []struct {
-			ID      string `json:"id"`
-			Account struct {
-				ID string `json:"id"`
-			} `json:"account"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return "", "", fmt.Errorf("zone lookup decode failed: %v", err)
-	}
-	if !parsed.Success {
-		msg := ""
-		if len(parsed.Errors) > 0 {
-			msg = parsed.Errors[0].Message
-		}
-		return "", "", fmt.Errorf("zone lookup not successful: %s", msg)
-	}
-	if len(parsed.Result) == 0 {
-		return "", "", fmt.Errorf("zone not found — domain not on this Cloudflare account or token lacks Zone:Read")
-	}
-	return parsed.Result[0].ID, parsed.Result[0].Account.ID, nil
+	return cloudflare.ResolveZone(ctx, domain, token, nil)
 }
 func guideCloudflare(ctx context.Context, out output, probes installer.Probes) error {
 	if out.nonInteractive || out.jsonMode || !isTerminal(os.Stdin) {
@@ -1827,6 +1785,13 @@ func guideCloudflare(ctx context.Context, out output, probes installer.Probes) e
 		}
 		if accountID != "" {
 			postSecret("cloudflare_account_id", accountID)
+		}
+		if st, b2, err2 := doAPI(http.MethodPost, "/api/v1/setup/reconcile", map[string]any{}); err2 != nil {
+			out.printf("   %sWarning: could not trigger reconcile: %v%s\n", yellow, err2, reset)
+		} else if st < 200 || st >= 300 {
+			out.printf("   %sWarning: POST /api/v1/setup/reconcile returned %d: %s%s\n", yellow, st, strings.TrimSpace(string(b2)), reset)
+		} else {
+			out.printf("   %s✓ triggered setup reconcile%s\n", "\033[32m", reset)
 		}
 		nextURL := "http://<tailscale-ip>:8484"
 		if ip := tailscaleIP(ctx, probes); ip != "" {

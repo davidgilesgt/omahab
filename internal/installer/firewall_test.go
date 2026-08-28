@@ -48,6 +48,7 @@ func TestFirewallNftablesConfTemplate(t *testing.T) {
 		`tcp dport 22 accept comment "ssh"`,
 		`udp dport 41641 accept comment "tailscale direct"`,
 		`iifname "tailscale0" tcp dport 8484 accept comment "omahab dashboard via tailscale"`,
+		`iifname "tailscale0" tcp dport { 80, 443 } accept comment "caddy https via tailscale"`,
 		`icmp type { destination-unreachable, time-exceeded, parameter-problem, echo-request } limit rate 10/second accept`,
 		`ip6 nexthdr ipv6-icmp icmpv6 type { destination-unreachable, time-exceeded, parameter-problem, echo-request, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } limit rate 20/second accept`,
 	}
@@ -94,6 +95,21 @@ func TestFirewallNftablesConfTemplate(t *testing.T) {
 	gated := strings.Count(conf, `iifname "tailscale0" tcp dport 8484`)
 	if total != gated || total == 0 {
 		t.Fatalf("NftablesConf must contain only tailscale0-gated 8484 rules: total %d gated %d\nconf:\n%s", total, gated, conf)
+	}
+	if !strings.Contains(conf, `iifname "tailscale0" tcp dport { 80, 443 } accept comment "caddy https via tailscale"`) {
+		t.Fatalf("NftablesConf must contain tailscale0-gated 80/443 rule, got:\n%s", conf)
+	}
+	// Every tcp 80/443 occurrence must be gated by tailscale0 (no public accept).
+	for _, line := range strings.Split(conf, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.Contains(line, "tcp dport") && (strings.Contains(line, " 80") || strings.Contains(line, " 443") || strings.Contains(line, "{ 80")) {
+			if !strings.Contains(line, `iifname "tailscale0"`) {
+				t.Fatalf("NftablesConf must contain only tailscale0-gated 80/443 rules: ungated line %q\nconf:\n%s", line, conf)
+			}
+		}
 	}
 	if strings.Contains(conf, "0.0.0.0:8484") {
 		t.Fatalf("NftablesConf must not contain 0.0.0.0:8484 literal (listen address is systemd, not firewall)")

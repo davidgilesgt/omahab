@@ -31,6 +31,7 @@ table inet omahab {
     tcp dport 22 accept comment "ssh"
     udp dport 41641 accept comment "tailscale direct"
     iifname "tailscale0" tcp dport 8484 accept comment "omahab dashboard via tailscale"
+    iifname "tailscale0" tcp dport { 80, 443 } accept comment "caddy https via tailscale"
     icmp type { destination-unreachable, time-exceeded, parameter-problem, echo-request } limit rate 10/second accept
     ip6 nexthdr ipv6-icmp icmpv6 type { destination-unreachable, time-exceeded, parameter-problem, echo-request, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } limit rate 20/second accept
   }

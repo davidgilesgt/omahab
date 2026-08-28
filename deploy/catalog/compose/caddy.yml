@@ -11,7 +11,7 @@ services:
   caddy:
     image: ghcr.io/caddybuilds/caddy-cloudflare@sha256:${CADDY_DIGEST:?pinned digest required - release substitution missing}
     restart: unless-stopped
-    command: ["caddy", "run", "--config", "/etc/caddy/caddy.json"]
+    command: ["caddy", "run", "--config", "/etc/caddy/caddy.json", "--watch"]
     # Edge is the only bundle that publishes host ports. All other bundles use `expose` and are reachable via Caddy.
     ports:
       - "80:80"

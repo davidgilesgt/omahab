@@ -110,6 +110,11 @@ func (c *edgeClient) ListRoutes(ctx context.Context) ([]exposure.Route, error) {
 				if errors.Is(err2, store.ErrNotFound) {
 					return []exposure.Route{}, nil
 				}
+				if errors.Is(err2, ErrCaddyUnavailable) && (strings.TrimSpace(c.domain) != "" || strings.TrimSpace(c.dnsToken) != "") {
+					if routes, fileErr := c.routesFromFile(); fileErr == nil {
+						return routes, nil
+					}
+				}
 				return nil, err2
 			}
 			if legacy == nil {
@@ -118,12 +123,16 @@ func (c *edgeClient) ListRoutes(ctx context.Context) ([]exposure.Route, error) {
 			return legacy, nil
 		}
 		if errors.Is(err, ErrCaddyUnavailable) {
+			if strings.TrimSpace(c.domain) != "" || strings.TrimSpace(c.dnsToken) != "" {
+				if routes, fileErr := c.routesFromFile(); fileErr == nil {
+					return routes, nil
+				}
+			}
 			return nil, err
 		}
 		if strings.Contains(err.Error(), "404") {
 			return []exposure.Route{}, nil
 		}
-		// Handle case where /config/ returned array (legacy server) - decode error
 		if strings.Contains(err.Error(), "decode") {
 			var legacy []exposure.Route
 			if err2 := c.do(ctx, http.MethodGet, "/routes", nil, &legacy); err2 == nil {
@@ -208,6 +217,60 @@ func extractUpstream(m map[string]any) string {
 		}
 	}
 	return ""
+}
+
+func (c *edgeClient) routesFromFile() ([]exposure.Route, error) {
+	data, err := os.ReadFile(c.configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []exposure.Route{}, nil
+		}
+		return nil, err
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return []exposure.Route{}, nil
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	routes := []exposure.Route{}
+	if apps, ok := raw["apps"].(map[string]any); ok {
+		if httpCfg, ok := apps["http"].(map[string]any); ok {
+			if servers, ok := httpCfg["servers"].(map[string]any); ok {
+				if mainSrv, ok := servers["main"].(map[string]any); ok {
+					if rlist, ok := mainSrv["routes"].([]any); ok {
+						for _, r := range rlist {
+							rm, ok := r.(map[string]any)
+							if !ok {
+								continue
+							}
+							id, _ := rm["@id"].(string)
+							if !strings.HasPrefix(id, "omahab-") {
+								continue
+							}
+							hostname := strings.TrimPrefix(id, "omahab-")
+							if hostFromMatch := extractHost(rm); hostFromMatch != "" {
+								hostname = hostFromMatch
+							}
+							upstream := extractUpstream(rm)
+							if hostname == "" || upstream == "" {
+								continue
+							}
+							if !strings.HasPrefix(upstream, "http://") && !strings.HasPrefix(upstream, "https://") {
+								upstream = "http://" + upstream
+							}
+							routes = append(routes, exposure.Route{Hostname: hostname, Upstream: upstream})
+						}
+					}
+				}
+			}
+		}
+	}
+	if routes == nil {
+		routes = []exposure.Route{}
+	}
+	return routes, nil
 }
 
 func (c *edgeClient) PutRoute(ctx context.Context, route exposure.Route) error {
@@ -408,10 +471,10 @@ func (c *edgeClient) applyRoutes(ctx context.Context, routes []exposure.Route) e
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		if strings.Contains(err.Error(), "connect: connection refused") || strings.Contains(err.Error(), "connection refused") {
-			return fmt.Errorf("%w: %v", ErrCaddyUnavailable, err)
+		if errors.Is(err, ErrCaddyUnavailable) || strings.Contains(err.Error(), "connection refused") || strings.Contains(err.Error(), "no such host") || strings.Contains(err.Error(), "connect: connection refused") {
+			return nil
 		}
-		return fmt.Errorf("%w: %v", ErrCaddyUnavailable, err)
+		return nil
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))

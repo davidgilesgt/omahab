@@ -75,8 +75,6 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (api.SetupStatus, error) {
 		tunnelCheck.Status = "ok"
 		tunnelCheck.Detail = "tunnel id present"
 	} else {
-		// Check if tunnel token exists to decide pending vs skipped.
-		// Private-only install is valid when token absent.
 		tokenPresent := false
 		if b.secrets != nil {
 			if v, err := b.secrets.RevealByName(ctx, "platform-app", "cloudflare_tunnel"); err == nil && strings.TrimSpace(v) != "" {
@@ -87,14 +85,23 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (api.SetupStatus, error) {
 		}
 		if tokenPresent {
 			tunnelCheck.Status = "pending"
-			tunnelCheck.Detail = "tunnel not yet provisioned"
+			accountID := ""
+			if b.secrets != nil {
+				if v, err := b.secrets.RevealByName(ctx, "platform-app", "cloudflare_account_id"); err == nil {
+					accountID = strings.TrimSpace(v)
+				}
+			}
+			if accountID == "" {
+				tunnelCheck.Detail = "tunnel not yet provisioned: cloudflare_account_id missing"
+			} else {
+				tunnelCheck.Detail = "tunnel not yet provisioned"
+			}
 		} else {
 			tunnelCheck.Status = "skipped"
 			tunnelCheck.Detail = "tunnel not configured (private-only)"
 		}
 	}
 	checks = append(checks, tunnelCheck)
-
 	// --- dashboard_dns check (exposure observation reconciled) ---
 	dashCheck := api.SetupCheck{ID: "dashboard_dns"}
 	if domainSentinel || domain == "" {

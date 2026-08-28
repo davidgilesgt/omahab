@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,12 +21,79 @@ import (
 	"github.com/omahab/omahab/internal/apps"
 	"github.com/omahab/omahab/internal/cloudflare"
 	"github.com/omahab/omahab/internal/domain"
+	"github.com/omahab/omahab/internal/edge"
 	"github.com/omahab/omahab/internal/events"
 	"github.com/omahab/omahab/internal/exposure"
+	"github.com/omahab/omahab/internal/installer"
 	"github.com/omahab/omahab/internal/store"
 )
 
 var secretPatternRe = regexp.MustCompile(`(_password|_key|_secret|_api_key)$`)
+
+func (b *Backend) ensureTailscaleIP(ctx context.Context) error {
+	out, err := exec.CommandContext(ctx, "tailscale", "ip", "-4").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("tailscale ip -4: %v output=%s", err, strings.TrimSpace(string(out)))
+	}
+	ipStr := strings.TrimSpace(string(out))
+	fields := strings.Fields(ipStr)
+	if len(fields) > 0 {
+		ipStr = fields[0]
+	}
+	ipStr = strings.TrimSpace(ipStr)
+	parsed := net.ParseIP(ipStr)
+	if parsed == nil || parsed.To4() == nil {
+		return fmt.Errorf("tailscale ip -4: invalid IPv4 %q", ipStr)
+	}
+	inst, err := b.store.Instance(ctx)
+	if err != nil {
+		return fmt.Errorf("load instance: %w", err)
+	}
+	if strings.TrimSpace(inst.TailscaleIP) != ipStr {
+		inst.TailscaleIP = ipStr
+		if _, err := b.store.SaveInstance(ctx, inst); err != nil {
+			return fmt.Errorf("save instance tailscale IP: %w", err)
+		}
+		if err := b.refreshExposure(ctx); err != nil {
+			log.Printf("ensureTailscaleIP: refreshExposure failed: %v", err)
+		}
+	}
+	return nil
+}
+
+func (b *Backend) writeBootstrapCaddyJSON(ctx context.Context, dnsToken string) error {
+	const caddyJSONPath = "/etc/omahab/caddy.json"
+	if fi, err := os.Stat(caddyJSONPath); err == nil && fi.IsDir() {
+		if err := os.RemoveAll(caddyJSONPath); err != nil {
+			return fmt.Errorf("remove directory %s: %w", caddyJSONPath, err)
+		}
+	}
+	if err := os.MkdirAll("/etc/omahab", 0755); err != nil {
+		return fmt.Errorf("mkdir /etc/omahab: %w", err)
+	}
+	if fi, err := os.Stat(caddyJSONPath); err == nil && !fi.IsDir() && fi.Size() > 0 {
+		return nil
+	}
+	inst, err := b.store.Instance(ctx)
+	if err != nil {
+		return fmt.Errorf("load instance: %w", err)
+	}
+	domain := strings.TrimSpace(inst.Domain)
+	var cfgBytes []byte
+	if strings.TrimSpace(dnsToken) != "" && domain != "" && domain != "example.com" && domain != "not-configured.invalid" {
+		rendered, err := edge.RenderConfig(domain, dnsToken, nil)
+		if err != nil {
+			return fmt.Errorf("render caddy config: %w", err)
+		}
+		cfgBytes = rendered
+	} else {
+		cfgBytes = []byte(`{"apps":{"http":{"servers":{"main":{"listen":[":443",":80"],"routes":[]}}}}}`)
+	}
+	if err := os.WriteFile(caddyJSONPath, cfgBytes, 0600); err != nil {
+		return fmt.Errorf("write %s: %w", caddyJSONPath, err)
+	}
+	return nil
+}
 
 // IsSetupRunning reports whether the setup reconciler is currently running.
 func (b *Backend) IsSetupRunning() bool {
@@ -127,6 +195,9 @@ func emitSetupFailed(ctx context.Context, svc *events.Service, step string, err 
 
 // Phase 1: Preconditions
 func (b *Backend) setupPhasePreconditions(ctx context.Context) error {
+	if err := b.ensureTailscaleIP(ctx); err != nil {
+		return err
+	}
 	inst, err := b.store.Instance(ctx)
 	if err != nil {
 		return fmt.Errorf("load instance: %w", err)
@@ -152,6 +223,9 @@ func (b *Backend) setupPhasePreconditions(ctx context.Context) error {
 
 // Phase 2: Tunnel
 func (b *Backend) setupPhaseTunnel(ctx context.Context) error {
+	if err := b.ensureTailscaleIP(ctx); err != nil {
+		log.Printf("setup tunnel: ensureTailscaleIP failed: %v", err)
+	}
 	if b.secrets == nil {
 		return nil
 	}
@@ -185,6 +259,38 @@ func (b *Backend) setupPhaseTunnel(ctx context.Context) error {
 	if accountID == "" {
 		if v := strings.TrimSpace(os.Getenv("OMAHAB_CF_ACCOUNT_ID")); v != "" {
 			accountID = v
+		}
+	}
+	if accountID == "" && tunnelToken != "" {
+		dnsToken := ""
+		if v, err := b.secrets.RevealByName(ctx, "platform-app", "cloudflare_dns"); err == nil {
+			dnsToken = strings.TrimSpace(v)
+		}
+		if dnsToken == "" {
+			if v, err := b.secrets.RevealByName(ctx, "platform-app", "cloudflare_token_dns"); err == nil {
+				dnsToken = strings.TrimSpace(v)
+			}
+		}
+		if dnsToken == "" {
+			dnsToken = strings.TrimSpace(os.Getenv("OMAHAB_CF_TOKEN_DNS"))
+		}
+		if dnsToken == "" {
+			dnsToken = strings.TrimSpace(os.Getenv("OMAHAB_CF_API_TOKEN"))
+		}
+		if dnsToken != "" {
+			if inst, err := b.store.Instance(ctx); err == nil {
+				domain := strings.TrimSpace(inst.Domain)
+				if domain != "" && domain != "example.com" && domain != "not-configured.invalid" {
+					if _, aid, err := cloudflare.ResolveZone(ctx, domain, dnsToken, nil); err == nil {
+						if strings.TrimSpace(aid) != "" {
+							accountID = strings.TrimSpace(aid)
+							_ = upsertSecret(ctx, b.secrets, "platform-app", "cloudflare_account_id", accountID)
+						}
+					} else {
+						log.Printf("setup tunnel: ResolveZone failed: %v", err)
+					}
+				}
+			}
 		}
 	}
 	if accountID == "" {
@@ -404,6 +510,24 @@ func (b *Backend) setupPhaseCoreApps(ctx context.Context) error {
 	if b.apps == nil {
 		return fmt.Errorf("apps not configured")
 	}
+	dnsToken := ""
+	if b.secrets != nil {
+		if v, err := b.secrets.RevealByName(ctx, "platform-app", "cloudflare_dns"); err == nil {
+			dnsToken = strings.TrimSpace(v)
+		}
+		if dnsToken == "" {
+			if v, err := b.secrets.RevealByName(ctx, "platform-app", "cloudflare_token_dns"); err == nil {
+				dnsToken = strings.TrimSpace(v)
+			}
+		}
+	}
+	if dnsToken == "" {
+		dnsToken = strings.TrimSpace(os.Getenv("OMAHAB_CF_TOKEN_DNS"))
+	}
+	if dnsToken == "" {
+		dnsToken = strings.TrimSpace(os.Getenv("OMAHAB_CF_API_TOKEN"))
+	}
+	_ = b.writeBootstrapCaddyJSON(ctx, dnsToken)
 	ensureDockerNetwork(ctx)
 
 	bundles := b.apps.CatalogBundles()
@@ -581,6 +705,24 @@ func (b *Backend) setupPhaseOIDC(ctx context.Context) error {
 
 // Phase 6: Exposure records + DNS
 func (b *Backend) setupPhaseExposure(ctx context.Context) error {
+	dnsToken := ""
+	if b.secrets != nil {
+		if v, err := b.secrets.RevealByName(ctx, "platform-app", "cloudflare_dns"); err == nil {
+			dnsToken = strings.TrimSpace(v)
+		}
+		if dnsToken == "" {
+			if v, err := b.secrets.RevealByName(ctx, "platform-app", "cloudflare_token_dns"); err == nil {
+				dnsToken = strings.TrimSpace(v)
+			}
+		}
+	}
+	if dnsToken == "" {
+		dnsToken = strings.TrimSpace(os.Getenv("OMAHAB_CF_TOKEN_DNS"))
+	}
+	if dnsToken == "" {
+		dnsToken = strings.TrimSpace(os.Getenv("OMAHAB_CF_API_TOKEN"))
+	}
+	_ = b.writeBootstrapCaddyJSON(ctx, dnsToken)
 	expSvc := b.getExposure()
 	if expSvc == nil {
 		return fmt.Errorf("exposure not configured")
@@ -629,6 +771,44 @@ func (b *Backend) setupPhaseExposure(ctx context.Context) error {
 		emitSetupFailed(ctx, b.events, "exposure:"+dashHost, err)
 		return err
 	}
+	if b.apps != nil {
+		if list, err := b.apps.List(ctx); err == nil {
+			var caddyApp *apps.Status
+			for i := range list {
+				if list[i].BundleID == "caddy" {
+					c := list[i]
+					caddyApp = &c
+					break
+				}
+			}
+			if caddyApp != nil {
+				var catalogDigest string
+				for _, bd := range b.apps.CatalogBundles() {
+					if bd.ID == "caddy" {
+						catalogDigest = bd.Digest
+						break
+					}
+				}
+				if catalogDigest != "" {
+					if _, err := b.apps.Update(ctx, caddyApp.ID, catalogDigest); err != nil {
+						if strings.Contains(err.Error(), "already current") {
+							composePath := filepath.Join(b.cfg.DataDir, "apps", "caddy", "compose.yaml")
+							cmd := exec.CommandContext(ctx, "docker", "compose", "-f", composePath, "up", "-d")
+							if out, err2 := cmd.CombinedOutput(); err2 != nil {
+								log.Printf("setup exposure: docker compose up -d for caddy failed: %v output=%s", err2, string(out))
+							} else {
+								log.Printf("setup exposure: caddy redeployed via docker compose up -d")
+							}
+						} else {
+							log.Printf("setup exposure: caddy update failed: %v", err)
+						}
+					} else {
+						log.Printf("setup exposure: caddy updated to new digest")
+					}
+				}
+			}
+		}
+	}
 	return nil
 }
 
@@ -676,5 +856,29 @@ func (b *Backend) ensureExposureRecord(ctx context.Context, expSvc *exposure.Ser
 
 // Phase 7: Firewall
 func (b *Backend) setupPhaseFirewall(ctx context.Context) {
-	log.Printf("setup firewall: ensure nftables allows TCP 8484 from omahab bridge 172.30.0.0/24 (caddy -> host.docker.internal:8484); tailscale0 and lo rules unchanged")
+	const nftPath = "/etc/nftables.conf"
+	const managedMarker = "Managed by Omahab installer"
+	if data, err := os.ReadFile(nftPath); err == nil {
+		if !strings.Contains(string(data), managedMarker) {
+			log.Printf("setup firewall: %s exists and is not managed by Omahab installer; skipping", nftPath)
+			return
+		}
+	} else if !os.IsNotExist(err) {
+		log.Printf("setup firewall: read %s failed: %v", nftPath, err)
+		return
+	}
+	conf := installer.NftablesConf()
+	if err := os.WriteFile(nftPath, []byte(conf), 0644); err != nil {
+		log.Printf("setup firewall: write %s failed: %v", nftPath, err)
+		return
+	}
+	if out, err := exec.CommandContext(ctx, "nft", "-c", "-f", nftPath).CombinedOutput(); err != nil {
+		log.Printf("setup firewall: nft check failed: %v output=%s", err, string(out))
+		return
+	}
+	if out, err := exec.CommandContext(ctx, "nft", "-f", nftPath).CombinedOutput(); err != nil {
+		log.Printf("setup firewall: nft apply failed: %v output=%s", err, string(out))
+		return
+	}
+	log.Printf("setup firewall: nftables rules applied")
 }
