@@ -699,29 +699,30 @@ func (b *Backend) ensureDefaultApp(ctx context.Context, bundle apps.Bundle, doma
 	case apps.ObservedRunning:
 		if existing.Digest == bundle.Digest {
 			st, err := b.apps.CheckHealth(ctx, existing.ID)
-			if err != nil || st.Health != domain.HealthHealthy {
-				st, err = b.apps.Start(ctx, existing.ID)
-				if err != nil {
-					return err
-				}
-				if st.ObservedState == apps.ObservedRunning {
-					st, err = b.apps.CheckHealth(ctx, existing.ID)
-					if err != nil {
-						return err
-					}
-				}
+			if err == nil && st.Health == domain.HealthHealthy {
+				return nil
 			}
-			return requireRunningHealthy(st)
-		}
-		st, err := b.apps.Update(ctx, existing.ID, bundle.Digest)
-		if err != nil {
-			return err
-		}
-		if st.ObservedState == apps.ObservedRunning && st.Health != domain.HealthHealthy {
-			st, err = b.apps.CheckHealth(ctx, existing.ID)
+		} else {
+			st, err := b.apps.Update(ctx, existing.ID, bundle.Digest)
 			if err != nil {
 				return err
 			}
+			if st.ObservedState == apps.ObservedRunning && st.Health != domain.HealthHealthy {
+				st, err = b.apps.CheckHealth(ctx, existing.ID)
+				if err != nil {
+					return err
+				}
+			}
+			if err := requireRunningHealthy(st); err == nil {
+				return nil
+			}
+		}
+		if err := b.apps.Uninstall(ctx, existing.ID); err != nil {
+			return err
+		}
+		st, err := b.apps.Install(ctx, defaultInstallRequest(bundle, domainName))
+		if err != nil {
+			return err
 		}
 		return requireRunningHealthy(st)
 	case apps.ObservedStopped:
