@@ -78,7 +78,7 @@ func (r *ComposeRunner) Deploy(ctx context.Context, app domain.Application, spec
 	// --wait blocks until containers are running (and healthy when the
 	// definition carries healthchecks), so a successful Deploy means the
 	// stack is observable, not merely requested.
-	return r.run(ctx, app, spec, "up", "-d", "--wait", "--remove-orphans")
+	return r.run(ctx, app, spec, "up", "-d", "--wait", "--wait-timeout", "300", "--remove-orphans")
 }
 
 func (r *ComposeRunner) Start(ctx context.Context, app domain.Application, spec DeploySpec) error {
