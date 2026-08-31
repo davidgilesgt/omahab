@@ -2531,6 +2531,9 @@ func (n *noopPocketID) HealthCheck(ctx context.Context) error {
 func (n *noopPocketID) EnsureOIDCClient(ctx context.Context, name string, callbackURLs []string) (string, string, error) {
 	return "", "", fmt.Errorf("%w: PocketID not configured", ErrNotConfigured)
 }
+func (n *noopPocketID) CreateOIDCClientSecret(ctx context.Context, clientID string) (string, error) {
+	return "", fmt.Errorf("%w: PocketID not configured", ErrNotConfigured)
+}
 
 // additional sink wrappers to satisfy specific types
 type knowledgeSink struct{ *domainEventSink }

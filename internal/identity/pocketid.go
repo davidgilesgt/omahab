@@ -909,11 +909,14 @@ func (c *PocketIDClient) oidcClientHasSecrets(ctx context.Context, clientID stri
 	return false
 }
 
+func (c *PocketIDClient) CreateOIDCClientSecret(ctx context.Context, clientID string) (string, error) {
+	return c.mintOIDCClientSecret(ctx, clientID)
+}
+
 func (c *PocketIDClient) mintOIDCClientSecret(ctx context.Context, clientID string) (string, error) {
-	var created struct {
-		Secret       string `json:"secret"`
-		Value        string `json:"value"`
-		ClientSecret string `json:"clientSecret"`
+	clientID = strings.TrimSpace(clientID)
+	if clientID == "" {
+		return "", store.Validation("oidc client id is required")
 	}
 	paths := []string{
 		"/api/oidc/clients/" + url.PathEscape(clientID) + "/secrets",
@@ -921,27 +924,40 @@ func (c *PocketIDClient) mintOIDCClientSecret(ctx context.Context, clientID stri
 	}
 	var last error
 	for _, path := range paths {
-		created.Secret, created.Value, created.ClientSecret = "", "", ""
-		if err := c.doJSON(ctx, http.MethodPost, path, map[string]any{}, &created); err != nil {
+		var raw map[string]any
+		if err := c.doJSON(ctx, http.MethodPost, path, map[string]any{}, &raw); err != nil {
 			last = err
 			continue
 		}
-		sec := strings.TrimSpace(created.Secret)
-		if sec == "" {
-			sec = strings.TrimSpace(created.Value)
-		}
-		if sec == "" {
-			sec = strings.TrimSpace(created.ClientSecret)
-		}
+		sec := firstStringField(raw, "secret", "value", "clientSecret", "client_secret")
 		if sec != "" {
 			return sec, nil
 		}
-		last = fmt.Errorf("empty credential in response")
+		last = fmt.Errorf("empty mint response")
 	}
 	if last == nil {
-		last = fmt.Errorf("empty credential in response")
+		last = fmt.Errorf("empty mint response")
 	}
-	return "", fmt.Errorf("pocket-id mint oidc client credential: %w", last)
+	return "", fmt.Errorf("pocket-id mint oidc client: %w", last)
+}
+
+func firstStringField(raw map[string]any, keys ...string) string {
+	if raw == nil {
+		return ""
+	}
+	for _, k := range keys {
+		v, ok := raw[k]
+		if !ok {
+			continue
+		}
+		s, ok := v.(string)
+		if ok {
+			if s = strings.TrimSpace(s); s != "" {
+				return s
+			}
+		}
+	}
+	return ""
 }
 
 func (c *PocketIDClient) listOIDCClients(ctx context.Context) []pocketOidcClientDetailDto {

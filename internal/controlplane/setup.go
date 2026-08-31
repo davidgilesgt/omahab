@@ -1108,7 +1108,10 @@ func (b *Backend) setupPhaseOIDC(ctx context.Context) error {
 		}
 		clientSecret, err = reuseStoredOIDCSecret(ctx, b.secrets, "hermes_oidc_client_secret", clientSecret)
 		if err != nil {
-			return fmt.Errorf("hermes oidc credential: %w", err)
+			clientSecret, err = b.pocketClient.CreateOIDCClientSecret(ctx, clientID)
+			if err != nil {
+				return fmt.Errorf("hermes oidc client: %w", err)
+			}
 		}
 		if err := upsertSecret(ctx, b.secrets, "platform-app", "hermes_oidc_client_id", clientID); err != nil {
 			return fmt.Errorf("store hermes_oidc_client_id: %w", err)
@@ -1197,7 +1200,10 @@ func (b *Backend) ensureImmichOIDC(ctx context.Context, domainName string) error
 	}
 	clientSecret, err = reuseStoredOIDCSecret(ctx, b.secrets, "immich_oidc_client_secret", clientSecret)
 	if err != nil {
-		return fmt.Errorf("immich oidc credential: %w", err)
+		clientSecret, err = b.pocketClient.CreateOIDCClientSecret(ctx, clientID)
+		if err != nil {
+			return fmt.Errorf("immich oidc client: %w", err)
+		}
 	}
 	if err := upsertSecret(ctx, b.secrets, "platform-app", "immich_oidc_client_id", clientID); err != nil {
 		return fmt.Errorf("store immich_oidc_client_id: %w", err)
@@ -1207,10 +1213,10 @@ func (b *Backend) ensureImmichOIDC(ctx context.Context, domainName string) error
 	}
 	path := immichConfigPath(b.cfg.DataDir)
 	if err := writeImmichOAuthConfig(path, domainName, clientID, clientSecret); err != nil {
-		return fmt.Errorf("write immich oauth config: %w", err)
+		return fmt.Errorf("write immich config: %w", err)
 	}
 	if err := b.redeployBundle(ctx, "immich"); err != nil {
-		return fmt.Errorf("reload immich oauth config: %w", err)
+		return fmt.Errorf("reload immich config: %w", err)
 	}
 	log.Printf("setup oidc: immich client ensured")
 	return nil
