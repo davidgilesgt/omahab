@@ -331,6 +331,108 @@ func TestSetupPhaseOIDCSkipsHermesWhenAbsent(t *testing.T) {
 	}
 }
 
+func TestWriteImmichOAuthConfig(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "immich.json")
+	if err := writeImmichOAuthConfig(path, "omahab.com", "cid", "csecret"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	oauth, _ := cfg["oauth"].(map[string]any)
+	if oauth["enabled"] != true || oauth["clientId"] != "cid" || oauth["issuerUrl"] != "https://id.omahab.com" {
+		t.Fatalf("oauth = %+v", oauth)
+	}
+}
+
+func TestSetupPhaseOIDCEnsuresImmichClient(t *testing.T) {
+	ctx := context.Background()
+	var createdName string
+	var createdCallbacks []any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/users":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}})
+		case strings.Contains(r.URL.Path, "application-configuration"):
+			if r.Method == http.MethodPut {
+				_ = json.NewEncoder(w).Encode([]any{})
+				return
+			}
+			_ = json.NewEncoder(w).Encode([]any{})
+		case strings.Contains(r.URL.Path, "/api/user-groups"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
+				map[string]any{"id": "1", "name": "admins", "friendlyName": "admins"},
+				map[string]any{"id": "2", "name": "members", "friendlyName": "members"},
+				map[string]any{"id": "3", "name": "guests", "friendlyName": "guests"},
+			}})
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/api/oidc/clients"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/oidc/clients":
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			createdName, _ = body["name"].(string)
+			createdCallbacks, _ = body["callbackUrls"].([]any)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": "oidc-immich", "name": "immich",
+				"clientId": "immich-client", "clientSecret": "immich-secret",
+			})
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	digest := "sha256:" + strings.Repeat("a", 64)
+	b := newAppsBackend(t, &scriptedRunner{health: domain.HealthHealthy}, digest)
+	b.cfg.DataDir = t.TempDir()
+	if err := ensureImmichConfigStub(immichConfigPath(b.cfg.DataDir)); err != nil {
+		t.Fatal(err)
+	}
+	immich := testSetupBundle("immich", digest, domain.ExposurePrivate, "photos", []string{"caddy", "pocket-id"})
+	if err := b.ensureDefaultApp(ctx, immich, "omahab.com"); err != nil {
+		t.Fatalf("install immich: %v", err)
+	}
+	if _, err := b.secrets.Put(ctx, "platform-app", "pocketid_api_key", "test-key"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OMAHAB_POCKETID_URL", srv.URL)
+	if err := b.setupPhaseOIDC(ctx); err != nil {
+		t.Fatalf("oidc: %v", err)
+	}
+	if createdName != "immich" {
+		t.Fatalf("created client name = %q", createdName)
+	}
+	want := "https://photos.omahab.com/auth/login"
+	found := false
+	for _, c := range createdCallbacks {
+		if c == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("callbacks = %v want %s", createdCallbacks, want)
+	}
+	id, err := b.secrets.RevealByName(ctx, "platform-app", "immich_oidc_client_id")
+	if err != nil || id != "immich-client" {
+		t.Fatalf("client id = %q err=%v", id, err)
+	}
+	raw, err := os.ReadFile(immichConfigPath(b.cfg.DataDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"enabled": true`) || !strings.Contains(string(raw), "immich-client") {
+		t.Fatalf("config = %s", raw)
+	}
+}
+
 func testSetupBundle(id, digest string, exp domain.Exposure, route string, deps []string) apps.Bundle {
 	max := exp
 	if max == "" {

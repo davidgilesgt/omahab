@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -676,6 +677,9 @@ func (b *Backend) setupPhaseCoreApps(ctx context.Context) error {
 	if err := b.ensureOmahabNetwork(ctx); err != nil {
 		return err
 	}
+	if err := ensureImmichConfigStub(immichConfigPath(b.cfg.DataDir)); err != nil {
+		return fmt.Errorf("immich config stub: %w", err)
+	}
 
 	domainName := ""
 	if inst, err := b.store.Instance(ctx); err == nil {
@@ -1041,20 +1045,29 @@ func (b *Backend) setupPhaseOIDC(ctx context.Context) error {
 	if err := b.pocketClient.SeedDefaultGroups(ctx); err != nil {
 		return fmt.Errorf("pocket-id seed groups: %w", err)
 	}
-	hermesRunning := false
+
+	var installed []apps.Status
 	if b.apps != nil {
-		if list, err := b.apps.List(ctx); err == nil {
-			for _, st := range list {
-				if st.BundleID == "hermes" && st.ObservedState == apps.ObservedRunning {
-					hermesRunning = true
-					break
-				}
+		list, err := b.apps.List(ctx)
+		if err != nil {
+			return fmt.Errorf("list apps: %w", err)
+		}
+		installed = list
+	}
+	bundleRunning := func(id string) bool {
+		for _, st := range installed {
+			if st.BundleID == id && st.ObservedState == apps.ObservedRunning {
+				return true
 			}
 		}
+		return false
 	}
-	if !hermesRunning {
+	needImmich := bundleRunning("immich")
+	needHermes := bundleRunning("hermes")
+	if !needImmich && !needHermes {
 		return nil
 	}
+
 	inst, err := b.store.Instance(ctx)
 	if err != nil {
 		return fmt.Errorf("load instance: %w", err)
@@ -1063,24 +1076,172 @@ func (b *Backend) setupPhaseOIDC(ctx context.Context) error {
 	if domainName == "" || domainName == "example.com" || domainName == "not-configured.invalid" {
 		return fmt.Errorf("domain not configured for OIDC")
 	}
-	callback := fmt.Sprintf("https://ai.%s/auth/callback", domainName)
-	clientID, clientSecret, err := b.pocketClient.EnsureOIDCClient(ctx, "hermes", []string{callback})
-	if err != nil {
-		return fmt.Errorf("ensure oidc client hermes: %w", err)
-	}
-	if strings.TrimSpace(clientID) == "" {
-		return fmt.Errorf("oidc client hermes returned empty clientID")
-	}
-	if err := upsertSecret(ctx, b.secrets, "platform-app", "hermes_oidc_client_id", clientID); err != nil {
-		return fmt.Errorf("store hermes_oidc_client_id: %w", err)
-	}
-	if strings.TrimSpace(clientSecret) != "" {
-		if err := upsertSecret(ctx, b.secrets, "platform-app", "hermes_oidc_client_secret", clientSecret); err != nil {
-			return fmt.Errorf("store hermes_oidc_client_secret: %w", err)
+
+	if needImmich {
+		if err := b.ensureImmichOIDC(ctx, domainName); err != nil {
+			return err
 		}
 	}
-	log.Printf("setup oidc: hermes client ensured")
+	if needHermes {
+		callback := fmt.Sprintf("https://ai.%s/auth/callback", domainName)
+		clientID, clientSecret, err := b.pocketClient.EnsureOIDCClient(ctx, "hermes", []string{callback})
+		if err != nil {
+			return fmt.Errorf("ensure oidc client hermes: %w", err)
+		}
+		if strings.TrimSpace(clientID) == "" {
+			return fmt.Errorf("oidc client hermes returned empty clientID")
+		}
+		if err := upsertSecret(ctx, b.secrets, "platform-app", "hermes_oidc_client_id", clientID); err != nil {
+			return fmt.Errorf("store hermes_oidc_client_id: %w", err)
+		}
+		if strings.TrimSpace(clientSecret) != "" {
+			if err := upsertSecret(ctx, b.secrets, "platform-app", "hermes_oidc_client_secret", clientSecret); err != nil {
+				return fmt.Errorf("store hermes_oidc_client_secret: %w", err)
+			}
+		}
+		log.Printf("setup oidc: hermes client ensured")
+	}
 	return nil
+}
+
+func immichConfigPath(dataDir string) string {
+	if strings.TrimSpace(dataDir) == "" {
+		dataDir = "/srv/omahab"
+	}
+	return filepath.Join(dataDir, "apps", "immich", "immich.json")
+}
+
+func ensureImmichConfigStub(path string) error {
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return err
+	}
+	stub := []byte("{\n  \"oauth\": {\n    \"enabled\": false\n  }\n}\n")
+	return os.WriteFile(path, stub, 0o600)
+}
+
+func immichOIDCCallbacks(domainName string) []string {
+	base := "https://photos." + domainName
+	return []string{
+		base + "/auth/login",
+		base + "/user-settings",
+		base + "/api/oauth/mobile-redirect",
+		"app.immich:///oauth-callback",
+	}
+}
+
+func writeImmichOAuthConfig(path, domainName, clientID, clientSecret string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return err
+	}
+	cfg := map[string]any{
+		"oauth": map[string]any{
+			"enabled":                 true,
+			"autoRegister":            true,
+			"autoLaunch":              false,
+			"buttonText":              "Login with Pocket ID",
+			"clientId":                clientID,
+			"clientSecret":            clientSecret,
+			"issuerUrl":               "https://id." + domainName,
+			"scope":                   "openid email profile",
+			"signingAlgorithm":        "RS256",
+			"tokenEndpointAuthMethod": "client_secret_post",
+			"mobileOverrideEnabled":   true,
+			"mobileRedirectUri":       "https://photos." + domainName + "/api/oauth/mobile-redirect",
+			"accountManagementUrl":    "https://id." + domainName + "/settings/account",
+		},
+		"passwordLogin": map[string]any{"enabled": true},
+		"server":        map[string]any{"externalDomain": "https://photos." + domainName},
+	}
+	raw, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	raw = append(raw, '\n')
+	return os.WriteFile(path, raw, 0o600)
+}
+
+func (b *Backend) ensureImmichOIDC(ctx context.Context, domainName string) error {
+	callbacks := immichOIDCCallbacks(domainName)
+	clientID, clientSecret, err := b.pocketClient.EnsureOIDCClient(ctx, "immich", callbacks)
+	if err != nil {
+		httpsOnly := callbacks[:len(callbacks)-1]
+		clientID, clientSecret, err = b.pocketClient.EnsureOIDCClient(ctx, "immich", httpsOnly)
+		if err != nil {
+			return fmt.Errorf("ensure oidc client immich: %w", err)
+		}
+	}
+	if strings.TrimSpace(clientID) == "" {
+		return fmt.Errorf("oidc client immich returned empty clientID")
+	}
+	if err := upsertSecret(ctx, b.secrets, "platform-app", "immich_oidc_client_id", clientID); err != nil {
+		return fmt.Errorf("store immich_oidc_client_id: %w", err)
+	}
+	if strings.TrimSpace(clientSecret) != "" {
+		if err := upsertSecret(ctx, b.secrets, "platform-app", "immich_oidc_client_secret", clientSecret); err != nil {
+			return fmt.Errorf("store immich_oidc_client_secret: %w", err)
+		}
+	}
+	path := immichConfigPath(b.cfg.DataDir)
+	if err := writeImmichOAuthConfig(path, domainName, clientID, clientSecret); err != nil {
+		return fmt.Errorf("write immich oauth config: %w", err)
+	}
+	if err := b.redeployBundle(ctx, "immich"); err != nil {
+		return fmt.Errorf("reload immich oauth config: %w", err)
+	}
+	log.Printf("setup oidc: immich client ensured")
+	return nil
+}
+
+func (b *Backend) redeployBundle(ctx context.Context, bundleID string) error {
+	if b.apps == nil {
+		return nil
+	}
+	list, err := b.apps.List(ctx)
+	if err != nil {
+		return err
+	}
+	var app *apps.Status
+	for i := range list {
+		if list[i].BundleID == bundleID {
+			st := list[i]
+			app = &st
+			break
+		}
+	}
+	if app == nil {
+		return nil
+	}
+	var digest string
+	for _, bd := range b.apps.CatalogBundles() {
+		if bd.ID == bundleID {
+			digest = bd.Digest
+			break
+		}
+	}
+	if digest != "" {
+		if _, err := b.apps.Update(ctx, app.ID, digest); err != nil {
+			return err
+		}
+	}
+	if _, err := b.apps.Stop(ctx, app.ID); err != nil {
+		return err
+	}
+	st, err := b.apps.Start(ctx, app.ID)
+	if err != nil {
+		return err
+	}
+	if st.ObservedState == apps.ObservedRunning && st.Health != domain.HealthHealthy {
+		st, err = b.apps.CheckHealth(ctx, app.ID)
+		if err != nil {
+			return err
+		}
+	}
+	return requireRunningHealthy(st)
 }
 
 // Phase 6: Exposure records + DNS

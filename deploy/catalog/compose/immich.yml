@@ -25,10 +25,12 @@ services:
       REDIS_HOSTNAME: immich-redis
       IMMICH_MACHINE_LEARNING_URL: "http://immich-machine-learning:3003"
       IMMICH_PUBLIC_URL: "https://photos.${DOMAIN:?domain required}/"
+      IMMICH_CONFIG_FILE: /config/immich.json
     secrets:
       - immich_db_password
     volumes:
       - /srv/omahab/apps/immich/library:/data
+      - /srv/omahab/apps/immich/immich.json:/config/immich.json:ro
     networks:
       omahab:
         aliases:

@@ -453,6 +453,9 @@ func TestConvertRealCatalogDefaultsAndHealth(t *testing.T) {
 	if !strings.Contains(immich.Compose, "aliases:") || !strings.Contains(immich.Compose, "- immich\n") {
 		t.Fatalf("immich compose missing bundle-id network alias:\n%s", immich.Compose)
 	}
+	if !strings.Contains(immich.Compose, "IMMICH_CONFIG_FILE") || !strings.Contains(immich.Compose, "immich.json:/config/immich.json") {
+		t.Fatalf("immich compose missing oauth config mount:\n%s", immich.Compose)
+	}
 	if immich.Image != "ghcr.io/immich-app/immich-server" {
 		t.Fatalf("immich image = %q", immich.Image)
 	}
