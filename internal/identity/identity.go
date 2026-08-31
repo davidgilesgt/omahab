@@ -90,7 +90,11 @@ type Service struct {
 }
 
 const (
-	DefaultRecoveryTTL = 15 * time.Minute
+	// DefaultRecoveryTTL is the lifetime of Pocket ID one-time enrollment
+	// and recovery codes. Pocket ID emits 6-character codes when TTL is
+	// <= 15 minutes and 12-character codes above that; the login form
+	// requires 12 characters when email one-time login is disabled.
+	DefaultRecoveryTTL = 16 * time.Minute
 	maxEmailLen        = 254
 )
 

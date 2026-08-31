@@ -33,9 +33,9 @@ func newTestClient(t *testing.T, handler http.HandlerFunc) (*PocketIDClient, *ht
 
 func TestNewPocketIDClient(t *testing.T) {
 	tests := []struct {
-		name    string
-		cfg     PocketIDConfig
-		wantErr bool
+		name            string
+		cfg             PocketIDConfig
+		wantErr         bool
 		isNotConfigured bool
 	}{
 		{"ok", PocketIDConfig{BaseURL: "https://pocket.example.com", APIKey: "b"}, false, false},
@@ -68,14 +68,14 @@ func TestCreateRecoveryCode(t *testing.T) {
 	const userID = "user-123"
 	const email = "alice@example.com"
 	type testCase struct {
-		name        string
-		email       string
-		handler     http.HandlerFunc
-		wantCode    string
+		name          string
+		email         string
+		handler       http.HandlerFunc
+		wantCode      string
 		wantURLSuffix string
-		wantErr     bool
-		errIs       error
-		checkExpiry bool
+		wantErr       bool
+		errIs         error
+		checkExpiry   bool
 	}
 	tests := []testCase{
 		{
@@ -247,7 +247,7 @@ func TestCreateRecoveryCode(t *testing.T) {
 				if exp.After(start.Add(2 * DefaultRecoveryTTL).Add(time.Second)) {
 					t.Fatalf("expiry %v too far in future, start %v", exp, start)
 				}
-				// Check within expected ttl window: ~15m
+				// Check within expected ttl window.
 				diff := exp.Sub(start)
 				if diff < DefaultRecoveryTTL-time.Second || diff > DefaultRecoveryTTL+time.Second*2 {
 					t.Fatalf("expiry diff %v want ~%v", diff, DefaultRecoveryTTL)
@@ -371,16 +371,16 @@ func TestValidateRecovery(t *testing.T) {
 
 func TestCreateUser(t *testing.T) {
 	tests := []struct {
-		name    string
-		email   string
+		name        string
+		email       string
 		displayName string
-		handler http.HandlerFunc
-		wantErr bool
-		errIs   error
+		handler     http.HandlerFunc
+		wantErr     bool
+		errIs       error
 	}{
 		{
-			name:  "success with enrollment link",
-			email: "bob@example.com",
+			name:        "success with enrollment link",
+			email:       "bob@example.com",
 			displayName: "Bob",
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				if r.Header.Get("X-API-KEY") != "test-secret" {
@@ -405,8 +405,8 @@ func TestCreateUser(t *testing.T) {
 			},
 		},
 		{
-			name:  "validation empty email",
-			email: "",
+			name:        "validation empty email",
+			email:       "",
 			displayName: "Bob",
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				t.Fatalf("should not call API")
@@ -415,8 +415,8 @@ func TestCreateUser(t *testing.T) {
 			errIs:   store.ErrValidation,
 		},
 		{
-			name:  "conflict duplicate",
-			email: "bob@example.com",
+			name:        "conflict duplicate",
+			email:       "bob@example.com",
 			displayName: "Bob",
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				if r.Method == http.MethodPost && r.URL.Path == "/api/users" {
@@ -429,8 +429,8 @@ func TestCreateUser(t *testing.T) {
 			errIs:   store.ErrConflict,
 		},
 		{
-			name:  "bad request",
-			email: "bob@example.com",
+			name:        "bad request",
+			email:       "bob@example.com",
 			displayName: "Bob",
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				if r.Method == http.MethodPost && r.URL.Path == "/api/users" {
@@ -443,8 +443,8 @@ func TestCreateUser(t *testing.T) {
 			errIs:   store.ErrValidation,
 		},
 		{
-			name:  "server error",
-			email: "bob@example.com",
+			name:        "server error",
+			email:       "bob@example.com",
 			displayName: "Bob",
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
@@ -789,7 +789,10 @@ func TestNotConfiguredPropagation(t *testing.T) {
 	}{
 		{"CreateRecoveryCode", func() error { _, _, _, err := c.CreateRecoveryCode(context.Background(), "a@b.com"); return err }},
 		{"ValidateRecovery", func() error { return c.ValidateRecovery(context.Background(), "a@b.com", "ABC123") }},
-		{"CreateUser", func() error { _, _, _, err := c.CreateUser(context.Background(), "a@b.com", "A", false, nil); return err }},
+		{"CreateUser", func() error {
+			_, _, _, err := c.CreateUser(context.Background(), "a@b.com", "A", false, nil)
+			return err
+		}},
 		{"GetUser", func() error { _, err := c.GetUser(context.Background(), "u1"); return err }},
 		{"ListUsers", func() error { _, err := c.ListUsers(context.Background()); return err }},
 		{"HealthCheck", func() error { return c.HealthCheck(context.Background()) }},
