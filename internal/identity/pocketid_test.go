@@ -811,3 +811,102 @@ func TestNotConfiguredPropagation(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
+
+func TestEnsureOIDCClientMintsSecret(t *testing.T) {
+	t.Parallel()
+	var minted bool
+	c, srv := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/oidc/clients":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/oidc/clients":
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "client-1", "name": "immich"})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/oidc/clients/client-1":
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "client-1", "name": "immich"})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/oidc/clients/client-1/secrets":
+			_ = json.NewEncoder(w).Encode([]any{})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/oidc/clients/client-1/secrets":
+			minted = true
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "sec-1", "secret": "minted-credential"})
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	t.Cleanup(srv.Close)
+	id, secret, err := c.EnsureOIDCClient(context.Background(), "immich", []string{"https://photos.example.com/auth/login"})
+	if err != nil {
+		t.Fatalf("EnsureOIDCClient: %v", err)
+	}
+	if id != "client-1" || secret != "minted-credential" || !minted {
+		t.Fatalf("id=%q secret=%q minted=%v", id, secret, minted)
+	}
+}
+
+func TestEnsureOIDCClientReusesExistingID(t *testing.T) {
+	t.Parallel()
+	var minted bool
+	c, srv := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/oidc/clients":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
+				map[string]any{"id": "08e123bc", "name": "immich"},
+			}})
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/oidc/clients/08e123bc") && !strings.HasSuffix(r.URL.Path, "/secrets"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "08e123bc", "name": "immich"})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/oidc/clients/08e123bc/secrets":
+			_ = json.NewEncoder(w).Encode([]any{})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/oidc/clients/08e123bc/secrets":
+			minted = true
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"secret": "existing-mint"})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/oidc/clients":
+			t.Errorf("must not recreate existing client")
+			w.WriteHeader(http.StatusConflict)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	t.Cleanup(srv.Close)
+	id, secret, err := c.EnsureOIDCClient(context.Background(), "immich", []string{"https://photos.example.com/auth/login"})
+	if err != nil {
+		t.Fatalf("EnsureOIDCClient: %v", err)
+	}
+	if id != "08e123bc" || secret != "existing-mint" || !minted {
+		t.Fatalf("id=%q secret=%q minted=%v", id, secret, minted)
+	}
+}
+
+func TestEnsureOIDCClientSkipsMintWhenSecretsExist(t *testing.T) {
+	t.Parallel()
+	c, srv := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/oidc/clients":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
+				map[string]any{"id": "client-2", "name": "hermes"},
+			}})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/oidc/clients/client-2":
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "client-2", "name": "hermes"})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/oidc/clients/client-2/secrets":
+			_ = json.NewEncoder(w).Encode([]any{map[string]any{"id": "sec-existing"}})
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/secret"):
+			t.Errorf("must not mint when secrets exist")
+			w.WriteHeader(http.StatusInternalServerError)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	t.Cleanup(srv.Close)
+	id, secret, err := c.EnsureOIDCClient(context.Background(), "hermes", []string{"https://ai.example.com/auth/callback"})
+	if err != nil {
+		t.Fatalf("EnsureOIDCClient: %v", err)
+	}
+	if id != "client-2" || secret != "" {
+		t.Fatalf("id=%q secret=%q", id, secret)
+	}
+}

@@ -535,6 +535,21 @@ func upsertSecret(ctx context.Context, svc storeService, scope, name, value stri
 	return err
 }
 
+func reuseStoredOIDCSecret(ctx context.Context, svc storeService, name, current string) (string, error) {
+	current = strings.TrimSpace(current)
+	if current != "" {
+		return current, nil
+	}
+	if svc != nil {
+		if stored, err := svc.RevealByName(ctx, "platform-app", name); err == nil {
+			if stored = strings.TrimSpace(stored); stored != "" {
+				return stored, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("missing")
+}
+
 // Secrets materialization
 func (b *Backend) setupPhaseSecrets(ctx context.Context) error {
 	// Always ensure platform-app/pocketid_api_key exists for Pocket ID loopback API, even if catalog is empty.
@@ -1091,13 +1106,15 @@ func (b *Backend) setupPhaseOIDC(ctx context.Context) error {
 		if strings.TrimSpace(clientID) == "" {
 			return fmt.Errorf("oidc client hermes returned empty clientID")
 		}
+		clientSecret, err = reuseStoredOIDCSecret(ctx, b.secrets, "hermes_oidc_client_secret", clientSecret)
+		if err != nil {
+			return fmt.Errorf("hermes oidc credential: %w", err)
+		}
 		if err := upsertSecret(ctx, b.secrets, "platform-app", "hermes_oidc_client_id", clientID); err != nil {
 			return fmt.Errorf("store hermes_oidc_client_id: %w", err)
 		}
-		if strings.TrimSpace(clientSecret) != "" {
-			if err := upsertSecret(ctx, b.secrets, "platform-app", "hermes_oidc_client_secret", clientSecret); err != nil {
-				return fmt.Errorf("store hermes_oidc_client_secret: %w", err)
-			}
+		if err := upsertSecret(ctx, b.secrets, "platform-app", "hermes_oidc_client_secret", clientSecret); err != nil {
+			return fmt.Errorf("store hermes_oidc_client_secret: %w", err)
 		}
 		log.Printf("setup oidc: hermes client ensured")
 	}
@@ -1178,13 +1195,15 @@ func (b *Backend) ensureImmichOIDC(ctx context.Context, domainName string) error
 	if strings.TrimSpace(clientID) == "" {
 		return fmt.Errorf("oidc client immich returned empty clientID")
 	}
+	clientSecret, err = reuseStoredOIDCSecret(ctx, b.secrets, "immich_oidc_client_secret", clientSecret)
+	if err != nil {
+		return fmt.Errorf("immich oidc credential: %w", err)
+	}
 	if err := upsertSecret(ctx, b.secrets, "platform-app", "immich_oidc_client_id", clientID); err != nil {
 		return fmt.Errorf("store immich_oidc_client_id: %w", err)
 	}
-	if strings.TrimSpace(clientSecret) != "" {
-		if err := upsertSecret(ctx, b.secrets, "platform-app", "immich_oidc_client_secret", clientSecret); err != nil {
-			return fmt.Errorf("store immich_oidc_client_secret: %w", err)
-		}
+	if err := upsertSecret(ctx, b.secrets, "platform-app", "immich_oidc_client_secret", clientSecret); err != nil {
+		return fmt.Errorf("store immich_oidc_client_secret: %w", err)
 	}
 	path := immichConfigPath(b.cfg.DataDir)
 	if err := writeImmichOAuthConfig(path, domainName, clientID, clientSecret); err != nil {
@@ -1231,17 +1250,38 @@ func (b *Backend) redeployBundle(ctx context.Context, bundleID string) error {
 	if _, err := b.apps.Stop(ctx, app.ID); err != nil {
 		return err
 	}
-	st, err := b.apps.Start(ctx, app.ID)
-	if err != nil {
+	if _, err := b.apps.Start(ctx, app.ID); err != nil {
 		return err
 	}
-	if st.ObservedState == apps.ObservedRunning && st.Health != domain.HealthHealthy {
-		st, err = b.apps.CheckHealth(ctx, app.ID)
+	return b.waitAppHealthy(ctx, app.ID, 90*time.Second)
+}
+
+func (b *Backend) waitAppHealthy(ctx context.Context, appID domain.ID, timeout time.Duration) error {
+	if b.apps == nil {
+		return nil
+	}
+	deadline := time.Now().Add(timeout)
+	var last apps.Status
+	for {
+		st, err := b.apps.CheckHealth(ctx, appID)
 		if err != nil {
 			return err
 		}
+		last = st
+		if st.ObservedState == apps.ObservedRunning && st.Health == domain.HealthHealthy {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return requireRunningHealthy(last)
+		}
+		timer := time.NewTimer(2 * time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
 	}
-	return requireRunningHealthy(st)
 }
 
 // Phase 6: Exposure records + DNS
