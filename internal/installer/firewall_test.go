@@ -81,20 +81,42 @@ func TestFirewallNftablesConfTemplate(t *testing.T) {
 	if strings.Contains(conf, "policy drop") == false {
 		t.Fatalf("missing policy drop")
 	}
-	// Security invariant: TCP 8484 must be admitted only on tailscale0;
-	// public interfaces must remain blocked. Loopback reachability is via
-	// iifname "lo" accept, not a public 8484 rule.
+	// Security invariant: TCP 8484 is admitted on tailscale0 for the
+	// dashboard, and from the reserved Caddy address on Docker bridges.
 	if !strings.Contains(conf, `iifname "tailscale0" tcp dport 8484`) {
 		t.Fatalf("NftablesConf must gate 8484 on tailscale0, got:\n%s", conf)
+	}
+	if !strings.Contains(conf, `iifname "br-*" ip saddr 172.30.0.2 tcp dport 8484 accept comment "caddy dashboard upstream"`) {
+		t.Fatalf("NftablesConf must allow only Caddy 172.30.0.2 on docker bridges to 8484, got:\n%s", conf)
 	}
 	if !strings.Contains(conf, `iifname "lo" accept`) {
 		t.Fatalf("NftablesConf must allow loopback via iifname lo")
 	}
-	// No unrestricted 8484 accept. Every tcp dport 8484 line must be gated by tailscale0.
-	total := strings.Count(conf, "tcp dport 8484")
-	gated := strings.Count(conf, `iifname "tailscale0" tcp dport 8484`)
-	if total != gated || total == 0 {
-		t.Fatalf("NftablesConf must contain only tailscale0-gated 8484 rules: total %d gated %d\nconf:\n%s", total, gated, conf)
+	if strings.Count(conf, "tcp dport 8484") != 2 {
+		t.Fatalf("NftablesConf must contain exactly two 8484 rules, got:\n%s", conf)
+	}
+	if strings.Contains(conf, "172.30.0.0/24") {
+		t.Fatalf("NftablesConf must not admit the rest of 172.30.0.0/24:\n%s", conf)
+	}
+	for _, line := range strings.Split(conf, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if !strings.Contains(line, "tcp dport 8484") {
+			continue
+		}
+		tailscale := strings.Contains(line, `iifname "tailscale0"`)
+		caddyBridge := strings.Contains(line, `iifname "br-*"`) && strings.Contains(line, `ip saddr 172.30.0.2`)
+		if !tailscale && !caddyBridge {
+			t.Fatalf("NftablesConf 8484 rule is unrestricted: %q\nconf:\n%s", line, conf)
+		}
+		if caddyBridge && (strings.Contains(line, "172.30.0.3") || strings.Contains(line, "ip saddr 172.30.0.0")) {
+			t.Fatalf("Docker 8484 rule must not match another container: %q", line)
+		}
+		if strings.Contains(line, "tcp dport 8484") && !strings.Contains(line, `iifname "tailscale0"`) && !strings.Contains(line, `iifname "br-*"`) {
+			t.Fatalf("8484 rule must not match non-bridge traffic: %q", line)
+		}
 	}
 	if !strings.Contains(conf, `iifname "tailscale0" tcp dport { 80, 443 } accept comment "caddy https via tailscale"`) {
 		t.Fatalf("NftablesConf must contain tailscale0-gated 80/443 rule, got:\n%s", conf)

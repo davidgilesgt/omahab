@@ -80,6 +80,13 @@ type Backend struct {
 	setupRunning bool
 	setupLastErr string
 	setupLastRun time.Time
+
+	tailscaleIPv4 func(context.Context) ([]byte, error)
+	tailscaleWait time.Duration
+	dockerNetwork func(context.Context) error
+	httpsProbe    func(context.Context, string) error
+	httpsWait     time.Duration
+	httpsInterval time.Duration
 }
 
 // Options for New

@@ -194,3 +194,87 @@ func TestCheckForUpdatesNoCatalogMatch(t *testing.T) {
 		t.Fatalf("expected 0 when bundle missing from catalog, got %d", sink.Count())
 	}
 }
+
+type countingRunner struct {
+	fakeRunner
+	deploys int
+}
+
+func (c *countingRunner) Deploy(ctx context.Context, app domain.Application, spec DeploySpec) error {
+	c.deploys++
+	return c.fakeRunner.Deploy(ctx, app, spec)
+}
+
+func TestServiceUpdateSameDigestComposeChange(t *testing.T) {
+	t.Parallel()
+	digest := "sha256:" + strings.Repeat("a", 64)
+	original := testBundle("caddy", digest)
+	cat, err := NewCatalog(original)
+	if err != nil {
+		t.Fatalf("catalog: %v", err)
+	}
+	runner := &countingRunner{}
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.Migrate(context.Background(), Migrations()...); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	sink := &recordingSink{}
+	svc, err := NewService(st.DB(), Options{Catalog: cat, Runner: runner, Events: sink})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	ctx := context.Background()
+	installed, err := svc.Install(ctx, InstallRequest{BundleID: "caddy"})
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if runner.deploys != 1 {
+		t.Fatalf("install deploys = %d want 1", runner.deploys)
+	}
+
+	changed := original
+	changed.Compose = "services:\n  app:\n    image: {{.Image}}@{{.Digest}}\n    ports:\n      - \"127.0.0.1:80:80\"\n"
+	cat2, err := NewCatalog(changed)
+	if err != nil {
+		t.Fatalf("changed catalog: %v", err)
+	}
+	if err := svc.SetCatalog(cat2); err != nil {
+		t.Fatalf("set catalog: %v", err)
+	}
+	updated, err := svc.Update(ctx, installed.ID, digest)
+	if err != nil {
+		t.Fatalf("update compose: %v", err)
+	}
+	if runner.deploys != 2 {
+		t.Fatalf("compose change deploys = %d want 2", runner.deploys)
+	}
+	var prev string
+	if err := st.DB().QueryRow(`SELECT previous_release_id FROM apps WHERE id = ?`, string(updated.ID)).Scan(&prev); err != nil {
+		t.Fatalf("previous release: %v", err)
+	}
+	if prev == "" {
+		t.Fatal("expected rollback history after compose change")
+	}
+	var n int
+	if err := st.DB().QueryRow(`SELECT COUNT(*) FROM app_releases WHERE app_id = ?`, string(updated.ID)).Scan(&n); err != nil {
+		t.Fatalf("count releases: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("releases = %d want 2", n)
+	}
+
+	again, err := svc.Update(ctx, installed.ID, digest)
+	if err != nil {
+		t.Fatalf("second update: %v", err)
+	}
+	if runner.deploys != 2 {
+		t.Fatalf("idempotent update deploys = %d want 2", runner.deploys)
+	}
+	if again.ID != updated.ID {
+		t.Fatalf("status id changed on no-op")
+	}
+}

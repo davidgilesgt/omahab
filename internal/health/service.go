@@ -156,6 +156,7 @@ type Options struct {
 	Hostname      string
 	InstanceID    string
 }
+
 // Service aggregates host health and emits changes without storms.
 type Service struct {
 	db            *sql.DB
@@ -258,13 +259,13 @@ func (s *Service) Check(ctx context.Context) (*Report, error) {
 	// Disk
 	diskStatus, err := s.disk.CheckDisk(ctx)
 	if err != nil {
-		c := Check{Name: "disk", Status: "unknown", Message: redactDetail(err.Error())}
+		c := Check{Name: "disk", Status: "unknown", Message: RedactDetail(err.Error())}
 		checks = append(checks, c)
 		healthy = false
 	} else {
 		status := "healthy"
 		msg := fmt.Sprintf("disk use %.1f%%", diskStatus.UsePercent)
-		detail := fmt.Sprintf("path %s free %d/%d", redactDetail(diskStatus.Path), diskStatus.FreeBytes, diskStatus.TotalBytes)
+		detail := fmt.Sprintf("path %s free %d/%d", RedactDetail(diskStatus.Path), diskStatus.FreeBytes, diskStatus.TotalBytes)
 		if diskStatus.UsePercent >= s.diskThreshold {
 			status = "unhealthy"
 			msg = fmt.Sprintf("disk low: %.1f%% used", diskStatus.UsePercent)
@@ -282,7 +283,7 @@ func (s *Service) Check(ctx context.Context) (*Report, error) {
 	// Services
 	svcs, err := s.services.CheckServices(ctx)
 	if err != nil {
-		checks = append(checks, Check{Name: "services", Status: "unknown", Message: redactDetail(err.Error())})
+		checks = append(checks, Check{Name: "services", Status: "unknown", Message: RedactDetail(err.Error())})
 	} else if len(svcs) == 0 {
 		checks = append(checks, Check{Name: "services", Status: "healthy", Message: "no services registered"})
 	} else {
@@ -297,7 +298,7 @@ func (s *Service) Check(ctx context.Context) (*Report, error) {
 				status = "healthy"
 			}
 			msg := fmt.Sprintf("service %s %s", svc.Name, status)
-			c := Check{Name: "service:" + svc.Name, Status: status, Message: msg, Detail: redactDetail(svc.Detail)}
+			c := Check{Name: "service:" + svc.Name, Status: status, Message: msg, Detail: RedactDetail(svc.Detail)}
 			checks = append(checks, c)
 			if status != "healthy" {
 				healthy = false
@@ -308,7 +309,7 @@ func (s *Service) Check(ctx context.Context) (*Report, error) {
 	// Backup: differentiate created vs verified (ACCEPTANCE)
 	lastBackup, err := s.backup.LastBackup(ctx)
 	if err != nil {
-		checks = append(checks, Check{Name: "backup", Status: "unknown", Message: redactDetail(err.Error())})
+		checks = append(checks, Check{Name: "backup", Status: "unknown", Message: RedactDetail(err.Error())})
 	} else if lastBackup == nil {
 		checks = append(checks, Check{Name: "backup", Status: "degraded", Message: "no backups yet", Detail: "backup has not run"})
 		// backup missing is degraded not unhealthy initially, but after stale threshold unhealthy handled below
@@ -316,7 +317,7 @@ func (s *Service) Check(ctx context.Context) (*Report, error) {
 		age := now.Sub(lastBackup.FinishedAt)
 		status := "healthy"
 		msg := fmt.Sprintf("last backup %s ago", formatDuration(age))
-		detail := fmt.Sprintf("id %s status %s", redactDetail(lastBackup.ID), lastBackup.Status)
+		detail := fmt.Sprintf("id %s status %s", RedactDetail(lastBackup.ID), lastBackup.Status)
 		if age > s.backupStale {
 			status = "unhealthy"
 			msg = fmt.Sprintf("backup stale: last success %s ago", formatDuration(age))
@@ -330,7 +331,7 @@ func (s *Service) Check(ctx context.Context) (*Report, error) {
 
 	lastVerified, err := s.backup.LastVerified(ctx)
 	if err != nil {
-		checks = append(checks, Check{Name: "backup_verified", Status: "unknown", Message: redactDetail(err.Error())})
+		checks = append(checks, Check{Name: "backup_verified", Status: "unknown", Message: RedactDetail(err.Error())})
 	} else if lastVerified == nil {
 		// No verified restore yet: distinct from backup created
 		checks = append(checks, Check{Name: "backup_verified", Status: "degraded", Message: "no verified restore yet", Detail: "backup has not been verified by restore test"})
@@ -340,7 +341,7 @@ func (s *Service) Check(ctx context.Context) (*Report, error) {
 		age := now.Sub(*lastVerified.VerifiedAt)
 		status := "healthy"
 		msg := fmt.Sprintf("last verified %s ago", formatDuration(age))
-		detail := fmt.Sprintf("id %s", redactDetail(lastVerified.ID))
+		detail := fmt.Sprintf("id %s", RedactDetail(lastVerified.ID))
 		if age > s.verifyStale {
 			status = "degraded"
 			msg = fmt.Sprintf("verified restore stale: %s ago", formatDuration(age))
@@ -351,13 +352,13 @@ func (s *Service) Check(ctx context.Context) (*Report, error) {
 
 	// Tailscale
 	if ok, detail := s.tailscale.IsInstalled(ctx); !ok {
-		checks = append(checks, Check{Name: "tailscale", Status: "unhealthy", Message: "tailscale not installed", Detail: redactDetail(detail)})
+		checks = append(checks, Check{Name: "tailscale", Status: "unhealthy", Message: "tailscale not installed", Detail: RedactDetail(detail)})
 		healthy = false
 	} else if ok, detail := s.tailscale.IsLoggedIn(ctx); !ok {
-		checks = append(checks, Check{Name: "tailscale", Status: "unhealthy", Message: "tailscale not logged in", Detail: redactDetail(detail)})
+		checks = append(checks, Check{Name: "tailscale", Status: "unhealthy", Message: "tailscale not logged in", Detail: RedactDetail(detail)})
 		healthy = false
 	} else if ok, detail := s.tailscale.ServerNodeVisible(ctx); !ok {
-		checks = append(checks, Check{Name: "tailscale", Status: "degraded", Message: "server node not visible", Detail: redactDetail(detail)})
+		checks = append(checks, Check{Name: "tailscale", Status: "degraded", Message: "server node not visible", Detail: RedactDetail(detail)})
 	} else {
 		checks = append(checks, Check{Name: "tailscale", Status: "healthy", Message: "tailscale ok"})
 	}
@@ -368,9 +369,9 @@ func (s *Service) Check(ctx context.Context) (*Report, error) {
 		if err != nil || len(addrs) == 0 {
 			msg := "dns resolution failed"
 			if err != nil {
-				msg = redactDetail(err.Error())
+				msg = RedactDetail(err.Error())
 			}
-			checks = append(checks, Check{Name: "dns", Status: "unhealthy", Message: msg, Detail: fmt.Sprintf("host %s", redactDetail(s.hostname))})
+			checks = append(checks, Check{Name: "dns", Status: "unhealthy", Message: msg, Detail: fmt.Sprintf("host %s", RedactDetail(s.hostname))})
 			healthy = false
 		} else {
 			// Don't leak full IP list; just count.
@@ -384,7 +385,7 @@ func (s *Service) Check(ctx context.Context) (*Report, error) {
 	if s.hostname != "" {
 		ok, detail := s.tls.CheckTLS(ctx, "https://"+s.hostname)
 		if !ok {
-			checks = append(checks, Check{Name: "tls", Status: "unhealthy", Message: "tls check failed", Detail: redactDetail(detail)})
+			checks = append(checks, Check{Name: "tls", Status: "unhealthy", Message: "tls check failed", Detail: RedactDetail(detail)})
 			healthy = false
 		} else {
 			checks = append(checks, Check{Name: "tls", Status: "healthy", Message: "tls ok"})
@@ -393,7 +394,7 @@ func (s *Service) Check(ctx context.Context) (*Report, error) {
 
 	// PocketID
 	if err := s.pocketID.CheckPocketID(ctx); err != nil {
-		checks = append(checks, Check{Name: "pocketid", Status: "unhealthy", Message: redactDetail(err.Error())})
+		checks = append(checks, Check{Name: "pocketid", Status: "unhealthy", Message: RedactDetail(err.Error())})
 		healthy = false
 	} else {
 		checks = append(checks, Check{Name: "pocketid", Status: "healthy", Message: "pocketid reachable"})
@@ -402,7 +403,7 @@ func (s *Service) Check(ctx context.Context) (*Report, error) {
 	// Instance identity
 	id, err := s.instance.GetInstanceID(ctx)
 	if err != nil {
-		checks = append(checks, Check{Name: "instance", Status: "unhealthy", Message: redactDetail(err.Error())})
+		checks = append(checks, Check{Name: "instance", Status: "unhealthy", Message: RedactDetail(err.Error())})
 		healthy = false
 	} else if s.instanceID != "" && id != s.instanceID {
 		checks = append(checks, Check{Name: "instance", Status: "unhealthy", Message: "instance id mismatch", Detail: "expected identity does not match reported"})
@@ -417,7 +418,7 @@ func (s *Service) Check(ctx context.Context) (*Report, error) {
 	if s.encryption != nil {
 		enc, detail, encErr := s.encryption.CheckEncryption(ctx)
 		if encErr != nil {
-			checks = append(checks, Check{Name: "encryption", Status: "unknown", Message: redactDetail(encErr.Error())})
+			checks = append(checks, Check{Name: "encryption", Status: "unknown", Message: RedactDetail(encErr.Error())})
 		} else if !enc {
 			msg := "unencrypted filesystem detected"
 			if detail != "" {
@@ -515,11 +516,11 @@ func (s *Service) CheckAndEmit(ctx context.Context) (*Report, error) {
 			ID:       domain.ID(store.NewID()),
 			Type:     typ,
 			Severity: severity,
-			Message:  redactDetail(c.Message),
+			Message:  RedactDetail(c.Message),
 			Data: map[string]any{
 				"component": c.Name,
 				"status":    c.Status,
-				"detail":    redactDetail(c.Detail),
+				"detail":    RedactDetail(c.Detail),
 			},
 			CreatedAt: now,
 		}
@@ -597,7 +598,9 @@ func componentToEventType(component string) string {
 
 var sensitiveTokens = []string{"token", "secret", "password", "key", "auth", "credential", "private", "hmac", "bearer"}
 
-func redactDetail(s string) string {
+// RedactDetail sanitizes probe and setup details by replacing credential-keyword
+// matches with [REDACTED] and capping length at 200 characters.
+func RedactDetail(s string) string {
 	if s == "" {
 		return s
 	}

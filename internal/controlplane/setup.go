@@ -3,12 +3,13 @@ package controlplane
 import (
 	"context"
 	"crypto/rand"
-	"database/sql"
+	"crypto/tls"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/user"
@@ -25,14 +26,22 @@ import (
 	"github.com/omahab/omahab/internal/edge"
 	"github.com/omahab/omahab/internal/events"
 	"github.com/omahab/omahab/internal/exposure"
-	"github.com/omahab/omahab/internal/installer"
+	"github.com/omahab/omahab/internal/health"
 	"github.com/omahab/omahab/internal/store"
 )
 
 var (
 	secretPatternRe         = regexp.MustCompile(`(_password|_key|_secret|_api_key)$`)
 	errWaitingForEnrollment = errors.New("waiting for enrollment")
+	errMissingBundlePort    = errors.New("routed bundle missing internal port")
 )
+
+func (b *Backend) tailscaleIPOutput(ctx context.Context) ([]byte, error) {
+	if b.tailscaleIPv4 != nil {
+		return b.tailscaleIPv4(ctx)
+	}
+	return exec.CommandContext(ctx, "tailscale", "ip", "-4").CombinedOutput()
+}
 
 func (b *Backend) ensureTailscaleIP(ctx context.Context) error {
 	if b.store != nil {
@@ -43,12 +52,19 @@ func (b *Backend) ensureTailscaleIP(ctx context.Context) error {
 			}
 		}
 	}
-	deadline := time.Now().Add(90 * time.Second)
+	wait := b.tailscaleWait
+	if wait <= 0 {
+		wait = 90 * time.Second
+	}
+	deadline := time.Now().Add(wait)
 	var lastErr error
 	var lastOut string
 	for {
-		out, err := exec.CommandContext(ctx, "tailscale", "ip", "-4").CombinedOutput()
+		out, err := b.tailscaleIPOutput(ctx)
 		lastOut = strings.TrimSpace(string(out))
+		if strings.Contains(lastOut, "NeedsLogin") || strings.Contains(lastOut, "LoggedOut") {
+			return fmt.Errorf("%w: run sudo tailscale up", errWaitingForEnrollment)
+		}
 		if err == nil {
 			ipStr := lastOut
 			fields := strings.Fields(ipStr)
@@ -77,20 +93,23 @@ func (b *Backend) ensureTailscaleIP(ctx context.Context) error {
 		} else {
 			lastErr = fmt.Errorf("tailscale ip -4: %v output=%s", err, lastOut)
 		}
-		// Retry on NeedsLogin or any transient error until deadline.
-		if strings.Contains(lastOut, "NeedsLogin") {
-			// keep retrying
-		}
 		if time.Now().After(deadline) {
 			if lastErr != nil {
 				return lastErr
 			}
-			return fmt.Errorf("tailscale ip -4: %v output=%s", fmt.Errorf("timeout after 90s"), lastOut)
+			return fmt.Errorf("tailscale ip -4: timeout after %s output=%s", wait, lastOut)
+		}
+		sleep := 5 * time.Second
+		if remaining := time.Until(deadline); sleep > remaining {
+			sleep = remaining
+		}
+		if sleep < 0 {
+			sleep = 0
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(5 * time.Second):
+		case <-time.After(sleep):
 		}
 	}
 }
@@ -139,29 +158,34 @@ func (b *Backend) IsSetupRunning() bool {
 // TriggerSetupReconcile triggers the setup reconciler in the background.
 // Returns true if already running (caller should map to 202), false otherwise.
 func (b *Backend) TriggerSetupReconcile(ctx context.Context) (bool, error) {
-	b.setupMu.Lock()
-	if b.setupRunning {
-		b.setupMu.Unlock()
+	if !b.reserveSetup() {
 		return true, nil
 	}
-	b.setupMu.Unlock()
-
 	go func() {
-		_ = b.RunSetupReconciler(context.Background())
+		_ = b.runReservedSetup(context.Background())
 	}()
-
 	return false, nil
 }
 
 // RunSetupReconciler executes the first-run setup reconciliation with single-flight.
 func (b *Backend) RunSetupReconciler(ctx context.Context) error {
-	b.setupMu.Lock()
-	if b.setupRunning {
-		b.setupMu.Unlock()
+	if !b.reserveSetup() {
 		return fmt.Errorf("setup already running")
 	}
+	return b.runReservedSetup(ctx)
+}
+
+func (b *Backend) reserveSetup() bool {
+	b.setupMu.Lock()
+	defer b.setupMu.Unlock()
+	if b.setupRunning {
+		return false
+	}
 	b.setupRunning = true
-	b.setupMu.Unlock()
+	return true
+}
+
+func (b *Backend) runReservedSetup(ctx context.Context) error {
 	defer func() {
 		b.setupMu.Lock()
 		b.setupRunning = false
@@ -190,38 +214,70 @@ func (b *Backend) RunSetupReconciler(ctx context.Context) error {
 				return nil
 			}
 			b.setupMu.Lock()
-			b.setupLastErr = err.Error()
+			b.setupLastErr = health.RedactDetail(err.Error())
 			b.setupMu.Unlock()
-			emitSetupFailed(ctx, b.events, p.name, err)
+			b.emitSetupFailed(ctx, p.name, err)
 			return nil
 		}
 	}
-	b.setupPhaseFirewall(ctx)
+	return b.finishSetupSuccess(ctx)
+}
 
+func (b *Backend) finishSetupSuccess(ctx context.Context) error {
+	if b.events != nil {
+		if err := b.events.MarkAllReadByType(ctx, "setup.step_failed"); err != nil {
+			detail := health.RedactDetail(err.Error())
+			b.setupMu.Lock()
+			b.setupLastErr = detail
+			b.setupMu.Unlock()
+			return err
+		}
+		if _, err := b.events.Publish(ctx, events.PublishInput{
+			Type:     "setup.reconciled",
+			Severity: "info",
+			Message:  "automatic setup completed; DNS, certificates, and service routes verified",
+		}); err != nil {
+			detail := health.RedactDetail(err.Error())
+			b.setupMu.Lock()
+			b.setupLastErr = detail
+			b.setupMu.Unlock()
+			return err
+		}
+	}
 	b.setupMu.Lock()
 	b.setupLastErr = ""
 	b.setupMu.Unlock()
-	if b.events != nil {
-		_, _ = b.events.Publish(ctx, events.PublishInput{
-			Type:     "setup.reconciled",
-			Severity: "info",
-			Message:  "setup reconciler completed",
-		})
-	}
 	return nil
 }
 
-func emitSetupFailed(ctx context.Context, svc *events.Service, step string, err error) {
-	if svc == nil || err == nil {
+func (b *Backend) emitSetupFailed(ctx context.Context, phase string, err error) {
+	if b.events == nil || err == nil {
 		return
 	}
-	_, _ = svc.Publish(ctx, events.PublishInput{
-		Type:     "setup.step_failed",
-		Severity: "warning",
-		Message:  fmt.Sprintf("setup %s failed: %v", step, err),
-		Data:     map[string]any{"step": step, "error": err.Error()},
+	detail := health.RedactDetail(err.Error())
+	resourceID := "setup:" + phase
+	code := "automatic"
+	owner := "system"
+	if phase == "exposure" && (errors.Is(err, cloudflare.ErrUnauthorized) || errors.Is(err, cloudflare.ErrForbidden)) {
+		detail = "Cloudflare DNS token was rejected or lacks DNS permissions"
+		resourceID = "setup:cloudflare_dns"
+		code = "cloudflare_dns"
+		owner = "operator"
+	}
+	msg := fmt.Sprintf("automatic setup failed during %s: %s", phase, detail)
+	_, _ = b.events.Publish(ctx, events.PublishInput{
+		Type:       "setup.step_failed",
+		Severity:   "warning",
+		ResourceID: resourceID,
+		Message:    msg,
+		Data: map[string]any{
+			"step":  phase,
+			"error": detail,
+			"code":  code,
+			"owner": owner,
+		},
 	})
-	log.Printf("setup %s failed: %v", step, err)
+	log.Printf("%s", msg)
 }
 
 // Phase 1: Preconditions
@@ -617,7 +673,9 @@ func (b *Backend) setupPhaseCoreApps(ctx context.Context) error {
 		dnsToken = strings.TrimSpace(os.Getenv("OMAHAB_CF_API_TOKEN"))
 	}
 	_ = b.writeBootstrapCaddyJSON(ctx, dnsToken)
-	ensureDockerNetwork(ctx)
+	if err := b.ensureOmahabNetwork(ctx); err != nil {
+		return err
+	}
 
 	domainName := ""
 	if inst, err := b.store.Instance(ctx); err == nil {
@@ -697,30 +755,23 @@ func (b *Backend) ensureDefaultApp(ctx context.Context, bundle apps.Bundle, doma
 	}
 	switch existing.ObservedState {
 	case apps.ObservedRunning:
-		if existing.Digest == bundle.Digest {
-			st, err := b.apps.CheckHealth(ctx, existing.ID)
-			if err == nil && st.Health == domain.HealthHealthy {
-				return nil
-			}
-		} else {
-			st, err := b.apps.Update(ctx, existing.ID, bundle.Digest)
+		st, err := b.apps.Update(ctx, existing.ID, bundle.Digest)
+		if err != nil {
+			return err
+		}
+		if st.ObservedState == apps.ObservedRunning && st.Health != domain.HealthHealthy {
+			st, err = b.apps.CheckHealth(ctx, existing.ID)
 			if err != nil {
 				return err
 			}
-			if st.ObservedState == apps.ObservedRunning && st.Health != domain.HealthHealthy {
-				st, err = b.apps.CheckHealth(ctx, existing.ID)
-				if err != nil {
-					return err
-				}
-			}
-			if err := requireRunningHealthy(st); err == nil {
-				return nil
-			}
+		}
+		if err := requireRunningHealthy(st); err == nil {
+			return nil
 		}
 		if err := b.apps.Uninstall(ctx, existing.ID); err != nil {
 			return err
 		}
-		st, err := b.apps.Install(ctx, defaultInstallRequest(bundle, domainName))
+		st, err = b.apps.Install(ctx, defaultInstallRequest(bundle, domainName))
 		if err != nil {
 			return err
 		}
@@ -759,17 +810,143 @@ func requireRunningHealthy(st apps.Status) error {
 	return nil
 }
 
-func ensureDockerNetwork(ctx context.Context) {
-	cmd := exec.CommandContext(ctx, "docker", "network", "inspect", "omahab")
-	if err := cmd.Run(); err == nil {
-		return
+func (b *Backend) ensureOmahabNetwork(ctx context.Context) error {
+	if b.dockerNetwork != nil {
+		return b.dockerNetwork(ctx)
 	}
-	cmd = exec.CommandContext(ctx, "docker", "network", "create", "omahab", "--subnet", "172.30.0.0/24")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		log.Printf("setup docker network create failed (best-effort): %v output=%s", err, string(out))
-		cmd2 := exec.CommandContext(ctx, "docker", "network", "create", "omahab")
-		if out2, err2 := cmd2.CombinedOutput(); err2 != nil {
-			log.Printf("setup docker network create (fallback) failed: %v output=%s", err2, string(out2))
+	return ensureDockerNetwork(ctx)
+}
+
+func ensureDockerNetwork(ctx context.Context) error {
+	const name = "omahab"
+	const subnet = "172.30.0.0/24"
+	out, err := exec.CommandContext(ctx, "docker", "network", "inspect", name, "--format", "{{range .IPAM.Config}}{{.Subnet}}{{end}}").CombinedOutput()
+	if err == nil {
+		got := strings.TrimSpace(string(out))
+		if got != subnet {
+			return fmt.Errorf("docker network %s uses subnet %q, want %s", name, got, subnet)
+		}
+		return nil
+	}
+	createOut, createErr := exec.CommandContext(ctx, "docker", "network", "create", name, "--subnet", subnet).CombinedOutput()
+	if createErr != nil {
+		return fmt.Errorf("create docker network %s (%s): %v output=%s", name, subnet, createErr, strings.TrimSpace(string(createOut)))
+	}
+	return nil
+}
+
+func bundleUpstream(bundle apps.Bundle) (string, error) {
+	if bundle.Port <= 0 {
+		return "", fmt.Errorf("%w: %s", errMissingBundlePort, bundle.ID)
+	}
+	return fmt.Sprintf("http://%s:%d", bundle.ID, bundle.Port), nil
+}
+
+func probeHTTPSRoute(ctx context.Context, hostname string) error {
+	hostname = strings.TrimSpace(hostname)
+	if hostname == "" {
+		return fmt.Errorf("hostname required")
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return dialer.DialContext(ctx, network, net.JoinHostPort("127.0.0.1", "443"))
+		},
+		TLSClientConfig: &tls.Config{
+			ServerName: hostname,
+			MinVersion: tls.VersionTLS12,
+		},
+		DisableKeepAlives: true,
+	}
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   5 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, "https://"+hostname+"/", nil)
+	if err != nil {
+		return fmt.Errorf("%s: %w", hostname, err)
+	}
+	req.Host = hostname
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("%s: %v", hostname, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+		return nil
+	}
+	return fmt.Errorf("%s: unexpected status %d", hostname, resp.StatusCode)
+}
+
+func waitForHTTPSRoutes(ctx context.Context, hostnames []string, probe func(context.Context, string) error, timeout, interval time.Duration) error {
+	if probe == nil {
+		probe = probeHTTPSRoute
+	}
+	if timeout <= 0 {
+		timeout = 90 * time.Second
+	}
+	if interval <= 0 {
+		interval = 2 * time.Second
+	}
+	pending := make([]string, 0, len(hostnames))
+	seen := map[string]bool{}
+	for _, h := range hostnames {
+		h = strings.TrimSpace(h)
+		if h == "" || seen[h] {
+			continue
+		}
+		seen[h] = true
+		pending = append(pending, h)
+	}
+	if len(pending) == 0 {
+		return nil
+	}
+	deadline := time.Now().Add(timeout)
+	lastErr := map[string]error{}
+	for {
+		still := pending[:0]
+		for _, h := range pending {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := probe(ctx, h); err != nil {
+				lastErr[h] = err
+				still = append(still, h)
+				continue
+			}
+			delete(lastErr, h)
+		}
+		pending = still
+		if len(pending) == 0 {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			parts := make([]string, 0, len(pending))
+			for _, h := range pending {
+				if err := lastErr[h]; err != nil {
+					parts = append(parts, err.Error())
+					continue
+				}
+				parts = append(parts, h)
+			}
+			return fmt.Errorf("https route readiness timed out: %s", strings.Join(parts, "; "))
+		}
+		wait := interval
+		if remaining := time.Until(deadline); wait > remaining {
+			wait = remaining
+		}
+		if wait < 0 {
+			wait = 0
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(wait):
 		}
 	}
 }
@@ -954,63 +1131,79 @@ func (b *Backend) setupPhaseExposure(ctx context.Context) error {
 			}
 		}
 	}
+	hostnames := make([]string, 0, len(bundles)+1)
 	for _, bd := range bundles {
 		if !installed[bd.ID] {
 			continue
 		}
 		hostname := bd.Route + "." + domainName
-		upstream := fmt.Sprintf("http://%s:%d", bd.ID, bd.Port)
-		if bd.Port == 0 {
-			upstream = fmt.Sprintf("http://%s:80", bd.ID)
+		upstream, err := bundleUpstream(bd)
+		if err != nil {
+			return fmt.Errorf("%s: %w", hostname, err)
 		}
 		if err := b.ensureExposureRecord(ctx, expSvc, hostname, upstream); err != nil {
-			emitSetupFailed(ctx, b.events, "exposure:"+hostname, err)
-			log.Printf("setup exposure %s failed: %v", hostname, err)
+			return fmt.Errorf("%s: %w", hostname, err)
 		}
+		hostnames = append(hostnames, hostname)
 	}
 	dashHost := "omahab." + domainName
 	dashUpstream := "http://host.docker.internal:8484"
 	if err := b.ensureExposureRecord(ctx, expSvc, dashHost, dashUpstream); err != nil {
-		emitSetupFailed(ctx, b.events, "exposure:"+dashHost, err)
+		return fmt.Errorf("%s: %w", dashHost, err)
+	}
+	hostnames = append(hostnames, dashHost)
+	if err := b.reconcileCaddySpec(ctx); err != nil {
 		return err
 	}
-	if b.apps != nil {
-		if list, err := b.apps.List(ctx); err == nil {
-			var caddyApp *apps.Status
-			for i := range list {
-				if list[i].BundleID == "caddy" {
-					c := list[i]
-					caddyApp = &c
-					break
-				}
-			}
-			if caddyApp != nil {
-				var catalogDigest string
-				for _, bd := range b.apps.CatalogBundles() {
-					if bd.ID == "caddy" {
-						catalogDigest = bd.Digest
-						break
-					}
-				}
-				if catalogDigest != "" {
-					if _, err := b.apps.Update(ctx, caddyApp.ID, catalogDigest); err != nil {
-						if strings.Contains(err.Error(), "already current") {
-							composePath := filepath.Join(b.cfg.DataDir, "apps", "caddy", "compose.yaml")
-							cmd := exec.CommandContext(ctx, "docker", "compose", "-f", composePath, "up", "-d")
-							if out, err2 := cmd.CombinedOutput(); err2 != nil {
-								log.Printf("setup exposure: docker compose up -d for caddy failed: %v output=%s", err2, string(out))
-							} else {
-								log.Printf("setup exposure: caddy redeployed via docker compose up -d")
-							}
-						} else {
-							log.Printf("setup exposure: caddy update failed: %v", err)
-						}
-					} else {
-						log.Printf("setup exposure: caddy updated to new digest")
-					}
-				}
-			}
+	probe := b.httpsProbe
+	if probe == nil {
+		probe = probeHTTPSRoute
+	}
+	wait := b.httpsWait
+	if wait <= 0 {
+		wait = 90 * time.Second
+	}
+	interval := b.httpsInterval
+	if interval <= 0 {
+		interval = 2 * time.Second
+	}
+	if err := waitForHTTPSRoutes(ctx, hostnames, probe, wait, interval); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (b *Backend) reconcileCaddySpec(ctx context.Context) error {
+	if b.apps == nil {
+		return nil
+	}
+	list, err := b.apps.List(ctx)
+	if err != nil {
+		return fmt.Errorf("list apps: %w", err)
+	}
+	var caddyApp *apps.Status
+	for i := range list {
+		if list[i].BundleID == "caddy" {
+			c := list[i]
+			caddyApp = &c
+			break
 		}
+	}
+	if caddyApp == nil {
+		return nil
+	}
+	var catalogDigest string
+	for _, bd := range b.apps.CatalogBundles() {
+		if bd.ID == "caddy" {
+			catalogDigest = bd.Digest
+			break
+		}
+	}
+	if catalogDigest == "" {
+		return nil
+	}
+	if _, err := b.apps.Update(ctx, caddyApp.ID, catalogDigest); err != nil {
+		return fmt.Errorf("caddy spec: %w", err)
 	}
 	return nil
 }
@@ -1020,20 +1213,6 @@ func (b *Backend) ensureExposureRecord(ctx context.Context, expSvc *exposure.Ser
 	upstream = strings.TrimSpace(upstream)
 	if hostname == "" || upstream == "" {
 		return fmt.Errorf("hostname/upstream required")
-	}
-	var svcID string
-	var revision int64
-	err := b.db.QueryRowContext(ctx, `SELECT id, revision FROM exposure_services WHERE hostname = ?`, hostname).Scan(&svcID, &revision)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("query exposure service %s: %w", hostname, err)
-	}
-	if svcID != "" {
-		var reconciled int
-		var lastErr string
-		err = b.db.QueryRowContext(ctx, `SELECT reconciled, last_error FROM exposure_observations WHERE service_id = ?`, svcID).Scan(&reconciled, &lastErr)
-		if err == nil && reconciled == 1 && strings.TrimSpace(lastErr) == "" {
-			return nil
-		}
 	}
 	rec, err := expSvc.UpsertService(ctx, exposure.UpsertInput{
 		Hostname: hostname,
@@ -1055,33 +1234,4 @@ func (b *Backend) ensureExposureRecord(ctx context.Context, expSvc *exposure.Ser
 		return fmt.Errorf("apply %s: %w", hostname, err)
 	}
 	return nil
-}
-
-// Phase 7: Firewall
-func (b *Backend) setupPhaseFirewall(ctx context.Context) {
-	const nftPath = "/etc/nftables.conf"
-	const managedMarker = "Managed by Omahab installer"
-	if data, err := os.ReadFile(nftPath); err == nil {
-		if !strings.Contains(string(data), managedMarker) {
-			log.Printf("setup firewall: %s exists and is not managed by Omahab installer; skipping", nftPath)
-			return
-		}
-	} else if !os.IsNotExist(err) {
-		log.Printf("setup firewall: read %s failed: %v", nftPath, err)
-		return
-	}
-	conf := installer.NftablesConf()
-	if err := os.WriteFile(nftPath, []byte(conf), 0644); err != nil {
-		log.Printf("setup firewall: write %s failed: %v", nftPath, err)
-		return
-	}
-	if out, err := exec.CommandContext(ctx, "nft", "-c", "-f", nftPath).CombinedOutput(); err != nil {
-		log.Printf("setup firewall: nft check failed: %v output=%s", err, string(out))
-		return
-	}
-	if out, err := exec.CommandContext(ctx, "nft", "-f", nftPath).CombinedOutput(); err != nil {
-		log.Printf("setup firewall: nft apply failed: %v output=%s", err, string(out))
-		return
-	}
-	log.Printf("setup firewall: nftables rules applied")
 }

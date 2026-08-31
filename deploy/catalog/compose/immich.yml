@@ -30,7 +30,9 @@ services:
     volumes:
       - /srv/omahab/apps/immich/library:/data
     networks:
-      - omahab
+      omahab:
+        aliases:
+          - immich
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://127.0.0.1:2283/api/server/ping || wget --no-verbose --tries=1 --spider http://127.0.0.1:2283/api/server/ping || exit 1"]
       interval: 30s

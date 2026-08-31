@@ -10,6 +10,7 @@ import (
 	"github.com/omahab/omahab/internal/api"
 	"github.com/omahab/omahab/internal/apps"
 	"github.com/omahab/omahab/internal/domain"
+	"github.com/omahab/omahab/internal/health"
 	"github.com/omahab/omahab/internal/store"
 )
 
@@ -362,6 +363,37 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (api.SetupStatus, error) {
 	}
 	checks = append(checks, backupCheck)
 
+	tailCheck := api.SetupCheck{ID: "tailscale"}
+	tsIP := ""
+	if instErr == nil {
+		tsIP = strings.TrimSpace(inst.TailscaleIP)
+	}
+	if tsIP != "" {
+		tailCheck.Status = "ok"
+		tailCheck.Detail = tsIP
+	} else {
+		tailCheck.Status = "pending"
+		tailCheck.Detail = "tailscale not enrolled"
+	}
+	checks = append(checks, tailCheck)
+
+	autoCheck := b.automaticReconciliationCheck(ctx)
+	checks = append(checks, autoCheck)
+
+	if unreadCF, ok := b.unreadCloudflareDNSFailure(ctx); ok {
+		for i := range checks {
+			if checks[i].ID == "cloudflare_dns" {
+				checks[i].Status = "failed"
+				checks[i].Detail = unreadCF
+			}
+		}
+	}
+
+	for i := range checks {
+		checks[i] = applySetupCheckMeta(checks[i])
+	}
+	checks = orderSetupChecks(checks)
+
 	// Derive overall state
 	state := deriveSetupState(checks, domainSentinel, cfDNSPresent)
 	// Override with reconciling if running and not waiting_for_cloudflare
@@ -380,9 +412,12 @@ func deriveSetupState(checks []api.SetupCheck, domainSentinel bool, cfDNSPresent
 	hasPendingOrFailed := false
 	for _, c := range checks {
 		switch c.ID {
-		case "domain", "cloudflare_dns":
-			// already handled
+		case "domain":
 			continue
+		case "cloudflare_dns":
+			if c.Status == "failed" {
+				hasPendingOrFailed = true
+			}
 		case "tunnel":
 			if c.Status == "skipped" {
 				continue
@@ -439,6 +474,117 @@ func classifyCoreApp(st apps.Status) api.SetupAppStatus {
 		as.Detail = st.ObservedState
 	}
 	return as
+}
+
+func applySetupCheckMeta(c api.SetupCheck) api.SetupCheck {
+	switch c.ID {
+	case "domain":
+		c.Label = "Choose your domain"
+		c.Owner = "operator"
+		c.Action = "Enter the apex domain below."
+	case "cloudflare_dns":
+		c.Label = "Connect Cloudflare DNS"
+		c.Owner = "operator"
+		c.Action = "Add a scoped Cloudflare DNS token below."
+	case "tailscale":
+		c.Label = "Connect Tailscale"
+		c.Owner = "operator"
+		c.Action = "Run sudo tailscale up, then retry automatic setup."
+	case "admin_passkeys":
+		c.Label = "Create the admin account and passkeys"
+		c.Owner = "operator"
+		c.Action = "Create the admin below and register two passkeys."
+	case "recovery_tested":
+		c.Label = "Test identity recovery"
+		c.Owner = "operator"
+		c.Action = "Complete one recovery drill."
+	case "backups_configured":
+		c.Label = "Configure backups"
+		c.Owner = "operator"
+		c.Action = "Add a backup repository."
+	case "tunnel":
+		c.Label = "Provision Cloudflare Tunnel"
+		c.Owner = "system"
+	case "dashboard_dns":
+		c.Label = "Publish dashboard DNS"
+		c.Owner = "system"
+	case "core_apps":
+		c.Label = "Install core services"
+		c.Owner = "system"
+	case "automatic_reconciliation":
+		c.Label = "Verify DNS, TLS, and service routes"
+		c.Owner = "system"
+	}
+	if c.Owner != "operator" || (c.Status != "pending" && c.Status != "failed") {
+		c.Action = ""
+	}
+	return c
+}
+
+func orderSetupChecks(checks []api.SetupCheck) []api.SetupCheck {
+	order := []string{
+		"domain", "cloudflare_dns", "tailscale", "admin_passkeys", "recovery_tested", "backups_configured",
+		"tunnel", "dashboard_dns", "core_apps", "automatic_reconciliation",
+	}
+	byID := make(map[string]api.SetupCheck, len(checks))
+	for _, c := range checks {
+		byID[c.ID] = c
+	}
+	out := make([]api.SetupCheck, 0, len(order))
+	for _, id := range order {
+		if c, ok := byID[id]; ok {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func (b *Backend) automaticReconciliationCheck(ctx context.Context) api.SetupCheck {
+	c := api.SetupCheck{ID: "automatic_reconciliation"}
+	if b.IsSetupRunning() {
+		c.Status = "pending"
+		c.Detail = "Applying DNS, certificates, and service routes"
+		return c
+	}
+	b.setupMu.Lock()
+	lastErr := b.setupLastErr
+	b.setupMu.Unlock()
+	if strings.TrimSpace(lastErr) != "" {
+		c.Status = "failed"
+		c.Detail = health.RedactDetail(lastErr)
+		return c
+	}
+	if b.db != nil {
+		var typ, msg string
+		err := b.db.QueryRowContext(ctx, `SELECT type, message FROM events WHERE type IN ('setup.step_failed', 'setup.reconciled') ORDER BY created_at DESC, id DESC LIMIT 1`).Scan(&typ, &msg)
+		if err == nil {
+			switch typ {
+			case "setup.step_failed":
+				c.Status = "failed"
+				c.Detail = health.RedactDetail(msg)
+				return c
+			case "setup.reconciled":
+				c.Status = "ok"
+				c.Detail = "DNS, certificates, and service routes verified"
+				return c
+			}
+		}
+	}
+	c.Status = "pending"
+	c.Detail = "Waiting to run"
+	return c
+}
+
+func (b *Backend) unreadCloudflareDNSFailure(ctx context.Context) (string, bool) {
+	if b.db == nil {
+		return "", false
+	}
+	var n int
+	err := b.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE type = 'setup.step_failed' AND resource_id = 'setup:cloudflare_dns' AND read_at IS NULL`).Scan(&n)
+	if err != nil || n == 0 {
+		return "", false
+	}
+	return "Cloudflare DNS token was rejected or lacks DNS permissions", true
 }
 
 // Ensure GetSetupStatus satisfies api.Backend at compile time.

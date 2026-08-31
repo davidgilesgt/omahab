@@ -44,7 +44,7 @@ func TestConvertProducesPinnedTemplate(t *testing.T) {
 			"healthCheck": {"endpoint": "http://demo:8080/up"},
 			"backup": {"preHooks": ["pg_dump -f /tmp/dump {{.ComposeFile}}"]},
 			"oidc": {"supported": true},
-			"exposure": {"default": "private", "allowed": ["private", "shared"]}
+			"exposure": {"default": "private", "allowed": ["private", "shared"], "caddyRoute": "demo.{{.Domain}}", "internalPort": 8080}
 		}]}`,
 		"compose/demo.yml": strings.Join([]string{
 			"services:",
@@ -92,12 +92,40 @@ func TestConvertProducesPinnedTemplate(t *testing.T) {
 	if !b.OIDC.Supported || b.MaxExposure != "shared" || b.Resources.MemoryMB != 256 {
 		t.Fatalf("unexpected metadata: %+v", b)
 	}
+	if b.Port != 8080 || b.Route != "demo" {
+		t.Fatalf("unexpected route/port: port=%d route=%q", b.Port, b.Route)
+	}
 	wantHook := "/srv/omahab/apps/demo/compose.yaml"
 	if len(b.Backup.PreBackup) != 3 || !strings.Contains(b.Backup.PreBackup[2], wantHook) {
 		t.Fatalf("hook argv wrong: %q", b.Backup.PreBackup)
 	}
 	if _, err := apps.NewCatalog(b); err != nil {
 		t.Fatalf("generated bundle rejected: %v", err)
+	}
+}
+
+func TestConvertRejectsRoutedBundleWithoutPort(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"catalog.json": `{"bundles":[{
+			"name": "demo", "displayName": "Demo", "composeFile": "compose/demo.yml",
+			"supportedArchitectures": ["amd64"],
+			"images": {"demo": "docker.io/example/demo@sha256:${DEMO_DIGEST:?required}"},
+			"healthCheck": {"endpoint": "http://demo:8080/up"},
+			"exposure": {"default": "private", "allowed": ["private"], "caddyRoute": "demo.{{.Domain}}"}
+		}]}`,
+		"compose/demo.yml": "services:\n  demo:\n    image: docker.io/example/demo@sha256:${DEMO_DIGEST:?required}\n",
+	})
+	var doc curatedDoc
+	raw, err := os.ReadFile(filepath.Join(root, "catalog.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	digests := map[string]string{"demo": "sha256:" + strings.Repeat("a", 64)}
+	if _, err := convert(doc.Bundles[0], root, digests); err == nil {
+		t.Fatal("convert succeeded without internalPort")
 	}
 }
 
@@ -385,6 +413,7 @@ func TestConvertRealCatalogDefaultsAndHealth(t *testing.T) {
 	var defaults []string
 	var immich apps.Bundle
 	var caddy apps.Bundle
+	var pocketID apps.Bundle
 	for _, cb := range doc.Bundles {
 		b, err := convert(cb, realComposeDir, digests)
 		if err != nil {
@@ -398,6 +427,11 @@ func TestConvertRealCatalogDefaultsAndHealth(t *testing.T) {
 			caddy = b
 		case "immich":
 			immich = b
+		case "pocket-id":
+			pocketID = b
+		}
+		if strings.TrimSpace(b.Route) != "" && b.Port <= 0 {
+			t.Fatalf("routed bundle %s missing positive port", b.ID)
 		}
 		if (b.ID == "caddy" || b.ID == "immich" || b.ID == "pocket-id") && b.HealthCheck.Kind != apps.CheckCommand {
 			t.Fatalf("%s health check kind = %q want command: %+v", b.ID, b.HealthCheck.Kind, b.HealthCheck)
@@ -409,6 +443,15 @@ func TestConvertRealCatalogDefaultsAndHealth(t *testing.T) {
 	}
 	if caddy.HealthCheck.Kind != apps.CheckCommand || caddy.HealthCheck.Service != "caddy" {
 		t.Fatalf("caddy health = %+v", caddy.HealthCheck)
+	}
+	if pocketID.Port != 1411 {
+		t.Fatalf("pocket-id port = %d want 1411", pocketID.Port)
+	}
+	if immich.Port != 2283 {
+		t.Fatalf("immich port = %d want 2283", immich.Port)
+	}
+	if !strings.Contains(immich.Compose, "aliases:") || !strings.Contains(immich.Compose, "- immich\n") {
+		t.Fatalf("immich compose missing bundle-id network alias:\n%s", immich.Compose)
 	}
 	if immich.Image != "ghcr.io/immich-app/immich-server" {
 		t.Fatalf("immich image = %q", immich.Image)

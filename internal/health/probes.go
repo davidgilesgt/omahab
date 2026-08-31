@@ -174,7 +174,7 @@ func (p *serviceProbe) CheckServices(ctx context.Context) ([]ServiceStatus, erro
 func (p *serviceProbe) checkDocker(ctx context.Context) ServiceStatus {
 	conn, err := p.dial("unix", p.dockerSocket)
 	if err != nil {
-		return ServiceStatus{Name: "docker", Health: "degraded", Detail: "docker socket not reachable: " + redactDetail(err.Error())}
+		return ServiceStatus{Name: "docker", Health: "degraded", Detail: "docker socket not reachable: " + RedactDetail(err.Error())}
 	}
 	defer conn.Close()
 	// Try HTTP _ping if possible
@@ -203,12 +203,12 @@ func (p *serviceProbe) checkSystemd(ctx context.Context) ServiceStatus {
 		if s == "" {
 			s = err.Error()
 		}
-		return ServiceStatus{Name: p.systemdUnit, Health: "degraded", Detail: "systemd not active: " + redactDetail(s)}
+		return ServiceStatus{Name: p.systemdUnit, Health: "degraded", Detail: "systemd not active: " + RedactDetail(s)}
 	}
 	if s == "active" {
 		return ServiceStatus{Name: p.systemdUnit, Health: "healthy", Detail: "systemd active"}
 	}
-	return ServiceStatus{Name: p.systemdUnit, Health: "degraded", Detail: "systemd status: " + redactDetail(s)}
+	return ServiceStatus{Name: p.systemdUnit, Health: "degraded", Detail: "systemd status: " + RedactDetail(s)}
 }
 
 // BackupProbe
@@ -336,9 +336,9 @@ func (p *tailscaleProbe) IsInstalled(ctx context.Context) (bool, string) {
 			msg = err.Error()
 		}
 		if strings.Contains(strings.ToLower(msg), "not found") || strings.Contains(strings.ToLower(msg), "executable file not found") {
-			return false, "tailscale not installed: " + redactDetail(msg)
+			return false, "tailscale not installed: " + RedactDetail(msg)
 		}
-		return false, redactDetail(msg)
+		return false, RedactDetail(msg)
 	}
 	return true, strings.TrimSpace(string(out))
 }
@@ -361,16 +361,16 @@ func (p *tailscaleProbe) IsLoggedIn(ctx context.Context) (bool, string) {
 		if msg == "" {
 			msg = err.Error()
 		}
-		return false, redactDetail(msg)
+		return false, RedactDetail(msg)
 	}
 	var st tailscaleStatusJSON
 	if err := json.Unmarshal(out, &st); err != nil {
-		return false, "tailscale status parse error: " + redactDetail(err.Error())
+		return false, "tailscale status parse error: " + RedactDetail(err.Error())
 	}
 	if strings.EqualFold(st.BackendState, "Running") {
 		return true, "tailscale running"
 	}
-	return false, "tailscale state: " + redactDetail(st.BackendState)
+	return false, "tailscale state: " + RedactDetail(st.BackendState)
 }
 
 func (p *tailscaleProbe) ServerNodeVisible(ctx context.Context) (bool, string) {
@@ -383,11 +383,11 @@ func (p *tailscaleProbe) ServerNodeVisible(ctx context.Context) (bool, string) {
 		if msg == "" {
 			msg = err.Error()
 		}
-		return false, redactDetail(msg)
+		return false, RedactDetail(msg)
 	}
 	var st tailscaleStatusJSON
 	if err := json.Unmarshal(out, &st); err != nil {
-		return false, "tailscale status parse error: " + redactDetail(err.Error())
+		return false, "tailscale status parse error: " + RedactDetail(err.Error())
 	}
 	if st.Self.ID == "" && len(st.Peer) == 0 {
 		return false, "server node not visible (no peers)"
@@ -475,7 +475,7 @@ func (p *tlsProbe) CheckTLS(ctx context.Context, urlStr string) (bool, string) {
 	defer cancel()
 	conn, err := p.dialTLS(ctx, "tcp", host)
 	if err != nil {
-		return false, redactDetail(err.Error())
+		return false, RedactDetail(err.Error())
 	}
 	defer conn.Close()
 	if tc, ok := conn.(*tls.Conn); ok {
@@ -647,15 +647,15 @@ func (p *encryptionProbe) CheckEncryption(ctx context.Context) (bool, string, er
 	// Heuristic: parse JSON for fstype
 	var data struct {
 		Blockdevices []struct {
-			Name       string `json:"name"`
+			Name       string  `json:"name"`
 			Mountpoint *string `json:"mountpoint"`
 			Fstype     *string `json:"fstype"`
-			Type       string `json:"type"`
+			Type       string  `json:"type"`
 			Children   []struct {
-				Name       string `json:"name"`
+				Name       string  `json:"name"`
 				Mountpoint *string `json:"mountpoint"`
 				Fstype     *string `json:"fstype"`
-				Type       string `json:"type"`
+				Type       string  `json:"type"`
 			} `json:"children"`
 		} `json:"blockdevices"`
 	}

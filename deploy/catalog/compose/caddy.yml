@@ -14,9 +14,11 @@ services:
     command: ["caddy", "run", "--config", "/etc/caddy/caddy.json", "--watch"]
     # Edge is the only bundle that publishes host ports. All other bundles use `expose` and are reachable via Caddy.
     ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"
+      - "127.0.0.1:80:80"
+      - "${TAILSCALE_IP:?tailscale IP required}:80:80"
+      - "127.0.0.1:443:443"
+      - "${TAILSCALE_IP:?tailscale IP required}:443:443"
+      - "${TAILSCALE_IP:?tailscale IP required}:443:443/udp"
     volumes:
       - caddy_data:/data
       - caddy_config:/config
@@ -25,7 +27,8 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
-      - omahab
+      omahab:
+        ipv4_address: 172.30.0.2
     healthcheck:
       test: ["CMD-SHELL", "caddy version >/dev/null 2>&1 && wget --no-verbose --tries=1 --spider http://127.0.0.1:2019/config/ || exit 1"]
       interval: 30s

@@ -1484,11 +1484,14 @@ components:
 
     SetupCheck:
       type: object
-      required: [id, status]
+      required: [id, status, label, owner]
       properties:
         id: { type: string }
+        label: { type: string }
+        owner: { type: string, enum: [operator, system] }
         status: { type: string, enum: [ok, pending, failed, skipped] }
         detail: { type: string }
+        action: { type: string }
         apps: { type: array, items: { $ref: '#/components/schemas/SetupAppStatus' } }
         passkey_count: { type: integer }
         target: { type: integer }

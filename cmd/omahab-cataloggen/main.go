@@ -57,9 +57,10 @@ type curatedBundle struct {
 		Supported bool `json:"supported"`
 	} `json:"oidc"`
 	Exposure struct {
-		Default    string   `json:"default"`
-		Allowed    []string `json:"allowed"`
-		CaddyRoute string   `json:"caddyRoute"`
+		Default      string   `json:"default"`
+		Allowed      []string `json:"allowed"`
+		CaddyRoute   string   `json:"caddyRoute"`
+		InternalPort int      `json:"internalPort"`
 	} `json:"exposure"`
 	EnabledByDefault bool     `json:"enabledByDefault"`
 	Dependencies     []string `json:"dependencies"`
@@ -244,10 +245,14 @@ func convert(cb curatedBundle, composeDir string, digests map[string]string) (ap
 		PostRestore: hookArgv(cb.Restore.Hooks, cb.Name),
 	}
 	b.Default = cb.EnabledByDefault
+	b.Port = cb.Exposure.InternalPort
 	route := strings.TrimSpace(cb.Exposure.CaddyRoute)
 	if route == "edge" {
 		route = ""
 	} else {
+		if route != "" && (cb.Exposure.InternalPort < 1 || cb.Exposure.InternalPort > 65535) {
+			return apps.Bundle{}, fmt.Errorf("caddyRoute %q requires internalPort in 1..65535, got %d", route, cb.Exposure.InternalPort)
+		}
 		route = strings.TrimSuffix(route, ".{{.Domain}}")
 	}
 	b.Route = route

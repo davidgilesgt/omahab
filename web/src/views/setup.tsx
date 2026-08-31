@@ -1,41 +1,60 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../auth";
-import type { SetupStatus } from "../api/types";
+import type { SetupCheck, SetupStatus } from "../api/types";
 import { ErrorState, LoadingState, PageHeader, Section, StatusPill } from "../components/ui";
 import { useToast } from "../components/toast";
 import { CopyButton } from "../components/copyButton";
 
-function Checklist({ setup }: { setup: SetupStatus }) {
+function CheckRow({ check }: { check: SetupCheck }) {
+  const showAction = check.owner === "operator" && (check.status === "pending" || check.status === "failed") && check.action;
   return (
-    <Section title="Setup checklist" description="Progress through first-run setup.">
-      <ul className="activity-list">
-        {setup.checks.map((check) => (
-          <li key={check.id} style={{ display: "flex", gap: 8, alignItems: "flex-start", flexDirection: "column" }}>
-            <div style={{ display: "flex", gap: 8, alignItems: "center", width: "100%" }}>
-              <StatusPill value={check.status} />
-              <strong>{check.id}</strong>
-              {check.detail && <span style={{ opacity: 0.7, fontSize: "0.9em" }}>{check.detail}</span>}
-            </div>
-            {check.id === "core_apps" && check.apps && check.apps.length > 0 && (
-              <ul style={{ marginLeft: 16, listStyle: "none", padding: 0, width: "100%" }}>
-                {check.apps.map((app) => (
-                  <li key={app.bundle_id} style={{ display: "flex", gap: 8, alignItems: "center", padding: "4px 0" }}>
-                    <StatusPill value={app.status} />
-                    <span>{app.bundle_id}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-            {check.id === "admin_passkeys" && typeof check.passkey_count === "number" && (
-              <span style={{ marginLeft: 16, opacity: 0.8 }}>
-                {check.passkey_count}/{check.target ?? 2} passkeys registered
-              </span>
-            )}
-          </li>
-        ))}
-      </ul>
-    </Section>
+    <li style={{ display: "flex", gap: 8, alignItems: "flex-start", flexDirection: "column" }}>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", width: "100%" }}>
+        <StatusPill value={check.status} />
+        <strong>{check.label}</strong>
+      </div>
+      {check.detail && <span style={{ opacity: 0.7, fontSize: "0.9em" }}>{check.detail}</span>}
+      {showAction && <span style={{ fontSize: "0.9em" }}>{check.action}</span>}
+      {check.id === "core_apps" && check.apps && check.apps.length > 0 && (
+        <ul style={{ marginLeft: 16, listStyle: "none", padding: 0, width: "100%" }}>
+          {check.apps.map((app) => (
+            <li key={app.bundle_id} style={{ display: "flex", gap: 8, alignItems: "center", padding: "4px 0" }}>
+              <StatusPill value={app.status} />
+              <span>{app.bundle_id}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {check.id === "admin_passkeys" && typeof check.passkey_count === "number" && (
+        <span style={{ marginLeft: 16, opacity: 0.8 }}>
+          {check.passkey_count}/{check.target ?? 2} passkeys registered
+        </span>
+      )}
+    </li>
+  );
+}
+
+function Checklist({ setup }: { setup: SetupStatus }) {
+  const operator = setup.checks.filter((c) => c.owner === "operator");
+  const system = setup.checks.filter((c) => c.owner === "system");
+  return (
+    <>
+      <Section title="Your steps" description="Work only you can complete.">
+        <ul className="activity-list">
+          {operator.map((check) => (
+            <CheckRow key={check.id} check={check} />
+          ))}
+        </ul>
+      </Section>
+      <Section title="Omahab sets up automatically" description="DNS, certificates, and core services.">
+        <ul className="activity-list">
+          {system.map((check) => (
+            <CheckRow key={check.id} check={check} />
+          ))}
+        </ul>
+      </Section>
+    </>
   );
 }
 
@@ -72,7 +91,7 @@ export function SetupPage() {
   const reconcileMutation = useMutation({
     mutationFn: client.reconcileSetup,
     onSuccess: () => {
-      toast.success("Reconciliation started");
+      toast.success("Automatic setup started");
       void queryClient.invalidateQueries({ queryKey: ["setup"] });
     },
     onError: (err) => toast.error(err instanceof Error ? err.message : "Reconciliation failed"),
@@ -167,7 +186,7 @@ export function SetupPage() {
         description="Complete Cloudflare, app provisioning, and passkey enrollment."
         actions={
           <button className="button secondary" type="button" onClick={() => void reconcileMutation.mutate()} disabled={reconcileMutation.isPending}>
-            {reconcileMutation.isPending ? "Retrying…" : "Retry reconcile"}
+            {reconcileMutation.isPending ? "Retrying…" : "Retry automatic setup"}
           </button>
         }
       />
@@ -202,6 +221,19 @@ export function SetupPage() {
               <p className="inline-error" role="alert">{cloudflareMutation.error instanceof Error ? cloudflareMutation.error.message : "Save failed"}</p>
             )}
           </div>
+        </Section>
+      )}
+
+      {instanceDomain && instanceDomain !== "example.com" && instanceDomain !== "not-configured.invalid" && (
+        <Section title="Service addresses" description="Canonical application URLs.">
+          <p>
+            <a href={`https://id.${instanceDomain}`} target="_blank" rel="noreferrer">
+              {`https://id.${instanceDomain}`}
+            </a>
+          </p>
+          <p>
+            Use this address for identity setup. id.home.{instanceDomain} is a DNS routing record, not a website.
+          </p>
         </Section>
       )}
 

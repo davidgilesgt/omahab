@@ -73,8 +73,8 @@ type Service struct {
 	now     func() time.Time
 	locks   keyedLocks
 
-	updateMu       sync.Mutex
-	updateEmitted  map[string]string
+	updateMu      sync.Mutex
+	updateEmitted map[string]string
 }
 
 // NewService validates options and returns the service.
@@ -318,14 +318,12 @@ func (s *Service) Stop(ctx context.Context, id domain.ID) (Status, error) {
 	return s.Status(ctx, id)
 }
 
-// Update deploys a new pinned digest for the app's bundle. Mutable tags are
-// rejected. The current release pointer only moves after a successful
+// Update deploys a new pinned digest and/or catalog compose for the app's
+// bundle. Mutable tags are rejected. Same digest with a changed compose is a
+// valid new release. The current release pointer only moves after a successful
 // deploy; on failure the previous version is restored and the app records
-// the failure without changing its release history.
-// Update deploys a new pinned digest for the app's bundle. Mutable tags are
-// rejected. The current release pointer only moves after a successful
-// deploy; on failure the previous version is restored and the app records
-// the failure without changing its release history.
+// the failure without changing its release history. When digest and rendered
+// compose both match the active release, Update returns the current status.
 func (s *Service) Update(ctx context.Context, id domain.ID, digest string) (Status, error) {
 	rec, unlock, err := s.lockedApp(ctx, id)
 	if err != nil {
@@ -338,9 +336,6 @@ func (s *Service) Update(ctx context.Context, id domain.ID, digest string) (Stat
 	if !ValidDigest(digest) {
 		return Status{}, invalid("digest %q must be a pinned sha256 digest; mutable tags are not accepted", digest)
 	}
-	if digest == rec.Digest {
-		return Status{}, invalid("digest %s is already current", digest)
-	}
 	s.catMu.RLock()
 	bundle, ok := s.catalog.Get(rec.BundleID)
 	s.catMu.RUnlock()
@@ -350,6 +345,15 @@ func (s *Service) Update(ctx context.Context, id domain.ID, digest string) (Stat
 	compose, err := renderCompose(bundle, digest)
 	if err != nil {
 		return Status{}, err
+	}
+	if rec.CurrentReleaseID != "" {
+		current, err := getRelease(ctx, s.db, rec.CurrentReleaseID)
+		if err != nil {
+			return Status{}, err
+		}
+		if digest == rec.Digest && compose == current.Compose {
+			return s.Status(ctx, id)
+		}
 	}
 
 	rel := releaseRecord{ID: domain.ID(newID("rel")), AppID: rec.ID, Digest: digest, Compose: compose, CreatedAt: s.now().UTC()}
@@ -766,7 +770,6 @@ func (s *Service) ResetUpdateAvailableDedup() {
 	s.updateEmitted = make(map[string]string)
 	s.updateMu.Unlock()
 }
-
 
 func (s *Service) lockedApp(ctx context.Context, id domain.ID) (appRecord, func(), error) {
 	unlock := s.locks.acquire(string(id))

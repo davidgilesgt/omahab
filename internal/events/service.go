@@ -424,6 +424,23 @@ func (s *Service) MarkAllRead(ctx context.Context) error {
 	return nil
 }
 
+// MarkAllReadByType acknowledges unread events of one allowed type.
+func (s *Service) MarkAllReadByType(ctx context.Context, eventType string) error {
+	t := strings.TrimSpace(eventType)
+	if t == "" {
+		return store.Validation("event type is required")
+	}
+	if !allowedTypes[t] {
+		return store.Validationf("unknown event type %q", t)
+	}
+	now := s.now().UTC().Format(time.RFC3339Nano)
+	_, err := s.db.ExecContext(ctx, `UPDATE events SET read_at = COALESCE(read_at, ?) WHERE read_at IS NULL AND type = ?`, now, t)
+	if err != nil {
+		return fmt.Errorf("mark all read by type: %w", err)
+	}
+	return nil
+}
+
 // Subscribe returns a channel that receives durable catch-up from since (exclusive) followed by live events.
 // The channel is buffered and never blocks the producer; slow subscribers drop events.
 func (s *Service) Subscribe(ctx context.Context, since domain.ID) (<-chan domain.Event, func()) {

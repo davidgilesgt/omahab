@@ -217,7 +217,6 @@ type KnowledgeUploadRequest struct {
 	Principal string   `json:"principal,omitempty"`
 }
 
-
 // Backend is the explicit control-plane interface consumed by the HTTP layer.
 // Every dashboard operation has a corresponding method; implementations remain
 type Backend interface {
@@ -360,12 +359,15 @@ type SetupStatus struct {
 
 // SetupCheck is one checklist entry. Status is ok|pending|failed|skipped.
 type SetupCheck struct {
-	ID           string            `json:"id"`
-	Status       string            `json:"status"`
-	Detail       string            `json:"detail,omitempty"`
-	Apps         []SetupAppStatus  `json:"apps,omitempty"`
-	PasskeyCount *int              `json:"passkey_count,omitempty"`
-	Target       *int              `json:"target,omitempty"`
+	ID           string           `json:"id"`
+	Label        string           `json:"label"`
+	Owner        string           `json:"owner"`
+	Status       string           `json:"status"`
+	Detail       string           `json:"detail,omitempty"`
+	Action       string           `json:"action,omitempty"`
+	Apps         []SetupAppStatus `json:"apps,omitempty"`
+	PasskeyCount *int             `json:"passkey_count,omitempty"`
+	Target       *int             `json:"target,omitempty"`
 }
 
 // SetupAppStatus tracks one default bundle in the core_apps check.
@@ -373,4 +375,4 @@ type SetupAppStatus struct {
 	BundleID string `json:"bundle_id"`
 	Status   string `json:"status"`
 	Detail   string `json:"detail,omitempty"`
- }
+}

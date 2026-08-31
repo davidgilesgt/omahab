@@ -339,7 +339,7 @@ func testSetupBundle(id, digest string, exp domain.Exposure, route string, deps 
 	if exp == domain.ExposurePublic {
 		max = domain.ExposurePublic
 	}
-	return apps.Bundle{
+	b := apps.Bundle{
 		ID:              id,
 		Name:            id,
 		Image:           "example.com/" + id,
@@ -353,6 +353,13 @@ func testSetupBundle(id, digest string, exp domain.Exposure, route string, deps 
 		Route:           route,
 		Dependencies:    deps,
 	}
+	switch id {
+	case "pocket-id":
+		b.Port = 1411
+	case "immich":
+		b.Port = 2283
+	}
+	return b
 }
 
 type scriptedRunner struct {

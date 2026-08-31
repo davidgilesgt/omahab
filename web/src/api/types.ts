@@ -166,8 +166,11 @@ export interface Secret {
 
 export interface SetupCheck {
   id: string;
+  label: string;
+  owner: "operator" | "system";
   status: "ok" | "pending" | "failed" | "skipped";
   detail?: string;
+  action?: string;
   apps?: { bundle_id: string; status: string }[];
   passkey_count?: number;
   target?: number;
