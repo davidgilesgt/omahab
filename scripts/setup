@@ -9,7 +9,7 @@
 #
 # The script bundles every step that follows the clone:
 #
-  1. install the build prerequisites with sudo (ca-certificates, golang-go, nodejs, npm, skopeo);
+#  1. install the build prerequisites with sudo (ca-certificates, golang-go, nodejs, npm, skopeo);
 #   2. compile the Omahab binaries into ~/omahab/dist (no root needed);
 #   3. exec the installer with sudo.
 #
