@@ -29,6 +29,8 @@ services:
     networks:
       omahab:
         ipv4_address: 172.30.0.2
+        aliases:
+          - id.${DOMAIN:?domain required}
     healthcheck:
       test: ["CMD-SHELL", "caddy version >/dev/null 2>&1 && wget --no-verbose --tries=1 --spider http://127.0.0.1:2019/config/ || exit 1"]
       interval: 30s

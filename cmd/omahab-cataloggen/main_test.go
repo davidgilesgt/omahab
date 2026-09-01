@@ -444,6 +444,9 @@ func TestConvertRealCatalogDefaultsAndHealth(t *testing.T) {
 	if caddy.HealthCheck.Kind != apps.CheckCommand || caddy.HealthCheck.Service != "caddy" {
 		t.Fatalf("caddy health = %+v", caddy.HealthCheck)
 	}
+	if !strings.Contains(caddy.Compose, "id.${DOMAIN:?domain required}") {
+		t.Fatalf("caddy compose missing identity hostname alias:\n%s", caddy.Compose)
+	}
 	if pocketID.Port != 1411 {
 		t.Fatalf("pocket-id port = %d want 1411", pocketID.Port)
 	}
