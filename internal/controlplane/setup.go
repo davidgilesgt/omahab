@@ -1174,7 +1174,7 @@ func writeImmichOAuthConfig(path, domainName, clientID, clientSecret string) err
 			"mobileRedirectUri":       "https://photos." + domainName + "/api/oauth/mobile-redirect",
 			"accountManagementUrl":    "https://id." + domainName + "/settings/account",
 		},
-		"passwordLogin": map[string]any{"enabled": true},
+		"passwordLogin": map[string]any{"enabled": false},
 		"server":        map[string]any{"externalDomain": "https://photos." + domainName},
 	}
 	raw, err := json.MarshalIndent(cfg, "", "  ")

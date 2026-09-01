@@ -350,6 +350,10 @@ func TestWriteImmichOAuthConfig(t *testing.T) {
 	if oauth["enabled"] != true || oauth["clientId"] != "cid" || oauth["issuerUrl"] != "https://id.omahab.com" {
 		t.Fatalf("oauth = %+v", oauth)
 	}
+	pw, _ := cfg["passwordLogin"].(map[string]any)
+	if pw["enabled"] != false {
+		t.Fatalf("passwordLogin = %+v", pw)
+	}
 }
 
 func TestSetupPhaseOIDCEnsuresImmichClient(t *testing.T) {
