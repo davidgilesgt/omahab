@@ -139,15 +139,18 @@ func (s *TPMSealer) Unseal(ciphertext []byte) ([]byte, error) {
 	if len(ciphertext) < 8 {
 		return nil, fmt.Errorf("tpm2 unseal: invalid sealed blob")
 	}
-	privLen := binary.BigEndian.Uint32(ciphertext[0:4])
-	if uint32(len(ciphertext)) < 4+privLen+4 {
+	privLen := uint64(binary.BigEndian.Uint32(ciphertext[0:4]))
+	if uint64(len(ciphertext)) < 4+privLen+4 {
 		return nil, fmt.Errorf("tpm2 unseal: truncated sealed blob")
 	}
 	privM := ciphertext[4 : 4+privLen]
 	pubLenOffset := 4 + privLen
-	pubLen := binary.BigEndian.Uint32(ciphertext[pubLenOffset : pubLenOffset+4])
+	if uint64(len(ciphertext)) < pubLenOffset+4 {
+		return nil, fmt.Errorf("tpm2 unseal: truncated sealed blob")
+	}
+	pubLen := uint64(binary.BigEndian.Uint32(ciphertext[pubLenOffset : pubLenOffset+4]))
 	pubM := ciphertext[pubLenOffset+4:]
-	if uint32(len(pubM)) != pubLen {
+	if uint64(len(pubM)) != pubLen {
 		return nil, fmt.Errorf("tpm2 unseal: mismatched public length")
 	}
 

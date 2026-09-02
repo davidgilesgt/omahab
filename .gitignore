@@ -9,7 +9,11 @@ coverage/
 __omp_shell(".env.example")
 .DS_Store
 
-# Generated at release time with resolved image digests
-deploy/catalog/apps-catalog.json
 internal/installer/assets/root/*
 !internal/installer/assets/root/.gitkeep
+
+# Root binaries - use `nix build` instead
+/omahab
+/omahabd
+/omahab-install
+/omahab-cataloggen
