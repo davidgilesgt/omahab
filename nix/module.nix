@@ -92,6 +92,8 @@ in
     };
   };
 
+  imports = [ ./apps.nix ];
+
   config = mkIf cfg.enable {
     assertions = [
       {
@@ -179,7 +181,10 @@ in
         ];
         WorkingDirectory = stateDir;
         StateDirectory = "omahab";
-        StateDirectoryMode = "0700";
+        # 0711: service users (caddy, embedding worker) must traverse the
+        # state dir to reach their group-readable config subtrees; every
+        # secret-bearing entry inside stays 0600/0700.
+        StateDirectoryMode = "0711";
         CacheDirectory = "omahab";
         LogsDirectory = "omahab";
         ReadWritePaths = [

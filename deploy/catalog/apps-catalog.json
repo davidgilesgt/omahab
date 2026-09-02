@@ -3,13 +3,13 @@
     {
       "id": "caddy",
       "name": "Caddy",
-      "image": "ghcr.io/caddybuilds/caddy-cloudflare",
-      "digest": "sha256:6497a315a0177e8515d1c4a33c075e8d5a2a35a3f4f9701c3a0cf9ddf3db8821",
+      "image": "",
+      "digest": "",
       "architectures": [
         "amd64",
         "arm64"
       ],
-      "compose": "# Caddy edge — curated Omahab bundle\n# Pinned digest is REQUIRED: substituted from signed release manifest via ${CADDY_DIGEST}\n# omahabd validates image matches ^[^@]+@sha256:[a-f0-9]{64}$ after envsubst and refuses to pull otherwise.\n# No mutable tags are allowed.\nname: omahab-caddy\nnetworks:\n  omahab:\n    name: omahab\n    external: true\nservices:\n  caddy:\n    image: {{.Image}}@{{.Digest}}\n    restart: unless-stopped\n    command: [\"caddy\", \"run\", \"--config\", \"/etc/caddy/caddy.json\", \"--watch\"]\n    # Edge is the only bundle that publishes host ports. All other bundles use `expose` and are reachable via Caddy.\n    ports:\n      - \"127.0.0.1:80:80\"\n      - \"${TAILSCALE_IP:?tailscale IP required}:80:80\"\n      - \"127.0.0.1:443:443\"\n      - \"${TAILSCALE_IP:?tailscale IP required}:443:443\"\n      - \"${TAILSCALE_IP:?tailscale IP required}:443:443/udp\"\n    volumes:\n      - caddy_data:/data\n      - caddy_config:/config\n      - /etc/omahab/caddy.json:/etc/caddy/caddy.json:ro\n      - /var/lib/omahab/caddy:/var/lib/caddy:ro\n    extra_hosts:\n      - \"host.docker.internal:host-gateway\"\n    networks:\n      omahab:\n        ipv4_address: 172.30.0.2\n        aliases:\n          - id.${DOMAIN:?domain required}\n    healthcheck:\n      test: [\"CMD-SHELL\", \"caddy version \u003e/dev/null 2\u003e\u00261 \u0026\u0026 wget --no-verbose --tries=1 --spider http://127.0.0.1:2019/config/ || exit 1\"]\n      interval: 30s\n      timeout: 5s\n      retries: 3\n      start_period: 10s\n    logging:\n      driver: json-file\n      options:\n        max-size: \"10m\"\n        max-file: \"3\"\n    # NO Docker socket mount. Never mount docker socket into applications.\nvolumes:\n  caddy_data:\n    name: caddy_data\n  caddy_config:\n    name: caddy_config\n",
+      "compose": "",
       "default_exposure": "public",
       "max_exposure": "public",
       "health_check": {
@@ -45,18 +45,22 @@
         "memory_mb": 256
       },
       "default": true,
-      "route": ""
+      "route": "",
+      "runtime": "systemd",
+      "units": [
+        "caddy.service"
+      ]
     },
     {
       "id": "pocket-id",
       "name": "Pocket ID",
-      "image": "ghcr.io/pocket-id/pocket-id",
-      "digest": "sha256:01540977dcf4c7b41b1159f34d68e4632f2658d62790e460ca65a42722b13c4a",
+      "image": "",
+      "digest": "",
       "architectures": [
         "amd64",
         "arm64"
       ],
-      "compose": "# Pocket ID — curated Omahab bundle\n# Passkey-first OIDC IdP. Private by default, shared via Tunnel+Access when enabled.\nname: omahab-pocket-id\nnetworks:\n  omahab:\n    name: omahab\n    external: true\nservices:\n  pocket-id:\n    image: {{.Image}}@{{.Digest}}\n    restart: unless-stopped\n    expose:\n      - \"1411\"\n    ports:\n      - \"127.0.0.1:1411:1411\"\n    environment:\n      # omahabd templates non-secret env; secrets via *_FILE -\u003e /run/secrets\n      PUID: \"1000\"\n      PGID: \"1000\"\n      APP_URL: \"https://id.${DOMAIN:?domain required}/\"\n      TRUST_PROXY: \"true\"\n      STATIC_API_KEY: \"${STATIC_API_KEY:?static api key required}\"\n      ENCRYPTION_KEY_FILE: /run/secrets/pocket_id_encryption_key\n      MAXMIND_LICENSE_FILE: /run/secrets/maxmind_license\n    secrets:\n      - pocket_id_encryption_key\n      - maxmind_license\n    volumes:\n      - pocket_id_data:/app/backend/data\n    networks:\n      - omahab\n    healthcheck:\n      test: [\"CMD-SHELL\", \"wget --no-verbose --tries=1 --spider http://127.0.0.1:1411/health || exit 1\"]\n      interval: 20s\n      timeout: 5s\n      retries: 5\n      start_period: 15s\n    logging:\n      driver: json-file\n      options:\n        max-size: \"10m\"\n        max-file: \"3\"\n    # No host port publishing reachable only via Caddy reverse_proxy on private bridge.\n    # No Docker socket mount.\nsecrets:\n  pocket_id_encryption_key:\n    file: /var/lib/omahab/secrets/pocket_id_encryption_key\n  maxmind_license:\n    file: /var/lib/omahab/secrets/maxmind_license\nvolumes:\n  pocket_id_data:\n    name: pocket_id_data\n",
+      "compose": "",
       "port": 1411,
       "default_exposure": "private",
       "max_exposure": "shared",
@@ -101,18 +105,22 @@
       "secret_sources": [
         "pocket_id_encryption_key",
         "maxmind_license"
+      ],
+      "runtime": "systemd",
+      "units": [
+        "pocket-id.service"
       ]
     },
     {
       "id": "forgejo",
       "name": "Forgejo",
-      "image": "codeberg.org/forgejo/forgejo",
-      "digest": "sha256:946243edbab116d5bb78b73ea68af6f3d69229ba1b1ed958dd82c3481167f3e0",
+      "image": "",
+      "digest": "",
       "architectures": [
         "amd64",
         "arm64"
       ],
-      "compose": "# Forgejo — curated Omahab bundle\n# Private by default. Native OIDC to Pocket ID. Postgres dump required for consistent backup.\nname: omahab-forgejo\nnetworks:\n  omahab:\n    name: omahab\n    external: true\nservices:\n  forgejo:\n    image: {{.Image}}@{{.Digest}}\n    restart: unless-stopped\n    depends_on:\n      forgejo-postgres:\n        condition: service_healthy\n      forgejo-redis:\n        condition: service_healthy\n    expose:\n      - \"3000\"\n      - \"22\"\n    environment:\n      USER_UID: \"1000\"\n      USER_GID: \"1000\"\n      FORGEJO__database__DB_TYPE: postgres\n      FORGEJO__database__HOST: forgejo-postgres:5432\n      FORGEJO__database__NAME: forgejo\n      FORGEJO__database__USER: forgejo\n      FORGEJO__database__PASSWD_FILE: /run/secrets/forgejo_db_password\n      FORGEJO__security__SECRET_KEY_FILE: /run/secrets/forgejo_secret_key\n      FORGEJO__security__INSTALL_LOCK: \"true\"\n      FORGEJO__service__DISABLE_REGISTRATION: \"true\"\n      FORGEJO__server__ROOT_URL: \"https://git.${DOMAIN:?domain required}/\"\n      FORGEJO__server__SSH_DOMAIN: \"git.${DOMAIN}\"\n    secrets:\n      - forgejo_db_password\n      - forgejo_secret_key\n    volumes:\n      - forgejo_data:/data\n      - /etc/omahab/forgejo/app.ini:/data/custom/conf/app.ini:ro\n    networks:\n      - omahab\n    healthcheck:\n      test: [\"CMD-SHELL\", \"wget --no-verbose --tries=1 --spider http://127.0.0.1:3000/-/healthz || curl -f http://127.0.0.1:3000/-/healthz || exit 1\"]\n      interval: 30s\n      timeout: 10s\n      retries: 5\n      start_period: 30s\n    logging:\n      driver: json-file\n      options:\n        max-size: \"10m\"\n        max-file: \"3\"\n    # No ports, no docker socket\n\n  forgejo-postgres:\n    image: docker.io/library/postgres@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685\n    restart: unless-stopped\n    expose:\n      - \"5432\"\n    environment:\n      POSTGRES_DB: forgejo\n      POSTGRES_USER: forgejo\n      POSTGRES_PASSWORD_FILE: /run/secrets/forgejo_db_password\n      PGDATA: /var/lib/postgresql/data/pgdata\n    secrets:\n      - forgejo_db_password\n    volumes:\n      - forgejo_postgres_data:/var/lib/postgresql/data\n    networks:\n      - omahab\n    healthcheck:\n      test: [\"CMD-SHELL\", \"pg_isready -U forgejo -d forgejo || exit 1\"]\n      interval: 10s\n      timeout: 5s\n      retries: 5\n      start_period: 15s\n    logging:\n      driver: json-file\n      options:\n        max-size: \"10m\"\n        max-file: \"3\"\n\n  forgejo-redis:\n    image: docker.io/library/redis@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf\n    restart: unless-stopped\n    expose:\n      - \"6379\"\n    command: [\"redis-server\", \"--appendonly\", \"yes\", \"--save\", \"60\", \"1\"]\n    volumes:\n      - forgejo_redis_data:/data\n    networks:\n      - omahab\n    healthcheck:\n      test: [\"CMD\", \"redis-cli\", \"ping\"]\n      interval: 10s\n      timeout: 3s\n      retries: 5\n\nsecrets:\n  forgejo_db_password:\n    file: /var/lib/omahab/secrets/forgejo_db_password\n  forgejo_secret_key:\n    file: /var/lib/omahab/secrets/forgejo_secret_key\nvolumes:\n  forgejo_data:\n    name: forgejo_data\n  forgejo_postgres_data:\n    name: forgejo_postgres_data\n  forgejo_redis_data:\n    name: forgejo_redis_data\n",
+      "compose": "",
       "port": 3000,
       "default_exposure": "private",
       "max_exposure": "public",
@@ -153,7 +161,7 @@
       "resources": {
         "memory_mb": 1024
       },
-      "default": false,
+      "default": true,
       "route": "git",
       "dependencies": [
         "caddy",
@@ -162,18 +170,22 @@
       "secret_sources": [
         "forgejo_db_password",
         "forgejo_secret_key"
+      ],
+      "runtime": "systemd",
+      "units": [
+        "forgejo.service"
       ]
     },
     {
       "id": "woodpecker",
       "name": "Woodpecker CI",
-      "image": "docker.io/woodpeckerci/woodpecker-server",
-      "digest": "sha256:ed8cdc14dad4488d595786373ffbf5c7eea2de9ae183e97fd40308e486cb94a9",
+      "image": "",
+      "digest": "",
       "architectures": [
         "amd64",
         "arm64"
       ],
-      "compose": "# Woodpecker CI — curated Omahab bundle\n# Server + agent pair integrated with Forgejo. Forgejo Actions disabled.\nname: omahab-woodpecker\nnetworks:\n  omahab:\n    name: omahab\n    external: true\nservices:\n  woodpecker-server:\n    image: {{.Image}}@{{.Digest}}\n    restart: unless-stopped\n    depends_on:\n      woodpecker-postgres:\n        condition: service_healthy\n    expose:\n      - \"8000\"\n    environment:\n      WOODPECKER_OPEN: \"false\"\n      WOODPECKER_HOST: \"https://ci.${DOMAIN:?domain required}\"\n      WOODPECKER_FORGEJO: \"true\"\n      WOODPECKER_FORGEJO_URL: \"https://git.${DOMAIN}/\"\n      WOODPECKER_FORGEJO_CLIENT: \"${WOODPECKER_FORGEJO_CLIENT:?forgejo oauth client id required}\"\n      WOODPECKER_FORGEJO_CLIENT_SECRET_FILE: /run/secrets/woodpecker_forgejo_client_secret\n      WOODPECKER_AGENT_SECRET_FILE: /run/secrets/woodpecker_agent_secret\n      WOODPECKER_DATABASE_DRIVER: postgres\n      WOODPECKER_DATABASE_DATASOURCE: \"postgres://woodpecker:${WOODPECKER_DB_PASSWORD:?}@woodpecker-postgres:5432/woodpecker?sslmode=disable\"\n      # Prefer file-based secret; omahabd will template datasource from file if supported, otherwise inject via envsubst at deploy time.\n    secrets:\n      - woodpecker_forgejo_client_secret\n      - woodpecker_agent_secret\n      - woodpecker_db_password\n    volumes:\n      - woodpecker_data:/var/lib/woodpecker\n    networks:\n      - omahab\n    healthcheck:\n      test: [\"CMD-SHELL\", \"wget --no-verbose --tries=1 --spider http://127.0.0.1:8000/healthz || curl -f http://127.0.0.1:8000/healthz || exit 1\"]\n      interval: 20s\n      timeout: 5s\n      retries: 5\n      start_period: 20s\n    logging:\n      driver: json-file\n      options:\n        max-size: \"10m\"\n        max-file: \"3\"\n\n  woodpecker-agent:\n    image: docker.io/woodpeckerci/woodpecker-agent@sha256:d95ac8a778881709c05d2ec931577e278447cc4097fd31122955c169d264b7e4\n    restart: unless-stopped\n    depends_on:\n      woodpecker-server:\n        condition: service_healthy\n    environment:\n      WOODPECKER_SERVER: \"woodpecker-server:9000\"\n      WOODPECKER_AGENT_SECRET_FILE: /run/secrets/woodpecker_agent_secret\n      WOODPECKER_MAX_WORKFLOWS: \"2\"\n      WOODPECKER_FILTER_LABELS: \"type=docker\"\n      # Woodpecker agent builds OCI images. Docker access is brokered via omahabd's\n      # controlled deployment layer on 127.0.0.1 — no direct docker socket mount\n      # into any application or agent container. omahabd validates that no compose\n      # file mounts docker socket; builds use a restricted BuildKit endpoint instead.\n      WOODPECKER_BACKEND: docker\n      DOCKER_HOST: tcp://omahabd-builder:2375\n    secrets:\n      - woodpecker_agent_secret\n    networks:\n      - omahab\n    healthcheck:\n      test: [\"CMD-SHELL\", \"ps aux | grep -q woodpecker-agent || exit 1\"]\n      interval: 30s\n      timeout: 5s\n      retries: 3\n\n  woodpecker-postgres:\n    image: docker.io/library/postgres@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685\n    restart: unless-stopped\n    expose:\n      - \"5432\"\n    environment:\n      POSTGRES_DB: woodpecker\n      POSTGRES_USER: woodpecker\n      POSTGRES_PASSWORD_FILE: /run/secrets/woodpecker_db_password\n      PGDATA: /var/lib/postgresql/data/pgdata\n    secrets:\n      - woodpecker_db_password\n    volumes:\n      - woodpecker_postgres_data:/var/lib/postgresql/data\n    networks:\n      - omahab\n    healthcheck:\n      test: [\"CMD-SHELL\", \"pg_isready -U woodpecker -d woodpecker || exit 1\"]\n      interval: 10s\n      timeout: 5s\n      retries: 5\n      start_period: 15s\n\nsecrets:\n  woodpecker_forgejo_client_secret:\n    file: /var/lib/omahab/secrets/woodpecker_forgejo_client_secret\n  woodpecker_agent_secret:\n    file: /var/lib/omahab/secrets/woodpecker_agent_secret\n  woodpecker_db_password:\n    file: /var/lib/omahab/secrets/woodpecker_db_password\nvolumes:\n  woodpecker_data:\n    name: woodpecker_data\n  woodpecker_postgres_data:\n    name: woodpecker_postgres_data\n",
+      "compose": "",
       "port": 8000,
       "default_exposure": "private",
       "max_exposure": "shared",
@@ -214,28 +226,37 @@
       "resources": {
         "memory_mb": 512
       },
-      "default": false,
+      "default": true,
       "route": "ci",
       "dependencies": [
         "caddy",
         "forgejo"
       ],
       "secret_sources": [
+        "woodpecker_forgejo_client_id",
         "woodpecker_forgejo_client_secret",
         "woodpecker_agent_secret",
+        "woodpecker_grpc_secret",
+        "woodpecker_db_url",
         "woodpecker_db_password"
+      ],
+      "pipeline_image": "quay.io/podman/stable@sha256:943585c013eeeb5acc9f4e6d2a81d80c6b0be3069557cbb9a5aa737a8c4aae3e",
+      "runtime": "systemd",
+      "units": [
+        "woodpecker-server.service",
+        "woodpecker-agent.service"
       ]
     },
     {
       "id": "immich",
       "name": "Immich",
-      "image": "ghcr.io/immich-app/immich-server",
-      "digest": "sha256:b434cb9287eea1471c9974845914d4dd328c9c2d652e446ed4930f99944f0ceb",
+      "image": "",
+      "digest": "",
       "architectures": [
         "amd64",
         "arm64"
       ],
-      "compose": "# Immich — curated Omahab bundle\n# Includes server + ML (isolated but co-deployed), Postgres/VectorChord, Valkey.\n# Library on host bind /srv/omahab/apps/immich/library for restic backup efficiency.\nname: omahab-immich\nnetworks:\n  omahab:\n    name: omahab\n    external: true\nservices:\n  immich-server:\n    image: {{.Image}}@{{.Digest}}\n    restart: unless-stopped\n    depends_on:\n      immich-postgres:\n        condition: service_healthy\n      immich-redis:\n        condition: service_healthy\n    expose:\n      - \"2283\"\n    environment:\n      DB_HOSTNAME: immich-postgres\n      DB_USERNAME: postgres\n      DB_DATABASE_NAME: immich\n      DB_PASSWORD_FILE: /run/secrets/immich_db_password\n      REDIS_HOSTNAME: immich-redis\n      IMMICH_MACHINE_LEARNING_URL: \"http://immich-machine-learning:3003\"\n      IMMICH_PUBLIC_URL: \"https://photos.${DOMAIN:?domain required}/\"\n      IMMICH_CONFIG_FILE: /config/immich.json\n    secrets:\n      - immich_db_password\n    volumes:\n      - /srv/omahab/apps/immich/library:/data\n      - /srv/omahab/apps/immich/immich.json:/config/immich.json:ro\n    networks:\n      omahab:\n        aliases:\n          - immich\n    healthcheck:\n      test: [\"CMD-SHELL\", \"curl -f http://127.0.0.1:2283/api/server/ping || wget --no-verbose --tries=1 --spider http://127.0.0.1:2283/api/server/ping || exit 1\"]\n      interval: 30s\n      timeout: 10s\n      retries: 5\n      start_period: 60s\n    logging:\n      driver: json-file\n      options:\n        max-size: \"10m\"\n        max-file: \"3\"\n\n  immich-machine-learning:\n    image: ghcr.io/immich-app/immich-machine-learning@sha256:5a0839dc5303cd7215bcd2180a26aed3af41675aefb3e75e5157e9f10ad16e6e\n    restart: unless-stopped\n    expose:\n      - \"3003\"\n    volumes:\n      - immich_model_cache:/cache\n    networks:\n      - omahab\n    healthcheck:\n      test: [\"CMD\", \"python\", \"-c\", \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:3003/ping')\"]\n      interval: 30s\n      timeout: 10s\n      retries: 5\n      start_period: 120s\n    deploy:\n      resources:\n        limits:\n          memory: 2G\n\n  immich-postgres:\n    image: ghcr.io/immich-app/postgres@sha256:bcf63357191b76a916ae5eb93464d65c07511da41e3bf7a8416db519b40b1c23\n    restart: unless-stopped\n    expose:\n      - \"5432\"\n    environment:\n      POSTGRES_DB: immich\n      POSTGRES_USER: postgres\n      POSTGRES_PASSWORD_FILE: /run/secrets/immich_db_password\n      PGDATA: /var/lib/postgresql/data/pgdata\n    secrets:\n      - immich_db_password\n    volumes:\n      - immich_postgres_data:/var/lib/postgresql/data\n    networks:\n      - omahab\n    healthcheck:\n      test: [\"CMD-SHELL\", \"pg_isready -U postgres -d immich || exit 1\"]\n      interval: 10s\n      timeout: 5s\n      retries: 5\n      start_period: 20s\n\n  immich-redis:\n    image: docker.io/valkey/valkey@sha256:a91d34ab33975b1054e26f1bd9995b268f7e0c507b5ded7f3d181a1a25521630\n    restart: unless-stopped\n    expose:\n      - \"6379\"\n    volumes:\n      - immich_redis_data:/data\n    networks:\n      - omahab\n    healthcheck:\n      test: [\"CMD\", \"redis-cli\", \"ping\"]\n      interval: 10s\n      timeout: 3s\n      retries: 5\n\nsecrets:\n  immich_db_password:\n    file: /var/lib/omahab/secrets/immich_db_password\nvolumes:\n  immich_postgres_data:\n    name: immich_postgres_data\n  immich_redis_data:\n    name: immich_redis_data\n  immich_model_cache:\n    name: immich_model_cache\n",
+      "compose": "",
       "port": 2283,
       "default_exposure": "private",
       "max_exposure": "shared",
@@ -288,18 +309,23 @@
       ],
       "secret_sources": [
         "immich_db_password"
+      ],
+      "runtime": "systemd",
+      "units": [
+        "immich-server.service",
+        "immich-machine-learning.service"
       ]
     },
     {
       "id": "paperless-ngx",
       "name": "Paperless-ngx",
-      "image": "ghcr.io/paperless-ngx/paperless-ngx",
-      "digest": "sha256:73a1d0bcc5b50cb501f084da795722aa5e2988c6bc9b26ca1ae493a57a490c06",
+      "image": "",
+      "digest": "",
       "architectures": [
         "amd64",
         "arm64"
       ],
-      "compose": "# Paperless-ngx — curated Omahab bundle\n# Postgres + redis + gotenberg + tika sidecars. Native OIDC to Pocket ID.\nname: omahab-paperless\nnetworks:\n  omahab:\n    name: omahab\n    external: true\nservices:\n  paperless:\n    image: {{.Image}}@{{.Digest}}\n    restart: unless-stopped\n    depends_on:\n      paperless-postgres:\n        condition: service_healthy\n      paperless-redis:\n        condition: service_healthy\n      gotenberg:\n        condition: service_started\n      tika:\n        condition: service_started\n    expose:\n      - \"8000\"\n    environment:\n      PAPERLESS_URL: \"https://docs.${DOMAIN:?domain required}/\"\n      PAPERLESS_REDIS: \"redis://paperless-redis:6379/0\"\n      PAPERLESS_DBHOST: paperless-postgres\n      PAPERLESS_DBNAME: paperless\n      PAPERLESS_DBUSER: paperless\n      PAPERLESS_DBPASS_FILE: /run/secrets/paperless_db_password\n      PAPERLESS_SECRET_KEY_FILE: /run/secrets/paperless_secret_key\n      PAPERLESS_OCR_LANGUAGE: eng\n      PAPERLESS_TIKA_ENABLED: \"1\"\n      PAPERLESS_TIKA_GOTENBERG_ENDPOINT: \"http://gotenberg:3000\"\n      PAPERLESS_TIKA_ENDPOINT: \"http://tika:9998\"\n      PAPERLESS_ENABLE_HTTP_REMOTE_USER: \"false\"\n      PAPERLESS_APPS: allauth.socialaccount.providers.openid_connect\n      PAPERLESS_SOCIALACCOUNT_OIDC_ISSUER: \"https://id.${DOMAIN}/\"\n    secrets:\n      - paperless_db_password\n      - paperless_secret_key\n    volumes:\n      - /srv/omahab/apps/paperless/data:/usr/src/paperless/data\n      - /srv/omahab/apps/paperless/media:/usr/src/paperless/media\n      - /srv/omahab/apps/paperless/consume:/usr/src/paperless/consume\n      - /srv/omahab/apps/paperless/export:/usr/src/paperless/export\n    networks:\n      - omahab\n    healthcheck:\n      test: [\"CMD-SHELL\", \"curl -f http://127.0.0.1:8000/api/ || wget --no-verbose --tries=1 --spider http://127.0.0.1:8000/api/ || exit 1\"]\n      interval: 30s\n      timeout: 10s\n      retries: 5\n      start_period: 30s\n    logging:\n      driver: json-file\n      options:\n        max-size: \"10m\"\n        max-file: \"3\"\n\n  paperless-postgres:\n    image: docker.io/library/postgres@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685\n    restart: unless-stopped\n    expose:\n      - \"5432\"\n    environment:\n      POSTGRES_DB: paperless\n      POSTGRES_USER: paperless\n      POSTGRES_PASSWORD_FILE: /run/secrets/paperless_db_password\n      PGDATA: /var/lib/postgresql/data/pgdata\n    secrets:\n      - paperless_db_password\n    volumes:\n      - paperless_postgres_data:/var/lib/postgresql/data\n    networks:\n      - omahab\n    healthcheck:\n      test: [\"CMD-SHELL\", \"pg_isready -U paperless -d paperless || exit 1\"]\n      interval: 10s\n      timeout: 5s\n      retries: 5\n      start_period: 15s\n\n  paperless-redis:\n    image: docker.io/library/redis@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf\n    restart: unless-stopped\n    expose:\n      - \"6379\"\n    volumes:\n      - paperless_redis_data:/data\n    networks:\n      - omahab\n    healthcheck:\n      test: [\"CMD\", \"redis-cli\", \"ping\"]\n      interval: 10s\n      timeout: 3s\n      retries: 5\n\n  gotenberg:\n    image: docker.io/gotenberg/gotenberg@sha256:87c16b9f364279d321bc9772d31fa58aa6abe036423c270698bd636c3a8e9466\n    restart: unless-stopped\n    expose:\n      - \"3000\"\n    command: [\"gotenberg\", \"--api-timeout=30s\", \"--chromium-disable-javascript=false\"]\n    networks:\n      - omahab\n    healthcheck:\n      test: [\"CMD-SHELL\", \"curl -f http://127.0.0.1:3000/health || exit 1\"]\n      interval: 30s\n      timeout: 5s\n      retries: 3\n\n  tika:\n    image: docker.io/apache/tika@sha256:a8b442501f601fb15015de974f9afe13dd242b0f14e49a2b144fadcb214a555b\n    restart: unless-stopped\n    expose:\n      - \"9998\"\n    networks:\n      - omahab\n    healthcheck:\n      test: [\"CMD-SHELL\", \"curl -f http://127.0.0.1:9998/tika || curl -f http://127.0.0.1:9998/ || exit 1\"]\n      interval: 30s\n      timeout: 5s\n      retries: 3\n\nsecrets:\n  paperless_db_password:\n    file: /var/lib/omahab/secrets/paperless_db_password\n  paperless_secret_key:\n    file: /var/lib/omahab/secrets/paperless_secret_key\nvolumes:\n  paperless_postgres_data:\n    name: paperless_postgres_data\n  paperless_redis_data:\n    name: paperless_redis_data\n",
+      "compose": "",
       "port": 8000,
       "default_exposure": "private",
       "max_exposure": "shared",
@@ -336,7 +362,7 @@
       "resources": {
         "memory_mb": 2048
       },
-      "default": false,
+      "default": true,
       "route": "docs",
       "dependencies": [
         "caddy",
@@ -345,18 +371,96 @@
       "secret_sources": [
         "paperless_db_password",
         "paperless_secret_key"
+      ],
+      "runtime": "systemd",
+      "units": [
+        "paperless-web.service",
+        "paperless-consumer.service",
+        "paperless-scheduler.service",
+        "paperless-tika.service",
+        "paperless-gotenberg.service"
+      ]
+    },
+    {
+      "id": "karakeep",
+      "name": "Karakeep",
+      "image": "",
+      "digest": "",
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "compose": "",
+      "port": 3000,
+      "default_exposure": "private",
+      "max_exposure": "shared",
+      "health_check": {
+        "kind": "command",
+        "service": "karakeep",
+        "command": [
+          "sh",
+          "-c",
+          "curl -f http://127.0.0.1:3000/api/health || wget --no-verbose --tries=1 --spider http://127.0.0.1:3000/api/trpc/health || exit 1"
+        ]
+      },
+      "data": [
+        {
+          "name": "karakeep_data",
+          "path": "/data"
+        },
+        {
+          "name": "karakeep_postgres_data",
+          "path": "/var/lib/postgresql/data"
+        },
+        {
+          "name": "karakeep_meili_data",
+          "path": "/meili_data"
+        }
+      ],
+      "backup": {
+        "pre_backup": [
+          "/bin/sh",
+          "-c",
+          "docker compose -f /srv/omahab/apps/karakeep/compose.yaml exec karakeep-postgres pg_dump -U ${KARAKEEP_POSTGRES_USER:-karakeep} -Fc -d ${KARAKEEP_POSTGRES_DB:-karakeep} -f /tmp/karakeep.pgdump"
+        ],
+        "post_restore": [
+          "/bin/sh",
+          "-c",
+          "docker compose -f /srv/omahab/apps/karakeep/compose.yaml exec karakeep-postgres pg_restore -U ${KARAKEEP_POSTGRES_USER:-karakeep} -d ${KARAKEEP_POSTGRES_DB:-karakeep} --clean --if-exists /tmp/karakeep.pgdump \u0026\u0026 docker compose -f /srv/omahab/apps/karakeep/compose.yaml restart karakeep karakeep-meilisearch karakeep-chrome"
+        ]
+      },
+      "oidc": {
+        "supported": true
+      },
+      "resources": {
+        "memory_mb": 1024
+      },
+      "default": true,
+      "route": "save",
+      "dependencies": [
+        "caddy",
+        "pocket-id"
+      ],
+      "secret_sources": [
+        "karakeep_db_password",
+        "karakeep_nextauth_secret",
+        "karakeep_meili_master_key"
+      ],
+      "runtime": "systemd",
+      "units": [
+        "karakeep.service"
       ]
     },
     {
       "id": "syncthing",
       "name": "Syncthing",
-      "image": "docker.io/syncthing/syncthing",
-      "digest": "sha256:8c8ff37ab6aa8be23b700648a90fa9412e214852e9fd6ea8477c8334792daec0",
+      "image": "",
+      "digest": "",
       "architectures": [
         "amd64",
         "arm64"
       ],
-      "compose": "# Syncthing — curated Omahab bundle\n# GUI on private bridge only. No sync protocol exposure via Caddy; LAN discovery/Tailscale handles peer transport.\nname: omahab-syncthing\nnetworks:\n  omahab:\n    name: omahab\n    external: true\nservices:\n  syncthing:\n    image: {{.Image}}@{{.Digest}}\n    restart: unless-stopped\n    hostname: syncthing\n    expose:\n      - \"8384\"\n      - \"22000\"\n      - \"21027/udp\"\n    environment:\n      PUID: \"1000\"\n      PGID: \"1000\"\n      STGUIADDRESS: \"0.0.0.0:8384\"\n      STGUIAPIKEY_FILE: /run/secrets/syncthing_api_key\n    secrets:\n      - syncthing_api_key\n      - syncthing_gui_password\n    volumes:\n      - syncthing_config:/var/syncthing/config\n      - /srv/omahab/sync:/var/syncthing:rw\n    networks:\n      - omahab\n    healthcheck:\n      test: [\"CMD-SHELL\", \"wget --no-verbose --tries=1 --spider http://127.0.0.1:8384/rest/system/ping || curl -fk https://127.0.0.1:8384/rest/system/ping || exit 1\"]\n      interval: 30s\n      timeout: 10s\n      retries: 5\n      start_period: 20s\n    logging:\n      driver: json-file\n      options:\n        max-size: \"10m\"\n        max-file: \"3\"\n    # No host port publishing; GUI via Caddy private route sync.\u003cdomain\u003e -\u003e syncthing:8384\n    # Sync protocol (22000/tcp, 21027/udp) is host-local discovery; peers connect via Tailscale/LAN.\n    # Do not publish 22000/21027 via Caddy.\n    # No Docker socket mount.\n\nsecrets:\n  syncthing_api_key:\n    file: /var/lib/omahab/secrets/syncthing_api_key\n  syncthing_gui_password:\n    file: /var/lib/omahab/secrets/syncthing_gui_password\nvolumes:\n  syncthing_config:\n    name: syncthing_config\n",
+      "compose": "",
       "port": 8384,
       "default_exposure": "private",
       "max_exposure": "private",
@@ -393,7 +497,7 @@
       "resources": {
         "memory_mb": 512
       },
-      "default": false,
+      "default": true,
       "route": "sync",
       "dependencies": [
         "caddy"
@@ -401,18 +505,22 @@
       "secret_sources": [
         "syncthing_api_key",
         "syncthing_gui_password"
+      ],
+      "runtime": "systemd",
+      "units": [
+        "syncthing.service"
       ]
     },
     {
       "id": "litellm",
       "name": "LiteLLM Model Gateway",
-      "image": "ghcr.io/berriai/litellm",
-      "digest": "sha256:846795f2a2b5787ce2155170fd33b9ae886fd925f26635424ee613d53ece2fa4",
+      "image": "",
+      "digest": "",
       "architectures": [
         "amd64",
         "arm64"
       ],
-      "compose": "# LiteLLM gateway — curated Omahab bundle\n# OpenAI-compatible proxy + credential broker. Private-only, no Tunnel public exposure.\nname: omahab-litellm\nnetworks:\n  omahab:\n    name: omahab\n    external: true\nservices:\n  litellm:\n    image: {{.Image}}@{{.Digest}}\n    restart: unless-stopped\n    depends_on:\n      litellm-postgres:\n        condition: service_healthy\n    expose:\n      - \"4000\"\n    environment:\n      LITELLM_MASTER_KEY_FILE: /run/secrets/litellm_master_key\n      DATABASE_URL_FILE: /run/secrets/litellm_db_url\n      LITELLM_SALT_KEY_FILE: /run/secrets/litellm_salt_key\n      STORE_MODEL_IN_DB: \"true\"\n      LITELLM_CONFIG_PATH: /app/config/litellm.yaml\n    secrets:\n      - litellm_master_key\n      - litellm_db_url\n      - litellm_salt_key\n    volumes:\n      - litellm_config:/app/config:ro\n    command: [\"--config\", \"/app/config/litellm.yaml\", \"--detailed_debug\"]\n    networks:\n      - omahab\n    healthcheck:\n      test: [\"CMD-SHELL\", \"curl -f http://127.0.0.1:4000/health/liveliness || wget --no-verbose --tries=1 --spider http://127.0.0.1:4000/health/liveliness || exit 1\"]\n      interval: 20s\n      timeout: 5s\n      retries: 5\n      start_period: 20s\n    logging:\n      driver: json-file\n      options:\n        max-size: \"10m\"\n        max-file: \"3\"\n\n  litellm-postgres:\n    image: docker.io/library/postgres@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685\n    restart: unless-stopped\n    expose:\n      - \"5432\"\n    environment:\n      POSTGRES_DB: litellm\n      POSTGRES_USER: litellm\n      POSTGRES_PASSWORD_FILE: /run/secrets/litellm_db_password\n      PGDATA: /var/lib/postgresql/data/pgdata\n    secrets:\n      - litellm_db_password\n    volumes:\n      - litellm_postgres_data:/var/lib/postgresql/data\n    networks:\n      - omahab\n    healthcheck:\n      test: [\"CMD-SHELL\", \"pg_isready -U litellm -d litellm || exit 1\"]\n      interval: 10s\n      timeout: 5s\n      retries: 5\n      start_period: 15s\n\nsecrets:\n  litellm_master_key:\n    file: /var/lib/omahab/secrets/litellm_master_key\n  litellm_db_url:\n    file: /var/lib/omahab/secrets/litellm_db_url\n  litellm_salt_key:\n    file: /var/lib/omahab/secrets/litellm_salt_key\n  litellm_db_password:\n    file: /var/lib/omahab/secrets/litellm_db_password\nvolumes:\n  litellm_config:\n    name: litellm_config\n  litellm_postgres_data:\n    name: litellm_postgres_data\n",
+      "compose": "",
       "port": 4000,
       "default_exposure": "private",
       "max_exposure": "private",
@@ -431,8 +539,8 @@
           "path": "/var/lib/postgresql/data"
         },
         {
-          "name": "litellm_config",
-          "path": "/app/config"
+          "name": "litellm_auth",
+          "path": "/var/lib/litellm-auth"
         }
       ],
       "backup": {
@@ -453,27 +561,80 @@
       "resources": {
         "memory_mb": 512
       },
-      "default": false,
+      "default": true,
       "route": "models",
       "dependencies": [
         "caddy"
       ],
       "secret_sources": [
         "litellm_master_key",
+        "litellm_db_url",
         "litellm_db_password",
         "litellm_salt_key"
+      ],
+      "runtime": "systemd",
+      "units": [
+        "litellm.service"
+      ]
+    },
+    {
+      "id": "embedding-worker",
+      "name": "Embedding Worker",
+      "image": "",
+      "digest": "",
+      "architectures": [
+        "amd64",
+        "arm64"
+      ],
+      "compose": "",
+      "port": 8090,
+      "default_exposure": "private",
+      "max_exposure": "private",
+      "health_check": {
+        "kind": "command",
+        "service": "embedding-worker",
+        "command": [
+          "sh",
+          "-c",
+          "curl -f http://127.0.0.1:8090/health || python3 -c \"import http.client; http.client.HTTPConnection('127.0.0.1',8090).request('GET','/health'); assert http.client.HTTPConnection('127.0.0.1',8090).getresponse().status==200\" || exit 1"
+        ]
+      },
+      "data": [
+        {
+          "name": "embedding_models",
+          "path": "/models"
+        }
+      ],
+      "backup": {
+        "post_restore": [
+          "/bin/sh",
+          "-c",
+          "rsync -a /backups/derived-indexes/ /srv/omahab/derived-indexes/ \u0026\u0026 docker compose -f /srv/omahab/apps/embedding-worker/compose.yaml restart embedding-worker"
+        ]
+      },
+      "oidc": {
+        "supported": false
+      },
+      "resources": {
+        "memory_mb": 1536
+      },
+      "default": true,
+      "route": "",
+      "runtime": "systemd",
+      "units": [
+        "omahab-embedding-worker.service"
       ]
     },
     {
       "id": "ntfy",
       "name": "ntfy",
-      "image": "docker.io/binwiederhier/ntfy",
-      "digest": "sha256:6ef4b819f722fccdc036af611c4774cfdc2de821ab74fdd48bbf4c9d6f8973da",
+      "image": "",
+      "digest": "",
       "architectures": [
         "amd64",
         "arm64"
       ],
-      "compose": "# ntfy — curated Omahab OPTIONAL bundle\n# Disabled by default. Optional push adapter for normalized events.\n# When enabled, omahabd fan-outs events → ntfy topics.\nname: omahab-ntfy\nnetworks:\n  omahab:\n    name: omahab\n    external: true\nservices:\n  ntfy:\n    image: {{.Image}}@{{.Digest}}\n    restart: unless-stopped\n    expose:\n      - \"80\"\n    environment:\n      NTFY_AUTH_FILE: /run/secrets/ntfy_auth_file\n      NTFY_BEHIND_PROXY: \"true\"\n      NTFY_BASE_URL: \"https://ntfy.${DOMAIN:?domain required}\"\n    secrets:\n      - ntfy_auth_file\n    volumes:\n      - ntfy_cache:/var/cache/ntfy\n      - ntfy_config:/etc/ntfy\n      - /etc/omahab/ntfy/server.yml:/etc/ntfy/server.yml:ro\n    command: [\"serve\"]\n    networks:\n      - omahab\n    healthcheck:\n      test: [\"CMD-SHELL\", \"wget --no-verbose --tries=1 --spider http://127.0.0.1:80/v1/health || curl -f http://127.0.0.1:80/v1/health || exit 1\"]\n      interval: 30s\n      timeout: 5s\n      retries: 3\n      start_period: 10s\n    logging:\n      driver: json-file\n      options:\n        max-size: \"10m\"\n        max-file: \"3\"\n    # No host ports; Caddy routes ntfy.\u003cdomain\u003e -\u003e ntfy:80 when enabled.\n    # No Docker socket mount.\n\nsecrets:\n  ntfy_auth_file:\n    file: /var/lib/omahab/secrets/ntfy_auth_file\nvolumes:\n  ntfy_cache:\n    name: ntfy_cache\n  ntfy_config:\n    name: ntfy_config\n",
+      "compose": "",
       "port": 80,
       "default_exposure": "private",
       "max_exposure": "public",
@@ -509,13 +670,17 @@
       "resources": {
         "memory_mb": 256
       },
-      "default": false,
+      "default": true,
       "route": "ntfy",
       "dependencies": [
         "caddy"
       ],
       "secret_sources": [
         "ntfy_auth_file"
+      ],
+      "runtime": "systemd",
+      "units": [
+        "ntfy-sh.service"
       ]
     }
   ]

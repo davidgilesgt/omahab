@@ -23,6 +23,13 @@ const (
 	CheckCommand CheckKind = "command"
 )
 
+// Runtime values selecting how a bundle is placed: compose (Docker
+// Compose, digest-pinned) or systemd (native NixOS service).
+const (
+	RuntimeCompose = "compose"
+	RuntimeSystemd = "systemd"
+)
+
 // supportedArchitectures mirrors the supported Debian 13 / Ubuntu 26.04 hosts (amd64 and
 // arm64, DESIGN.md §5.1). Bundles must declare a subset.
 var supportedArchitectures = map[string]bool{
@@ -124,6 +131,14 @@ type Bundle struct {
 	Dependencies    []string         `json:"dependencies,omitempty"`
 	SecretSources   []string         `json:"secret_sources,omitempty"`
 	PipelineImage   string           `json:"pipeline_image,omitempty"`
+
+	// Runtime selects the runner: "systemd" (native NixOS service,
+	// versions owned by the nixpkgs pin) or "compose" (Docker Compose;
+	// digest pinning applies). Empty defaults to compose.
+	Runtime string `json:"runtime,omitempty"`
+	// Units lists the systemd units to control for runtime=systemd
+	// bundles (e.g. ["forgejo.service"]).
+	Units []string `json:"units,omitempty"`
 }
 
 // exposureRank orders exposure so requests can be checked against a bundle's
@@ -150,6 +165,11 @@ func validSlug(s string) bool {
 func (b Bundle) validate() (Bundle, error) {
 	var problems []string
 
+	// runtime=systemd bundles are native NixOS services: their versions
+	// are owned by the nixpkgs pin, so image/digest/compose pinning does
+	// not apply to them.
+	native := b.Runtime == RuntimeSystemd
+
 	if !validSlug(b.ID) || len(b.ID) < 2 {
 		problems = append(problems, fmt.Sprintf("id %q must be 2-63 chars of [a-z0-9-], starting with a letter and ending alphanumeric", b.ID))
 	}
@@ -157,13 +177,15 @@ func (b Bundle) validate() (Bundle, error) {
 	if b.Name == "" {
 		problems = append(problems, "name is required")
 	}
-	if b.Image == "" || strings.Contains(b.Image, "@") || !imageRe.MatchString(b.Image) {
-		problems = append(problems, fmt.Sprintf("image %q must be a tagless lowercase repository reference (digests belong in the digest field)", b.Image))
-	} else if idx := strings.LastIndexByte(b.Image, '/'); idx >= 0 && strings.ContainsRune(b.Image[idx:], ':') {
-		problems = append(problems, fmt.Sprintf("image %q carries a mutable tag", b.Image))
-	}
-	if !ValidDigest(b.Digest) {
-		problems = append(problems, fmt.Sprintf("digest %q must be a pinned sha256:<64 lowercase hex> digest", b.Digest))
+	if !native {
+		if b.Image == "" || strings.Contains(b.Image, "@") || !imageRe.MatchString(b.Image) {
+			problems = append(problems, fmt.Sprintf("image %q must be a tagless lowercase repository reference (digests belong in the digest field)", b.Image))
+		} else if idx := strings.LastIndexByte(b.Image, '/'); idx >= 0 && strings.ContainsRune(b.Image[idx:], ':') {
+			problems = append(problems, fmt.Sprintf("image %q carries a mutable tag", b.Image))
+		}
+		if !ValidDigest(b.Digest) {
+			problems = append(problems, fmt.Sprintf("digest %q must be a pinned sha256:<64 lowercase hex> digest", b.Digest))
+		}
 	}
 	if b.Port < 0 || b.Port > 65535 {
 		problems = append(problems, fmt.Sprintf("port %d out of range", b.Port))
@@ -260,6 +282,27 @@ func (b Bundle) validate() (Bundle, error) {
 		if !pinnedImageRe.MatchString(strings.TrimSpace(b.PipelineImage)) {
 			problems = append(problems, fmt.Sprintf("pipeline_image %q must be repository@sha256:<64 lowercase hex>", b.PipelineImage))
 		}
+	}
+	// Runtime normalization + units contract.
+	switch b.Runtime {
+	case "", RuntimeCompose:
+		b.Runtime = RuntimeCompose
+	case RuntimeSystemd:
+		if len(b.Units) == 0 {
+			problems = append(problems, "runtime=systemd requires at least one unit")
+		}
+	default:
+		problems = append(problems, fmt.Sprintf("runtime %q must be systemd or compose", b.Runtime))
+	}
+	seenUnit := map[string]bool{}
+	for _, u := range b.Units {
+		if !strings.HasSuffix(u, ".service") && !strings.HasSuffix(u, ".socket") && !strings.HasSuffix(u, ".timer") {
+			problems = append(problems, fmt.Sprintf("unit %q must name a .service/.socket/.timer unit", u))
+		}
+		if seenUnit[u] {
+			problems = append(problems, fmt.Sprintf("unit %q listed twice", u))
+		}
+		seenUnit[u] = true
 	}
 	if len(problems) > 0 {
 		return Bundle{}, &ValidationError{Problems: problems}
@@ -375,8 +418,10 @@ func NewCatalog(bundles ...Bundle) (*Catalog, error) {
 		if _, dup := c.byID[nb.ID]; dup {
 			return nil, invalid("duplicate bundle id %q", nb.ID)
 		}
-		if _, err := renderCompose(nb, nb.Digest); err != nil {
-			return nil, fmt.Errorf("bundle %q: %w", nb.ID, err)
+		if nb.Runtime != RuntimeSystemd {
+			if _, err := renderCompose(nb, nb.Digest); err != nil {
+				return nil, fmt.Errorf("bundle %q: %w", nb.ID, err)
+			}
 		}
 		c.byID[nb.ID] = nb
 		c.order = append(c.order, nb.ID)

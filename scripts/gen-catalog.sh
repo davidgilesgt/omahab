@@ -86,6 +86,10 @@ get_repo() {
   esac
 }
 # Enabled-by-default images must resolve; optional bundles may be skipped.
+# hermes is the only digest-pinned bundle left after the NixOS port; its
+# image (ghcr.io/omahab/hermes) is not yet published. It becomes required
+# again once the image is pushed; until then gen-catalog skips hermes and
+# the runtime catalog omits it (installing hermes returns "unknown bundle").
 REQUIRED_KEYS=("caddy" "pocket-id" "forgejo" "postgres" "redis" "woodpecker-server" "woodpecker-agent" "podman")
 
 is_required() {

@@ -171,9 +171,9 @@ def load_config(explicit_path: str | os.PathLike[str] | None = None) -> WorkerCo
                         f"artifact_sha256 mismatch for alias {alias!r}: expected {pin.artifact_sha256} got {actual}"
                     )
 
-    # Also require that at least one model is configured. In production, both should be present.
-    if not cfg.allow_test_adapter and len(cfg.models) == 0:
-        gate_errors.append("no models pinned in config; at least one of {} required".format(sorted(ALLOWED_ALIASES)))
+    # An empty models map is valid: the appliance boots the worker before
+    # a model is chosen (dashboard setup step). It serves no adapter until
+    # omahabd rewrites the config with the chosen pin and restarts it.
 
     if gate_errors:
         for e in gate_errors:
@@ -187,8 +187,11 @@ def _parse_config(data: dict[str, Any], path: Path) -> WorkerConfig:
     if not isinstance(data, dict):
         raise ValueError("config root must be an object")
     models_raw = data.get("models")
-    if not isinstance(models_raw, dict) or len(models_raw) == 0:
-        raise ValueError("'models' must be a non-empty object mapping alias -> pin")
+    if not isinstance(models_raw, dict):
+        # An empty models object is valid: the appliance boots the worker
+        # before a model is chosen (dashboard setup step); it serves no
+        # adapter until omahabd rewrites the config and restarts it.
+        raise ValueError("'models' must be an object mapping alias -> pin")
     base_raw = data.get("models_base_dir", "/var/lib/omahab/models")
     if not isinstance(base_raw, str) or not base_raw.strip():
         raise ValueError("models_base_dir must be a non-empty string")

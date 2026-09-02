@@ -106,27 +106,7 @@ func (r *ComposeRunner) Check(ctx context.Context, app domain.Application, spec 
 		if hc.Port <= 0 || hc.Port > 65535 {
 			return domain.HealthUnknown, fmt.Errorf("%w: http health check has no port", ErrInvalid)
 		}
-		checkCtx, cancel := context.WithTimeout(ctx, hc.timeout())
-		defer cancel()
-		path := hc.Path
-		if path == "" {
-			path = "/"
-		}
-		req, err := http.NewRequestWithContext(checkCtx, http.MethodGet,
-			fmt.Sprintf("http://127.0.0.1:%d%s", hc.Port, path), nil)
-		if err != nil {
-			return domain.HealthUnknown, fmt.Errorf("build health request: %w", err)
-		}
-		resp, err := r.client.Do(req)
-		if err != nil {
-			return domain.HealthUnhealthy, nil
-		}
-		defer resp.Body.Close()
-		_, _ = io.Copy(io.Discard, resp.Body)
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			return domain.HealthHealthy, nil
-		}
-		return domain.HealthUnhealthy, nil
+		return probeHTTPWith(ctx, r.client, hc)
 	case CheckCommand:
 		if hc.Service == "" || len(hc.Command) == 0 {
 			return domain.HealthUnknown, fmt.Errorf("%w: command health check needs service and command", ErrInvalid)
@@ -145,6 +125,40 @@ func (r *ComposeRunner) Check(ctx context.Context, app domain.Application, spec 
 	default:
 		return domain.HealthUnknown, fmt.Errorf("%w: unknown health check kind %q", ErrInvalid, hc.Kind)
 	}
+}
+
+// probeHTTP performs an HTTP health probe against 127.0.0.1:<port><path>
+// with the default client. Shared by every runner.
+func probeHTTP(ctx context.Context, hc HealthCheck, port int) (domain.Health, error) {
+	return probeHTTPWith(ctx, http.DefaultClient, hc)
+}
+
+// probeHTTPWith is probeHTTP with an injectable client.
+func probeHTTPWith(ctx context.Context, client *http.Client, hc HealthCheck) (domain.Health, error) {
+	if hc.Port <= 0 || hc.Port > 65535 {
+		return domain.HealthUnknown, fmt.Errorf("%w: http health check has no port", ErrInvalid)
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, hc.timeout())
+	defer cancel()
+	path := hc.Path
+	if path == "" {
+		path = "/"
+	}
+	req, err := http.NewRequestWithContext(checkCtx, http.MethodGet,
+		fmt.Sprintf("http://127.0.0.1:%d%s", hc.Port, path), nil)
+	if err != nil {
+		return domain.HealthUnknown, fmt.Errorf("build health request: %w", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return domain.HealthUnhealthy, nil
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return domain.HealthHealthy, nil
+	}
+	return domain.HealthUnhealthy, nil
 }
 
 // ExecInvoker is the production Invoker: it runs the command as a child

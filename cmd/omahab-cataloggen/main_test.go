@@ -427,7 +427,6 @@ func TestConvertRealCatalogDefaultsAndHealth(t *testing.T) {
 	}
 	var defaults []string
 	var immich apps.Bundle
-	var caddy apps.Bundle
 	var pocketID apps.Bundle
 	var forgejo apps.Bundle
 	var woodpecker apps.Bundle
@@ -439,18 +438,16 @@ func TestConvertRealCatalogDefaultsAndHealth(t *testing.T) {
 		if b.Default {
 			defaults = append(defaults, b.ID)
 		}
-		switch b.ID {
-		case "caddy":
-			caddy = b
-		case "immich":
-			immich = b
-		case "pocket-id":
-			pocketID = b
-		case "forgejo":
-			forgejo = b
-		case "woodpecker":
-			woodpecker = b
-		}
+	switch b.ID {
+	case "immich":
+		immich = b
+	case "pocket-id":
+		pocketID = b
+	case "forgejo":
+		forgejo = b
+	case "woodpecker":
+		woodpecker = b
+	}
 		if strings.TrimSpace(b.Route) != "" && b.Port <= 0 {
 			t.Fatalf("routed bundle %s missing positive port", b.ID)
 		}
@@ -458,18 +455,33 @@ func TestConvertRealCatalogDefaultsAndHealth(t *testing.T) {
 			t.Fatalf("%s health check kind = %q want command: %+v", b.ID, b.HealthCheck.Kind, b.HealthCheck)
 		}
 	}
-	wantDefaults := "caddy,pocket-id,forgejo,woodpecker"
+	wantDefaults := "caddy,pocket-id,forgejo,woodpecker,hermes,immich,paperless-ngx,karakeep,syncthing,litellm,embedding-worker,ntfy"
 	if got := strings.Join(defaults, ","); got != wantDefaults {
 		t.Fatalf("default bundles = %q want %q", got, wantDefaults)
 	}
-	if caddy.HealthCheck.Kind != apps.CheckCommand || caddy.HealthCheck.Service != "caddy" {
-		t.Fatalf("caddy health = %+v", caddy.HealthCheck)
+	// Native (systemd-runtime) bundles carry no compose or digest — their
+	// versions track the nixpkgs pin — and hermes stays compose-placed.
+	nativeWant := map[string]bool{
+		"caddy": true, "pocket-id": true, "forgejo": true, "woodpecker": true,
+		"immich": true, "paperless-ngx": true, "karakeep": true, "syncthing": true,
+		"litellm": true, "embedding-worker": true, "ntfy": true,
 	}
-	if !strings.Contains(caddy.Compose, "id.${DOMAIN:?domain required}") {
-		t.Fatalf("caddy compose missing identity hostname alias:\n%s", caddy.Compose)
-	}
-	if !strings.Contains(caddy.Compose, "git.${DOMAIN") || !strings.Contains(caddy.Compose, "ci.${DOMAIN") {
-		t.Fatalf("caddy compose missing git/ci aliases:\n%s", caddy.Compose)
+	for _, cb := range doc.Bundles {
+		b, err := convert(cb, realComposeDir, digests)
+		if err != nil {
+			t.Fatalf("bundle %s: %v", cb.Name, err)
+		}
+		if nativeWant[b.ID] {
+			if b.Runtime != apps.RuntimeSystemd {
+				t.Fatalf("%s runtime = %q want systemd", b.ID, b.Runtime)
+			}
+			if len(b.Units) == 0 {
+				t.Fatalf("%s systemd bundle declares no units", b.ID)
+			}
+			if b.Compose != "" {
+				t.Fatalf("%s systemd bundle should carry no compose", b.ID)
+			}
+		}
 	}
 	if pocketID.Port != 1411 {
 		t.Fatalf("pocket-id port = %d want 1411", pocketID.Port)
@@ -477,58 +489,13 @@ func TestConvertRealCatalogDefaultsAndHealth(t *testing.T) {
 	if forgejo.Port != 3000 {
 		t.Fatalf("forgejo port = %d want 3000", forgejo.Port)
 	}
-	if !strings.Contains(forgejo.Compose, "FORGEJO__actions__ENABLED") || !strings.Contains(forgejo.Compose, "FORGEJO__webhook__ALLOWED_HOST_LIST") {
-		t.Fatalf("forgejo compose missing actions/webhook hardening:\n%s", forgejo.Compose)
-	}
-	if strings.Contains(forgejo.Compose, "/etc/omahab/forgejo/app.ini") {
-		t.Fatalf("forgejo compose still references unmanaged app.ini mount:\n%s", forgejo.Compose)
-	}
-	if strings.Contains(forgejo.Compose, "expose:\n      - \"22\"") {
-		t.Fatalf("forgejo compose still exposes SSH 22:\n%s", forgejo.Compose)
-	}
 	if woodpecker.Port != 8000 {
 		t.Fatalf("woodpecker port = %d want 8000", woodpecker.Port)
 	}
 	if woodpecker.PipelineImage == "" || !strings.Contains(woodpecker.PipelineImage, "quay.io/podman/stable@sha256:") {
 		t.Fatalf("woodpecker pipeline image missing or not podman: %q", woodpecker.PipelineImage)
 	}
-	if !strings.Contains(woodpecker.Compose, "WOODPECKER_FORGEJO_CLIENT_FILE") || !strings.Contains(woodpecker.Compose, "WOODPECKER_FORGEJO_SECRET_FILE") {
-		t.Fatalf("woodpecker compose missing forgejo client file vars:\n%s", woodpecker.Compose)
-	}
-	if !strings.Contains(woodpecker.Compose, "WOODPECKER_DATABASE_DATASOURCE_FILE") || !strings.Contains(woodpecker.Compose, "WOODPECKER_GRPC_SECRET_FILE") {
-		t.Fatalf("woodpecker compose missing datasource/grpc secret file vars:\n%s", woodpecker.Compose)
-	}
-	if !strings.Contains(woodpecker.Compose, "/run/omahab-builder/podman.sock") {
-		t.Fatalf("woodpecker compose missing podman socket mount:\n%s", woodpecker.Compose)
-	}
-	if strings.Contains(woodpecker.Compose, "/var/run/docker.sock") || strings.Contains(woodpecker.Compose, "tcp://omahabd-builder:2375") {
-		t.Fatalf("woodpecker compose still references docker socket or buildkit tcp:\n%s", woodpecker.Compose)
-	}
 	if immich.Port != 2283 {
 		t.Fatalf("immich port = %d want 2283", immich.Port)
-	}
-	if !strings.Contains(immich.Compose, "aliases:") || !strings.Contains(immich.Compose, "- immich\n") {
-		t.Fatalf("immich compose missing bundle-id network alias:\n%s", immich.Compose)
-	}
-	if !strings.Contains(immich.Compose, "IMMICH_CONFIG_FILE") || !strings.Contains(immich.Compose, "immich.json:/config/immich.json") {
-		t.Fatalf("immich compose missing oauth config mount:\n%s", immich.Compose)
-	}
-	if immich.Image != "ghcr.io/immich-app/immich-server" {
-		t.Fatalf("immich image = %q", immich.Image)
-	}
-	if !strings.Contains(immich.Compose, "ghcr.io/immich-app/postgres@") {
-		t.Fatalf("immich compose missing postgres repo:\n%s", immich.Compose)
-	}
-	if !strings.Contains(immich.Compose, "docker.io/valkey/valkey@") {
-		t.Fatalf("immich compose missing valkey repo:\n%s", immich.Compose)
-	}
-	if strings.Contains(immich.Compose, "pgvecto") || strings.Contains(immich.Compose, "tensorchord") {
-		t.Fatalf("immich compose still references pgvecto.rs:\n%s", immich.Compose)
-	}
-	if strings.Contains(immich.Compose, "docker.io/library/redis@") {
-		t.Fatalf("immich compose still reuses generic redis:\n%s", immich.Compose)
-	}
-	if strings.Contains(immich.Compose, "/usr/src/app/upload") {
-		t.Fatalf("immich compose still uses stale upload path:\n%s", immich.Compose)
 	}
 }

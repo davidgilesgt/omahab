@@ -99,7 +99,11 @@
         "strategy": "recreate",
         "rollback": "previous digest + volume snapshot"
       },
-      "dependencies": []
+      "dependencies": [],
+      "runtime": "systemd",
+      "units": [
+        "caddy.service"
+      ]
     },
     {
       "name": "pocket-id",
@@ -198,6 +202,10 @@
       },
       "dependencies": [
         "caddy"
+      ],
+      "runtime": "systemd",
+      "units": [
+        "pocket-id.service"
       ]
     },
     {
@@ -310,6 +318,10 @@
       "dependencies": [
         "caddy",
         "pocket-id"
+      ],
+      "runtime": "systemd",
+      "units": [
+        "forgejo.service"
       ]
     },
     {
@@ -436,6 +448,11 @@
       "dependencies": [
         "caddy",
         "forgejo"
+      ],
+      "runtime": "systemd",
+      "units": [
+        "woodpecker-server.service",
+        "woodpecker-agent.service"
       ]
     },
     {
@@ -443,7 +460,7 @@
       "displayName": "Hermes",
       "description": "Default AI assistant backend and project bots. Stable profile 'default' mapped to user-chosen display name (default AI). Remote gateway for WebSocket/JSON-RPC.",
       "category": "platform",
-      "enabledByDefault": false,
+      "enabledByDefault": true,
       "failureDomain": "hermes",
       "composeFile": "compose/hermes.yml",
       "supportedArchitectures": [
@@ -542,15 +559,17 @@
       },
       "dependencies": [
         "caddy",
-        "pocket-id"
-      ]
+        "pocket-id",
+        "litellm"
+      ],
+      "runtime": "compose"
     },
     {
       "name": "immich",
       "displayName": "Immich",
       "description": "Private photo and video management. Mobile clients via Pocket ID / native auth; machine-learning via separate Immich ML container (isolated failure boundary).",
       "category": "platform",
-      "enabledByDefault": false,
+      "enabledByDefault": true,
       "failureDomain": "immich",
       "composeFile": "compose/immich.yml",
       "supportedArchitectures": [
@@ -666,6 +685,11 @@
       "dependencies": [
         "caddy",
         "pocket-id"
+      ],
+      "runtime": "systemd",
+      "units": [
+        "immich-server.service",
+        "immich-machine-learning.service"
       ]
     },
     {
@@ -673,7 +697,7 @@
       "displayName": "Paperless-ngx",
       "description": "Document management system of record. REST API for retrieval. Supports native OIDC and local embedding indexing via separate worker (failure-isolated).",
       "category": "platform",
-      "enabledByDefault": false,
+      "enabledByDefault": true,
       "failureDomain": "paperless",
       "composeFile": "compose/paperless.yml",
       "supportedArchitectures": [
@@ -793,6 +817,14 @@
       "dependencies": [
         "caddy",
         "pocket-id"
+      ],
+      "runtime": "systemd",
+      "units": [
+        "paperless-web.service",
+        "paperless-consumer.service",
+        "paperless-scheduler.service",
+        "paperless-tika.service",
+        "paperless-gotenberg.service"
       ]
     },
     {
@@ -800,7 +832,7 @@
       "displayName": "Karakeep",
       "description": "Bookmark, article, video and RSS archiving with full-text and semantic search. Agent skills for Hermes.",
       "category": "platform",
-      "enabledByDefault": false,
+      "enabledByDefault": true,
       "failureDomain": "karakeep",
       "composeFile": "compose/karakeep.yml",
       "supportedArchitectures": [
@@ -911,6 +943,10 @@
       "dependencies": [
         "caddy",
         "pocket-id"
+      ],
+      "runtime": "systemd",
+      "units": [
+        "karakeep.service"
       ]
     },
     {
@@ -918,7 +954,7 @@
       "displayName": "Syncthing",
       "description": "Folder synchronization. Restic is the off-site backup; Syncthing is not the backup mechanism. Never synchronize active .git directories.",
       "category": "sync",
-      "enabledByDefault": false,
+      "enabledByDefault": true,
       "failureDomain": "syncthing",
       "composeFile": "compose/syncthing.yml",
       "supportedArchitectures": [
@@ -1018,6 +1054,10 @@
       },
       "dependencies": [
         "caddy"
+      ],
+      "runtime": "systemd",
+      "units": [
+        "syncthing.service"
       ]
     },
     {
@@ -1025,7 +1065,7 @@
       "displayName": "LiteLLM Model Gateway",
       "description": "OpenAI-compatible model gateway and credential broker for provider API keys and ChatGPT subscription OAuth. Grok (xAI) OAuth requires pinned image with xAI OAuth support (BerriAI/litellm#29866) and companion relay (127.0.0.1:56121) \u2014 not fully managed until Phase 4 wiring. Projects receive aliases omahab/fast, omahab/balanced, omahab/reasoning, omahab/embedding, not upstream creds.",
       "category": "gateway",
-      "enabledByDefault": false,
+      "enabledByDefault": true,
       "failureDomain": "gateway",
       "composeFile": "compose/litellm.yml",
       "supportedArchitectures": [
@@ -1137,6 +1177,10 @@
       },
       "dependencies": [
         "caddy"
+      ],
+      "runtime": "systemd",
+      "units": [
+        "litellm.service"
       ]
     },
     {
@@ -1144,7 +1188,7 @@
       "displayName": "Embedding Worker",
       "description": "Isolated Python worker for local embedding inference (ONNX Runtime). Handles tokenization, pooling, normalization, batching. Failure or memory spike must NOT take down omahabd. Consumes only current job content, no provider credentials.",
       "category": "ml",
-      "enabledByDefault": false,
+      "enabledByDefault": true,
       "failureDomain": "ml-worker",
       "composeFile": "compose/embedding-worker.yml",
       "supportedArchitectures": [
@@ -1225,14 +1269,18 @@
         "rollback": "previous digest; previous index remains usable during background re-index"
       },
       "dependencies": [],
-      "notes": "Preserves failure boundary: omahabd owns model selection, pinned artifact metadata, source permissions, indexing jobs; worker owns inference only."
+      "notes": "Preserves failure boundary: omahabd owns model selection, pinned artifact metadata, source permissions, indexing jobs; worker owns inference only.",
+      "runtime": "systemd",
+      "units": [
+        "omahab-embedding-worker.service"
+      ]
     },
     {
       "name": "ntfy",
       "displayName": "ntfy",
       "description": "Optional push delivery adapter for normalized events (backup.failed, service.unhealthy, etc.). No phone subscription created by default.",
       "category": "notifications",
-      "enabledByDefault": false,
+      "enabledByDefault": true,
       "optional": true,
       "failureDomain": "notifications",
       "composeFile": "compose/ntfy.yml",
@@ -1320,6 +1368,10 @@
       },
       "dependencies": [
         "caddy"
+      ],
+      "runtime": "systemd",
+      "units": [
+        "ntfy-sh.service"
       ]
     }
   ],

@@ -66,6 +66,8 @@ type curatedBundle struct {
 	} `json:"exposure"`
 	EnabledByDefault bool     `json:"enabledByDefault"`
 	Dependencies     []string `json:"dependencies"`
+	Runtime          string   `json:"runtime,omitempty"`
+	Units            []string `json:"units,omitempty"`
 	Secrets          struct {
 		SecretFiles []struct {
 			Source string `json:"source"`
@@ -119,6 +121,11 @@ func run(args []string) error {
 	enabledRequired := map[string]bool{}
 	for _, cb := range doc.Bundles {
 		if cb.EnabledByDefault {
+			// hermes is skipped-with-warning above while its image is
+			// unpublished; see that block for details.
+			if cb.Name == "hermes" && cb.Runtime != apps.RuntimeSystemd {
+				continue
+			}
 			enabledRequired[cb.Name] = false
 		}
 	}
@@ -126,7 +133,11 @@ func run(args []string) error {
 		b, err := convert(cb, *composeDir, digests)
 		if err != nil {
 			if strings.Contains(err.Error(), "no resolved digest") {
-				if cb.EnabledByDefault {
+				// Native (systemd) bundles need no digest. Hermes is the one
+				// digest-pinned compose bundle whose image is not yet
+				// published; it is skipped with a warning until the image
+				// exists (installing it then returns "unknown bundle").
+				if cb.EnabledByDefault && cb.Runtime != apps.RuntimeSystemd && cb.Name != "hermes" {
 					return fmt.Errorf("bundle %q: %w", cb.Name, err)
 				}
 				fmt.Fprintf(os.Stderr, "warning: skip bundle %q: %v\n", cb.Name, err)
@@ -182,50 +193,57 @@ func convert(cb curatedBundle, composeDir string, digests map[string]string) (ap
 	if len(cb.Images) == 0 {
 		return apps.Bundle{}, fmt.Errorf("no images declared")
 	}
-	composeRaw, err := os.ReadFile(filepath.Join(composeDir, cb.ComposeFile))
-	if err != nil {
-		return apps.Bundle{}, fmt.Errorf("read compose: %w", err)
+	compose := ""
+	if cb.Runtime != apps.RuntimeSystemd {
+		composeRaw, err := os.ReadFile(filepath.Join(composeDir, cb.ComposeFile))
+		if err != nil {
+			return apps.Bundle{}, fmt.Errorf("read compose: %w", err)
+		}
+		compose = string(composeRaw)
 	}
-	compose := string(composeRaw)
 
 	primary := primaryImageKey(cb)
 	primaryRepo := ""
-	keys := make([]string, 0, len(cb.Images))
-	for key := range cb.Images {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		ref := cb.Images[key]
-		repo, variable, ok := splitImageRef(ref)
-		if !ok {
-			return apps.Bundle{}, fmt.Errorf("image %q must be repo@sha256:${VAR} with a digest placeholder", ref)
+	digest := ""
+	if cb.Runtime != apps.RuntimeSystemd {
+		keys := make([]string, 0, len(cb.Images))
+		for key := range cb.Images {
+			keys = append(keys, key)
 		}
-		digest, ok := digests[key]
-		if !ok {
-			return apps.Bundle{}, fmt.Errorf("no resolved digest for image key %q", key)
+		sort.Strings(keys)
+		for _, key := range keys {
+			ref := cb.Images[key]
+			repo, variable, ok := splitImageRef(ref)
+			if !ok {
+				return apps.Bundle{}, fmt.Errorf("image %q must be repo@sha256:${VAR} with a digest placeholder", ref)
+			}
+			keyDigest, ok := digests[key]
+			if !ok {
+				return apps.Bundle{}, fmt.Errorf("no resolved digest for image key %q", key)
+			}
+			// The compose template may phrase the placeholder's error message
+			// differently from the catalog entry; match on the variable name.
+			pattern := regexp.MustCompile(regexp.QuoteMeta(repo+"@sha256:") + `\$\{` + regexp.QuoteMeta(variable) + `:[^}]*\}`)
+			if pattern.FindString(compose) == "" {
+				return apps.Bundle{}, fmt.Errorf("compose template does not reference image %q", ref)
+			}
+			replacement := repo + "@" + keyDigest
+			if key == primary {
+				primaryRepo = repo
+				replacement = "{{.Image}}@{{.Digest}}"
+			}
+			compose = pattern.ReplaceAllString(compose, replacement)
 		}
-		// The compose template may phrase the placeholder's error message
-		// differently from the catalog entry; match on the variable name.
-		pattern := regexp.MustCompile(regexp.QuoteMeta(repo+"@sha256:") + `\$\{` + regexp.QuoteMeta(variable) + `:[^}]*\}`)
-		if pattern.FindString(compose) == "" {
-			return apps.Bundle{}, fmt.Errorf("compose template does not reference image %q", ref)
+		if primaryRepo == "" {
+			return apps.Bundle{}, fmt.Errorf("primary image key %q not present in images", primary)
 		}
-		replacement := repo + "@" + digest
-		if key == primary {
-			primaryRepo = repo
-			replacement = "{{.Image}}@{{.Digest}}"
-		}
-		compose = pattern.ReplaceAllString(compose, replacement)
-	}
-	if primaryRepo == "" {
-		return apps.Bundle{}, fmt.Errorf("primary image key %q not present in images", primary)
+		digest = digests[primary]
 	}
 	b := apps.Bundle{
 		ID:            cb.Name,
 		Name:          cb.DisplayName,
 		Image:         primaryRepo,
-		Digest:        digests[primary],
+		Digest:        digest,
 		Architectures: cb.SupportedArchitectures,
 		Compose:       compose,
 	}
@@ -246,13 +264,15 @@ func convert(cb curatedBundle, composeDir string, digests map[string]string) (ap
 		PreBackup:   hookArgv(cb.Backup.PreHooks, cb.Name),
 		PostRestore: hookArgv(cb.Restore.Hooks, cb.Name),
 	}
+	b.Runtime = cb.Runtime
+	b.Units = append([]string(nil), cb.Units...)
 	b.Default = cb.EnabledByDefault
 	b.Port = cb.Exposure.InternalPort
 	route := strings.TrimSpace(cb.Exposure.CaddyRoute)
 	if route == "edge" {
 		route = ""
 	} else {
-		if route != "" && (cb.Exposure.InternalPort < 1 || cb.Exposure.InternalPort > 65535) {
+		if route != "" && cb.Runtime != apps.RuntimeSystemd && (cb.Exposure.InternalPort < 1 || cb.Exposure.InternalPort > 65535) {
 			return apps.Bundle{}, fmt.Errorf("caddyRoute %q requires internalPort in 1..65535, got %d", route, cb.Exposure.InternalPort)
 		}
 		route = strings.TrimSuffix(route, ".{{.Domain}}")

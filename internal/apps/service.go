@@ -342,6 +342,9 @@ func (s *Service) Update(ctx context.Context, id domain.ID, digest string) (Stat
 	if !ok {
 		return Status{}, fmt.Errorf("%w: bundle %q missing from catalog", ErrConflict, rec.BundleID)
 	}
+	if bundle.Runtime == RuntimeSystemd {
+		return Status{}, invalid("bundle %q is a native system service managed by the system image; updates come from the nixpkgs pin", rec.BundleID)
+	}
 	compose, err := renderCompose(bundle, digest)
 	if err != nil {
 		return Status{}, err
@@ -483,6 +486,12 @@ func (s *Service) Uninstall(ctx context.Context, id domain.ID) error {
 		return err
 	}
 	defer unlock()
+	s.catMu.RLock()
+	bundle, ok := s.catalog.Get(rec.BundleID)
+	s.catMu.RUnlock()
+	if ok && bundle.Runtime == RuntimeSystemd {
+		return invalid("bundle %q is a native system service defined by the system closure; it cannot be uninstalled", rec.BundleID)
+	}
 	spec, err := s.specFor(ctx, rec)
 	if err != nil {
 		return err
@@ -733,6 +742,9 @@ func (s *Service) CheckForUpdates(ctx context.Context) ([]Status, error) {
 		bundle, ok := cat.Get(rec.BundleID)
 		if !ok {
 			continue
+		}
+		if bundle.Runtime == RuntimeSystemd {
+			continue // versions track the nixpkgs pin, not the catalog
 		}
 		if bundle.Digest == "" || rec.Digest == bundle.Digest {
 			continue

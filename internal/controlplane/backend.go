@@ -220,7 +220,16 @@ func (b *Backend) initServices(ctx context.Context) error {
 			return fmt.Errorf("apps catalog %s: %w", b.cfg.CatalogPath, err)
 		}
 	}
-	appRunner := apps.NewComposeRunner(nil, b.cfg.DataDir+"/apps")
+	composeRunner := apps.NewComposeRunner(nil, b.cfg.DataDir+"/apps")
+	// Units for systemd-runtime bundles come from the catalog.
+	systemdRunner := apps.NewSystemdRunner(nil, "", func(bundleID string) []string {
+		bundle, ok := catalog.Get(bundleID)
+		if !ok {
+			return nil
+		}
+		return bundle.Units
+	})
+	appRunner, routerErr := apps.NewRuntimeRouter(catalog, systemdRunner, composeRunner)
 	// EnvSource for DOMAIN and other instance vars needed by compose templates (e.g. PUBLIC_APP_URL https://id.${DOMAIN}/)
 	domainEnv := func(ctx context.Context, app domain.Application) ([]string, error) {
 		inst, err := b.store.Instance(ctx)
@@ -250,10 +259,13 @@ func (b *Backend) initServices(ctx context.Context) error {
 		}
 		return env, nil
 	}
+	if routerErr != nil {
+		return fmt.Errorf("apps runner: %w", routerErr)
+	}
 	appSvc, err := apps.NewService(b.db, apps.Options{
 		Catalog: catalog, Runner: appRunner,
-		Events: newAppsSink(b.events),
-		Env:    domainEnv,
+		Events:  newAppsSink(b.events),
+		Env:     domainEnv,
 	})
 	if err != nil {
 		return fmt.Errorf("apps: %w", err)
