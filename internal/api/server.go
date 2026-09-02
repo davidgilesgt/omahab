@@ -56,7 +56,6 @@ type Config struct {
 	Bootstrap BootstrapGate
 }
 
-
 const (
 	defaultBodyLimit    int64 = 1 << 20 // 1 MiB
 	defaultReadTimeout        = 10 * time.Second
@@ -268,14 +267,22 @@ func (s *Server) buildRouter() chi.Router {
 
 		// Setup (first-run provisioning)
 		r.Get("/api/v1/setup", s.handleGetSetup)
+		r.Post("/api/v1/setup/verify-cloudflare", s.withBodyLimit(defaultBodyLimit, s.handleVerifyCloudflareToken))
+		r.Post("/api/v1/recovery/generate", s.handleGenerateRecoveryKey)
+		r.Post("/api/v1/recovery/confirm", s.withBodyLimit(defaultBodyLimit, s.handleConfirmRecoveryKey))
+		r.Get("/api/v1/system/disks", s.handleListDisks)
+		r.Put("/api/v1/system/storage", s.withBodyLimit(defaultBodyLimit, s.handleConfigureStorage))
+		r.Get("/api/v1/backup-repositories", s.handleListBackupRepositories)
+		r.Post("/api/v1/backup-repositories", s.withBodyLimit(defaultBodyLimit, s.handleCreateBackupRepository))
+		r.Delete("/api/v1/backup-repositories/{id}", s.handleDeleteBackupRepository)
 		r.Post("/api/v1/setup/reconcile", s.withBodyLimit(defaultBodyLimit, s.handleTriggerSetupReconcile))
 		r.Put("/api/v1/setup/woodpecker", s.withBodyLimit(defaultBodyLimit, s.handleSetupWoodpecker))
 
- 		// Users / identity recovery
- 		r.Get("/api/v1/users", s.handleListUsers)
- 		r.Post("/api/v1/users", s.withBodyLimit(defaultBodyLimit, s.handleCreateUser))
- 		r.Get("/api/v1/users/{id}", s.handleGetUser)
- 		r.Patch("/api/v1/users/{id}", s.withBodyLimit(defaultBodyLimit, s.handleUpdateUser))
+		// Users / identity recovery
+		r.Get("/api/v1/users", s.handleListUsers)
+		r.Post("/api/v1/users", s.withBodyLimit(defaultBodyLimit, s.handleCreateUser))
+		r.Get("/api/v1/users/{id}", s.handleGetUser)
+		r.Patch("/api/v1/users/{id}", s.withBodyLimit(defaultBodyLimit, s.handleUpdateUser))
 		r.Post("/api/v1/users/{id}/recovery", s.handleCreateUserRecovery)
 		r.Post("/api/v1/users/{id}/enrollment", s.withBodyLimit(defaultBodyLimit, s.handleIssueUserEnrollment))
 		r.Post("/api/v1/identity/recover", s.withBodyLimit(defaultBodyLimit, s.handleIdentityRecover))

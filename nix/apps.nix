@@ -271,6 +271,47 @@ in
     };
 
     # ----------------------------------------------------------------
+    # Storage placement: mounts volumes recorded in storage.json before
+    # app units start. No-op when the file is absent (root disk holds
+    # everything; the wizard step is skippable).
+    # ----------------------------------------------------------------
+    systemd.services.omahab-storage = {
+      description = "Mount Omahab storage volumes (storage.json)";
+      wantedBy = [ "multi-user.target" ];
+      before = [
+        "postgresql.service"
+        "immich-server.service"
+        "syncthing.service"
+      ];
+      unitConfig = {
+        ConditionPathExists = "${stateDir}/storage.json";
+        RequiresMountsFor = [ "/srv/omahab" ];
+      };
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = pkgs.writeShellScript "omahab-storage" ''
+          set -euo pipefail
+          CFG="${stateDir}/storage.json"
+          mkdir -p /srv/omahab/disks
+          ${pkgs.jq}/bin/jq -c '.[]' "$CFG" | while read -r entry; do
+            vol=$(echo "$entry" | ${pkgs.jq}/bin/jq -r '.volume')
+            uuid=$(echo "$entry" | ${pkgs.jq}/bin/jq -r '.fs_uuid')
+            mnt="/srv/omahab/disks/$uuid"
+            mkdir -p "$mnt"
+            if ! mountpoint -q "$mnt"; then
+              mount -U "$uuid" "$mnt"
+            fi
+            if [ "$vol" = "media" ]; then
+              mkdir -p "$mnt/media" /srv/omahab/apps/immich/library
+              mountpoint -q /srv/omahab/apps/immich/library || mount --bind "$mnt/media" /srv/omahab/apps/immich/library
+            fi
+          done
+        '';
+        RemainAfterExit = true;
+      };
+    };
+
+    # ----------------------------------------------------------------
     # Shared PostgreSQL — per-app databases provisioned by modules above
     # plus LiteLLM's (the litellm module does not manage it).
     # ----------------------------------------------------------------

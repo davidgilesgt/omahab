@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/omahab/omahab/internal/api"
@@ -339,6 +340,28 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (api.SetupStatus, error) {
 	}
 	checks = append(checks, recovCheck)
 
+	// --- recovery_key check (kit exported + recipient stored) ---
+	recovKeyCheck := api.SetupCheck{ID: "recovery_key"}
+	if _, err := os.Stat(filepath.Join(b.cfg.StateDir, "recovery.age")); err == nil {
+		recovKeyCheck.Status = "ok"
+		recovKeyCheck.Detail = "recovery kit exported"
+	} else {
+		recovKeyCheck.Status = "pending"
+		recovKeyCheck.Detail = "generate and confirm a recovery key"
+	}
+	checks = append(checks, recovKeyCheck)
+
+	// --- storage_configured check (optional; skipped when unset) ---
+	storageCheck := api.SetupCheck{ID: "storage_configured"}
+	if _, err := os.Stat(filepath.Join(b.cfg.StateDir, "storage.json")); err == nil {
+		storageCheck.Status = "ok"
+		storageCheck.Detail = "volume placement configured"
+	} else {
+		storageCheck.Status = "skipped"
+		storageCheck.Detail = "root disk holds everything"
+	}
+	checks = append(checks, storageCheck)
+
 	// --- backups_configured check ---
 	backupCheck := api.SetupCheck{ID: "backups_configured"}
 	var backupCount int
@@ -495,6 +518,14 @@ func applySetupCheckMeta(c api.SetupCheck) api.SetupCheck {
 		c.Label = "Create the admin account and passkeys"
 		c.Owner = "operator"
 		c.Action = "Create the admin below and register two passkeys."
+	case "recovery_key":
+		c.Label = "Save a recovery key"
+		c.Owner = "operator"
+		c.Action = "Generate an age key pair and confirm you saved it."
+	case "storage_configured":
+		c.Label = "Storage placement"
+		c.Owner = "operator"
+		c.Action = "Optional: dedicate a disk to media or data."
 	case "recovery_tested":
 		c.Label = "Test identity recovery"
 		c.Owner = "operator"
@@ -527,7 +558,7 @@ func applySetupCheckMeta(c api.SetupCheck) api.SetupCheck {
 }
 func orderSetupChecks(checks []api.SetupCheck) []api.SetupCheck {
 	order := []string{
-		"domain", "cloudflare_dns", "tailscale", "admin_passkeys", "recovery_tested", "backups_configured",
+		"domain", "cloudflare_dns", "tailscale", "admin_passkeys", "recovery_key", "recovery_tested", "storage_configured", "backups_configured",
 		"tunnel", "dashboard_dns", "core_apps", "woodpecker_connection", "automatic_reconciliation",
 	}
 	byID := make(map[string]api.SetupCheck, len(checks))

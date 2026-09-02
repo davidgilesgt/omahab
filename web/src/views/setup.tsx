@@ -6,6 +6,11 @@ import { ErrorState, LoadingState, PageHeader, Section, StatusPill } from "../co
 import { useToast } from "../components/toast";
 import { CopyButton } from "../components/copyButton";
 
+function authHeaders(): Record<string, string> {
+  const t = sessionStorage.getItem("omahab.session") ?? "";
+  return t ? { Authorization: `Bearer ${t}` } : {};
+}
+
 function CheckRow({ check }: { check: SetupCheck }) {
   const showAction = check.owner === "operator" && (check.status === "pending" || check.status === "failed") && check.action;
   return (
@@ -161,6 +166,90 @@ export function SetupPage() {
     onError: (err) => toast.error(err instanceof Error ? err.message : "Enrollment failed"),
   });
 
+  const [recovery, setRecovery] = useState<{ public_key: string; private_key: string; kit: string } | null>(null);
+  const [recoverySaved, setRecoverySaved] = useState(false);
+  const [repoLabel, setRepoLabel] = useState("");
+  const [repoLocation, setRepoLocation] = useState("");
+  const [repoPassword, setRepoPassword] = useState("");
+
+  const verifyTokenMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch("/api/v1/setup/verify-cloudflare", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ token: dnsToken.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error?.message ?? `HTTP ${res.status}`);
+      return data as { ok: boolean; status?: string; detail?: string };
+    },
+    onSuccess: (data) => {
+      if (data.ok) toast.success(`Token active (${data.status ?? "active"})`);
+      else toast.error(`Token check failed: ${data.detail ?? data.status ?? "rejected"}`);
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Verification failed"),
+  });
+
+  const recoveryGenerateMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch("/api/v1/recovery/generate", {
+        method: "POST",
+        headers: { ...authHeaders() },
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error?.message ?? `HTTP ${res.status}`);
+      return data as { public_key: string; private_key: string; kit: string };
+    },
+    onSuccess: (data) => {
+      setRecovery(data);
+      setRecoverySaved(false);
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Generation failed"),
+  });
+
+  const recoveryConfirmMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch("/api/v1/recovery/confirm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ public_key: recovery?.public_key }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data?.error?.message ?? `HTTP ${res.status}`);
+      }
+    },
+    onSuccess: () => {
+      setRecoverySaved(true);
+      toast.success("Recovery kit saved to the server");
+      void queryClient.invalidateQueries({ queryKey: ["setup"] });
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Confirm failed"),
+  });
+
+  const repoMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch("/api/v1/backup-repositories", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({
+          label: repoLabel.trim(),
+          location: repoLocation.trim(),
+          password: repoPassword,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error?.message ?? `HTTP ${res.status}`);
+      return data;
+    },
+    onSuccess: () => {
+      toast.success("Backup repository configured; daily backup timer enabled");
+      setRepoPassword("");
+      void queryClient.invalidateQueries({ queryKey: ["setup"] });
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Configure failed"),
+  });
+
   const woodpeckerMutation = useMutation({
     mutationFn: async () => {
       if (!woodpeckerUsername.trim() || !woodpeckerToken.trim()) throw new Error("Username and token required");
@@ -233,9 +322,14 @@ export function SetupPage() {
               <span>Account ID (optional — cloudflare_account_id)</span>
               <input value={accountId} onChange={(e) => setAccountId(e.target.value)} placeholder="account id" />
             </label>
-            <button className="button primary" type="button" onClick={() => void cloudflareMutation.mutate()} disabled={cloudflareMutation.isPending}>
-              {cloudflareMutation.isPending ? "Saving…" : "Save and reconcile"}
-            </button>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className="button secondary" type="button" onClick={() => void verifyTokenMutation.mutate()} disabled={verifyTokenMutation.isPending || !dnsToken.trim()}>
+                {verifyTokenMutation.isPending ? "Verifying…" : "Verify DNS token"}
+              </button>
+              <button className="button primary" type="button" onClick={() => void cloudflareMutation.mutate()} disabled={cloudflareMutation.isPending}>
+                {cloudflareMutation.isPending ? "Saving…" : "Save and reconcile"}
+              </button>
+            </div>
             {cloudflareMutation.isError && (
               <p className="inline-error" role="alert">{cloudflareMutation.error instanceof Error ? cloudflareMutation.error.message : "Save failed"}</p>
             )}
@@ -374,7 +468,94 @@ export function SetupPage() {
         </div>
       </Section>
 
-      <Section title="Recovery" description="Test recovery while you have root access.">
+      <Section title="Recovery key" description="Generate an age key pair; the private key and kit are shown once and never stored server-side.">
+        {!recovery ? (
+          <div className="form-stack">
+            <p>Generate a recovery key pair now — you must save both the private key and the recovery kit offline.</p>
+            <button className="button primary" type="button" onClick={() => void recoveryGenerateMutation.mutate()} disabled={recoveryGenerateMutation.isPending}>
+              {recoveryGenerateMutation.isPending ? "Generating…" : "Generate recovery key"}
+            </button>
+            {recoveryGenerateMutation.isError && (
+              <p className="inline-error" role="alert">{recoveryGenerateMutation.error instanceof Error ? recoveryGenerateMutation.error.message : "Generation failed"}</p>
+            )}
+          </div>
+        ) : (
+          <div className="form-stack">
+            <div>
+              <strong>Private key (save this offline — shown once):</strong>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", background: "var(--surface-muted, #f6f6f6)", padding: 8, borderRadius: 6, marginTop: 4 }}>
+                <code style={{ flex: 1, wordBreak: "break-all" }} className="mono">{recovery.private_key}</code>
+                <CopyButton text={recovery.private_key} label="Copy" />
+              </div>
+            </div>
+            <div>
+              <strong>Recovery kit (armored):</strong>
+              <div style={{ display: "flex", gap: 8, background: "var(--surface-muted, #f6f6f6)", padding: 8, borderRadius: 6, marginTop: 4 }}>
+                <pre style={{ flex: 1, whiteSpace: "pre-wrap", wordBreak: "break-all", margin: 0, fontSize: "0.8em" }} className="mono">{recovery.kit}</pre>
+                <CopyButton text={recovery.kit} label="Copy" />
+              </div>
+            </div>
+            <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input type="checkbox" checked={recoverySaved} onChange={(e) => setRecoverySaved(e.target.checked)} />
+              I saved both the private key and the recovery kit
+            </label>
+            <button className="button primary" type="button" onClick={() => void recoveryConfirmMutation.mutate()} disabled={!recoverySaved || recoveryConfirmMutation.isPending}>
+              {recoveryConfirmMutation.isPending ? "Confirming…" : "Confirm and store kit"}
+            </button>
+            {recoveryConfirmMutation.isError && (
+              <p className="inline-error" role="alert">{recoveryConfirmMutation.error instanceof Error ? recoveryConfirmMutation.error.message : "Confirm failed"}</p>
+            )}
+          </div>
+        )}
+
+        <p style={{ marginTop: 12 }}>Recovery drill (run as root while you have access):</p>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", background: "var(--surface-muted, #f6f6f6)", padding: 8, borderRadius: 6 }}>
+          <code style={{ flex: 1, wordBreak: "break-all" }}>ssh {sshHost} sudo omahab identity recover {recoveryEmail}</code>
+          <CopyButton text={`ssh ${sshHost} sudo omahab identity recover ${recoveryEmail}`} label="Copy" />
+        </div>
+        <p style={{ marginTop: 8 }}>
+          Status:{" "}
+          {setup.checks.find((c) => c.id === "recovery_tested")?.status === "ok" ? (
+            <StatusPill value="ok" />
+          ) : (
+            <StatusPill value={setup.checks.find((c) => c.id === "recovery_tested")?.status ?? "pending"} />
+          )}
+        </p>
+      </Section>
+
+      <Section title="Storage placement" description="Optional: dedicate a disk to media (photos) or data. Skippable — the root disk holds everything by default.">
+        <p className="muted">Run on the server to list candidate disks, then assign via the API:</p>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", background: "var(--surface-muted, #f6f6f6)", padding: 8, borderRadius: 6 }}>
+          <code style={{ flex: 1, wordBreak: "break-all" }}>curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8484/api/v1/system/disks</code>
+          <CopyButton text='curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8484/api/v1/system/disks' label="Copy" />
+        </div>
+        <p style={{ marginTop: 8 }}><small>GET /api/v1/system/disks lists filesystems; PUT /api/v1/system/storage assigns {"{"}volume, fs_uuid{"}"}.</small></p>
+      </Section>
+
+      <Section title="Backups" description="Add a restic repository (e.g. Hetzner Storage Box or S3). Daily backup + weekly verify timers enable automatically.">
+        <div className="form-stack">
+          <label className="field">
+            <span>Label</span>
+            <input value={repoLabel} onChange={(e) => setRepoLabel(e.target.value)} placeholder="primary" />
+          </label>
+          <label className="field">
+            <span>Location (restic URL)</span>
+            <input value={repoLocation} onChange={(e) => setRepoLocation(e.target.value)} placeholder="sftp:user@host:restic-repo" className="mono" />
+          </label>
+          <label className="field">
+            <span>Repository password</span>
+            <input type="password" value={repoPassword} onChange={(e) => setRepoPassword(e.target.value)} autoComplete="new-password" />
+          </label>
+          <button className="button primary" type="button" onClick={() => void repoMutation.mutate()} disabled={repoMutation.isPending || !repoLabel.trim() || !repoLocation.trim() || !repoPassword}>
+            {repoMutation.isPending ? "Configuring…" : "Add repository"}
+          </button>
+          {repoMutation.isError && (
+            <p className="inline-error" role="alert">{repoMutation.error instanceof Error ? repoMutation.error.message : "Configure failed"}</p>
+          )}
+        </div>
+      </Section>
+
+      <Section title="Recovery drill" description="Test recovery while you have root access.">
         <p>Run on the server as root to test recovery for {recoveryEmail}:</p>
         <div style={{ display: "flex", gap: 8, alignItems: "center", background: "var(--surface-muted, #f6f6f6)", padding: 8, borderRadius: 6 }}>
           <code style={{ flex: 1, wordBreak: "break-all" }}>ssh {sshHost} sudo omahab identity recover {recoveryEmail}</code>

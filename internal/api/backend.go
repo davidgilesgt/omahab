@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"github.com/omahab/omahab/internal/backups"
 	"time"
 
 	"github.com/omahab/omahab/internal/domain"
@@ -68,43 +69,43 @@ type SetModelAliasRequest struct {
 
 // ModelKey is metadata for a scoped LiteLLM virtual key (plaintext never returned except once on create).
 type ModelKey struct {
-	ID          domain.ID `json:"id"`
-	Name        string    `json:"name"`
-	KeyPrefix   string    `json:"key_prefix"`
-	OwnerKind   string    `json:"owner_kind"`
-	OwnerID     string    `json:"owner_id"`
-	Scopes      []string  `json:"scopes"`
-	RPM         *int      `json:"rpm,omitempty"`
-	TPM         *int      `json:"tpm,omitempty"`
-	Concurrency *int      `json:"concurrency,omitempty"`
-	Budget      *float64  `json:"budget,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID          domain.ID  `json:"id"`
+	Name        string     `json:"name"`
+	KeyPrefix   string     `json:"key_prefix"`
+	OwnerKind   string     `json:"owner_kind"`
+	OwnerID     string     `json:"owner_id"`
+	Scopes      []string   `json:"scopes"`
+	RPM         *int       `json:"rpm,omitempty"`
+	TPM         *int       `json:"tpm,omitempty"`
+	Concurrency *int       `json:"concurrency,omitempty"`
+	Budget      *float64   `json:"budget,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 }
 
 // CreateModelKeyRequest is the body for POST /api/v1/model-keys.
 type CreateModelKeyRequest struct {
-	Name        string   `json:"name"`
-	OwnerKind   string   `json:"owner_kind"`
-	OwnerID     string   `json:"owner_id"`
-	Scopes      []string `json:"scopes,omitempty"`
-	RPM         *int     `json:"rpm,omitempty"`
-	TPM         *int     `json:"tpm,omitempty"`
-	Concurrency *int     `json:"concurrency,omitempty"`
-	Budget      *float64 `json:"budget,omitempty"`
+	Name        string     `json:"name"`
+	OwnerKind   string     `json:"owner_kind"`
+	OwnerID     string     `json:"owner_id"`
+	Scopes      []string   `json:"scopes,omitempty"`
+	RPM         *int       `json:"rpm,omitempty"`
+	TPM         *int       `json:"tpm,omitempty"`
+	Concurrency *int       `json:"concurrency,omitempty"`
+	Budget      *float64   `json:"budget,omitempty"`
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 }
 
 // OAuthSession is the safe OAuth session returned to clients; never includes device codes, tokens, or master key.
 type OAuthSession struct {
-	ID              string  `json:"id"`
-	Provider        string  `json:"provider"`
-	Flow            string  `json:"flow"`
-	VerificationURL string  `json:"verification_url"`
-	UserCode        *string `json:"user_code,omitempty"`
-	CallbackPort    *int    `json:"callback_port,omitempty"`
+	ID              string    `json:"id"`
+	Provider        string    `json:"provider"`
+	Flow            string    `json:"flow"`
+	VerificationURL string    `json:"verification_url"`
+	UserCode        *string   `json:"user_code,omitempty"`
+	CallbackPort    *int      `json:"callback_port,omitempty"`
 	ExpiresAt       time.Time `json:"expires_at"`
-	Status          string  `json:"status"`
+	Status          string    `json:"status"`
 }
 
 // StartProviderOAuthRequest is the body for POST /api/v1/provider-oauth/{provider}/start.
@@ -120,11 +121,11 @@ type ForwardProviderOAuthCallbackRequest struct {
 // CompanionDevice is a placeholder for Phase 6 enrollment (device record).
 // TODO Phase 6: implement full companion device lifecycle.
 type CompanionDevice struct {
-	ID                 domain.ID  `json:"id"`
-	Name               string     `json:"name"`
-	AllowProviderOAuth bool       `json:"allow_provider_oauth"`
-	CreatedAt          time.Time  `json:"created_at"`
-	UpdatedAt          time.Time  `json:"updated_at"`
+	ID                 domain.ID `json:"id"`
+	Name               string    `json:"name"`
+	AllowProviderOAuth bool      `json:"allow_provider_oauth"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
 }
 
 // CompanionEnrollment is a placeholder for Phase 6 single-use enrollment codes.
@@ -197,6 +198,46 @@ type InstallApplicationRequest struct {
 	Name     string          `json:"name,omitempty"`
 	Hostname string          `json:"hostname,omitempty"`
 	Exposure domain.Exposure `json:"exposure,omitempty"`
+}
+
+// VerifyCloudflareTokenResult reports a live token check.
+type VerifyCloudflareTokenResult struct {
+	OK     bool   `json:"ok"`
+	Status string `json:"status,omitempty"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// RecoveryKeyMaterial is the one-time response of recovery key generation.
+// PrivateKey is never persisted server-side.
+type RecoveryKeyMaterial struct {
+	PublicKey  string `json:"public_key"`
+	PrivateKey string `json:"private_key"`
+	Kit        string `json:"kit"`
+}
+
+// Disk is one candidate storage filesystem.
+type Disk struct {
+	Name       string `json:"name"`
+	Size       string `json:"size"`
+	Type       string `json:"type"`
+	FSType     string `json:"fstype"`
+	UUID       string `json:"uuid"`
+	Mountpoint string `json:"mountpoint,omitempty"`
+}
+
+// ConfigureStorageRequest assigns a filesystem to a volume role.
+type ConfigureStorageRequest struct {
+	Volume string `json:"volume"` // "media" | "data"
+	FSUUID string `json:"fs_uuid"`
+}
+
+// CreateBackupRepositoryRequest carries repository credentials to the
+// secrets store (value material bridges to SecretRef server-side).
+type CreateBackupRepositoryRequest struct {
+	Label    string            `json:"label"`
+	Location string            `json:"location"`
+	Password string            `json:"password"`
+	Env      map[string]string `json:"env,omitempty"`
 }
 
 // CatalogBundle is the installable view of one curated bundle. Compose
@@ -340,6 +381,16 @@ type Backend interface {
 	ListApplications(ctx context.Context, p Pagination) ([]domain.Application, error)
 	InstallApplication(ctx context.Context, req InstallApplicationRequest) (domain.Application, error)
 	ListCatalog(ctx context.Context) ([]CatalogBundle, error)
+
+	// First-run wizard surfaces.
+	VerifyCloudflareToken(ctx context.Context, token string) (VerifyCloudflareTokenResult, error)
+	GenerateRecoveryKey(ctx context.Context) (RecoveryKeyMaterial, error)
+	ConfirmRecoveryKey(ctx context.Context, publicKey string) error
+	ListDisks(ctx context.Context) ([]Disk, error)
+	ConfigureStorage(ctx context.Context, req ConfigureStorageRequest) error
+	ListBackupRepositories(ctx context.Context) ([]backups.Repository, error)
+	CreateBackupRepository(ctx context.Context, req CreateBackupRepositoryRequest) (backups.Repository, error)
+	DeleteBackupRepository(ctx context.Context, id string) error
 	GetApplication(ctx context.Context, id domain.ID) (domain.Application, error)
 	UpdateApplication(ctx context.Context, id domain.ID, req UpdateApplicationRequest) (domain.Application, error)
 	DoApplicationAction(ctx context.Context, id domain.ID, action string) (domain.Application, error)

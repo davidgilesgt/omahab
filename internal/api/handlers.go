@@ -1209,7 +1209,6 @@ func (s *Server) handleRevokeCompanionDevice(w http.ResponseWriter, r *http.Requ
 	w.WriteHeader(http.StatusNoContent)
 }
 
-
 func (s *Server) handleSetDeviceAllowOAuth(w http.ResponseWriter, r *http.Request) {
 	id := domain.ID(chi.URLParam(r, "id"))
 	if strings.TrimSpace(string(id)) == "" {
@@ -1229,7 +1228,6 @@ func (s *Server) handleSetDeviceAllowOAuth(w http.ResponseWriter, r *http.Reques
 	}
 	writeJSON(w, http.StatusOK, dev)
 }
-
 
 func (s *Server) handleCompanionStatus(w http.ResponseWriter, r *http.Request) {
 	st, err := s.backend.GetStatus(r.Context())
@@ -1892,7 +1890,7 @@ func (s *Server) handleSetupWoodpecker(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 }
 
- // --- email routes ---
+// --- email routes ---
 
 func (s *Server) handleEnsureEmailRoute(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -1913,3 +1911,100 @@ func (s *Server) handleEnsureEmailRoute(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// handleVerifyCloudflareToken runs the live token check server-side.
+func (s *Server) handleVerifyCloudflareToken(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Token string `json:"token"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	res, err := s.backend.VerifyCloudflareToken(r.Context(), req.Token)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// handleGenerateRecoveryKey creates a one-time age key pair + kit.
+func (s *Server) handleGenerateRecoveryKey(w http.ResponseWriter, r *http.Request) {
+	mat, err := s.backend.GenerateRecoveryKey(r.Context())
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, mat)
+}
+
+// handleConfirmRecoveryKey persists the confirmed kit.
+func (s *Server) handleConfirmRecoveryKey(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		PublicKey string `json:"public_key"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if err := s.backend.ConfirmRecoveryKey(r.Context(), req.PublicKey); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"confirmed": true})
+}
+
+// handleListDisks lists candidate storage filesystems.
+func (s *Server) handleListDisks(w http.ResponseWriter, r *http.Request) {
+	disks, err := s.backend.ListDisks(r.Context())
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeList(w, disks)
+}
+
+// handleConfigureStorage assigns a filesystem to a volume role.
+func (s *Server) handleConfigureStorage(w http.ResponseWriter, r *http.Request) {
+	var req ConfigureStorageRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if err := s.backend.ConfigureStorage(r.Context(), req); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"configured": true})
+}
+
+// handleListBackupRepositories lists configured backup repositories.
+func (s *Server) handleListBackupRepositories(w http.ResponseWriter, r *http.Request) {
+	repos, err := s.backend.ListBackupRepositories(r.Context())
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeList(w, repos)
+}
+
+// handleCreateBackupRepository stores credentials + configures the repo.
+func (s *Server) handleCreateBackupRepository(w http.ResponseWriter, r *http.Request) {
+	var req CreateBackupRepositoryRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	repo, err := s.backend.CreateBackupRepository(r.Context(), req)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, repo)
+}
+
+// handleDeleteBackupRepository removes a repository.
+func (s *Server) handleDeleteBackupRepository(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if err := s.backend.DeleteBackupRepository(r.Context(), id); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
