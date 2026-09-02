@@ -39,6 +39,8 @@ export interface CatalogBundle {
   max_exposure: Exposure;
   memory_mb?: number;
   installed: boolean;
+  /** "systemd" = native NixOS service (auto-installed, image-versioned); "compose" = Docker Compose. */
+  runtime?: string;
 }
 export interface ExposureState {
   resource_type: "application" | "project";

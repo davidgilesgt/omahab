@@ -223,7 +223,9 @@ export function ApplicationsPage() {
     onError: (err) => toast.error(err instanceof Error ? err.message : "Install failed"),
   });
   const applications = query.data ?? [];
-  const catalog = (catalogQuery.data ?? []).filter((bundle) => !bundle.installed);
+  // Native (systemd-runtime) bundles are adopted automatically by the
+  // setup reconciler; they never show an Install button.
+  const catalog = (catalogQuery.data ?? []).filter((bundle) => !bundle.installed && bundle.runtime !== "systemd");
 
   return (
     <div className="page">
@@ -246,6 +248,7 @@ export function ApplicationsPage() {
       ) : (
         <div className="resource-list">
           {applications.map((application) => {
+            const nativeBundle = (catalogQuery.data ?? []).some((b) => b.id === application.bundle_id && b.runtime === "systemd");
             const running = application.observed_state === "running";
             return (
               <article className="resource-row" key={application.id}>
@@ -253,7 +256,7 @@ export function ApplicationsPage() {
                 <div className="row-actions">
                   <button className="button secondary" type="button" disabled={mutation.isPending} onClick={() => mutation.mutate({ id: application.id, action: running ? "restart" : "start" })}>{running ? "Restart" : "Start"}</button>
                   {running && <button className="button ghost" type="button" disabled={mutation.isPending} onClick={() => setPendingAction({ id: application.id, action: "stop", hostname: application.hostname || application.image, name: application.name })}>Stop</button>}
-                  <button className="button ghost" type="button" disabled={mutation.isPending} onClick={() => setPendingAction({ id: application.id, action: "update", hostname: application.hostname || application.image, name: application.name })}>Update</button>
+                  {!nativeBundle && <button className="button ghost" type="button" disabled={mutation.isPending} onClick={() => setPendingAction({ id: application.id, action: "update", hostname: application.hostname || application.image, name: application.name })}>Update</button>}
                   <button className="button secondary" type="button" onClick={() => setReview(application)}>Exposure</button>
                 </div>
               </article>

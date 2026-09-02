@@ -1407,10 +1407,18 @@ func ensureDockerNetwork(ctx context.Context) error {
 }
 
 func bundleUpstream(bundle apps.Bundle) (string, error) {
-	if bundle.Port <= 0 {
+	port := bundle.Port
+	if bundle.Runtime == apps.RuntimeSystemd {
+		// Native services are reachable on loopback at their mapped port
+		// (compose-internal DNS names no longer resolve).
+		if p, ok := apps.NativePort(bundle.ID); ok {
+			port = p
+		}
+	}
+	if port <= 0 {
 		return "", fmt.Errorf("%w: %s", errMissingBundlePort, bundle.ID)
 	}
-	return fmt.Sprintf("http://%s:%d", bundle.ID, bundle.Port), nil
+	return fmt.Sprintf("http://127.0.0.1:%d", port), nil
 }
 
 func probeHTTPSRoute(ctx context.Context, hostname string) error {

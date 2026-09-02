@@ -210,6 +210,9 @@ type CatalogBundle struct {
 	MaxExposure     domain.Exposure `json:"max_exposure"`
 	MemoryMB        int             `json:"memory_mb,omitempty"`
 	Installed       bool            `json:"installed"`
+	// Runtime is "systemd" (native NixOS service; auto-installed and
+	// versioned by the system image) or "compose".
+	Runtime string `json:"runtime,omitempty"`
 }
 
 type CreateSecretRequest struct {

@@ -981,6 +981,7 @@ func (b *Backend) ListCatalog(ctx context.Context) ([]api.CatalogBundle, error) 
 			MaxExposure:     maxExposure,
 			MemoryMB:        bundle.Resources.MemoryMB,
 			Installed:       installed[bundle.ID],
+			Runtime:         bundle.Runtime,
 		})
 	}
 	return out, nil
