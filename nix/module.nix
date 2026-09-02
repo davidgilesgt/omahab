@@ -147,6 +147,7 @@ in
       "d /var/lib/cloudflared 0700 cloudflared cloudflared - -"
       "d /var/lib/omahab-builder 0700 omahab-builder omahab-builder - -"
       "d /run/omahab 0700 root root - -"
+      "d /home/omahab/.ssh 0700 omahab omahab - -"
     ];
 
     # ------------------------------------------------------------------
@@ -218,6 +219,8 @@ in
         OMAHAB_LISTEN = cfg.listen;
         OMAHAB_CATALOG = "${cfg.catalogPackage}/apps-catalog.json";
         OMAHAB_WEB_DIR = "${cfg.webPackage}";
+        # First-boot LAN wizard listener; inert once bootstrap-done exists.
+        OMAHAB_BOOTSTRAP_LISTEN = "0.0.0.0:8485";
       };
       wantedBy = [ "multi-user.target" ];
     };
@@ -517,6 +520,26 @@ in
     };
 
     # ------------------------------------------------------------------
+    # First-boot console on tty1 (replaces getty@tty1).
+    # ------------------------------------------------------------------
+    users.users.omahab = {
+      isNormalUser = true;
+      extraGroups = [ "wheel" ];
+      # runtime-writable authorized_keys (bootstrap wizard writes it)
+      openssh.authorizedKeys.keys = [ ];
+    };
+    # Authorized keys file is runtime state, not declarative.
+    services.getty.autologinUser = lib.mkForce "omahab";
+    systemd.services."getty@tty1".serviceConfig.ExecStart = lib.mkForce [
+      ""
+      "-${cfg.package}/bin/omahab console"
+    ];
+    systemd.services."getty@tty1".unitConfig = {
+      After = [ "omahabd.service" ];
+      Wants = [ "omahabd.service" ];
+    };
+
+    # ------------------------------------------------------------------
     # Docker (project deploys + ONCE) & podman (CI builder)
     # ------------------------------------------------------------------
     virtualisation.docker.enable = true;
@@ -541,6 +564,8 @@ in
           iifname "tailscale0" tcp dport 8484 accept comment "omahab dashboard via tailscale"
           iifname "br-*" ip saddr 172.30.0.2 tcp dport 8484 accept comment "caddy dashboard upstream"
           iifname "tailscale0" tcp dport { 80, 443 } accept comment "caddy https via tailscale"
+          tcp dport 8485 ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } accept comment "first-boot bootstrap wizard (LAN only)"
+          ip6 saddr fe80::/10 tcp dport 8485 accept comment "first-boot bootstrap wizard (link-local)"
           icmp type { destination-unreachable, time-exceeded, parameter-problem, echo-request } limit rate 10/second accept
           ip6 nexthdr ipv6-icmp icmpv6 type { destination-unreachable, time-exceeded, parameter-problem, echo-request, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } limit rate 20/second accept
         }
@@ -561,6 +586,15 @@ in
 
     # Tailscale
     services.tailscale.enable = true;
+
+    # mDNS: best-effort omahab.local on the LAN (IP URL is primary).
+    services.avahi = {
+      enable = true;
+      publish = {
+        enable = true;
+        addresses = true;
+      };
+    };
 
     # Rootless podman builder: no session bus in a system unit, so the
     # systemd cgroup manager cannot be used — pin cgroupfs.

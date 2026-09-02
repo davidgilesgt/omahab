@@ -5,6 +5,7 @@ import { ApplicationsPage, BackupsPage, EventsPage, OverviewPage, ProjectsPage }
 import { PeoplePage, ProvidersPage, SyncFoldersPage, WorkspacesPage } from "./views/administration";
 import { ToolEnvironmentPage } from "./views/tool-environment";
 import { ChatPage } from "./views/chat";
+import { BootstrapPage } from "./views/bootstrap";
 import { SetupPage } from "./views/setup";
 function DashboardRoutes() {
   return (
@@ -31,5 +32,11 @@ function DashboardRoutes() {
 }
 
 export default function App() {
-  return <Routes><Route path="/login" element={<LoginPage />} /><Route path="*" element={<DashboardRoutes />} /></Routes>;
+  return (
+    <Routes>
+      <Route path="/login" element={<LoginPage />} />
+      <Route path="/bootstrap" element={<BootstrapPage />} />
+      <Route path="*" element={<DashboardRoutes />} />
+    </Routes>
+  );
 }

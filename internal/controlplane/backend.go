@@ -73,6 +73,11 @@ type Backend struct {
 	masterKey [32]byte
 	apiToken  string
 
+	// first-boot bootstrap gate (lazily initialized)
+	bsMu             sync.Mutex
+	bsGate           *BootstrapGate
+	onBootstrapClose func()
+
 	// extended integrations for dashboard-triggered actions
 	emailRouter     *cloudflare.EmailClient
 	emailPrimary    string
@@ -153,6 +158,9 @@ func New(ctx context.Context, st *store.Store, opts Options) (*Backend, error) {
 	if err := b.initServices(ctx); err != nil {
 		return nil, err
 	}
+	// First-boot: generate the one-time claim code eagerly so the console
+	// can display it immediately.
+	_ = b.bootstrapGate()
 	// Start setup reconciler in background (best-effort, single-flight).
 	go func() {
 		bg := context.Background()

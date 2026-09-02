@@ -31,6 +31,13 @@ type Server struct {
 	startedAt    time.Time
 	router       chi.Router
 	httpServer   *http.Server
+
+	// bootstrap is the first-boot gate (LAN listener, /api/bootstrap/*).
+	// nil disables the bootstrap routes.
+	bootstrap BootstrapGate
+	// adminToken is the raw admin API token returned by the bootstrap
+	// claim (kept in memory only; never logged).
+	adminToken string
 }
 
 // Config configures the API server.
@@ -44,6 +51,9 @@ type Config struct {
 	WriteTimeout time.Duration
 	IdleTimeout  time.Duration
 	BodyLimit    int64 // max JSON body bytes (default 1MiB)
+
+	// Bootstrap enables the first-boot route group. Nil disables it.
+	Bootstrap BootstrapGate
 }
 
 
@@ -79,6 +89,8 @@ func New(cfg Config) (*Server, error) {
 		version:      cfg.Version,
 		startedAt:    time.Now().UTC(),
 		emailHMACKey: []byte(cfg.EmailHMACKey),
+		bootstrap:    cfg.Bootstrap,
+		adminToken:   cfg.BearerToken,
 	}
 	if cfg.BearerToken != "" {
 		h := sha256.Sum256([]byte(cfg.BearerToken))
@@ -138,6 +150,19 @@ func (s *Server) buildRouter() chi.Router {
 
 	// Companion enrollment: device claim with single-use code, no bearer (open). Code in JSON body {code}.
 	r.Post("/api/v1/companion/enroll", s.withBodyLimit(defaultBodyLimit, s.handleEnrollCompanion))
+
+	// First-boot bootstrap (LAN listener only; group is inert when the
+	// gate is nil or bootstrap already completed).
+	r.Group(func(r chi.Router) {
+		r.Post("/api/bootstrap/claim", s.withBodyLimit(defaultBodyLimit, s.handleBootstrapClaim))
+		r.Group(func(r chi.Router) {
+			r.Use(s.bootstrapGateActive)
+			r.Post("/api/bootstrap/ssh-keys", s.withBodyLimit(64<<10, s.handleBootstrapSSHKeys))
+			r.Post("/api/bootstrap/tailscale/up", s.handleBootstrapTailscaleUp)
+			r.Get("/api/bootstrap/tailscale/status", s.handleBootstrapTailscaleStatus)
+			r.Post("/api/bootstrap/complete", s.handleBootstrapComplete)
+		})
+	})
 
 	// Authenticated API group.
 	r.Group(func(r chi.Router) {
