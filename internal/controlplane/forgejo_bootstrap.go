@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -19,7 +20,6 @@ import (
 	"github.com/omahab/omahab/internal/health"
 	"github.com/omahab/omahab/internal/store"
 )
-
 
 // forgejoBaseURL returns the Forgejo base URL for API calls.
 // It prefers an explicit secret/env override for testability, falling back to https://git.<domain>.
@@ -74,6 +74,12 @@ func (b *Backend) runForgejoAdminCommand(ctx context.Context, args ...string) (s
 	if b.forgejoExec != nil {
 		return b.forgejoExec(ctx, args...)
 	}
+	// Native (NixOS) path first: forgejo is a systemd service running as
+	// its own user; exec the admin CLI directly, no container involved.
+	if out, err := b.runNativeForgejoAdmin(ctx, args...); err == nil {
+		return out, nil
+	}
+	// Compose fallback (legacy Debian installs / hermes-style containers).
 	containerID, err := b.findForgejoContainerID(ctx)
 	if err != nil {
 		return "", err
@@ -102,6 +108,39 @@ func (b *Backend) runForgejoAdminCommand(ctx context.Context, args ...string) (s
 		out = errOut
 	}
 	return strings.TrimSpace(out), nil
+}
+
+// runNativeForgejoAdmin runs `gitea admin <args>` as the forgejo service
+// user via runuser. Returns an error when the native forgejo binary or
+// user is absent (compose-placed deployments).
+func (b *Backend) runNativeForgejoAdmin(ctx context.Context, args ...string) (string, error) {
+	gitea, err := exec.LookPath("gitea")
+	if err != nil {
+		if _, serr := exec.LookPath("forgejo"); serr != nil {
+			return "", fmt.Errorf("native forgejo binary not found: %w", err)
+		}
+		gitea = "forgejo"
+	}
+	if _, uerr := user.Lookup("forgejo"); uerr != nil {
+		return "", fmt.Errorf("native forgejo user not found: %w", uerr)
+	}
+	fullArgs := append([]string{"-u", "forgejo", "--", gitea, "admin"}, args...)
+	cmd := exec.CommandContext(ctx, "runuser", fullArgs...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		combined := strings.TrimSpace(strings.TrimSpace(stdout.String()) + "\n" + strings.TrimSpace(stderr.String()))
+		if combined == "" {
+			combined = err.Error()
+		}
+		return "", fmt.Errorf("native forgejo admin: %s", health.RedactDetail(combined))
+	}
+	out := strings.TrimSpace(stdout.String())
+	if out == "" {
+		out = strings.TrimSpace(stderr.String())
+	}
+	return out, nil
 }
 
 func redactArgsForLog(args []string) string {
@@ -407,10 +446,10 @@ func (b *Backend) ensureForgejoOrgTeams(ctx context.Context, baseURL, token stri
 				continue
 			}
 			payload := map[string]any{
-				"name":                        d.name,
-				"permission":                  d.permission,
-				"includes_all_repositories":   true,
-				"can_create_org_repo":         false,
+				"name":                      d.name,
+				"permission":                d.permission,
+				"includes_all_repositories": true,
+				"can_create_org_repo":       false,
 			}
 			patchPath := fmt.Sprintf("/api/v1/teams/%d", id)
 			if _, perr := b.forgejoAPIRequest(ctx, baseURL, token, http.MethodPatch, patchPath, payload, nil); perr != nil {
@@ -771,4 +810,3 @@ func (b *Backend) ensureWoodpeckerOAuthApp(ctx context.Context, baseURL, token, 
 var _ = store.ErrNotFound
 var _ = filepath.Join
 var _ = health.RedactDetail
-

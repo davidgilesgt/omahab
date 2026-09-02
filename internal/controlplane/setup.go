@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -28,6 +29,8 @@ import (
 	"github.com/omahab/omahab/internal/events"
 	"github.com/omahab/omahab/internal/exposure"
 	"github.com/omahab/omahab/internal/health"
+	"github.com/omahab/omahab/internal/providers"
+	"github.com/omahab/omahab/internal/secrets"
 	"github.com/omahab/omahab/internal/store"
 )
 
@@ -722,6 +725,12 @@ func (b *Backend) setupPhaseSecrets(ctx context.Context) error {
 		case "woodpecker_db_password", "woodpecker_grpc_secret", "woodpecker_agent_secret":
 			content = generateRandomBase64URL(32)
 		default:
+			if src == "hermes_litellm_key" {
+				// Real value issued by ensureHermesLiteLLMKey once LiteLLM is
+				// healthy (dependent_apps phase); never materialize a random
+				// placeholder that would shadow it.
+				continue
+			}
 			if src == "litellm_master_key" || src == "hermes_jwt_secret" || secretPatternRe.MatchString(src) {
 				content = generateRandomBase64URL(32)
 			} else {
@@ -757,6 +766,73 @@ func atomicReplaceSecretFile(dir, name, value string) error {
 		return fmt.Errorf("replace secret %s: %w", name, err)
 	}
 	_ = os.Chmod(path, 0o644)
+	return nil
+}
+
+// appEnvDir returns the directory holding per-bundle env files consumed
+// by the nix-defined systemd units (EnvironmentFile + gating condition).
+func (b *Backend) appEnvDir() string {
+	return filepath.Join(b.cfg.StateDir, "appenv")
+}
+
+// writeAppEnv atomically writes /var/lib/omahab/appenv/<bundle>.env from
+// kv (sorted, KEY=VALUE lines). mode is 0640 with an owning user (native
+// services run as their own users), 0600 when root-only.
+func (b *Backend) writeAppEnv(bundleID string, kv map[string]string, ownerUser string) error {
+	dir := b.appEnvDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("mkdir appenv: %w", err)
+	}
+	keys := make([]string, 0, len(kv))
+	for k := range kv {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var buf strings.Builder
+	for _, k := range keys {
+		v := strings.ReplaceAll(kv[k], "\n", "")
+		buf.WriteString(k)
+		buf.WriteByte('=')
+		buf.WriteString(v)
+		buf.WriteByte('\n')
+	}
+	path := filepath.Join(dir, bundleID+".env")
+	tmp, err := os.CreateTemp(dir, "."+bundleID+".env-*")
+	if err != nil {
+		return fmt.Errorf("create temp env: %w", err)
+	}
+	tmpName := tmp.Name()
+	mode := os.FileMode(0o600)
+	if ownerUser != "" {
+		mode = 0o640
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if _, err := tmp.WriteString(buf.String()); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if ownerUser != "" {
+		if u, uerr := user.Lookup(ownerUser); uerr == nil {
+			if uid, e1 := strconv.Atoi(u.Uid); e1 == nil {
+				if gid, e2 := strconv.Atoi(u.Gid); e2 == nil {
+					_ = os.Chown(tmpName, uid, gid)
+				}
+			}
+		}
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("replace appenv %s: %w", bundleID, err)
+	}
 	return nil
 }
 
@@ -806,6 +882,10 @@ func (b *Backend) setupPhaseCoreApps(ctx context.Context) error {
 	if inst, err := b.store.Instance(ctx); err == nil {
 		domainName = strings.TrimSpace(inst.Domain)
 	}
+	// Render env files for native bundles whose units gate on them.
+	if err := b.renderNativeAppEnv(ctx, dnsToken, domainName); err != nil {
+		return fmt.Errorf("render native appenv: %w", err)
+	}
 	bundles := b.apps.CatalogBundles()
 	defaultBundles := []apps.Bundle{}
 	for _, bd := range bundles {
@@ -839,6 +919,65 @@ func (b *Backend) setupPhaseCoreApps(ctx context.Context) error {
 			return fmt.Errorf("%s: %w", bd.ID, err)
 		}
 		log.Printf("setup core apps: %s running and healthy", bd.ID)
+	}
+	return nil
+}
+
+// renderNativeAppEnv writes the env files that gate the nix-defined
+// systemd units for native bundles. Values come from materialized secrets
+// (setupPhaseSecrets) and instance state.
+func (b *Backend) renderNativeAppEnv(ctx context.Context, dnsToken, domainName string) error {
+	if b.secrets == nil {
+		return nil
+	}
+	reveal := func(name string) string {
+		if v, err := b.secrets.RevealByName(ctx, "platform-app", name); err == nil {
+			return strings.TrimSpace(v)
+		}
+		return ""
+	}
+	// Caddy: DNS-01 token for the cloudflare plugin.
+	if dnsToken != "" {
+		if err := b.writeAppEnv("caddy", map[string]string{
+			"CLOUDFLARE_API_TOKEN": dnsToken,
+		}, ""); err != nil {
+			return fmt.Errorf("caddy: %w", err)
+		}
+	}
+	// Domain-dependent env renders only once a real domain exists.
+	domainReady := domainName != "" && domainName != "example.com" && domainName != "not-configured.invalid"
+	if !domainReady {
+		return nil
+	}
+	pocketEnv := map[string]string{
+		"APP_URL":     "https://id." + domainName,
+		"TRUST_PROXY": "true",
+	}
+	if k := reveal("pocketid_encryption_key"); k != "" {
+		pocketEnv["ENCRYPTION_KEY"] = k
+	}
+	if k := reveal("pocketid_api_key"); k != "" {
+		pocketEnv["STATIC_API_KEY"] = k
+	}
+	if err := b.writeAppEnv("pocket-id", pocketEnv, "pocket-id"); err != nil {
+		return fmt.Errorf("pocket-id: %w", err)
+	}
+	litellmEnv := map[string]string{}
+	if k := reveal("litellm_master_key"); k != "" {
+		litellmEnv["LITELLM_MASTER_KEY"] = k
+	}
+	if u := reveal("litellm_db_url"); u != "" {
+		litellmEnv["DATABASE_URL"] = u
+	}
+	if len(litellmEnv) > 0 {
+		if err := b.writeAppEnv("litellm", litellmEnv, "litellm"); err != nil {
+			return fmt.Errorf("litellm: %w", err)
+		}
+	}
+	if err := b.writeAppEnv("ntfy", map[string]string{
+		"NTFY_BASE_URL": "https://ntfy." + domainName,
+	}, "ntfy-sh"); err != nil {
+		return fmt.Errorf("ntfy: %w", err)
 	}
 	return nil
 }
@@ -950,6 +1089,79 @@ func (b *Backend) setupPhaseDependentApps(ctx context.Context) error {
 		}
 	}
 	log.Printf("setup dependent_apps: woodpecker server and agent healthy")
+
+	// Hermes needs a real LiteLLM virtual key (OwnerKindHermes) issued
+	// once LiteLLM is healthy; it replaces the placeholder secret file.
+	if err := b.ensureHermesLiteLLMKey(ctx); err != nil {
+		return fmt.Errorf("hermes litellm key: %w", err)
+	}
+	return nil
+}
+
+// ensureHermesLiteLLMKey issues a real LiteLLM virtual key for Hermes
+// (scopes omahab/fast|balanced|reasoning), caches the token under the
+// platform-app/hermes_litellm_key secret, and renders it into the hermes
+// appenv. Order: litellm healthy -> key -> hermes start.
+func (b *Backend) ensureHermesLiteLLMKey(ctx context.Context) error {
+	if b.providers == nil || b.secrets == nil {
+		log.Printf("setup dependent_apps: providers/secrets not configured; skipping hermes key")
+		return nil
+	}
+	secretName := "hermes_litellm_key"
+	var vkID string
+	var expiresAt, revokedAt sql.NullString
+	nowStr := store.FormatTime(time.Now().UTC())
+	err := b.db.QueryRowContext(ctx, `SELECT id, expires_at, revoked_at FROM provider_virtual_keys WHERE owner_kind = 'hermes' AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?) ORDER BY created_at DESC LIMIT 1`, nowStr).Scan(&vkID, &expiresAt, &revokedAt)
+	if err == nil {
+		if v, rerr := b.secrets.RevealByName(ctx, "platform-app", secretName); rerr == nil && strings.TrimSpace(v) != "" {
+			return b.renderHermesKeyEnv(ctx, strings.TrimSpace(v))
+		}
+		_ = b.providers.RevokeVirtualKey(ctx, domain.ID(vkID))
+	}
+	kind := providers.OwnerKindHermes
+	ownerID := "hermes"
+	res, err := b.providers.IssueVirtualKey(ctx, providers.IssueVirtualKeyInput{
+		Name:      "hermes",
+		Scopes:    []string{"omahab/fast", "omahab/balanced", "omahab/reasoning"},
+		OwnerKind: &kind,
+		OwnerID:   &ownerID,
+	})
+	if err != nil {
+		return fmt.Errorf("issue hermes virtual key: %w", err)
+	}
+	if _, err := b.secrets.Put(ctx, "platform-app", secretName, res.Token); err != nil {
+		if errors.Is(err, store.ErrConflict) || errors.Is(err, secrets.ErrConflict) {
+			_, _ = b.secrets.RotateByName(ctx, "platform-app", secretName, res.Token)
+		}
+	}
+	return b.renderHermesKeyEnv(ctx, res.Token)
+}
+
+// renderHermesKeyEnv writes the hermes appenv with the LiteLLM key and
+// gateway URL.
+func (b *Backend) renderHermesKeyEnv(ctx context.Context, token string) error {
+	kv := map[string]string{
+		"HERMES_MODEL_GATEWAY_URL": "http://127.0.0.1:4000",
+		"HERMES_MODEL_GATEWAY_KEY": token,
+	}
+	if b.secrets != nil {
+		if v, err := b.secrets.RevealByName(ctx, "platform-app", "hermes_oidc_client_id"); err == nil && strings.TrimSpace(v) != "" {
+			kv["HERMES_OIDC_CLIENT_ID"] = strings.TrimSpace(v)
+		}
+		if v, err := b.secrets.RevealByName(ctx, "platform-app", "hermes_oidc_client_secret"); err == nil && strings.TrimSpace(v) != "" {
+			kv["HERMES_OIDC_CLIENT_SECRET"] = strings.TrimSpace(v)
+		}
+	}
+	if inst, err := b.store.Instance(ctx); err == nil {
+		if d := strings.TrimSpace(inst.Domain); d != "" {
+			kv["HERMES_PUBLIC_URL"] = "https://ai." + d
+			kv["HERMES_OIDC_ISSUER_URL"] = "https://id." + d
+		}
+	}
+	if err := b.writeAppEnv("hermes", kv, ""); err != nil {
+		return fmt.Errorf("write hermes appenv: %w", err)
+	}
+	log.Printf("setup dependent_apps: hermes litellm key rendered")
 	return nil
 }
 
@@ -1420,7 +1632,9 @@ func (b *Backend) setupPhaseOIDC(ctx context.Context) error {
 	needImmich := bundleRunning("immich")
 	needHermes := bundleRunning("hermes")
 	needForgejo := bundleRunning("forgejo")
-	if !needImmich && !needHermes && !needForgejo {
+	needPaperless := bundleRunning("paperless-ngx")
+	needKarakeep := bundleRunning("karakeep")
+	if !needImmich && !needHermes && !needForgejo && !needPaperless && !needKarakeep {
 		return nil
 	}
 
@@ -1435,6 +1649,16 @@ func (b *Backend) setupPhaseOIDC(ctx context.Context) error {
 
 	if needImmich {
 		if err := b.ensureImmichOIDC(ctx, domainName); err != nil {
+			return err
+		}
+	}
+	if needPaperless {
+		if err := b.ensurePaperlessOIDC(ctx, domainName); err != nil {
+			return err
+		}
+	}
+	if needKarakeep {
+		if err := b.ensureKarakeepOIDC(ctx, domainName); err != nil {
 			return err
 		}
 	}
@@ -1543,8 +1767,141 @@ func (b *Backend) setupPhaseOIDC(ctx context.Context) error {
 			_ = atomicReplaceSecretFile("/var/lib/omahab/secrets", "woodpecker_forgejo_client_id", wClientID)
 			_ = atomicReplaceSecretFile("/var/lib/omahab/secrets", "woodpecker_forgejo_client_secret", wClientSecret)
 		}
+		// Native placement: render the woodpecker appenv (server + agent
+		// units consume it; the file's existence gates the units).
+		grpcSecret := ""
+		agentSecret := ""
+		dbURL := ""
+		if v, verr := b.secrets.RevealByName(ctx, "platform-app", "woodpecker_grpc_secret"); verr == nil {
+			grpcSecret = strings.TrimSpace(v)
+		}
+		if v, verr := b.secrets.RevealByName(ctx, "platform-app", "woodpecker_agent_secret"); verr == nil {
+			agentSecret = strings.TrimSpace(v)
+		}
+		if v, verr := b.secrets.RevealByName(ctx, "platform-app", "woodpecker_db_url"); verr == nil {
+			dbURL = strings.TrimSpace(v)
+		}
+		woodpeckerEnv := map[string]string{
+			"WOODPECKER_HOST":                "https://ci." + domainName,
+			"WOODPECKER_FORGEJO":             "true",
+			"WOODPECKER_FORGEJO_URL":         "https://git." + domainName,
+			"WOODPECKER_FORGEJO_CLIENT":      wClientID,
+			"WOODPECKER_FORGEJO_SECRET":      wClientSecret,
+			"WOODPECKER_OPEN":                "true",
+			"WOODPECKER_ADMIN":               "omahab-bot",
+			"WOODPECKER_DATABASE_DATASOURCE": dbURL,
+		}
+		if grpcSecret != "" {
+			woodpeckerEnv["WOODPECKER_GRPC_SECRET"] = grpcSecret
+		}
+		if agentSecret != "" {
+			woodpeckerEnv["WOODPECKER_AGENT_SECRET"] = agentSecret
+		}
+		if err := b.writeAppEnv("woodpecker", woodpeckerEnv, "woodpecker"); err != nil {
+			log.Printf("setup oidc: warn write woodpecker appenv: %s", health.RedactDetail(err.Error()))
+		}
 		log.Printf("setup oidc: forgejo client ensured")
 	}
+	return nil
+}
+
+// paperlessOIDCEnv renders PAPERLESS_SOCIALACCOUNT_PROVIDERS JSON for
+// allauth's openid_connect provider backed by Pocket ID.
+func paperlessOIDCEnv(domainName, clientID, clientSecret string) string {
+	providers := map[string]any{
+		"openid_connect": map[string]any{
+			"APPS": []map[string]any{
+				{
+					"provider_id": "pocket-id",
+					"name":        "Pocket ID",
+					"client_id":   clientID,
+					"secret":      clientSecret,
+					"settings": map[string]any{
+						"server_url": "https://id." + domainName + "/.well-known/openid-configuration",
+					},
+				},
+			},
+			"OAUTH_PKCE_ENABLED": true,
+		},
+	}
+	raw, _ := json.Marshal(providers)
+	return string(raw)
+}
+
+func (b *Backend) ensurePaperlessOIDC(ctx context.Context, domainName string) error {
+	callback := fmt.Sprintf("https://docs.%s/accounts/oidc/pocket-id/login/callback/", domainName)
+	clientID, clientSecret, err := b.pocketClient.EnsureOIDCClient(ctx, "paperless", []string{callback})
+	if err != nil {
+		return fmt.Errorf("ensure oidc client paperless: %w", err)
+	}
+	if strings.TrimSpace(clientID) == "" {
+		return fmt.Errorf("oidc client paperless returned empty clientID")
+	}
+	clientSecret, err = reuseStoredOIDCSecret(ctx, b.secrets, "paperless_oidc_client_secret", clientSecret)
+	if err != nil {
+		clientSecret, err = b.pocketClient.CreateOIDCClientSecret(ctx, clientID)
+		if err != nil {
+			return fmt.Errorf("paperless oidc client: %w", err)
+		}
+	}
+	if err := upsertSecret(ctx, b.secrets, "platform-app", "paperless_oidc_client_id", clientID); err != nil {
+		return fmt.Errorf("store paperless_oidc_client_id: %w", err)
+	}
+	if err := upsertSecret(ctx, b.secrets, "platform-app", "paperless_oidc_client_secret", clientSecret); err != nil {
+		return fmt.Errorf("store paperless_oidc_client_secret: %w", err)
+	}
+	if err := b.writeAppEnv("paperless-ngx", map[string]string{
+		"PAPERLESS_URL":                     "https://docs." + domainName,
+		"PAPERLESS_APPS":                    "allauth.socialaccount.providers.openid_connect",
+		"PAPERLESS_SOCIALACCOUNT_PROVIDERS": paperlessOIDCEnv(domainName, clientID, clientSecret),
+	}, "paperless"); err != nil {
+		return fmt.Errorf("write paperless appenv: %w", err)
+	}
+	if err := b.redeployBundle(ctx, "paperless-ngx"); err != nil {
+		return fmt.Errorf("reload paperless config: %w", err)
+	}
+	log.Printf("setup oidc: paperless client ensured")
+	return nil
+}
+
+func (b *Backend) ensureKarakeepOIDC(ctx context.Context, domainName string) error {
+	// NextAuth custom-provider callback path (Karakeep docs).
+	callback := fmt.Sprintf("https://save.%s/api/auth/callback/custom", domainName)
+	clientID, clientSecret, err := b.pocketClient.EnsureOIDCClient(ctx, "karakeep", []string{callback})
+	if err != nil {
+		return fmt.Errorf("ensure oidc client karakeep: %w", err)
+	}
+	if strings.TrimSpace(clientID) == "" {
+		return fmt.Errorf("oidc client karakeep returned empty clientID")
+	}
+	clientSecret, err = reuseStoredOIDCSecret(ctx, b.secrets, "karakeep_oidc_client_secret", clientSecret)
+	if err != nil {
+		clientSecret, err = b.pocketClient.CreateOIDCClientSecret(ctx, clientID)
+		if err != nil {
+			return fmt.Errorf("karakeep oidc client: %w", err)
+		}
+	}
+	if err := upsertSecret(ctx, b.secrets, "platform-app", "karakeep_oidc_client_id", clientID); err != nil {
+		return fmt.Errorf("store karakeep_oidc_client_id: %w", err)
+	}
+	if err := upsertSecret(ctx, b.secrets, "platform-app", "karakeep_oidc_client_secret", clientSecret); err != nil {
+		return fmt.Errorf("store karakeep_oidc_client_secret: %w", err)
+	}
+	if err := b.writeAppEnv("karakeep", map[string]string{
+		"NEXTAUTH_URL":        "https://save." + domainName,
+		"OAUTH_PROVIDER_NAME": "Pocket ID",
+		"OAUTH_CLIENT_ID":     clientID,
+		"OAUTH_CLIENT_SECRET": clientSecret,
+		"OAUTH_WELLKNOWN_URL": "https://id." + domainName + "/.well-known/openid-configuration",
+		"OAUTH_SCOPE":         "openid email profile",
+		"OAUTH_ALLOW_DANGEROUS_EMAIL_ACCOUNT_LINKING": "true",
+	}, "karakeep"); err != nil {
+		return fmt.Errorf("write karakeep appenv: %w", err)
+	}
+	if err := b.redeployBundle(ctx, "karakeep"); err != nil {
+		return fmt.Errorf("reload karakeep config: %w", err)
+	}
+	log.Printf("setup oidc: karakeep client ensured")
 	return nil
 }
 

@@ -20,12 +20,26 @@ import (
 
 func TestBundleUpstreamPocketID(t *testing.T) {
 	t.Parallel()
+	// Compose bundles keep the docker-network DNS upstream.
 	got, err := bundleUpstream(apps.Bundle{ID: "pocket-id", Port: 1411})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "http://pocket-id:1411" {
+	if got != "http://127.0.0.1:1411" {
 		t.Fatalf("upstream = %q", got)
+	}
+}
+
+func TestBundleUpstreamNativeUsesLoopbackPort(t *testing.T) {
+	t.Parallel()
+	// Native bundles map to the loopback port map regardless of the
+	// catalog's internal port (e.g. karakeep 3000 -> 3010).
+	got, err := bundleUpstream(apps.Bundle{ID: "karakeep", Port: 3000, Runtime: apps.RuntimeSystemd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "http://127.0.0.1:3010" {
+		t.Fatalf("native upstream = %q", got)
 	}
 }
 
