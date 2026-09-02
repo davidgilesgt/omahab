@@ -52,7 +52,6 @@ const (
 // project data, and shared sync folders.
 func DefaultPaths() []string {
 	return []string{
-		"/etc/omahab",
 		"/var/lib/omahab",
 		"/srv/omahab/apps",
 		"/srv/omahab/projects",

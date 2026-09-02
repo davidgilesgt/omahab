@@ -134,6 +134,10 @@ func New(ctx context.Context, st *store.Store, opts Options) (*Backend, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Backup units' env file (best-effort; failures logged, not fatal).
+	if err := EnsureBackupEnv(opts.Config.StateDir, tok); err != nil {
+		log.Printf("bootstrap: ensure backup.env: %v", err)
+	}
 	b := &Backend{
 		cfg:       opts.Config,
 		store:     st,
@@ -658,7 +662,7 @@ func (b *Backend) refreshExposure(ctx context.Context) error {
 		CaddyAddr:       "http://127.0.0.1:2019",
 		Domain:          inst.Domain,
 		DNSToken:        dnsToken,
-		CaddyConfigPath: "/etc/omahab/caddy.json",
+		CaddyConfigPath: b.caddyConfigPath(),
 	})
 	if cErr != nil {
 		clients = exposure.Clients{}

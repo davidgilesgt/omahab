@@ -34,7 +34,7 @@ func newEdgeClient(baseURL string, httpClient *http.Client, domain, dnsToken, co
 	}
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if configPath == "" {
-		configPath = "/etc/omahab/caddy.json"
+		configPath = "/var/lib/omahab/caddy/caddy.json"
 	}
 	return &edgeClient{
 		baseURL:    baseURL,
@@ -283,7 +283,7 @@ func (c *edgeClient) PutRoute(ctx context.Context, route exposure.Route) error {
 		return c.do(ctx, http.MethodPut, path, route, nil)
 	}
 	// For admin-API mode, recompute full set
-	if c.domain != "" || c.dnsToken != "" || c.configPath != "/etc/omahab/caddy.json" {
+	if c.domain != "" || c.dnsToken != "" || c.configPath != "/var/lib/omahab/caddy/caddy.json" {
 		return c.putRouteViaConfig(ctx, route)
 	}
 	// Fallback legacy mode: try to detect if /config/ exists; if not, use legacy

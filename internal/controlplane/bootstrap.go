@@ -131,6 +131,51 @@ func EnsureAPIToken(path string) (string, error) {
 	return tok, nil
 }
 
+// EnsureBackupEnv writes the backup units' env file (OMAHAB_SERVER/OMAHAB_TOKEN)
+// under the state dir, next to the API token. Idempotent: skipped when content
+// matches. This lets the systemd backup/verify units reference a state-owned
+// file instead of /etc (NixOS /etc is generation-managed).
+func EnsureBackupEnv(stateDir, token string) error {
+	if stateDir == "" {
+		return fmt.Errorf("state dir is required")
+	}
+	if strings.TrimSpace(token) == "" {
+		return fmt.Errorf("api token is required")
+	}
+	path := filepath.Join(stateDir, "backup.env")
+	content := "OMAHAB_SERVER=http://127.0.0.1:8484\nOMAHAB_TOKEN=" + token + "\n"
+	if existing, err := os.ReadFile(path); err == nil && string(existing) == content {
+		return nil
+	}
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		return fmt.Errorf("create state dir: %w", err)
+	}
+	tmp, err := os.CreateTemp(stateDir, ".backup.env.*")
+	if err != nil {
+		return fmt.Errorf("create temp backup env: %w", err)
+	}
+	tmpName := tmp.Name()
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if _, err := tmp.WriteString(content); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	return nil
+}
+
 // HashToken returns sha256 hex of token for logging-safe comparison.
 func HashToken(tok string) string {
 	h := sha256.Sum256([]byte(tok))

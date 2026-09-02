@@ -70,7 +70,7 @@ func TestDaemonHappyPath(t *testing.T) {
 			switch path {
 			case "/var/lib/omahab/api.token":
 				return []byte(token + "\n"), nil
-			case "/etc/omahab/backup.env":
+			case "/var/lib/omahab/backup.env":
 				return nil, errors.New("not found")
 			default:
 				return nil, errors.New("unexpected path " + path)
@@ -121,8 +121,8 @@ func TestDaemonHappyPath(t *testing.T) {
 	if restartIdx > pollIdx {
 		t.Fatalf("restart should be before poll, order %v", order)
 	}
-	if wrotePath != "/etc/omahab/backup.env" {
-		t.Fatalf("wrotePath = %q want /etc/omahab/backup.env", wrotePath)
+	if wrotePath != "/var/lib/omahab/backup.env" {
+		t.Fatalf("wrotePath = %q want /var/lib/omahab/backup.env", wrotePath)
 	}
 	if wrotePerm != 0o600 {
 		t.Fatalf("perm = %o want 600", wrotePerm)
@@ -202,7 +202,7 @@ func TestDaemonTokenMissing(t *testing.T) {
 			switch path {
 			case "/var/lib/omahab/api.token":
 				return nil, errors.New("not found")
-			case "/etc/omahab/backup.env":
+			case "/var/lib/omahab/backup.env":
 				return nil, errors.New("not found")
 			default:
 				return nil, errors.New("unexpected " + path)
@@ -275,7 +275,7 @@ func TestDaemonNeverLeaksTokenOnWriteError(t *testing.T) {
 			switch path {
 			case "/var/lib/omahab/api.token":
 				return []byte(token), nil
-			case "/etc/omahab/backup.env":
+			case "/var/lib/omahab/backup.env":
 				return nil, errors.New("not found")
 			default:
 				return nil, errors.New("unexpected")
@@ -321,7 +321,7 @@ func TestDaemonIdempotentSecondRun(t *testing.T) {
 			switch path {
 			case "/var/lib/omahab/api.token":
 				return []byte(token + "\n"), nil
-			case "/etc/omahab/backup.env":
+			case "/var/lib/omahab/backup.env":
 				if data, ok := existing[path]; ok {
 					return append([]byte(nil), data...), nil
 				}
@@ -331,7 +331,7 @@ func TestDaemonIdempotentSecondRun(t *testing.T) {
 			}
 		},
 		WriteFile: func(path string, data []byte, perm uint32) error {
-			if path != "/etc/omahab/backup.env" {
+			if path != "/var/lib/omahab/backup.env" {
 				t.Fatalf("unexpected write path %q", path)
 			}
 			writeCount++
@@ -353,8 +353,8 @@ func TestDaemonIdempotentSecondRun(t *testing.T) {
 		t.Fatalf("first run perm %o want 600", lastPerm)
 	}
 	wantContent := "OMAHAB_SERVER=http://127.0.0.1:8484\nOMAHAB_TOKEN=" + token + "\n"
-	if string(existing["/etc/omahab/backup.env"]) != wantContent {
-		t.Fatalf("first run content %q want %q", string(existing["/etc/omahab/backup.env"]), wantContent)
+	if string(existing["/var/lib/omahab/backup.env"]) != wantContent {
+		t.Fatalf("first run content %q want %q", string(existing["/var/lib/omahab/backup.env"]), wantContent)
 	}
 
 	// second run with same token and already-existing identical file should skip write
@@ -388,7 +388,7 @@ func TestDaemonIdempotentRewritesWhenDifferent(t *testing.T) {
 				}
 				return []byte(token2), nil
 			}
-			if path == "/etc/omahab/backup.env" {
+			if path == "/var/lib/omahab/backup.env" {
 				if data, ok := existing[path]; ok {
 					return append([]byte(nil), data...), nil
 				}
@@ -418,8 +418,8 @@ func TestDaemonIdempotentRewritesWhenDifferent(t *testing.T) {
 		t.Fatalf("different token should rewrite: writeCount %d want 2", writeCount)
 	}
 	want := "OMAHAB_SERVER=http://127.0.0.1:8484\nOMAHAB_TOKEN=" + token2 + "\n"
-	if string(existing["/etc/omahab/backup.env"]) != want {
-		t.Fatalf("rewritten content %q want %q", string(existing["/etc/omahab/backup.env"]), want)
+	if string(existing["/var/lib/omahab/backup.env"]) != want {
+		t.Fatalf("rewritten content %q want %q", string(existing["/var/lib/omahab/backup.env"]), want)
 	}
 }
 
@@ -446,8 +446,8 @@ func TestDaemonRollback(t *testing.T) {
 	if !reflect.DeepEqual(sysCalls, want) {
 		t.Fatalf("sysCalls = %v want %v", sysCalls, want)
 	}
-	if removed != "/etc/omahab/backup.env" {
-		t.Fatalf("removed = %q want /etc/omahab/backup.env", removed)
+	if removed != "/var/lib/omahab/backup.env" {
+		t.Fatalf("removed = %q want /var/lib/omahab/backup.env", removed)
 	}
 }
 
@@ -867,7 +867,7 @@ func TestDaemonProvisionsUserTokenForOmahab(t *testing.T) {
 			switch path {
 			case "/var/lib/omahab/api.token":
 				return []byte(token + "\n"), nil
-			case "/etc/omahab/backup.env":
+			case "/var/lib/omahab/backup.env":
 				return nil, errors.New("not found")
 			case tokenPath:
 				return nil, errors.New("not found")
@@ -929,7 +929,7 @@ func TestDaemonProvisionsUserTokenForOmahab(t *testing.T) {
 	foundBackup := false
 	foundToken := false
 	for _, w := range writes {
-		if w.path == "/etc/omahab/backup.env" {
+		if w.path == "/var/lib/omahab/backup.env" {
 			foundBackup = true
 			if w.perm != 0o600 {
 				t.Fatalf("backup.env perm %o want 600", w.perm)
@@ -1097,7 +1097,7 @@ func TestDaemonProvisionsUserTokenIdempotent(t *testing.T) {
 	backupWrites := 0
 	tokenWrites := 0
 	for _, p := range writes {
-		if p == "/etc/omahab/backup.env" {
+		if p == "/var/lib/omahab/backup.env" {
 			backupWrites++
 		}
 		if p == tokenPath {
@@ -1197,8 +1197,8 @@ func TestDaemonProvisionsUserTokenRewritesWhenChanged(t *testing.T) {
 		t.Fatalf("rewritten token %q want %q", string(files[tokenPath]), token2+"\n")
 	}
 	wantBackup := "OMAHAB_SERVER=http://127.0.0.1:8484\nOMAHAB_TOKEN=" + token2 + "\n"
-	if string(files["/etc/omahab/backup.env"]) != wantBackup {
-		t.Fatalf("backup.env %q want %q", string(files["/etc/omahab/backup.env"]), wantBackup)
+	if string(files["/var/lib/omahab/backup.env"]) != wantBackup {
+		t.Fatalf("backup.env %q want %q", string(files["/var/lib/omahab/backup.env"]), wantBackup)
 	}
 }
 
@@ -1211,7 +1211,7 @@ func TestDaemonProvisionsUserTokenEvenWhenBackupEnvUpToDate(t *testing.T) {
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	backupContent := "OMAHAB_SERVER=http://127.0.0.1:8484\nOMAHAB_TOKEN=" + token + "\n"
 	files := map[string][]byte{
-		"/etc/omahab/backup.env": []byte(backupContent),
+		"/var/lib/omahab/backup.env": []byte(backupContent),
 	}
 	var writes []string
 	probes := Probes{
@@ -1258,7 +1258,7 @@ func TestDaemonProvisionsUserTokenEvenWhenBackupEnvUpToDate(t *testing.T) {
 	}
 	// backup.env should not be rewritten (already up to date)
 	for _, p := range writes {
-		if p == "/etc/omahab/backup.env" {
+		if p == "/var/lib/omahab/backup.env" {
 			t.Fatalf("backup.env should not rewrite when up to date, writes %v", writes)
 		}
 	}
@@ -1296,7 +1296,7 @@ func TestDaemonUserTokenFailureDoesNotLeak(t *testing.T) {
 					if path == "/var/lib/omahab/api.token" {
 						return []byte(token), nil
 					}
-					if path == "/etc/omahab/backup.env" {
+					if path == "/var/lib/omahab/backup.env" {
 						return nil, errors.New("not found")
 					}
 					return nil, errors.New("not found")
@@ -1318,7 +1318,7 @@ func TestDaemonUserTokenFailureDoesNotLeak(t *testing.T) {
 					if path == "/var/lib/omahab/api.token" {
 						return []byte(token), nil
 					}
-					if path == "/etc/omahab/backup.env" {
+					if path == "/var/lib/omahab/backup.env" {
 						return nil, errors.New("not found")
 					}
 					return nil, errors.New("not found")
@@ -1340,7 +1340,7 @@ func TestDaemonUserTokenFailureDoesNotLeak(t *testing.T) {
 					if path == "/var/lib/omahab/api.token" {
 						return []byte(token), nil
 					}
-					if path == "/etc/omahab/backup.env" {
+					if path == "/var/lib/omahab/backup.env" {
 						return nil, errors.New("not found")
 					}
 					return nil, errors.New("not found")
@@ -1362,7 +1362,7 @@ func TestDaemonUserTokenFailureDoesNotLeak(t *testing.T) {
 					if path == "/var/lib/omahab/api.token" {
 						return []byte(token), nil
 					}
-					if path == "/etc/omahab/backup.env" {
+					if path == "/var/lib/omahab/backup.env" {
 						return nil, errors.New("not found")
 					}
 					return nil, errors.New("not found")
@@ -1384,7 +1384,7 @@ func TestDaemonUserTokenFailureDoesNotLeak(t *testing.T) {
 					if path == "/var/lib/omahab/api.token" {
 						return []byte(token), nil
 					}
-					if path == "/etc/omahab/backup.env" {
+					if path == "/var/lib/omahab/backup.env" {
 						return nil, errors.New("not found")
 					}
 					return nil, errors.New("not found")
@@ -1411,7 +1411,7 @@ func TestDaemonUserTokenFailureDoesNotLeak(t *testing.T) {
 					if path == "/var/lib/omahab/api.token" {
 						return []byte(token), nil
 					}
-					if path == "/etc/omahab/backup.env" {
+					if path == "/var/lib/omahab/backup.env" {
 						return nil, errors.New("not found")
 					}
 					return nil, errors.New("not found")
@@ -1438,7 +1438,7 @@ func TestDaemonUserTokenFailureDoesNotLeak(t *testing.T) {
 					if path == "/var/lib/omahab/api.token" {
 						return []byte(token), nil
 					}
-					if path == "/etc/omahab/backup.env" {
+					if path == "/var/lib/omahab/backup.env" {
 						return nil, errors.New("not found")
 					}
 					return nil, errors.New("not found")
@@ -1484,7 +1484,7 @@ func TestDaemonProvisionsUserTokenRootFallback(t *testing.T) {
 			if path == "/var/lib/omahab/api.token" {
 				return []byte(token), nil
 			}
-			if path == "/etc/omahab/backup.env" {
+			if path == "/var/lib/omahab/backup.env" {
 				return nil, errors.New("not found")
 			}
 			if path == tokenPath {
@@ -1563,7 +1563,7 @@ func TestDaemonProvisionsUserTokenCorrectsOwnershipAndMode(t *testing.T) {
 			if path == "/var/lib/omahab/api.token" {
 				return []byte(token), nil
 			}
-			if path == "/etc/omahab/backup.env" {
+			if path == "/var/lib/omahab/backup.env" {
 				return nil, errors.New("not found")
 			}
 			if d, ok := files[path]; ok {

@@ -22,7 +22,7 @@ services:
     volumes:
       - caddy_data:/data
       - caddy_config:/config
-      - /etc/omahab/caddy.json:/etc/caddy/caddy.json:ro
+      - /var/lib/omahab/caddy/caddy.json:/etc/caddy/caddy.json:ro
       - /var/lib/omahab/caddy:/var/lib/caddy:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"

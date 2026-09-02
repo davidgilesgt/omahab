@@ -47,7 +47,8 @@ type Options struct {
 	// DNSToken is the Cloudflare DNS token for Caddy DNS-01 (Token A). Empty → edge config fails closed.
 	DNSToken string
 
-	// CaddyConfigPath is the host path for rendered Caddy JSON (default /etc/omahab/caddy.json).
+	// CaddyConfigPath is the host path for rendered Caddy JSON
+	// (default /var/lib/omahab/caddy/caddy.json).
 	CaddyConfigPath string
 }
 
@@ -98,7 +99,7 @@ func NewClients(o Options) (exposure.Clients, error) {
 	if o.CaddyAddr != "" {
 		cfgPath := o.CaddyConfigPath
 		if cfgPath == "" {
-			cfgPath = "/etc/omahab/caddy.json"
+			cfgPath = "/var/lib/omahab/caddy/caddy.json"
 		}
 		c.Edge = newEdgeClient(o.CaddyAddr, o.HTTPClient, o.Domain, o.DNSToken, cfgPath)
 	}

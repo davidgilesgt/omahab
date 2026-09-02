@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/omahab/omahab/internal/apps"
+	"github.com/omahab/omahab/internal/config"
 	"github.com/omahab/omahab/internal/domain"
 	"github.com/omahab/omahab/internal/events"
 	"github.com/omahab/omahab/internal/identity"
@@ -60,9 +61,7 @@ func TestTunnelFallbackName(t *testing.T) {
 func TestWriteCloudflaredTokenEnv(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	prev := cloudflaredDir
-	cloudflaredDir = dir
-	t.Cleanup(func() { cloudflaredDir = prev })
+	b := &Backend{cfg: config.Config{CloudflaredDir: dir}}
 
 	creds := filepath.Join(dir, "credentials.json")
 	cfg := filepath.Join(dir, "config.yml")
@@ -74,7 +73,7 @@ func TestWriteCloudflaredTokenEnv(t *testing.T) {
 	}
 
 	token := "connector-token-value"
-	if err := writeCloudflaredTokenEnv(token); err != nil {
+	if err := b.writeCloudflaredTokenEnv(token); err != nil {
 		t.Fatalf("writeCloudflaredTokenEnv: %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(dir, "env"))
@@ -230,6 +229,74 @@ func TestEnsureDefaultAppResume(t *testing.T) {
 	}
 	if runner.deployCount < 2 {
 		t.Fatalf("update should deploy again, deploys=%d", runner.deployCount)
+	}
+}
+
+func TestWriteBootstrapCaddyJSONUnderStateDir(t *testing.T) {
+	t.Parallel()
+	stateDir := t.TempDir()
+	runner := &scriptedRunner{health: domain.HealthHealthy}
+	b, _ := newSetupBackend(t, runner)
+	b.cfg = config.Config{StateDir: stateDir, CaddyConfigPath: filepath.Join(stateDir, "caddy", "caddy.json")}
+
+	if err := b.writeBootstrapCaddyJSON(context.Background(), ""); err != nil {
+		t.Fatalf("writeBootstrapCaddyJSON: %v", err)
+	}
+	path := filepath.Join(stateDir, "caddy", "caddy.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("caddy json not written under state dir: %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("caddy json invalid: %v", err)
+	}
+	// Idempotent: second run with existing non-empty file does not rewrite.
+	if err := os.WriteFile(path, []byte(`{"apps":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.writeBootstrapCaddyJSON(context.Background(), ""); err != nil {
+		t.Fatalf("second write: %v", err)
+	}
+	raw, _ = os.ReadFile(path)
+	if string(raw) != `{"apps":{}}` {
+		t.Fatalf("existing config should be preserved, got %s", raw)
+	}
+}
+
+func TestEnsureBackupEnv(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	tok := "test-token-abc123"
+	if err := EnsureBackupEnv(dir, tok); err != nil {
+		t.Fatalf("EnsureBackupEnv: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "backup.env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "OMAHAB_SERVER=http://127.0.0.1:8484\nOMAHAB_TOKEN=" + tok + "\n"
+	if string(raw) != want {
+		t.Fatalf("backup.env = %q want %q", raw, want)
+	}
+	fi, err := os.Stat(filepath.Join(dir, "backup.env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("perm = %o want 600", fi.Mode().Perm())
+	}
+	// Idempotent: same token, no error.
+	if err := EnsureBackupEnv(dir, tok); err != nil {
+		t.Fatalf("idempotent: %v", err)
+	}
+	// Rotation: new token rewrites the file.
+	if err := EnsureBackupEnv(dir, "rotated"); err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	raw, _ = os.ReadFile(filepath.Join(dir, "backup.env"))
+	if !strings.Contains(string(raw), "OMAHAB_TOKEN=rotated") {
+		t.Fatalf("rotation not applied: %q", raw)
 	}
 }
 

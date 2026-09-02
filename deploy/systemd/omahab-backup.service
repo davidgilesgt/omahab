@@ -4,11 +4,11 @@ Documentation=https://github.com/davidgilesgt/omahab
 After=network-online.target
 Wants=network-online.target
 RequiresMountsFor=/srv/omahab
-ConditionPathExists=/etc/omahab
+ConditionPathExists=/var/lib/omahab
 
 [Service]
 Type=oneshot
-EnvironmentFile=/etc/omahab/backup.env
+EnvironmentFile=/var/lib/omahab/backup.env
 ExecStart=/usr/bin/omahab backup create
 User=root
 Group=root
@@ -17,7 +17,6 @@ PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=/var/lib/omahab /srv/omahab
-ReadOnlyPaths=/etc/omahab
 ProtectKernelTunables=yes
 ProtectControlGroups=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

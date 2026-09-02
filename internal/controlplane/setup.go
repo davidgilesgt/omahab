@@ -115,15 +115,23 @@ func (b *Backend) ensureTailscaleIP(ctx context.Context) error {
 	}
 }
 
+// caddyConfigPath resolves the Caddy JSON render target from config.
+func (b *Backend) caddyConfigPath() string {
+	if p := strings.TrimSpace(b.cfg.CaddyConfigPath); p != "" {
+		return p
+	}
+	return "/var/lib/omahab/caddy/caddy.json"
+}
+
 func (b *Backend) writeBootstrapCaddyJSON(ctx context.Context, dnsToken string) error {
-	const caddyJSONPath = "/etc/omahab/caddy.json"
+	caddyJSONPath := b.caddyConfigPath()
 	if fi, err := os.Stat(caddyJSONPath); err == nil && fi.IsDir() {
 		if err := os.RemoveAll(caddyJSONPath); err != nil {
 			return fmt.Errorf("remove directory %s: %w", caddyJSONPath, err)
 		}
 	}
-	if err := os.MkdirAll("/etc/omahab", 0755); err != nil {
-		return fmt.Errorf("mkdir /etc/omahab: %w", err)
+	if err := os.MkdirAll(filepath.Dir(caddyJSONPath), 0755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", filepath.Dir(caddyJSONPath), err)
 	}
 	if fi, err := os.Stat(caddyJSONPath); err == nil && !fi.IsDir() && fi.Size() > 0 {
 		return nil
@@ -409,7 +417,7 @@ func (b *Backend) setupPhaseTunnel(ctx context.Context) error {
 	if err := upsertSecret(ctx, b.secrets, "platform-app", "cloudflare_tunnel_token", connectorToken); err != nil {
 		return fmt.Errorf("store tunnel connector token: %w", err)
 	}
-	if err := writeCloudflaredTokenEnv(connectorToken); err != nil {
+	if err := b.writeCloudflaredTokenEnv(connectorToken); err != nil {
 		return fmt.Errorf("write cloudflared env: %w", err)
 	}
 	if out, err := exec.CommandContext(ctx, "systemctl", "reset-failed", "cloudflared").CombinedOutput(); err != nil {
@@ -429,7 +437,12 @@ func (b *Backend) setupPhaseTunnel(ctx context.Context) error {
 	return nil
 }
 
-var cloudflaredDir = "/etc/omahab/cloudflared"
+func (b *Backend) cloudflaredDir() string {
+	if d := strings.TrimSpace(b.cfg.CloudflaredDir); d != "" {
+		return d
+	}
+	return "/var/lib/omahab/cloudflared"
+}
 
 func tunnelFallbackName(instanceID string) string {
 	var alnum strings.Builder
@@ -447,15 +460,16 @@ func tunnelFallbackName(instanceID string) string {
 	return "omahab-" + alnum.String()
 }
 
-func writeCloudflaredTokenEnv(token string) error {
+func (b *Backend) writeCloudflaredTokenEnv(token string) error {
 	token = strings.TrimSpace(token)
 	if token == "" {
 		return fmt.Errorf("cloudflared connector token is required")
 	}
-	if err := os.MkdirAll(cloudflaredDir, 0o700); err != nil {
+	dir := b.cloudflaredDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(cloudflaredDir, ".env-*.tmp")
+	tmp, err := os.CreateTemp(dir, ".env-*.tmp")
 	if err != nil {
 		return err
 	}
@@ -474,18 +488,18 @@ func writeCloudflaredTokenEnv(token string) error {
 	}
 	uid, gid, ok := lookupCloudflaredIDs()
 	if ok {
-		_ = os.Chown(cloudflaredDir, uid, gid)
+		_ = os.Chown(dir, uid, gid)
 		_ = os.Chown(tmpName, uid, gid)
 	}
-	envPath := filepath.Join(cloudflaredDir, "env")
+	envPath := filepath.Join(dir, "env")
 	if err := os.Rename(tmpName, envPath); err != nil {
 		return err
 	}
 	if ok {
 		_ = os.Chown(envPath, uid, gid)
 	}
-	_ = os.Remove(filepath.Join(cloudflaredDir, "credentials.json"))
-	_ = os.Remove(filepath.Join(cloudflaredDir, "config.yml"))
+	_ = os.Remove(filepath.Join(dir, "credentials.json"))
+	_ = os.Remove(filepath.Join(dir, "config.yml"))
 	return nil
 }
 

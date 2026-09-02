@@ -112,7 +112,7 @@ func (s *Service) runDaemonStep(ctx context.Context, opts InstallOptions) RunRes
 
 	// Idempotency: skip write when content identical.
 	if p.ReadFile != nil {
-		if existing, err := p.ReadFile("/etc/omahab/backup.env"); err == nil && string(existing) == content {
+		if existing, err := p.ReadFile("/var/lib/omahab/backup.env"); err == nil && string(existing) == content {
 			emit("backup.env already up to date")
 			if err := s.provisionUserToken(p, s.resolveTargetUser(opts), token); err != nil {
 				return RunResult{Step: StepDaemon, Status: JournalFailed, Error: err.Error()}
@@ -124,7 +124,7 @@ func (s *Service) runDaemonStep(ctx context.Context, opts InstallOptions) RunRes
 		return RunResult{Step: StepDaemon, Status: JournalFailed, Error: "write file probe not configured"}
 	}
 	emit("writing backup.env")
-	if err := p.WriteFile("/etc/omahab/backup.env", []byte(content), 0o600); err != nil {
+	if err := p.WriteFile("/var/lib/omahab/backup.env", []byte(content), 0o600); err != nil {
 		return RunResult{Step: StepDaemon, Status: JournalFailed, Error: err.Error()}
 	}
 	if err := s.provisionUserToken(p, s.resolveTargetUser(opts), token); err != nil {
@@ -238,7 +238,7 @@ func RollbackDaemon(ctx context.Context, p Probes) error {
 		_, _ = p.Systemctl(ctx, "disable", "omahabd")
 	}
 	if p.RemoveFile != nil {
-		_ = p.RemoveFile("/etc/omahab/backup.env")
+		_ = p.RemoveFile("/var/lib/omahab/backup.env")
 	}
 	return nil
 }
