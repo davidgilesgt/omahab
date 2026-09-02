@@ -13,7 +13,6 @@ import (
 
 func testConfig(root string) config.Config {
 	return config.Config{
-		EtcDir:        filepath.Join(root, "etc"),
 		StateDir:      filepath.Join(root, "state"),
 		DataDir:       filepath.Join(root, "data"),
 		Listen:        "127.0.0.1:8484",

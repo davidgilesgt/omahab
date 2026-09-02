@@ -10,7 +10,6 @@ import (
 // a missing master key or token path.
 func TestLoadProducesCompleteConfig(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("OMAHAB_ETC_DIR", filepath.Join(root, "etc"))
 	t.Setenv("OMAHAB_STATE_DIR", filepath.Join(root, "state"))
 	t.Setenv("OMAHAB_DATA_DIR", filepath.Join(root, "data"))
 	t.Setenv("OMAHAB_CATALOG", filepath.Join(root, "apps-catalog.json"))
@@ -50,7 +49,6 @@ func TestDefaultListenIsLoopback(t *testing.T) {
 
 func TestLoadWithoutListenEnvUsesLoopbackDefault(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("OMAHAB_ETC_DIR", filepath.Join(root, "etc"))
 	t.Setenv("OMAHAB_STATE_DIR", filepath.Join(root, "state"))
 	t.Setenv("OMAHAB_DATA_DIR", filepath.Join(root, "data"))
 	t.Setenv("OMAHAB_CATALOG", filepath.Join(root, "apps-catalog.json"))
@@ -70,7 +68,6 @@ func TestLoadWithoutListenEnvUsesLoopbackDefault(t *testing.T) {
 
 func TestLoadAcceptsPackagedWildcardWhenExplicitlySet(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("OMAHAB_ETC_DIR", filepath.Join(root, "etc"))
 	t.Setenv("OMAHAB_STATE_DIR", filepath.Join(root, "state"))
 	t.Setenv("OMAHAB_DATA_DIR", filepath.Join(root, "data"))
 	t.Setenv("OMAHAB_CATALOG", filepath.Join(root, "apps-catalog.json"))

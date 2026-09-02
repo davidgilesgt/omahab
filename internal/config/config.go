@@ -12,7 +12,6 @@ import (
 )
 
 const (
-	DefaultEtcDir      = "/etc/omahab"
 	DefaultStateDir    = "/var/lib/omahab"
 	DefaultDataDir     = "/srv/omahab"
 	DefaultListen      = "127.0.0.1:8484"
@@ -20,7 +19,6 @@ const (
 )
 
 type Config struct {
-	EtcDir        string
 	StateDir      string
 	DataDir       string
 	Listen        string
@@ -40,7 +38,6 @@ type Config struct {
 
 func Load() (Config, error) {
 	cfg := Config{
-		EtcDir:        envOr("OMAHAB_ETC_DIR", DefaultEtcDir),
 		StateDir:      envOr("OMAHAB_STATE_DIR", DefaultStateDir),
 		DataDir:       envOr("OMAHAB_DATA_DIR", DefaultDataDir),
 		Listen:        envOr("OMAHAB_LISTEN", DefaultListen),
@@ -52,9 +49,6 @@ func Load() (Config, error) {
 	cfg.APITokenPath = envOr("OMAHAB_API_TOKEN_FILE", filepath.Join(cfg.StateDir, "api.token"))
 	cfg.CaddyConfigPath = envOr("OMAHAB_CADDY_CONFIG", filepath.Join(cfg.StateDir, "caddy", "caddy.json"))
 	cfg.CloudflaredDir = envOr("OMAHAB_CLOUDFLARED_DIR", filepath.Join(cfg.StateDir, "cloudflared"))
-	if cfg.EtcDir == "" {
-		cfg.EtcDir = DefaultEtcDir
-	}
 	if raw := os.Getenv("OMAHAB_SHUTDOWN_GRACE_SECONDS"); raw != "" {
 		seconds, err := strconv.Atoi(raw)
 		if err != nil || seconds < 1 || seconds > 300 {
@@ -70,7 +64,7 @@ func Load() (Config, error) {
 
 func (c Config) Validate() error {
 	for name, value := range map[string]string{
-		"etc directory": c.EtcDir, "state directory": c.StateDir, "data directory": c.DataDir,
+		"state directory": c.StateDir, "data directory": c.DataDir,
 		"database path": c.DatabasePath, "master key path": c.MasterKeyPath, "API token path": c.APITokenPath,
 		"application catalog path": c.CatalogPath, "caddy config path": c.CaddyConfigPath,
 		"cloudflared directory": c.CloudflaredDir,
@@ -96,7 +90,7 @@ func (c Config) Validate() error {
 }
 
 func (c Config) EnsureDirectories() error {
-	for _, dir := range []string{c.EtcDir, c.StateDir, c.DataDir} {
+	for _, dir := range []string{c.StateDir, c.DataDir} {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return fmt.Errorf("create %s: %w", dir, err)
 		}

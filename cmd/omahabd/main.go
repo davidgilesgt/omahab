@@ -216,13 +216,18 @@ func isSPAFallback(r *http.Request) bool {
 }
 
 func findStaticDir() string {
-	candidates := []string{
+	candidates := []string{}
+	// Explicit override wins (NixOS module sets OMAHAB_WEB_DIR).
+	if v := strings.TrimSpace(os.Getenv("OMAHAB_WEB_DIR")); v != "" {
+		candidates = append(candidates, v)
+	}
+	candidates = append(candidates,
 		"web/dist",
 		"../web/dist",
 		filepath.Join(filepath.Dir(os.Args[0]), "..", "web", "dist"),
 		filepath.Join(filepath.Dir(os.Args[0]), "web", "dist"),
 		"/usr/share/omahab/web",
-	}
+	)
 	// Also check executable directory
 	if exe, err := os.Executable(); err == nil {
 		candidates = append(candidates, filepath.Join(filepath.Dir(exe), "web", "dist"))

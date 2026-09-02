@@ -102,8 +102,18 @@ EOF
         };
       }
     ) // {
-      nixosModules.omahab = { config, lib, pkgs, ... }: {
+      nixosModules = {
+        omahab = import ./nix/module.nix;
+        default = self.nixosModules.omahab;
       };
-      nixosModules.default = self.nixosModules.omahab;
+      nixosConfigurations.omahab-vm = nixpkgs.lib.nixosSystem {
+        system = "x86_64-linux";
+        specialArgs = { inherit self; };
+        modules = [
+          "${nixpkgs}/nixos/modules/virtualisation/qemu-vm.nix"
+          self.nixosModules.omahab
+          ./nix/vm.nix
+        ];
+      };
     };
 }
