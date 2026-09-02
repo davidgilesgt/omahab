@@ -19,9 +19,13 @@ type installEntry struct {
 	perm uint32
 }
 
-// binaryUnits is the six systemd units managed by the binaries step.
+// binaryUnits is the ten systemd units managed by the binaries step.
 var binaryUnits = []string{
 	"omahabd.service",
+	"omahab-builder.socket",
+	"omahab-builder.service",
+	"omahab-builder-prune.service",
+	"omahab-builder-prune.timer",
 	"omahab-backup.service",
 	"omahab-backup.timer",
 	"omahab-verify.service",
@@ -48,6 +52,10 @@ func collectInstallEntries(fsys fs.FS) ([]installEntry, error) {
 		{"bin/omahab", "/usr/bin/omahab", 0o755},
 		{"bin/omahabd", "/usr/bin/omahabd", 0o755},
 		{"systemd/omahabd.service", "/usr/lib/systemd/system/omahabd.service", 0o644},
+		{"systemd/omahab-builder.socket", "/usr/lib/systemd/system/omahab-builder.socket", 0o644},
+		{"systemd/omahab-builder.service", "/usr/lib/systemd/system/omahab-builder.service", 0o644},
+		{"systemd/omahab-builder-prune.service", "/usr/lib/systemd/system/omahab-builder-prune.service", 0o644},
+		{"systemd/omahab-builder-prune.timer", "/usr/lib/systemd/system/omahab-builder-prune.timer", 0o644},
 		{"systemd/omahab-backup.service", "/usr/lib/systemd/system/omahab-backup.service", 0o644},
 		{"systemd/omahab-backup.timer", "/usr/lib/systemd/system/omahab-backup.timer", 0o644},
 		{"systemd/omahab-verify.service", "/usr/lib/systemd/system/omahab-verify.service", 0o644},
@@ -299,16 +307,21 @@ func installShellCompletions(ctx context.Context, p Probes) {
 
 // RollbackBinaries removes the exact files the binaries step installed.
 //
-// It removes /usr/bin/omahab, /usr/bin/omahabd, the six systemd units,
+// It removes /usr/bin/omahab, /usr/bin/omahabd, the ten systemd units,
 // /usr/lib/tmpfiles.d/omahab.conf, and shell completions. It does NOT remove
 // /usr/share/omahab (catalog/web) — those trees may contain data later steps
 // referenced and leaving them is safer on rollback than deleting shared
-// application assets.
+// application assets. It also does NOT remove /var/lib/omahab-builder
+// (builder CI cache/state) on rollback.
 func RollbackBinaries(ctx context.Context, p Probes) error {
 	paths := []string{
 		"/usr/bin/omahab",
 		"/usr/bin/omahabd",
 		"/usr/lib/systemd/system/omahabd.service",
+		"/usr/lib/systemd/system/omahab-builder.socket",
+		"/usr/lib/systemd/system/omahab-builder.service",
+		"/usr/lib/systemd/system/omahab-builder-prune.service",
+		"/usr/lib/systemd/system/omahab-builder-prune.timer",
 		"/usr/lib/systemd/system/omahab-backup.service",
 		"/usr/lib/systemd/system/omahab-backup.timer",
 		"/usr/lib/systemd/system/omahab-verify.service",

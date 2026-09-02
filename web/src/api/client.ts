@@ -3,14 +3,24 @@ import type {
   Application,
   Backup,
   CatalogBundle,
+  CompanionDevice,
   ControlEvent,
+  CreateCompanionEnrollmentResponse,
+  CreateModelKeyResponse,
   Exposure,
   ExposureState,
+  HermesNousSession,
+  HermesProviderOAuth,
+  HermesToolset,
   IndexSetupOption,
   Instance,
   KnowledgeConsent,
   ListEnvelope,
+  ModelAlias,
+  ModelAliasName,
   ModelInfo,
+  ModelKey,
+  OAuthSession,
   Project,
   ProviderCredential,
   RecoverySession,
@@ -19,6 +29,7 @@ import type {
   SetupStatus,
   Status,
   SyncFolder,
+  ToolVariableMeta,
   User,
   Workspace,
 } from "./types";
@@ -143,12 +154,69 @@ export class ApiClient {
 
   setup = () => this.request<SetupStatus>("/setup");
   reconcileSetup = () => this.request<void>("/setup/reconcile", { method: "POST", body: JSON.stringify({}) });
+  setupWoodpecker = (input: { username: string; token: string }) =>
+    this.request<{ status: string }>("/setup/woodpecker", { method: "PUT", body: JSON.stringify(input) });
 
   providerCredentials = () => this.list<ProviderCredential>("/provider-credentials");
   createProviderCredential = (input: { provider: string; kind: string; value: string; name?: string }) =>
     this.request<ProviderCredential>("/provider-credentials", { method: "POST", body: JSON.stringify(input) });
   revokeProvider = (id: string) =>
     this.request<void>(`/provider-credentials/${encodeURIComponent(id)}`, { method: "DELETE", body: JSON.stringify({}) });
+
+  // Model gateway (LiteLLM) — aliases
+  modelAliases = () => this.list<ModelAlias>("/model-aliases");
+  setModelAlias = (name: ModelAliasName, input: { credential_id: string; model: string; fallback_order?: string[] }) =>
+    this.request<ModelAlias>(`/model-aliases/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify(input) });
+
+  // Model keys (virtual keys) — metadata, plaintext returned once on create
+  modelKeys = () => this.list<ModelKey>("/model-keys");
+  createModelKey = (input: { name: string; owner_kind: "hermes" | "device" | "harness"; owner_id: string; scopes?: ModelAliasName[]; rpm?: number; tpm?: number; concurrency?: number; budget?: number; expires_at?: string }) =>
+    this.request<CreateModelKeyResponse>("/model-keys", { method: "POST", body: JSON.stringify(input) });
+  deleteModelKey = (id: string) =>
+    this.request<void>(`/model-keys/${encodeURIComponent(id)}`, { method: "DELETE" });
+
+  // Provider OAuth (subscription) — safe session, no secrets
+  startProviderOAuth = (provider: "chatgpt" | "xai", flow: "device_code" | "loopback") =>
+    this.request<OAuthSession>(`/provider-oauth/${encodeURIComponent(provider)}/start`, { method: "POST", body: JSON.stringify({ flow }) });
+  pollProviderOAuth = (provider: "chatgpt" | "xai", sessionId: string) =>
+    this.request<OAuthSession>(`/provider-oauth/${encodeURIComponent(provider)}/poll/${encodeURIComponent(sessionId)}`);
+  forwardProviderOAuthCallback = (provider: "xai", sessionId: string, callbackPath: string) =>
+    this.request<OAuthSession>(`/provider-oauth/${encodeURIComponent(provider)}/callback/${encodeURIComponent(sessionId)}`, {
+      method: "POST",
+      body: JSON.stringify({ callback_path: callbackPath }),
+    });
+
+  // Tool environment (admin only, metadata only, browser never calls device endpoint)
+  toolEnvironment = () => this.list<ToolVariableMeta>("/tool-environment");
+  putToolVariable = (name: string, value: string) =>
+    this.request<ToolVariableMeta>(`/tool-environment/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify({ value }) });
+  deleteToolVariable = (name: string) =>
+    this.request<void>(`/tool-environment/${encodeURIComponent(name)}`, { method: "DELETE", body: JSON.stringify({}) });
+
+  // Companion enrollment & devices (admin)
+  companionDevices = () => this.list<CompanionDevice>("/companion-devices");
+  createCompanionEnrollment = () =>
+    this.request<CreateCompanionEnrollmentResponse>("/companion-enrollments", { method: "POST", body: JSON.stringify({}) });
+  updateCompanionDevice = (id: string, input: { allow_provider_oauth?: boolean; granted?: boolean }) =>
+    this.request<CompanionDevice>(`/companion-devices/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(input) });
+  revokeCompanionDevice = (id: string) =>
+    this.request<void>(`/companion-devices/${encodeURIComponent(id)}`, { method: "DELETE", body: JSON.stringify({}) });
+  toolEnvironmentDevices = () => this.list<CompanionDevice>("/tool-environment/devices");
+  setToolEnvironmentGrant = (deviceId: string, granted: boolean) =>
+    this.request<void>(`/tool-environment/grants/${encodeURIComponent(deviceId)}`, { method: granted ? "PUT" : "DELETE", body: JSON.stringify({}) });
+
+  // Hermes Nous Portal tool gateway proxy — admin, forwards with Hermes JWT. Inference stays on LiteLLM.
+  hermesProvidersOAuth = () => this.list<HermesProviderOAuth>("/hermes/providers/oauth");
+  // Direct alias for GET /api/providers/oauth as per assignment spec.
+  providersOAuth = () => this.list<HermesProviderOAuth>("/hermes/providers/oauth");
+  startHermesNousOAuth = () =>
+    this.request<HermesNousSession>("/hermes/providers/oauth/nous/start", { method: "POST", body: JSON.stringify({}) });
+  pollHermesNousOAuth = (sessionId: string) =>
+    this.request<HermesNousSession>(`/hermes/providers/oauth/nous/poll/${encodeURIComponent(sessionId)}`);
+  hermesToolsets = () => this.list<HermesToolset>("/hermes/tools/toolsets");
+  // Assignment also mentions GET /api/tools/toolsets via handlers; alias handled server-side but client uses hermes path.
+  setHermesToolsetProvider = (name: string, provider: string) =>
+    this.request<HermesToolset>(`/hermes/tools/toolsets/${encodeURIComponent(name)}/provider`, { method: "PUT", body: JSON.stringify({ provider }) });
 
   knowledgeIndexSetupOptions = () => this.list<IndexSetupOption>("/knowledge/index-setup-options");
 

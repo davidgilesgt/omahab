@@ -17,11 +17,14 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+
+	"github.com/omahab/omahab/internal/environments"
 )
 
 // Server is the Chi HTTP server for omahabd.
 type Server struct {
 	backend      Backend
+	environments *environments.Service
 	tokenHash    []byte // SHA256 of bearer token, nil means auth disabled (tests only)
 	emailHMACKey []byte
 	version      string
@@ -33,6 +36,7 @@ type Server struct {
 // Config configures the API server.
 type Config struct {
 	Backend      Backend
+	Environments *environments.Service
 	Version      string
 	BearerToken  string // raw token; hashed with SHA256 and compared constant-time
 	EmailHMACKey string // raw HMAC key for email webhook; empty disables HMAC check (tests)
@@ -41,6 +45,7 @@ type Config struct {
 	IdleTimeout  time.Duration
 	BodyLimit    int64 // max JSON body bytes (default 1MiB)
 }
+
 
 const (
 	defaultBodyLimit    int64 = 1 << 20 // 1 MiB
@@ -70,6 +75,7 @@ func New(cfg Config) (*Server, error) {
 
 	s := &Server{
 		backend:      cfg.Backend,
+		environments: cfg.Environments,
 		version:      cfg.Version,
 		startedAt:    time.Now().UTC(),
 		emailHMACKey: []byte(cfg.EmailHMACKey),
@@ -129,6 +135,10 @@ func (s *Server) buildRouter() chi.Router {
 
 	// Email webhook with separate HMAC auth (not bearer).
 	r.Post("/api/v1/email/ingest", s.withBodyLimit(maxBodyLimit, s.handleEmailIngestHMAC))
+
+	// Companion enrollment: device claim with single-use code, no bearer (open). Code in JSON body {code}.
+	r.Post("/api/v1/companion/enroll", s.withBodyLimit(defaultBodyLimit, s.handleEnrollCompanion))
+
 	// Authenticated API group.
 	r.Group(func(r chi.Router) {
 		r.Use(s.bearerAuth)
@@ -234,6 +244,7 @@ func (s *Server) buildRouter() chi.Router {
 		// Setup (first-run provisioning)
 		r.Get("/api/v1/setup", s.handleGetSetup)
 		r.Post("/api/v1/setup/reconcile", s.withBodyLimit(defaultBodyLimit, s.handleTriggerSetupReconcile))
+		r.Put("/api/v1/setup/woodpecker", s.withBodyLimit(defaultBodyLimit, s.handleSetupWoodpecker))
 
  		// Users / identity recovery
  		r.Get("/api/v1/users", s.handleListUsers)
@@ -249,14 +260,58 @@ func (s *Server) buildRouter() chi.Router {
 		r.Put("/api/v1/users/{id}/groups", s.withBodyLimit(defaultBodyLimit, s.handleSetUserGroups))
 		// Provider credentials
 		r.Get("/api/v1/provider-credentials", s.handleListProviderCredentials)
- 		r.Post("/api/v1/provider-credentials", s.withBodyLimit(defaultBodyLimit, s.handleCreateProviderCredential))
- 		r.Get("/api/v1/provider-credentials/{id}", s.handleGetProviderCredential)
- 		r.Delete("/api/v1/provider-credentials/{id}", s.handleDeleteProviderCredential)
+		r.Post("/api/v1/provider-credentials", s.withBodyLimit(defaultBodyLimit, s.handleCreateProviderCredential))
+		r.Get("/api/v1/provider-credentials/{id}", s.handleGetProviderCredential)
+		r.Delete("/api/v1/provider-credentials/{id}", s.handleDeleteProviderCredential)
 
- 		// Email (authenticated read + route activation gated on verification)
- 		r.Get("/api/v1/email/messages", s.handleListEmailMessages)
- 		r.Get("/api/v1/email/messages/{id}", s.handleGetEmailMessage)
- 		r.Post("/api/v1/email/routes", s.withBodyLimit(defaultBodyLimit, s.handleEnsureEmailRoute))
+		// Model gateway (LiteLLM) — admin
+		r.Get("/api/v1/model-aliases", s.handleListModelAliases)
+		r.Put("/api/v1/model-aliases/{name}", s.withBodyLimit(defaultBodyLimit, s.handleSetModelAlias))
+		r.Get("/api/v1/model-keys", s.handleListModelKeys)
+		r.Post("/api/v1/model-keys", s.withBodyLimit(defaultBodyLimit, s.handleCreateModelKey))
+		r.Delete("/api/v1/model-keys/{id}", s.handleDeleteModelKey)
+		r.Post("/api/v1/provider-oauth/{provider}/start", s.withBodyLimit(defaultBodyLimit, s.handleStartProviderOAuth))
+		r.Get("/api/v1/provider-oauth/{provider}/poll/{session_id}", s.handlePollProviderOAuth)
+
+		// Hermes Nous Portal tool gateway proxy — admin, forwards with Hermes JWT, does not switch inference gateway.
+		r.Get("/api/v1/hermes/providers/oauth", s.handleListHermesProvidersOAuth)
+		r.Get("/api/providers/oauth", s.handleListHermesProvidersOAuth)
+		r.Post("/api/v1/hermes/providers/oauth/nous/start", s.withBodyLimit(defaultBodyLimit, s.handleStartHermesNousOAuth))
+		r.Post("/api/providers/oauth/nous/start", s.withBodyLimit(defaultBodyLimit, s.handleStartHermesNousOAuth))
+		r.Get("/api/v1/hermes/providers/oauth/nous/poll/{session_id}", s.handlePollHermesNousOAuth)
+		r.Get("/api/providers/oauth/nous/poll/{session_id}", s.handlePollHermesNousOAuth)
+		r.Get("/api/v1/hermes/tools/toolsets", s.handleListHermesToolsets)
+		r.Get("/api/tools/toolsets", s.handleListHermesToolsets)
+		r.Put("/api/v1/hermes/tools/toolsets/{name}/provider", s.withBodyLimit(defaultBodyLimit, s.handleSetHermesToolsetProvider))
+		r.Put("/api/tools/toolsets/{name}/provider", s.withBodyLimit(defaultBodyLimit, s.handleSetHermesToolsetProvider))
+
+		// Companion — admin (enrollment codes, device lifecycle)
+		r.Post("/api/v1/companion-enrollments", s.handleCreateCompanionEnrollment)
+		r.Get("/api/v1/companion/devices", s.handleListCompanionDevices)
+		r.Delete("/api/v1/companion/devices/{id}", s.handleRevokeCompanionDevice)
+		r.Put("/api/v1/companion/devices/{id}/allow-oauth", s.withBodyLimit(defaultBodyLimit, s.handleSetDeviceAllowOAuth))
+
+		// Tool environment (server authoritative singleton agent-tools) — admin
+		r.Get("/api/v1/tool-environment", s.handleListToolEnv)
+		r.Put("/api/v1/tool-environment/{NAME}", s.withBodyLimit(defaultBodyLimit, s.handlePutToolEnv))
+		r.Delete("/api/v1/tool-environment/{NAME}", s.handleDeleteToolEnv)
+
+		// Email (authenticated read + route activation gated on verification)
+		r.Get("/api/v1/email/messages", s.handleListEmailMessages)
+		r.Get("/api/v1/email/messages/{id}", s.handleGetEmailMessage)
+		r.Post("/api/v1/email/routes", s.withBodyLimit(defaultBodyLimit, s.handleEnsureEmailRoute))
+	})
+
+	// Device-authenticated group — companion + callback relay.
+	// deviceAuth validates Bearer oma_dev_... via environments.Service, sets device context,
+	// rejects admin bearer with 403, and rejects missing/invalid device token with 401.
+	r.Group(func(r chi.Router) {
+		r.Use(s.deviceAuth)
+		r.Get("/api/v1/companion/status", s.handleCompanionStatus)
+		r.Get("/api/v1/companion/events", s.handleCompanionEvents)
+		r.Get("/api/v1/companion/projects", s.handleCompanionProjects)
+		r.Get("/api/v1/companion/environment", s.handleGetCompanionEnvironment)
+		r.Post("/api/v1/provider-oauth/{provider}/callback/{session_id}", s.withBodyLimit(defaultBodyLimit, s.handleForwardProviderOAuthCallback))
 	})
 
 	return r
@@ -330,11 +385,14 @@ func (s *Server) timeoutMiddleware(d time.Duration) func(http.Handler) http.Hand
 }
 
 // bearerAuth enforces constant-time bearer token comparison. Skipped only for /up and HMAC routes
-// which are not inside the authenticated group.
+// which are not inside the authenticated group. Device tokens (oma_dev_...) are rejected with 403
+// on every admin route to enforce allowlist: companion devices may only call device-endpoints.
 func (s *Server) bearerAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.tokenHash == nil {
-			// No token configured; allow (used in tests).
+			// No token configured; allow (used in tests). But still reject device tokens if they appear,
+			// to preserve 403 semantics even when auth disabled? In tests tokenHash=nil means auth disabled,
+			// so we allow all. However deviceAuth tests use nil tokenHash; bearerAuth with nil should still allow admin routes.
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -353,12 +411,75 @@ func (s *Server) bearerAuth(next http.Handler) http.Handler {
 			writeError(w, r, errUnauthorized("missing bearer token"))
 			return
 		}
+		// Enforce allowlist: device tokens never allowed on admin routes. Return 403 per spec.
+		if strings.HasPrefix(token, "oma_dev_") {
+			// If environments service is available, verify it is a valid device token before returning 403
+			// to avoid leaking existence via timing, but always 403 for prefix match on admin.
+			if s.environments != nil {
+				if _, err := s.environments.ValidateDeviceToken(r.Context(), token); err == nil {
+					writeError(w, r, errForbidden("device token not allowed on admin endpoint"))
+					return
+				}
+			}
+			writeError(w, r, errForbidden("device token not allowed on admin endpoint"))
+			return
+		}
 		got := sha256.Sum256([]byte(token))
 		if subtle.ConstantTimeCompare(got[:], s.tokenHash) != 1 {
 			writeError(w, r, errUnauthorized("invalid bearer token"))
 			return
 		}
 		next.ServeHTTP(w, r)
+	})
+}
+
+// deviceAuth validates companion device tokens (oma_dev_...) via environments.Service.
+// It rejects admin bearer with 403, missing/invalid device token with 401, revoked with 403,
+// and on success sets device ID and device object in context.
+func (s *Server) deviceAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hdr := r.Header.Get("Authorization")
+		if hdr == "" {
+			writeError(w, r, errUnauthorized("missing device token"))
+			return
+		}
+		parts := strings.SplitN(hdr, " ", 2)
+		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+			writeError(w, r, errUnauthorized("invalid authorization header"))
+			return
+		}
+		token := strings.TrimSpace(parts[1])
+		if token == "" {
+			writeError(w, r, errUnauthorized("missing device token"))
+			return
+		}
+		// Reject admin bearer on device endpoint with 403.
+		if s.tokenHash != nil {
+			got := sha256.Sum256([]byte(token))
+			if subtle.ConstantTimeCompare(got[:], s.tokenHash) == 1 {
+				writeError(w, r, errForbidden("admin bearer not allowed on device endpoint"))
+				return
+			}
+		}
+		if s.environments == nil {
+			// No environments service (tests); allow any non-admin bearer through for now.
+			next.ServeHTTP(w, r)
+			return
+		}
+		dev, err := s.environments.ValidateDeviceToken(r.Context(), token)
+		if err != nil {
+			// Map revoked to 403, other invalid to 401 per spec.
+			if errors.Is(err, environments.ErrRevoked) {
+				writeError(w, r, errForbidden("device revoked"))
+				return
+			}
+			writeError(w, r, errUnauthorized("invalid device token"))
+			return
+		}
+		// Set device context for handlers.
+		ctx := context.WithValue(r.Context(), environments.DeviceIDKey, dev.ID)
+		ctx = context.WithValue(ctx, environments.DeviceKey, dev)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 

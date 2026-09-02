@@ -14,6 +14,7 @@ const NAVIGATION = [
   ["/workspaces", "Workspaces", "◇", "Remote workspaces"],
   ["/people", "People & access", "◎", "Users and access"],
   ["/providers", "Providers", "◐", "External providers"],
+  ["/tool-environment", "Tool environment", "⚙", "Agent tool variables and companion grants"],
   ["/ai", "AI", "✦", "AI assistant"],
 ] as const;
 

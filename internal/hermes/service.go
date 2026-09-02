@@ -30,11 +30,20 @@ var (
 
 // HermesClient is the narrow upstream Hermes integration. It is the only
 // way the control plane touches Hermes profiles. The interface is small,
-// testable, and never receives secrets or cookies.
+// testable, and never receives secrets or cookies. It also proxies the
+// official Hermes dashboard APIs for the Nous Portal tool gateway; those
+// methods forward with a short-lived Hermes JWT (never reimplementing auth)
+// and keep the default profile's inference base URL pointed at LiteLLM
+// (http://litellm:4000) regardless of Nous connection.
 type HermesClient interface {
 	EnsureProfile(ctx context.Context, id, displayAlias string) error
 	UpdateAlias(ctx context.Context, id, displayAlias string) error
 	DeleteProfile(ctx context.Context, id string) error
+	ListProvidersOAuth(ctx context.Context) ([]ProviderOAuth, error)
+	StartNousOAuth(ctx context.Context) (*NousOAuthSession, error)
+	PollNousOAuth(ctx context.Context, sessionID string) (*NousOAuthSession, error)
+	SetToolsetProvider(ctx context.Context, toolsetName, provider string) error
+	ListToolsets(ctx context.Context) ([]Toolset, error)
 }
 
 // NoopHermesClient does nothing. Used in tests and when Hermes is disabled.
@@ -43,6 +52,21 @@ type NoopHermesClient struct{}
 func (NoopHermesClient) EnsureProfile(_ context.Context, _, _ string) error { return nil }
 func (NoopHermesClient) UpdateAlias(_ context.Context, _, _ string) error   { return nil }
 func (NoopHermesClient) DeleteProfile(_ context.Context, _ string) error    { return nil }
+func (NoopHermesClient) ListProvidersOAuth(_ context.Context) ([]ProviderOAuth, error) {
+	return nil, nil
+}
+func (NoopHermesClient) StartNousOAuth(_ context.Context) (*NousOAuthSession, error) {
+	return nil, fmt.Errorf("%w: hermes not configured", ErrNotFound)
+}
+func (NoopHermesClient) PollNousOAuth(_ context.Context, _ string) (*NousOAuthSession, error) {
+	return nil, fmt.Errorf("%w: hermes not configured", ErrNotFound)
+}
+func (NoopHermesClient) SetToolsetProvider(_ context.Context, _, _ string) error {
+	return fmt.Errorf("%w: hermes not configured", ErrNotFound)
+}
+func (NoopHermesClient) ListToolsets(_ context.Context) ([]Toolset, error) {
+	return nil, nil
+}
 
 // EventSink is a package-local normalized event sink.
 type EventSink interface {
@@ -1356,6 +1380,38 @@ func (s *Service) UpsertRemoteConnection(ctx context.Context, profileID, serverU
 // write browser storage; the official Hermes Desktop performs its own auth flow.
 func (s *Service) ProvisionRemoteConnection(ctx context.Context, profileID string) (*RemoteConnection, error) {
 	return s.RemoteConnectionInfo(ctx, profileID)
+}
+
+// --- Nous Portal tool gateway proxy ---
+// These methods keep the default profile's inference base URL pointed at
+// LiteLLM (http://litellm:4000 / https://models.<domain>/v1) regardless of
+// Nous connection; they only affect tool providers via the Hermes dashboard
+// API and never switch HERMES_MODEL_GATEWAY_URL.
+
+// ListProvidersOAuth proxies GET /api/providers/oauth via the Hermes client
+// with a Hermes JWT. It does not reimplement Hermes auth.
+func (s *Service) ListProvidersOAuth(ctx context.Context) ([]ProviderOAuth, error) {
+	return s.client.ListProvidersOAuth(ctx)
+}
+
+// StartNousOAuth proxies POST /api/providers/oauth/nous/start.
+func (s *Service) StartNousOAuth(ctx context.Context) (*NousOAuthSession, error) {
+	return s.client.StartNousOAuth(ctx)
+}
+
+// PollNousOAuth proxies GET /api/providers/oauth/nous/poll/{session_id}.
+func (s *Service) PollNousOAuth(ctx context.Context, sessionID string) (*NousOAuthSession, error) {
+	return s.client.PollNousOAuth(ctx, sessionID)
+}
+
+// SetToolsetProvider proxies PUT /api/tools/toolsets/{name}/provider.
+func (s *Service) SetToolsetProvider(ctx context.Context, toolsetName, provider string) error {
+	return s.client.SetToolsetProvider(ctx, toolsetName, provider)
+}
+
+// ListToolsets proxies GET /api/tools/toolsets.
+func (s *Service) ListToolsets(ctx context.Context) ([]Toolset, error) {
+	return s.client.ListToolsets(ctx)
 }
 
 // --- helpers ---

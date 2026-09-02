@@ -4,6 +4,7 @@ import (
 	"github.com/omahab/omahab/internal/apps"
 	"github.com/omahab/omahab/internal/backups"
 	"github.com/omahab/omahab/internal/emailing"
+	"github.com/omahab/omahab/internal/environments"
 	"github.com/omahab/omahab/internal/events"
 	"github.com/omahab/omahab/internal/health"
 	"github.com/omahab/omahab/internal/hermes"
@@ -58,6 +59,8 @@ func AllMigrations() []store.Migration {
 	out = append(out, knowledge.Migrations()...)
 	// emailing
 	out = append(out, emailing.Migrations()...)
+	// environments (companion devices + enrollments + env meta)
+	out = append(out, environments.Migrations()...)
 	// installer
 	out = append(out, installer.Migrations()...)
 	// controlplane glue (users, release tokens)

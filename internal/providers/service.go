@@ -49,12 +49,39 @@ const (
 	EntitlementUnknown     = "unknown"
 )
 
+
+
+
 // Alias names routed to applications via the gateway.
 const (
 	AliasFast      = "omahab/fast"
 	AliasBalanced  = "omahab/balanced"
 	AliasReasoning = "omahab/reasoning"
 	AliasEmbedding = "omahab/embedding"
+)
+
+
+// ManagedBy values for provider_credentials.managed_by.
+const (
+	ManagedByOmahab  = "omahab"
+	ManagedByLiteLLM = "litellm"
+)
+
+// Alias for compatibility with differing capitalization expectations.
+const ManagedByLitellm = ManagedByLiteLLM
+
+
+// ExternalRef values for provider_credentials.external_ref (litellm-managed).
+const (
+	ExternalRefChatGPT = "chatgpt"
+	ExternalRefXAI     = "xai_oauth"
+)
+
+// OwnerKind values for provider_virtual_keys.owner_kind.
+const (
+	OwnerKindHermes  = "hermes"
+	OwnerKindDevice  = "device"
+	OwnerKindHarness = "harness"
 )
 
 var allowedProviders = map[string]bool{
@@ -97,6 +124,22 @@ var allowedEntitlements = map[string]bool{
 	EntitlementEntitled:    true,
 	EntitlementNotEntitled: true,
 	EntitlementUnknown:     true,
+}
+
+var allowedManagedBy = map[string]bool{
+	ManagedByOmahab:  true,
+	ManagedByLiteLLM: true,
+}
+
+var allowedExternalRef = map[string]bool{
+	ExternalRefChatGPT: true,
+	ExternalRefXAI:     true,
+}
+
+var allowedOwnerKind = map[string]bool{
+	OwnerKindHermes:  true,
+	OwnerKindDevice:  true,
+	OwnerKindHarness: true,
 }
 
 // SupportedProviders returns the sanctioned provider list.
@@ -188,13 +231,17 @@ func (NoopOAuthClient) RefreshToken(_ context.Context, _ string, _ domain.ID) (*
 func (NoopOAuthClient) RevokeToken(_ context.Context, _ string, _ domain.ID) error { return nil }
 
 // Credential is the persisted metadata for a provider credential.
-// Secret material is never stored here; SecretID references the secrets broker.
+// Secret material is never stored here; SecretID references the secrets broker
+// for omahab-managed rows. For litellm-managed subscription rows, SecretID is
+// empty and ExternalRef identifies the upstream OAuth linkage.
 type Credential struct {
 	ID                 domain.ID     `json:"id"`
 	Provider           string        `json:"provider"`
 	CredentialType     string        `json:"credential_type"`
 	DisplayName        string        `json:"display_name,omitempty"`
-	SecretID           domain.ID     `json:"secret_id"`
+	SecretID           domain.ID     `json:"secret_id,omitempty"`
+	ManagedBy          string        `json:"managed_by"`
+	ExternalRef        *string       `json:"external_ref,omitempty"`
 	Entitlement        string        `json:"entitlement"`
 	EntitlementMessage string        `json:"entitlement_message,omitempty"`
 	ExpiresAt          *time.Time    `json:"expires_at,omitempty"`
@@ -215,15 +262,25 @@ type Alias struct {
 
 // VirtualKey is the persisted metadata for a scoped virtual key.
 // The plaintext token is never persisted; only its hash is stored.
+// Deprecated: ValidateVirtualKey is audit-only; LiteLLM is authoritative for request authentication.
+// This struct retains hash/prefix for audit correlation, plus gateway linkage and ownership metadata.
 type VirtualKey struct {
-	ID        domain.ID  `json:"id"`
-	Name      string     `json:"name"`
-	KeyPrefix string     `json:"key_prefix"`
-	Scopes    []string   `json:"scopes"`
-	ExpiresAt *time.Time `json:"expires_at,omitempty"`
-	RevokedAt *time.Time `json:"revoked_at,omitempty"`
-	CreatedAt time.Time  `json:"created_at"`
-	UpdatedAt time.Time  `json:"updated_at"`
+	ID               domain.ID  `json:"id"`
+	Name             string     `json:"name"`
+	KeyPrefix        string     `json:"key_prefix"`
+	Scopes           []string   `json:"scopes"`
+	GatewayKeyID     *string    `json:"gateway_key_id,omitempty"`
+	OwnerKind        *string    `json:"owner_kind,omitempty"`
+	OwnerID          *string    `json:"owner_id,omitempty"`
+	RPMLimit         *int       `json:"rpm_limit,omitempty"`
+	TPMLimit         *int       `json:"tpm_limit,omitempty"`
+	ConcurrencyLimit *int       `json:"concurrency_limit,omitempty"`
+	BudgetAmount     *float64   `json:"budget_amount,omitempty"`
+	BudgetDuration   *string    `json:"budget_duration,omitempty"`
+	ExpiresAt        *time.Time `json:"expires_at,omitempty"`
+	RevokedAt        *time.Time `json:"revoked_at,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
 }
 
 // VirtualKeyWithToken is returned once when a virtual key is issued.
@@ -235,10 +292,13 @@ type VirtualKeyWithToken struct {
 
 // CreateCredentialInput holds fields for credential creation.
 type CreateCredentialInput struct {
+	ID             domain.ID `json:"id,omitempty"`
 	Provider       string
 	CredentialType string
 	DisplayName    string
 	SecretID       domain.ID
+	ManagedBy      string
+	ExternalRef    *string
 	ExpiresAt      *time.Time
 }
 
@@ -261,19 +321,37 @@ type SetAliasInput struct {
 
 // IssueVirtualKeyInput holds fields for virtual key issuance.
 type IssueVirtualKeyInput struct {
-	Name      string
-	Scopes    []string
-	ExpiresAt *time.Time
+	Name             string
+	Scopes           []string
+	ExpiresAt        *time.Time
+	OwnerKind        *string
+	OwnerID          *string
+	RPMLimit         *int
+	TPMLimit         *int
+	ConcurrencyLimit *int
+	BudgetAmount     *float64
+	BudgetDuration   *string
+}
+
+// virtualKeyGateway is the narrow gateway contract needed by Service.IssueVirtualKey
+// to store the LiteLLM-side key ID. The full GatewayAdmin (Health, ReconcileModels,
+// IssueVirtualKey, RevokeVirtualKey, StartOAuth, PollOAuth, ForwardOAuthCallback,
+// ProbeModel) is defined in litellm.go; litellmGateway implements this narrow
+// interface as well so Service can call it without a package-level duplicate.
+type virtualKeyGateway interface {
+	IssueVirtualKey(ctx context.Context, vk VirtualKey) (string, error)
+	RevokeVirtualKey(ctx context.Context, gatewayKeyID string) error
 }
 
 // Service brokers provider credential metadata, aliases, and scoped virtual
 // keys. Secret material never transits this service: SecretID references the
 // secrets broker, and virtual-key tokens are persisted only as hashes.
 type Service struct {
-	db    *sql.DB
-	oauth OAuthClient
-	sink  EventSink
-	now   func() time.Time
+	db        *sql.DB
+	oauth     OAuthClient
+	sink      EventSink
+	now       func() time.Time
+	vkGateway virtualKeyGateway
 }
 
 // New creates a Service. oauth and sink may be nil.
@@ -295,6 +373,12 @@ func NewWithSink(db *sql.DB, oauth OAuthClient, sink EventSink) *Service {
 	return &Service{db: db, oauth: oauth, sink: sink, now: func() time.Time { return time.Now().UTC() }}
 }
 
+// SetVirtualKeyGateway injects the gateway used to issue/revoke virtual keys
+// in LiteLLM. The full GatewayAdmin in litellm.go satisfies this narrow interface.
+func (s *Service) SetVirtualKeyGateway(gw virtualKeyGateway) {
+	s.vkGateway = gw
+}
+
 // SupportedProvidersForService returns the providers this service instance supports.
 func (s *Service) SupportedProviders() []string { return SupportedProviders() }
 
@@ -312,12 +396,25 @@ func (s *Service) nowUTC() time.Time {
 // --- Credential methods ---
 
 // CreateCredential validates inputs and persists credential metadata.
-// Provider tokens are never stored or returned; only SecretID is persisted.
+// Provider tokens are never stored or returned; only SecretID is persisted for
+// omahab-managed rows. For litellm-managed subscription rows, ExternalRef must
+// be set and SecretID must be empty.
 func (s *Service) CreateCredential(ctx context.Context, in CreateCredentialInput) (*Credential, error) {
 	provider := strings.TrimSpace(strings.ToLower(in.Provider))
 	credType := strings.TrimSpace(strings.ToLower(in.CredentialType))
 	displayName := strings.TrimSpace(in.DisplayName)
 	secretID := domain.ID(strings.TrimSpace(string(in.SecretID)))
+	managedBy := strings.TrimSpace(strings.ToLower(in.ManagedBy))
+	if managedBy == "" {
+		managedBy = ManagedByOmahab
+	}
+	var externalRef *string
+	if in.ExternalRef != nil {
+		v := strings.TrimSpace(*in.ExternalRef)
+		if v != "" {
+			externalRef = &v
+		}
+	}
 
 	if provider == "" {
 		return nil, fmt.Errorf("%w: provider is required", ErrValidation)
@@ -335,14 +432,64 @@ func (s *Service) CreateCredential(ctx context.Context, in CreateCredentialInput
 	if m, ok := allowedProviderCredentialType[provider]; !ok || !m[credType] {
 		return nil, fmt.Errorf("%w: credential type %q not allowed for provider %q", ErrValidation, credType, provider)
 	}
-	if strings.TrimSpace(string(secretID)) == "" {
-		return nil, fmt.Errorf("%w: secret_id is required", ErrValidation)
+	if !allowedManagedBy[managedBy] {
+		return nil, fmt.Errorf("%w: unsupported managed_by %q", ErrValidation, managedBy)
 	}
-	if strings.Contains(string(secretID), "\x00") {
-		return nil, fmt.Errorf("%w: secret_id contains NUL", ErrValidation)
+	// Enforce credential_type <-> managed_by mapping: api_key is omahab, oauth is litellm.
+	if credType == CredentialTypeAPIKey && managedBy != ManagedByOmahab {
+		return nil, fmt.Errorf("%w: credential type %q must be managed_by=%q", ErrValidation, credType, ManagedByOmahab)
 	}
-
-	id := domain.ID(newID())
+	if credType == CredentialTypeOAuth && managedBy != ManagedByLiteLLM {
+		return nil, fmt.Errorf("%w: credential type %q must be managed_by=%q", ErrValidation, credType, ManagedByLiteLLM)
+	}
+	// Enforce managed_by / secret_id / external_ref correlation.
+	switch managedBy {
+	case ManagedByOmahab:
+		if strings.TrimSpace(string(secretID)) == "" {
+			return nil, fmt.Errorf("%w: secret_id is required for managed_by=omahab", ErrValidation)
+		}
+		if strings.Contains(string(secretID), "\x00") {
+			return nil, fmt.Errorf("%w: secret_id contains NUL", ErrValidation)
+		}
+		if externalRef != nil {
+			return nil, fmt.Errorf("%w: external_ref must be null for managed_by=omahab", ErrValidation)
+		}
+	case ManagedByLiteLLM:
+		if strings.TrimSpace(string(secretID)) != "" {
+			return nil, fmt.Errorf("%w: secret_id must be empty for managed_by=litellm", ErrValidation)
+		}
+		if externalRef == nil || *externalRef == "" {
+			return nil, fmt.Errorf("%w: external_ref is required for managed_by=litellm", ErrValidation)
+		}
+		er := strings.TrimSpace(strings.ToLower(*externalRef))
+		if !allowedExternalRef[er] {
+			return nil, fmt.Errorf("%w: unsupported external_ref %q", ErrValidation, *externalRef)
+		}
+		// Normalize and enforce provider <-> external_ref mapping.
+		switch provider {
+		case ProviderChatGPT:
+			if er != ExternalRefChatGPT {
+				return nil, fmt.Errorf("%w: provider %q requires external_ref %q", ErrValidation, provider, ExternalRefChatGPT)
+			}
+		case ProviderXAI:
+			if er != ExternalRefXAI {
+				return nil, fmt.Errorf("%w: provider %q requires external_ref %q", ErrValidation, provider, ExternalRefXAI)
+			}
+		default:
+			// For non-subscription providers, litellm-managed is not expected; already enforced via credType mapping,
+			// but if they reach here, ensure external_ref is still valid.
+		}
+		*externalRef = er
+	default:
+		return nil, fmt.Errorf("%w: unsupported managed_by %q", ErrValidation, managedBy)
+	}
+	id := domain.ID(strings.TrimSpace(string(in.ID)))
+	if id == "" {
+		id = domain.ID(newID())
+	}
+	if strings.Contains(string(id), "\x00") {
+		return nil, fmt.Errorf("%w: id contains NUL", ErrValidation)
+	}
 	now := s.nowUTC()
 	cred := &Credential{
 		ID:             id,
@@ -350,6 +497,8 @@ func (s *Service) CreateCredential(ctx context.Context, in CreateCredentialInput
 		CredentialType: credType,
 		DisplayName:    displayName,
 		SecretID:       secretID,
+		ManagedBy:      managedBy,
+		ExternalRef:    externalRef,
 		Entitlement:    EntitlementUnknown,
 		Health:         domain.HealthUnknown,
 		CreatedAt:      now,
@@ -359,11 +508,23 @@ func (s *Service) CreateCredential(ctx context.Context, in CreateCredentialInput
 		t := in.ExpiresAt.UTC()
 		cred.ExpiresAt = &t
 	}
+	var secretIDVal any
+	if managedBy == ManagedByOmahab {
+		secretIDVal = string(cred.SecretID)
+	} else {
+		secretIDVal = nil
+	}
+	var externalRefVal any
+	if externalRef != nil {
+		externalRefVal = *externalRef
+	} else {
+		externalRefVal = nil
+	}
 
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO provider_credentials (id, provider, credential_type, display_name, secret_id, entitlement, entitlement_message, expires_at, health, last_checked_at, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		string(cred.ID), cred.Provider, cred.CredentialType, cred.DisplayName, string(cred.SecretID),
+		`INSERT INTO provider_credentials (id, provider, credential_type, display_name, secret_id, managed_by, external_ref, entitlement, entitlement_message, expires_at, health, last_checked_at, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		string(cred.ID), cred.Provider, cred.CredentialType, cred.DisplayName, secretIDVal, cred.ManagedBy, externalRefVal,
 		cred.Entitlement, cred.EntitlementMessage, timePtrToString(cred.ExpiresAt), string(cred.Health),
 		nil, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
 	)
@@ -380,7 +541,7 @@ func (s *Service) CreateCredential(ctx context.Context, in CreateCredentialInput
 		Severity:   "info",
 		ResourceID: cred.ID,
 		Message:    fmt.Sprintf("provider credential created: %s/%s", provider, credType),
-		Data:       map[string]any{"provider": provider, "credential_type": credType, "secret_id": string(secretID)},
+		Data:       map[string]any{"provider": provider, "credential_type": credType, "managed_by": managedBy},
 		CreatedAt:  now,
 	})
 
@@ -393,7 +554,7 @@ func (s *Service) GetCredential(ctx context.Context, id domain.ID) (*Credential,
 		return nil, fmt.Errorf("%w: id is required", ErrValidation)
 	}
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, provider, credential_type, display_name, secret_id, entitlement, entitlement_message, expires_at, health, last_checked_at, created_at, updated_at
+		`SELECT id, provider, credential_type, display_name, secret_id, managed_by, external_ref, entitlement, entitlement_message, expires_at, health, last_checked_at, created_at, updated_at
 		 FROM provider_credentials WHERE id = ?`, string(id))
 	return scanCredential(row)
 }
@@ -401,7 +562,7 @@ func (s *Service) GetCredential(ctx context.Context, id domain.ID) (*Credential,
 // ListCredentials returns all credentials ordered by provider and creation time.
 func (s *Service) ListCredentials(ctx context.Context) ([]*Credential, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, provider, credential_type, display_name, secret_id, entitlement, entitlement_message, expires_at, health, last_checked_at, created_at, updated_at
+		`SELECT id, provider, credential_type, display_name, secret_id, managed_by, external_ref, entitlement, entitlement_message, expires_at, health, last_checked_at, created_at, updated_at
 		 FROM provider_credentials ORDER BY provider ASC, created_at ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("list credentials: %w", err)
@@ -425,7 +586,7 @@ func (s *Service) ListCredentialsByProvider(ctx context.Context, provider string
 		return nil, fmt.Errorf("%w: unsupported provider %q", ErrValidation, provider)
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, provider, credential_type, display_name, secret_id, entitlement, entitlement_message, expires_at, health, last_checked_at, created_at, updated_at
+		`SELECT id, provider, credential_type, display_name, secret_id, managed_by, external_ref, entitlement, entitlement_message, expires_at, health, last_checked_at, created_at, updated_at
 		 FROM provider_credentials WHERE provider = ? ORDER BY created_at ASC`, provider)
 	if err != nil {
 		return nil, fmt.Errorf("list credentials by provider: %w", err)
@@ -443,6 +604,7 @@ func (s *Service) ListCredentialsByProvider(ctx context.Context, provider string
 }
 
 // UpdateCredential mutates mutable metadata. SecretID rotation is atomic.
+// ManagedBy and ExternalRef are immutable after creation.
 func (s *Service) UpdateCredential(ctx context.Context, id domain.ID, in UpdateCredentialInput) (*Credential, error) {
 	existing, err := s.GetCredential(ctx, id)
 	if err != nil {
@@ -453,9 +615,15 @@ func (s *Service) UpdateCredential(ctx context.Context, id domain.ID, in UpdateC
 		existing.DisplayName = strings.TrimSpace(*in.DisplayName)
 	}
 	if in.SecretID != nil {
+		if existing.ManagedBy == ManagedByLiteLLM {
+			return nil, fmt.Errorf("%w: secret_id cannot be set for litellm-managed credential", ErrValidation)
+		}
 		sid := domain.ID(strings.TrimSpace(string(*in.SecretID)))
 		if strings.TrimSpace(string(sid)) == "" {
 			return nil, fmt.Errorf("%w: secret_id is required", ErrValidation)
+		}
+		if strings.Contains(string(sid), "\x00") {
+			return nil, fmt.Errorf("%w: secret_id contains NUL", ErrValidation)
 		}
 		existing.SecretID = sid
 	}
@@ -485,9 +653,15 @@ func (s *Service) UpdateCredential(ctx context.Context, id domain.ID, in UpdateC
 	now := s.nowUTC()
 	existing.UpdatedAt = now
 
+	var secretIDVal any
+	if existing.ManagedBy == ManagedByOmahab {
+		secretIDVal = string(existing.SecretID)
+	} else {
+		secretIDVal = nil
+	}
 	_, err = s.db.ExecContext(ctx,
 		`UPDATE provider_credentials SET display_name = ?, secret_id = ?, entitlement = ?, entitlement_message = ?, expires_at = ?, health = ?, updated_at = ? WHERE id = ?`,
-		existing.DisplayName, string(existing.SecretID), existing.Entitlement, existing.EntitlementMessage,
+		existing.DisplayName, secretIDVal, existing.Entitlement, existing.EntitlementMessage,
 		timePtrToString(existing.ExpiresAt), string(existing.Health), now.Format(time.RFC3339Nano), string(id),
 	)
 	if err != nil {
@@ -867,6 +1041,9 @@ func (s *Service) ResolveAlias(ctx context.Context, name string) (*Credential, s
 
 // IssueVirtualKey generates a scoped virtual key. The plaintext token is returned once;
 // only its SHA256 hash is persisted. Scopes must be known aliases when non-empty.
+// Owner and limit fields are optional but validated when present.
+// If a virtualKeyGateway is configured, the key is first issued in the gateway (LiteLLM)
+// and the returned gateway_key_id is persisted; if the gateway fails, no row is persisted.
 func (s *Service) IssueVirtualKey(ctx context.Context, in IssueVirtualKeyInput) (*VirtualKeyWithToken, error) {
 	name := strings.TrimSpace(in.Name)
 	if name == "" {
@@ -889,6 +1066,72 @@ func (s *Service) IssueVirtualKey(ctx context.Context, in IssueVirtualKeyInput) 
 			return nil, fmt.Errorf("%w: expires_at is in the past", ErrValidation)
 		}
 	}
+	// Validate owner fields.
+	var ownerKind *string
+	if in.OwnerKind != nil {
+		raw := strings.TrimSpace(strings.ToLower(*in.OwnerKind))
+		if raw != "" {
+			if !allowedOwnerKind[raw] {
+				return nil, fmt.Errorf("%w: unsupported owner_kind %q", ErrValidation, *in.OwnerKind)
+			}
+			ownerKind = &raw
+		}
+	}
+	var ownerID *string
+	if in.OwnerID != nil {
+		raw := strings.TrimSpace(*in.OwnerID)
+		if raw != "" {
+			if strings.Contains(raw, "\x00") {
+				return nil, fmt.Errorf("%w: owner_id contains NUL", ErrValidation)
+			}
+			if len(raw) > 128 {
+				return nil, fmt.Errorf("%w: owner_id too long", ErrValidation)
+			}
+			ownerID = &raw
+		}
+	}
+	if ownerKind != nil && ownerID == nil {
+		return nil, fmt.Errorf("%w: owner_id is required when owner_kind is set", ErrValidation)
+	}
+	if ownerID != nil && ownerKind == nil {
+		return nil, fmt.Errorf("%w: owner_kind is required when owner_id is set", ErrValidation)
+	}
+	if in.RPMLimit != nil {
+		if *in.RPMLimit <= 0 {
+			return nil, fmt.Errorf("%w: rpm_limit must be > 0", ErrValidation)
+		}
+	}
+	if in.TPMLimit != nil {
+		if *in.TPMLimit <= 0 {
+			return nil, fmt.Errorf("%w: tpm_limit must be > 0", ErrValidation)
+		}
+	}
+	if in.ConcurrencyLimit != nil {
+		if *in.ConcurrencyLimit <= 0 {
+			return nil, fmt.Errorf("%w: concurrency_limit must be > 0", ErrValidation)
+		}
+	}
+	if in.BudgetAmount != nil {
+		if *in.BudgetAmount <= 0 {
+			return nil, fmt.Errorf("%w: budget_amount must be > 0", ErrValidation)
+		}
+	}
+	if in.BudgetDuration != nil {
+		bd := strings.TrimSpace(*in.BudgetDuration)
+		if bd == "" {
+			return nil, fmt.Errorf("%w: budget_duration cannot be empty", ErrValidation)
+		}
+		if strings.Contains(bd, "\x00") || strings.Contains(bd, "\n") || strings.Contains(bd, "\r") {
+			return nil, fmt.Errorf("%w: budget_duration contains invalid character", ErrValidation)
+		}
+		in.BudgetDuration = &bd
+	}
+	if in.BudgetAmount != nil && in.BudgetDuration == nil {
+		return nil, fmt.Errorf("%w: budget_duration is required when budget_amount is set", ErrValidation)
+	}
+	if in.BudgetDuration != nil && in.BudgetAmount == nil {
+		return nil, fmt.Errorf("%w: budget_amount is required when budget_duration is set", ErrValidation)
+	}
 
 	// Generate 32 random bytes, hex-encoded, prefixed for identification.
 	raw := make([]byte, 32)
@@ -909,26 +1152,74 @@ func (s *Service) IssueVirtualKey(ctx context.Context, in IssueVirtualKeyInput) 
 		expiresAtStr = &v
 	}
 
+	// If gateway is configured, issue there first to obtain gateway_key_id.
+	var gatewayKeyID *string
+	if s.vkGateway != nil {
+		gwVK := VirtualKey{
+			Name:             name,
+			Scopes:           scopes,
+			OwnerKind:        ownerKind,
+			OwnerID:          ownerID,
+			RPMLimit:         in.RPMLimit,
+			TPMLimit:         in.TPMLimit,
+			ConcurrencyLimit: in.ConcurrencyLimit,
+			BudgetAmount:     in.BudgetAmount,
+			BudgetDuration:   in.BudgetDuration,
+		}
+		if in.ExpiresAt != nil {
+			t := in.ExpiresAt.UTC()
+			gwVK.ExpiresAt = &t
+		}
+		gid, err := s.vkGateway.IssueVirtualKey(ctx, gwVK)
+		if err != nil {
+			return nil, fmt.Errorf("issue virtual key via gateway: %w", err)
+		}
+		gidTrim := strings.TrimSpace(gid)
+		if gidTrim != "" {
+			gatewayKeyID = &gidTrim
+		}
+	}
+
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO provider_virtual_keys (id, name, key_hash, key_prefix, scopes, expires_at, revoked_at, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO provider_virtual_keys (id, name, key_hash, key_prefix, scopes, gateway_key_id, owner_kind, owner_id, rpm_limit, tpm_limit, concurrency_limit, budget_amount, budget_duration, expires_at, revoked_at, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		string(id), name, hash, prefix, scopesStr,
+		nullableString(gatewayKeyID),
+		nullableString(ownerKind),
+		nullableString(ownerID),
+		nullableInt(in.RPMLimit),
+		nullableInt(in.TPMLimit),
+		nullableInt(in.ConcurrencyLimit),
+		nullableFloat(in.BudgetAmount),
+		nullableString(in.BudgetDuration),
 		nullableString(expiresAtStr), nil, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
 	)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return nil, fmt.Errorf("%w: virtual key hash collision", ErrAlreadyExists)
 		}
+		// If we had issued in gateway, attempt to revoke to avoid orphan.
+		if gatewayKeyID != nil && s.vkGateway != nil {
+			_ = s.vkGateway.RevokeVirtualKey(ctx, *gatewayKeyID)
+		}
 		return nil, fmt.Errorf("insert virtual key: %w", err)
 	}
 
 	vk := &VirtualKey{
-		ID:        id,
-		Name:      name,
-		KeyPrefix: prefix,
-		Scopes:    scopes,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:               id,
+		Name:             name,
+		KeyPrefix:        prefix,
+		Scopes:           scopes,
+		GatewayKeyID:     gatewayKeyID,
+		OwnerKind:        ownerKind,
+		OwnerID:          ownerID,
+		RPMLimit:         in.RPMLimit,
+		TPMLimit:         in.TPMLimit,
+		ConcurrencyLimit: in.ConcurrencyLimit,
+		BudgetAmount:     in.BudgetAmount,
+		BudgetDuration:   in.BudgetDuration,
+		CreatedAt:        now,
+		UpdatedAt:        now,
 	}
 	if in.ExpiresAt != nil {
 		t := in.ExpiresAt.UTC()
@@ -951,7 +1242,7 @@ func (s *Service) IssueVirtualKey(ctx context.Context, in IssueVirtualKeyInput) 
 // ListVirtualKeys returns virtual-key metadata without hash/plaintext. Ordered by creation time.
 func (s *Service) ListVirtualKeys(ctx context.Context) ([]*VirtualKey, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, name, key_prefix, scopes, expires_at, revoked_at, created_at, updated_at FROM provider_virtual_keys ORDER BY created_at ASC`)
+		`SELECT id, name, key_prefix, scopes, gateway_key_id, owner_kind, owner_id, rpm_limit, tpm_limit, concurrency_limit, budget_amount, budget_duration, expires_at, revoked_at, created_at, updated_at FROM provider_virtual_keys ORDER BY created_at ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("list virtual keys: %w", err)
 	}
@@ -973,7 +1264,7 @@ func (s *Service) GetVirtualKey(ctx context.Context, id domain.ID) (*VirtualKey,
 		return nil, fmt.Errorf("%w: id is required", ErrValidation)
 	}
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, name, key_prefix, scopes, expires_at, revoked_at, created_at, updated_at FROM provider_virtual_keys WHERE id = ?`, string(id))
+		`SELECT id, name, key_prefix, scopes, gateway_key_id, owner_kind, owner_id, rpm_limit, tpm_limit, concurrency_limit, budget_amount, budget_duration, expires_at, revoked_at, created_at, updated_at FROM provider_virtual_keys WHERE id = ?`, string(id))
 	vk, err := scanVirtualKey(row)
 	if err != nil {
 		return nil, err
@@ -982,9 +1273,14 @@ func (s *Service) GetVirtualKey(ctx context.Context, id domain.ID) (*VirtualKey,
 }
 
 // RevokeVirtualKey marks a virtual key as revoked. Idempotent.
+// If the key has a gateway_key_id and a gateway is configured, it also revokes in the gateway.
 func (s *Service) RevokeVirtualKey(ctx context.Context, id domain.ID) error {
 	if strings.TrimSpace(string(id)) == "" {
 		return fmt.Errorf("%w: id is required", ErrValidation)
+	}
+	vk, err := s.GetVirtualKey(ctx, id)
+	if err != nil {
+		return err
 	}
 	now := s.nowUTC()
 	res, err := s.db.ExecContext(ctx,
@@ -1004,8 +1300,25 @@ func (s *Service) RevokeVirtualKey(ctx context.Context, id domain.ID) error {
 		if err != nil {
 			return fmt.Errorf("check virtual key: %w", err)
 		}
-		// Already revoked — idempotent success.
+		// Already revoked — still attempt gateway revoke if needed, but treat as success.
+		if vk.GatewayKeyID != nil && s.vkGateway != nil {
+			_ = s.vkGateway.RevokeVirtualKey(ctx, *vk.GatewayKeyID)
+		}
 		return nil
+	}
+	if vk.GatewayKeyID != nil && s.vkGateway != nil {
+		if err := s.vkGateway.RevokeVirtualKey(ctx, *vk.GatewayKeyID); err != nil {
+			// Gateway revoke failure should not mask local revoke success, but surface as warning.
+			// We still consider the key revoked locally; caller can retry gateway revocation if needed.
+			_ = s.sink.Emit(ctx, domain.Event{
+				ID:         domain.ID(newID()),
+				Type:       "provider.virtual_key.revoke_gateway_failed",
+				Severity:   "warn",
+				ResourceID: id,
+				Message:    fmt.Sprintf("virtual key gateway revoke failed: %v", err),
+				CreatedAt:  now,
+			})
+		}
 	}
 	_ = s.sink.Emit(ctx, domain.Event{
 		ID:         domain.ID(newID()),
@@ -1020,6 +1333,10 @@ func (s *Service) RevokeVirtualKey(ctx context.Context, id domain.ID) error {
 
 // ValidateVirtualKey validates a presented virtual-key token (hash check, expiry, revocation).
 // It does not mark the key as consumed; virtual keys are reusable until revoked/expired.
+//
+// Deprecated: This method is retained for audit correlation and tests only.
+// LiteLLM is authoritative for request authentication; do NOT use this as the
+// request auth path in production. Caller should authenticate via the gateway.
 func (s *Service) ValidateVirtualKey(ctx context.Context, token string) (*VirtualKey, error) {
 	token = strings.TrimSpace(token)
 	if token == "" {
@@ -1031,12 +1348,16 @@ func (s *Service) ValidateVirtualKey(ctx context.Context, token string) (*Virtua
 	}
 	var (
 		id, name, keyPrefix, scopesStr string
+		gatewayKeyID, ownerKind, ownerID sql.NullString
+		rpmLimit, tpmLimit, concurrencyLimit sql.NullInt64
+		budgetAmount sql.NullFloat64
+		budgetDuration sql.NullString
 		expiresAt, revokedAt           sql.NullString
 		createdAt, updatedAt           string
 	)
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, name, key_prefix, scopes, expires_at, revoked_at, created_at, updated_at FROM provider_virtual_keys WHERE key_hash = ?`, hash).
-		Scan(&id, &name, &keyPrefix, &scopesStr, &expiresAt, &revokedAt, &createdAt, &updatedAt)
+		`SELECT id, name, key_prefix, scopes, gateway_key_id, owner_kind, owner_id, rpm_limit, tpm_limit, concurrency_limit, budget_amount, budget_duration, expires_at, revoked_at, created_at, updated_at FROM provider_virtual_keys WHERE key_hash = ?`, hash).
+		Scan(&id, &name, &keyPrefix, &scopesStr, &gatewayKeyID, &ownerKind, &ownerID, &rpmLimit, &tpmLimit, &concurrencyLimit, &budgetAmount, &budgetDuration, &expiresAt, &revokedAt, &createdAt, &updatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrVirtualKeyInvalid
@@ -1053,7 +1374,7 @@ func (s *Service) ValidateVirtualKey(ctx context.Context, token string) (*Virtua
 		}
 	}
 	// Re-parse for VirtualKey struct.
-	vk, err := scanVirtualKeyFromValues(id, name, keyPrefix, scopesStr, expiresAt, revokedAt, createdAt, updatedAt)
+	vk, err := scanVirtualKeyFromValuesExtended(id, name, keyPrefix, scopesStr, gatewayKeyID, ownerKind, ownerID, rpmLimit, tpmLimit, concurrencyLimit, budgetAmount, budgetDuration, expiresAt, revokedAt, createdAt, updatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -1109,12 +1430,15 @@ type credScanner interface{ Scan(dest ...any) error }
 
 func scanCredential(row credScanner) (*Credential, error) {
 	var (
-		id, provider, credType, displayName, secretID string
+		id, provider, credType, displayName string
+		secretID sql.NullString
+		managedBy sql.NullString
+		externalRef sql.NullString
 		entitlement, entitlementMessage               string
 		expiresAt, lastCheckedAt                      sql.NullString
 		health, createdAt, updatedAt                  string
 	)
-	if err := row.Scan(&id, &provider, &credType, &displayName, &secretID, &entitlement, &entitlementMessage, &expiresAt, &health, &lastCheckedAt, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&id, &provider, &credType, &displayName, &secretID, &managedBy, &externalRef, &entitlement, &entitlementMessage, &expiresAt, &health, &lastCheckedAt, &createdAt, &updatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -1127,12 +1451,23 @@ func scanCredential(row credScanner) (*Credential, error) {
 		Provider:           provider,
 		CredentialType:     credType,
 		DisplayName:        displayName,
-		SecretID:           domain.ID(secretID),
 		Entitlement:        entitlement,
 		EntitlementMessage: entitlementMessage,
 		Health:             domain.Health(health),
 		CreatedAt:          ca,
 		UpdatedAt:          ua,
+	}
+	if secretID.Valid {
+		c.SecretID = domain.ID(secretID.String)
+	}
+	if managedBy.Valid {
+		c.ManagedBy = managedBy.String
+	} else {
+		c.ManagedBy = ManagedByOmahab
+	}
+	if externalRef.Valid {
+		er := externalRef.String
+		c.ExternalRef = &er
 	}
 	if expiresAt.Valid {
 		t, _ := time.Parse(time.RFC3339Nano, expiresAt.String)
@@ -1150,19 +1485,27 @@ type vkScanner interface{ Scan(dest ...any) error }
 func scanVirtualKey(row vkScanner) (*VirtualKey, error) {
 	var (
 		id, name, keyPrefix, scopesStr string
+		gatewayKeyID, ownerKind, ownerID sql.NullString
+		rpmLimit, tpmLimit, concurrencyLimit sql.NullInt64
+		budgetAmount sql.NullFloat64
+		budgetDuration sql.NullString
 		expiresAt, revokedAt           sql.NullString
 		createdAt, updatedAt           string
 	)
-	if err := row.Scan(&id, &name, &keyPrefix, &scopesStr, &expiresAt, &revokedAt, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&id, &name, &keyPrefix, &scopesStr, &gatewayKeyID, &ownerKind, &ownerID, &rpmLimit, &tpmLimit, &concurrencyLimit, &budgetAmount, &budgetDuration, &expiresAt, &revokedAt, &createdAt, &updatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, fmt.Errorf("scan virtual key: %w", err)
 	}
-	return scanVirtualKeyFromValues(id, name, keyPrefix, scopesStr, expiresAt, revokedAt, createdAt, updatedAt)
+	return scanVirtualKeyFromValuesExtended(id, name, keyPrefix, scopesStr, gatewayKeyID, ownerKind, ownerID, rpmLimit, tpmLimit, concurrencyLimit, budgetAmount, budgetDuration, expiresAt, revokedAt, createdAt, updatedAt)
 }
 
 func scanVirtualKeyFromValues(id, name, keyPrefix, scopesStr string, expiresAt, revokedAt sql.NullString, createdAt, updatedAt string) (*VirtualKey, error) {
+	return scanVirtualKeyFromValuesExtended(id, name, keyPrefix, scopesStr, sql.NullString{}, sql.NullString{}, sql.NullString{}, sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, sql.NullFloat64{}, sql.NullString{}, expiresAt, revokedAt, createdAt, updatedAt)
+}
+
+func scanVirtualKeyFromValuesExtended(id, name, keyPrefix, scopesStr string, gatewayKeyID, ownerKind, ownerID sql.NullString, rpmLimit, tpmLimit, concurrencyLimit sql.NullInt64, budgetAmount sql.NullFloat64, budgetDuration sql.NullString, expiresAt, revokedAt sql.NullString, createdAt, updatedAt string) (*VirtualKey, error) {
 	ca, _ := time.Parse(time.RFC3339Nano, createdAt)
 	ua, _ := time.Parse(time.RFC3339Nano, updatedAt)
 	vk := &VirtualKey{
@@ -1174,6 +1517,38 @@ func scanVirtualKeyFromValues(id, name, keyPrefix, scopesStr string, expiresAt, 
 	}
 	if scopesStr != "" {
 		vk.Scopes = strings.Split(scopesStr, ",")
+	}
+	if gatewayKeyID.Valid {
+		v := gatewayKeyID.String
+		vk.GatewayKeyID = &v
+	}
+	if ownerKind.Valid {
+		v := ownerKind.String
+		vk.OwnerKind = &v
+	}
+	if ownerID.Valid {
+		v := ownerID.String
+		vk.OwnerID = &v
+	}
+	if rpmLimit.Valid {
+		v := int(rpmLimit.Int64)
+		vk.RPMLimit = &v
+	}
+	if tpmLimit.Valid {
+		v := int(tpmLimit.Int64)
+		vk.TPMLimit = &v
+	}
+	if concurrencyLimit.Valid {
+		v := int(concurrencyLimit.Int64)
+		vk.ConcurrencyLimit = &v
+	}
+	if budgetAmount.Valid {
+		v := budgetAmount.Float64
+		vk.BudgetAmount = &v
+	}
+	if budgetDuration.Valid {
+		v := budgetDuration.String
+		vk.BudgetDuration = &v
 	}
 	if expiresAt.Valid {
 		t, _ := time.Parse(time.RFC3339Nano, expiresAt.String)
@@ -1207,6 +1582,20 @@ func nullableString(s *string) any {
 		return nil
 	}
 	return *s
+}
+
+func nullableInt(v *int) any {
+	if v == nil {
+		return nil
+	}
+	return *v
+}
+
+func nullableFloat(v *float64) any {
+	if v == nil {
+		return nil
+	}
+	return *v
 }
 
 func newID() string {

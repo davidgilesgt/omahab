@@ -6,6 +6,7 @@ import (
 
 	"github.com/omahab/omahab/internal/domain"
 	"github.com/omahab/omahab/internal/health"
+	"github.com/omahab/omahab/internal/hermes"
 	"github.com/omahab/omahab/internal/identity"
 	"github.com/omahab/omahab/internal/knowledge"
 )
@@ -33,6 +34,7 @@ type ExposureState struct {
 }
 
 // ProviderCredential represents a model provider credential (metadata only).
+// Value and secret_id are never returned; managed_by distinguishes API-key vs subscription.
 type ProviderCredential struct {
 	ID          domain.ID  `json:"id"`
 	Provider    string     `json:"provider"`
@@ -40,9 +42,115 @@ type ProviderCredential struct {
 	Kind        string     `json:"kind"`
 	Status      string     `json:"status"`
 	Configured  bool       `json:"configured"`
+	ManagedBy   string     `json:"managed_by"`
+	ExternalRef *string    `json:"external_ref,omitempty"`
 	Entitlement *string    `json:"entitlement,omitempty"`
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 	UpdatedAt   time.Time  `json:"updated_at"`
+}
+
+// ModelAlias is a stable omahab/* alias routed via LiteLLM.
+type ModelAlias struct {
+	Name          string    `json:"name"`
+	CredentialID  domain.ID `json:"credential_id"`
+	Model         string    `json:"model"`
+	FallbackOrder []string  `json:"fallback_order,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+// SetModelAliasRequest is the body for PUT /api/v1/model-aliases/{name}.
+type SetModelAliasRequest struct {
+	CredentialID  string   `json:"credential_id"`
+	Model         string   `json:"model"`
+	FallbackOrder []string `json:"fallback_order,omitempty"`
+}
+
+// ModelKey is metadata for a scoped LiteLLM virtual key (plaintext never returned except once on create).
+type ModelKey struct {
+	ID          domain.ID `json:"id"`
+	Name        string    `json:"name"`
+	KeyPrefix   string    `json:"key_prefix"`
+	OwnerKind   string    `json:"owner_kind"`
+	OwnerID     string    `json:"owner_id"`
+	Scopes      []string  `json:"scopes"`
+	RPM         *int      `json:"rpm,omitempty"`
+	TPM         *int      `json:"tpm,omitempty"`
+	Concurrency *int      `json:"concurrency,omitempty"`
+	Budget      *float64  `json:"budget,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
+}
+
+// CreateModelKeyRequest is the body for POST /api/v1/model-keys.
+type CreateModelKeyRequest struct {
+	Name        string   `json:"name"`
+	OwnerKind   string   `json:"owner_kind"`
+	OwnerID     string   `json:"owner_id"`
+	Scopes      []string `json:"scopes,omitempty"`
+	RPM         *int     `json:"rpm,omitempty"`
+	TPM         *int     `json:"tpm,omitempty"`
+	Concurrency *int     `json:"concurrency,omitempty"`
+	Budget      *float64 `json:"budget,omitempty"`
+	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
+}
+
+// OAuthSession is the safe OAuth session returned to clients; never includes device codes, tokens, or master key.
+type OAuthSession struct {
+	ID              string  `json:"id"`
+	Provider        string  `json:"provider"`
+	Flow            string  `json:"flow"`
+	VerificationURL string  `json:"verification_url"`
+	UserCode        *string `json:"user_code,omitempty"`
+	CallbackPort    *int    `json:"callback_port,omitempty"`
+	ExpiresAt       time.Time `json:"expires_at"`
+	Status          string  `json:"status"`
+}
+
+// StartProviderOAuthRequest is the body for POST /api/v1/provider-oauth/{provider}/start.
+type StartProviderOAuthRequest struct {
+	Flow string `json:"flow"`
+}
+
+// ForwardProviderOAuthCallbackRequest is the body for POST /api/v1/provider-oauth/{provider}/callback/{session_id}.
+type ForwardProviderOAuthCallbackRequest struct {
+	CallbackPath string `json:"callback_path"`
+}
+
+// CompanionDevice is a placeholder for Phase 6 enrollment (device record).
+// TODO Phase 6: implement full companion device lifecycle.
+type CompanionDevice struct {
+	ID                 domain.ID  `json:"id"`
+	Name               string     `json:"name"`
+	AllowProviderOAuth bool       `json:"allow_provider_oauth"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+}
+
+// CompanionEnrollment is a placeholder for Phase 6 single-use enrollment codes.
+// TODO Phase 6: implement hashing, expiry, and consumption.
+type CompanionEnrollment struct {
+	ID        domain.ID `json:"id"`
+	ExpiresAt time.Time `json:"expires_at"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// ToolEnvEntry is metadata for a tool-environment variable (no value).
+type ToolEnvEntry struct {
+	Name      string    `json:"name"`
+	Version   int       `json:"version"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// PutToolEnvRequest is the body for PUT /api/v1/tool-environment/{NAME}
+type PutToolEnvRequest struct {
+	Value string `json:"value"`
+}
+
+// ToolEnvListResponse is the response for GET /api/v1/tool-environment
+type ToolEnvListResponse struct {
+	Items []ToolEnvEntry `json:"items"`
 }
 
 // RecoverySession is returned from identity recovery endpoints.
@@ -302,6 +410,34 @@ type Backend interface {
 	CreateProviderCredential(ctx context.Context, req CreateProviderCredentialRequest) (ProviderCredential, error)
 	DeleteProviderCredential(ctx context.Context, id domain.ID) error
 
+	// Model gateway (LiteLLM) — provider/alias/virtual-key wiring
+	ListModelAliases(ctx context.Context) ([]ModelAlias, error)
+	SetModelAlias(ctx context.Context, name string, req SetModelAliasRequest) (ModelAlias, error)
+	ListModelKeys(ctx context.Context, p Pagination) ([]ModelKey, error)
+	// CreateModelKey returns the created key metadata plus plaintext token once.
+	// The plaintext token is returned in the `key` field of the response envelope and never persisted.
+	CreateModelKey(ctx context.Context, req CreateModelKeyRequest) (ModelKey, string, error)
+	DeleteModelKey(ctx context.Context, id domain.ID) error
+
+	// Provider OAuth (subscription) — safe session, no secrets
+	StartProviderOAuth(ctx context.Context, provider string, req StartProviderOAuthRequest) (OAuthSession, error)
+	PollProviderOAuth(ctx context.Context, provider, sessionID string) (OAuthSession, error)
+	// ForwardProviderOAuthCallback forwards only the /callback?<query> path to LiteLLM's fixed loopback 127.0.0.1:56121.
+	// Only device-authenticated companions with allow_provider_oauth=true may call; admin bearer is rejected.
+	ForwardProviderOAuthCallback(ctx context.Context, provider, sessionID string, req ForwardProviderOAuthCallbackRequest) (OAuthSession, error)
+
+	// Companion / enrollment (Phase 6 stubs) — TODO: implement full lifecycle
+	ListCompanionDevices(ctx context.Context, p Pagination) ([]CompanionDevice, error)
+	CreateCompanionEnrollment(ctx context.Context) (CompanionEnrollment, string, error)
+	EnrollCompanion(ctx context.Context, code string) (string, error)
+	RevokeCompanionDevice(ctx context.Context, id domain.ID) error
+	SetDeviceAllowOAuth(ctx context.Context, id domain.ID, allow bool) (CompanionDevice, error)
+	// GetCompanionEnvironment is device-authenticated and returns raw values with ETag; admin bearer rejected.
+	GetCompanionEnvironment(ctx context.Context, deviceToken string) (map[string]string, string, error)
+	// Tool environment (server authoritative singleton agent-tools)
+	ListToolEnvironments(ctx context.Context) ([]ToolEnvEntry, error)
+	PutToolEnvironment(ctx context.Context, name, value string) (ToolEnvEntry, error)
+	DeleteToolEnvironment(ctx context.Context, name string) error
 	// Email ingestion
 	IngestEmail(ctx context.Context, req EmailIngestRequest) (domain.EmailMessage, error)
 	ListEmailMessages(ctx context.Context, p Pagination) ([]domain.EmailMessage, error)
@@ -342,12 +478,28 @@ type Backend interface {
 	GetUserGroups(ctx context.Context, userID string) ([]identity.Group, error)
 	SetUserGroups(ctx context.Context, userID string, groupIDs []string) error
 
+	// Hermes Nous Portal tool gateway proxy — admin only, forwards with Hermes JWT.
+	// Inference remains on LiteLLM (http://litellm:4000); Nous only affects tool providers.
+	ListHermesProvidersOAuth(ctx context.Context) ([]hermes.ProviderOAuth, error)
+	StartHermesNousOAuth(ctx context.Context) (*hermes.NousOAuthSession, error)
+	PollHermesNousOAuth(ctx context.Context, sessionID string) (*hermes.NousOAuthSession, error)
+	SetHermesToolsetProvider(ctx context.Context, toolsetName, provider string) error
+	ListHermesToolsets(ctx context.Context) ([]hermes.Toolset, error)
+
 	// Setup aggregates first-run provisioning state.
 	GetSetupStatus(ctx context.Context) (SetupStatus, error)
 	TriggerSetupReconcile(ctx context.Context) (bool, error)
+	SetupWoodpecker(ctx context.Context, req SetupWoodpeckerRequest) error
 
 	// Email routing gated on verification
 	EnsureEmailRoute(ctx context.Context, recipient string) error
+}
+
+// SetupWoodpeckerRequest is the body for PUT /api/v1/setup/woodpecker.
+// Token is never returned and must not be logged.
+type SetupWoodpeckerRequest struct {
+	Username string `json:"username"`
+	Token    string `json:"token"`
 }
 
 // SetupStatus is the aggregated first-run setup checklist state.

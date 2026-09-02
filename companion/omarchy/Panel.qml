@@ -37,17 +37,28 @@ Panel {
     { label: "Active runners", value: client.activeRunners, urgent: false },
     { label: "Waiting agents", value: client.waitingAgents, urgent: client.waitingAgents > 0 },
     { label: "Sync conflicts", value: client.syncConflicts, urgent: client.syncConflicts > 0 },
-    { label: "Unread events", value: client.unreadEvents, urgent: client.unreadEvents > 0 }
+    { label: "Unread events", value: client.unreadEvents, urgent: client.unreadEvents > 0 },
+    { label: "Tool variables", value: (client.environmentVariableCount + " · rev " + client.environmentRevision) + (client.environmentError !== "" ? " · error" : ""), urgent: client.environmentError !== "" }
   ]
 
-  readonly property var actions: [
+  readonly property var baseActions: [
     { label: "Open AI", action: "open-ai", icon: "󰚩", requiresOnline: true },
     { label: "New Project", action: "project.new", icon: "󰙅", requiresOnline: true },
     { label: "Clone Project", action: "project.clone", icon: "󰜘", requiresOnline: true },
     { label: "Start or Resume Runner", action: "runner.start", icon: "󰆍", requiresOnline: true },
     { label: "Open Omahab", action: "open-omahab", icon: "󰖟", requiresOnline: true },
+    { label: "Sync tool variables", action: "environment.sync", icon: "󰑓", requiresOnline: true },
     { label: "Diagnose Connection", action: "diagnose", icon: "󰒓", requiresOnline: false }
   ]
+
+  readonly property var actions: {
+    var list = baseActions.slice()
+    if (client.hasXaiOAuthSession) {
+      // Insert Connect xAI just before Diagnose to keep Diagnose last
+      list.splice(list.length - 1, 0, { label: "Connect xAI subscription", action: "xai.oauth.connect", icon: "󰭹", requiresOnline: true })
+    }
+    return list
+  }
 
   function actionEnabled(action) {
     if (client.actionBusy || !client.clientdReachable) return false

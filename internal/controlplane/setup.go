@@ -204,6 +204,7 @@ func (b *Backend) runReservedSetup(ctx context.Context) error {
 		{"secrets", b.setupPhaseSecrets},
 		{"core_apps", b.setupPhaseCoreApps},
 		{"oidc", b.setupPhaseOIDC},
+		{"dependent_apps", b.setupPhaseDependentApps},
 		{"exposure", b.setupPhaseExposure},
 	}
 	for _, p := range phases {
@@ -584,6 +585,15 @@ func (b *Backend) setupPhaseSecrets(ctx context.Context) error {
 	}
 	// Compose bind-mounts this path; Docker refuses a missing source even when unused.
 	sourcesSet["maxmind_license"] = true
+	// Ensure Woodpecker secrets are always materialized even if catalog filtering
+	// defers the woodpecker bundle to dependent_apps; the files must exist
+	// before OIDC can atomically replace client credentials.
+	sourcesSet["woodpecker_db_password"] = true
+	sourcesSet["woodpecker_db_url"] = true
+	sourcesSet["woodpecker_grpc_secret"] = true
+	sourcesSet["woodpecker_agent_secret"] = true
+	sourcesSet["woodpecker_forgejo_client_id"] = true
+	sourcesSet["woodpecker_forgejo_client_secret"] = true
 	if len(sourcesSet) == 0 {
 		return nil
 	}
@@ -593,14 +603,49 @@ func (b *Backend) setupPhaseSecrets(ctx context.Context) error {
 	}
 	sort.Strings(sources)
 	sort.SliceStable(sources, func(i, j int) bool {
-		if sources[i] == "litellm_db_password" {
+		// Passwords must be created before their derived URLs.
+		// Preserve original invariant: litellm_db_password is always first.
+		passwordOrder := func(s string) int {
+			switch s {
+			case "litellm_db_password":
+				return 0
+			case "woodpecker_db_password":
+				return 1
+			default:
+				return -1
+			}
+		}
+		pi, pj := passwordOrder(sources[i]), passwordOrder(sources[j])
+		if pi != -1 || pj != -1 {
+			if pi != -1 && pj != -1 {
+				return pi < pj
+			}
+			if pi != -1 {
+				return true
+			}
+			return false
+		}
+		// URLs are derived from passwords; place them after all non-URL secrets
+		// so the password file is guaranteed to exist when the URL is materialized.
+		urlOrder := func(s string) int {
+			switch s {
+			case "litellm_db_url":
+				return 0
+			case "woodpecker_db_url":
+				return 1
+			default:
+				return -1
+			}
+		}
+		ui, uj := urlOrder(sources[i]), urlOrder(sources[j])
+		if ui != -1 || uj != -1 {
+			if ui != -1 && uj != -1 {
+				return ui < uj
+			}
+			if ui != -1 {
+				return false
+			}
 			return true
-		}
-		if sources[j] == "litellm_db_password" {
-			return false
-		}
-		if sources[i] == "litellm_db_url" && sources[j] != "litellm_db_password" {
-			return false
 		}
 		return sources[i] < sources[j]
 	})
@@ -624,6 +669,12 @@ func (b *Backend) setupPhaseSecrets(ctx context.Context) error {
 		switch src {
 		case "maxmind_license":
 			content = ""
+		case "woodpecker_forgejo_client_id":
+			// Placeholder until OIDC phase creates the Forgejo OAuth app and
+			// atomically replaces the file with the real client ID.
+			content = ""
+		case "woodpecker_forgejo_client_secret":
+			content = ""
 		case "litellm_db_url":
 			pwdPath := filepath.Join(dir, "litellm_db_password")
 			pwdBytes, err := os.ReadFile(pwdPath)
@@ -639,6 +690,23 @@ func (b *Backend) setupPhaseSecrets(ctx context.Context) error {
 				_ = os.Chmod(pwdPath, 0o644)
 			}
 			content = fmt.Sprintf("postgresql://litellm:%s@litellm-postgres:5432/litellm", pwd)
+		case "woodpecker_db_url":
+			pwdPath := filepath.Join(dir, "woodpecker_db_password")
+			pwdBytes, err := os.ReadFile(pwdPath)
+			pwd := ""
+			if err == nil {
+				pwd = strings.TrimSpace(string(pwdBytes))
+			}
+			if pwd == "" {
+				pwd = generateRandomBase64URL(32)
+				if err := os.WriteFile(pwdPath, []byte(pwd), 0o644); err != nil {
+					return fmt.Errorf("write woodpecker_db_password: %w", err)
+				}
+				_ = os.Chmod(pwdPath, 0o644)
+			}
+			content = fmt.Sprintf("postgresql://woodpecker:%s@woodpecker-postgres:5432/woodpecker", pwd)
+		case "woodpecker_db_password", "woodpecker_grpc_secret", "woodpecker_agent_secret":
+			content = generateRandomBase64URL(32)
 		default:
 			if src == "litellm_master_key" || src == "hermes_jwt_secret" || secretPatternRe.MatchString(src) {
 				content = generateRandomBase64URL(32)
@@ -651,6 +719,30 @@ func (b *Backend) setupPhaseSecrets(ctx context.Context) error {
 		}
 		_ = os.Chmod(path, 0o644)
 	}
+	return nil
+}
+
+// atomicReplaceSecretFile atomically replaces a projected secret file in dir/name
+// with value. It writes to a temporary file in the same directory and renames,
+// ensuring the bind-mounted secret is never observed half-written. Mode 0644 is
+// enforced so the container's PUID 1000 can read it.
+func atomicReplaceSecretFile(dir, name, value string) error {
+	dir = strings.TrimSpace(dir)
+	name = strings.TrimSpace(name)
+	if dir == "" || name == "" {
+		return fmt.Errorf("dir and name required")
+	}
+	path := filepath.Join(dir, name)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(value), 0o644); err != nil {
+		return fmt.Errorf("write temp secret %s: %w", name, err)
+	}
+	_ = os.Chmod(tmp, 0o644)
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("replace secret %s: %w", name, err)
+	}
+	_ = os.Chmod(path, 0o644)
 	return nil
 }
 
@@ -700,7 +792,6 @@ func (b *Backend) setupPhaseCoreApps(ctx context.Context) error {
 	if inst, err := b.store.Instance(ctx); err == nil {
 		domainName = strings.TrimSpace(inst.Domain)
 	}
-
 	bundles := b.apps.CatalogBundles()
 	defaultBundles := []apps.Bundle{}
 	for _, bd := range bundles {
@@ -714,7 +805,18 @@ func (b *Backend) setupPhaseCoreApps(ctx context.Context) error {
 		}
 		return nil
 	}
-	sorted, err := topoSortBundles(defaultBundles)
+	// Defer woodpecker to dependent_apps phase after OIDC so Forgejo OAuth exists.
+	coreBundles := make([]apps.Bundle, 0, len(defaultBundles))
+	for _, bd := range defaultBundles {
+		if bd.ID == "woodpecker" {
+			continue
+		}
+		coreBundles = append(coreBundles, bd)
+	}
+	if len(coreBundles) == 0 {
+		return nil
+	}
+	sorted, err := topoSortBundles(coreBundles)
 	if err != nil {
 		return fmt.Errorf("topo sort: %w", err)
 	}
@@ -725,6 +827,230 @@ func (b *Backend) setupPhaseCoreApps(ctx context.Context) error {
 		log.Printf("setup core apps: %s running and healthy", bd.ID)
 	}
 	return nil
+}
+
+// Phase 5b: Dependent apps — Woodpecker after OIDC
+func (b *Backend) setupPhaseDependentApps(ctx context.Context) error {
+	if b.apps == nil {
+		return fmt.Errorf("apps not configured")
+	}
+	var woodpeckerBundle *apps.Bundle
+	for _, bd := range b.apps.CatalogBundles() {
+		if bd.ID == "woodpecker" {
+			if !bd.Default {
+				log.Printf("setup dependent_apps: woodpecker not default, skipping")
+				return nil
+			}
+			c := bd
+			woodpeckerBundle = &c
+			break
+		}
+	}
+	if woodpeckerBundle == nil {
+		log.Printf("setup dependent_apps: woodpecker bundle not found, skipping")
+		return nil
+	}
+	dir := filepath.Join(b.cfg.StateDir, "secrets")
+	if strings.TrimSpace(b.cfg.StateDir) == "" {
+		dir = "/var/lib/omahab/secrets"
+	}
+	// Check OAuth secret files before installing. The canonical paths per spec are
+	// /var/lib/omahab/secrets/woodpecker_forgejo_client_id and client_secret.
+	// When StateDir is customized, also accept that location but fail closed if
+	// neither location provides a non-empty value.
+	candidates := [][]string{
+		{filepath.Join(dir, "woodpecker_forgejo_client_id"), filepath.Join(dir, "woodpecker_forgejo_client_secret")},
+	}
+	if dir != "/var/lib/omahab/secrets" {
+		candidates = append(candidates, []string{
+			"/var/lib/omahab/secrets/woodpecker_forgejo_client_id",
+			"/var/lib/omahab/secrets/woodpecker_forgejo_client_secret",
+		})
+	}
+	var found bool
+	var missingMsg string
+	for _, pair := range candidates {
+		idPath, secretPath := pair[0], pair[1]
+		idData, idErr := os.ReadFile(idPath)
+		if idErr != nil {
+			missingMsg = fmt.Sprintf("woodpecker OAuth client ID missing at %s: %v", idPath, idErr)
+			continue
+		}
+		secretData, secErr := os.ReadFile(secretPath)
+		if secErr != nil {
+			missingMsg = fmt.Sprintf("woodpecker OAuth client secret missing at %s: %v", secretPath, secErr)
+			continue
+		}
+		if strings.TrimSpace(string(idData)) == "" {
+			missingMsg = fmt.Sprintf("woodpecker OAuth client ID empty at %s", idPath)
+			continue
+		}
+		if strings.TrimSpace(string(secretData)) == "" {
+			missingMsg = fmt.Sprintf("woodpecker OAuth client secret empty at %s", secretPath)
+			continue
+		}
+		found = true
+		break
+	}
+	if !found {
+		if missingMsg == "" {
+			missingMsg = "woodpecker OAuth secrets missing"
+		}
+		return fmt.Errorf("dependent_apps: %s", missingMsg)
+	}
+	domainName := ""
+	if inst, err := b.store.Instance(ctx); err == nil {
+		domainName = strings.TrimSpace(inst.Domain)
+	}
+	if err := b.ensureOmahabNetwork(ctx); err != nil {
+		return err
+	}
+	if err := b.ensureDefaultApp(ctx, *woodpeckerBundle, domainName); err != nil {
+		return fmt.Errorf("woodpecker: %w", err)
+	}
+	log.Printf("setup dependent_apps: woodpecker installed, waiting for health")
+	list, err := b.apps.List(ctx)
+	if err != nil {
+		return fmt.Errorf("list apps: %w", err)
+	}
+	var appID domain.ID
+	var ok bool
+	for _, st := range list {
+		if st.BundleID == "woodpecker" {
+			appID = st.ID
+			ok = true
+			break
+		}
+	}
+	if !ok {
+		return fmt.Errorf("woodpecker app not found after install")
+	}
+	if err := b.waitAppHealthy(ctx, appID, 120*time.Second); err != nil {
+		return fmt.Errorf("woodpecker server health: %w", err)
+	}
+	if err := b.waitWoodpeckerContainersHealthy(ctx, 90*time.Second); err != nil {
+		if isDockerNotAvailable(err) {
+			log.Printf("setup dependent_apps: docker not available for container health, assuming healthy: %s", health.RedactDetail(err.Error()))
+		} else {
+			return fmt.Errorf("woodpecker agent health: %w", err)
+		}
+	}
+	log.Printf("setup dependent_apps: woodpecker server and agent healthy")
+	return nil
+}
+
+func isDockerNotAvailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "executable file not found") || strings.Contains(s, "no such file or directory") || strings.Contains(s, "command not found") || strings.Contains(s, "not found")
+}
+
+func (b *Backend) waitWoodpeckerContainersHealthy(ctx context.Context, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = 90 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		serverOK, agentOK, err := b.checkWoodpeckerContainerHealth(ctx)
+		if err != nil {
+			if isDockerNotAvailable(err) {
+				return err
+			}
+			lastErr = err
+		} else if serverOK && agentOK {
+			return nil
+		} else {
+			lastErr = fmt.Errorf("woodpecker containers not healthy (server=%v agent=%v)", serverOK, agentOK)
+		}
+		if time.Now().After(deadline) {
+			if lastErr != nil {
+				return lastErr
+			}
+			return fmt.Errorf("woodpecker containers health timeout")
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
+func (b *Backend) checkWoodpeckerContainerHealth(ctx context.Context) (serverOK, agentOK bool, err error) {
+	getID := func(service string) (string, error) {
+		out, err := exec.CommandContext(ctx, "docker", "ps", "-q", "--filter", "label=com.docker.compose.project=omahab-woodpecker", "--filter", "label=com.docker.compose.service="+service).CombinedOutput()
+		if err != nil {
+			return "", fmt.Errorf("docker ps %s: %v: %s", service, err, strings.TrimSpace(string(out)))
+		}
+		id := strings.TrimSpace(string(out))
+		if id == "" {
+			return "", nil
+		}
+		lines := strings.Split(id, "\n")
+		for _, l := range lines {
+			l = strings.TrimSpace(l)
+			if l != "" {
+				return l, nil
+			}
+		}
+		return "", nil
+	}
+	inspectOK := func(id string) (bool, error) {
+		if id == "" {
+			return false, nil
+		}
+		out, err := exec.CommandContext(ctx, "docker", "inspect", "--format", "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}", id).CombinedOutput()
+		if err != nil {
+			return false, fmt.Errorf("docker inspect %s: %v: %s", id, err, strings.TrimSpace(string(out)))
+		}
+		status := strings.TrimSpace(string(out))
+		if status == "healthy" || status == "running" {
+			return true, nil
+		}
+		return false, nil
+	}
+	serverID, err := getID("woodpecker-server")
+	if err != nil {
+		return false, false, err
+	}
+	agentID, err := getID("woodpecker-agent")
+	if err != nil {
+		return false, false, err
+	}
+	// Fallback to name-based inspect when label filter finds nothing (e.g., older compose)
+	if serverID == "" {
+		for _, name := range []string{"omahab-woodpecker-woodpecker-server-1", "omahab-woodpecker_woodpecker-server_1"} {
+			out, err := exec.CommandContext(ctx, "docker", "inspect", "--format", "{{.Id}}", name).CombinedOutput()
+			if err == nil && strings.TrimSpace(string(out)) != "" {
+				serverID = name
+				break
+			}
+		}
+	}
+	if agentID == "" {
+		for _, name := range []string{"omahab-woodpecker-woodpecker-agent-1", "omahab-woodpecker_woodpecker-agent_1"} {
+			out, err := exec.CommandContext(ctx, "docker", "inspect", "--format", "{{.Id}}", name).CombinedOutput()
+			if err == nil && strings.TrimSpace(string(out)) != "" {
+				agentID = name
+				break
+			}
+		}
+	}
+	sOK, err := inspectOK(serverID)
+	if err != nil {
+		return false, false, err
+	}
+	aOK, err := inspectOK(agentID)
+	if err != nil {
+		return false, false, err
+	}
+	return sOK, aOK, nil
 }
 
 func defaultInstallRequest(bundle apps.Bundle, domainName string) apps.InstallRequest {
@@ -1079,7 +1405,8 @@ func (b *Backend) setupPhaseOIDC(ctx context.Context) error {
 	}
 	needImmich := bundleRunning("immich")
 	needHermes := bundleRunning("hermes")
-	if !needImmich && !needHermes {
+	needForgejo := bundleRunning("forgejo")
+	if !needImmich && !needHermes && !needForgejo {
 		return nil
 	}
 
@@ -1120,6 +1447,89 @@ func (b *Backend) setupPhaseOIDC(ctx context.Context) error {
 			return fmt.Errorf("store hermes_oidc_client_secret: %w", err)
 		}
 		log.Printf("setup oidc: hermes client ensured")
+	}
+	if needForgejo {
+		// Forgejo OIDC client via PocketID
+		forgejoCallback := fmt.Sprintf("https://git.%s/user/oauth2/PocketID/callback", domainName)
+		fClientID, fClientSecret, err := b.pocketClient.EnsureOIDCClient(ctx, "Forgejo", []string{forgejoCallback})
+		if err != nil {
+			return fmt.Errorf("ensure oidc client forgejo: %w", err)
+		}
+		if strings.TrimSpace(fClientID) == "" {
+			return fmt.Errorf("oidc client forgejo returned empty clientID")
+		}
+		fClientSecret, err = reuseStoredOIDCSecret(ctx, b.secrets, "forgejo_oidc_client_secret", fClientSecret)
+		if err != nil {
+			fClientSecret, err = b.pocketClient.CreateOIDCClientSecret(ctx, fClientID)
+			if err != nil {
+				return fmt.Errorf("forgejo oidc client secret: %w", err)
+			}
+		}
+		if err := upsertSecret(ctx, b.secrets, "platform-app", "forgejo_oidc_client_id", fClientID); err != nil {
+			return fmt.Errorf("store forgejo_oidc_client_id: %w", err)
+		}
+		if err := upsertSecret(ctx, b.secrets, "platform-app", "forgejo_oidc_client_secret", fClientSecret); err != nil {
+			return fmt.Errorf("store forgejo_oidc_client_secret: %w", err)
+		}
+		// Project to secret files atomically (for audit and potential file-based consumers)
+		secretsDir := filepath.Join(b.cfg.StateDir, "secrets")
+		if strings.TrimSpace(b.cfg.StateDir) == "" {
+			secretsDir = "/var/lib/omahab/secrets"
+		}
+		_ = os.MkdirAll(secretsDir, 0o700)
+		if err := atomicReplaceSecretFile(secretsDir, "forgejo_oidc_client_id", fClientID); err != nil {
+			log.Printf("setup oidc: warn replace forgejo_oidc_client_id file: %s", health.RedactDetail(err.Error()))
+		}
+		if err := atomicReplaceSecretFile(secretsDir, "forgejo_oidc_client_secret", fClientSecret); err != nil {
+			log.Printf("setup oidc: warn replace forgejo_oidc_client_secret file: %s", health.RedactDetail(err.Error()))
+		}
+		// Enforce group access: only admins and members
+		if err := b.pocketClient.EnsureOIDCClientGroupAccess(ctx, fClientID, []string{"admins", "members"}); err != nil {
+			return fmt.Errorf("ensure forgejo group access: %w", err)
+		}
+		// Bootstrap omahab-bot
+		if err := b.ensureOmahabBot(ctx, domainName); err != nil {
+			return fmt.Errorf("ensure omahab-bot: %w", err)
+		}
+		// Resolve forgejo token and base
+		forgejoToken, err := b.secrets.RevealByName(ctx, "platform-app", "forgejo_token")
+		if err != nil || strings.TrimSpace(forgejoToken) == "" {
+			return fmt.Errorf("forgejo token not available after bot ensure")
+		}
+		forgejoToken = strings.TrimSpace(forgejoToken)
+		forgejoBase := b.forgejoBaseURL(ctx, domainName)
+		// Ensure org and teams
+		if err := b.ensureForgejoOrgTeams(ctx, forgejoBase, forgejoToken); err != nil {
+			return fmt.Errorf("ensure forgejo org teams: %w", err)
+		}
+		// Ensure auth source PocketID
+		if err := b.ensureForgejoAuthSource(ctx, domainName, fClientID, fClientSecret); err != nil {
+			return fmt.Errorf("ensure forgejo auth source: %w", err)
+		}
+		// Ensure Woodpecker OAuth app
+		wClientID, wClientSecret, err := b.ensureWoodpeckerOAuthApp(ctx, forgejoBase, forgejoToken, domainName)
+		if err != nil {
+			return fmt.Errorf("ensure woodpecker oauth: %w", err)
+		}
+		if err := upsertSecret(ctx, b.secrets, "platform-app", "woodpecker_forgejo_client_id", wClientID); err != nil {
+			return fmt.Errorf("store woodpecker_forgejo_client_id: %w", err)
+		}
+		if err := upsertSecret(ctx, b.secrets, "platform-app", "woodpecker_forgejo_client_secret", wClientSecret); err != nil {
+			return fmt.Errorf("store woodpecker_forgejo_client_secret: %w", err)
+		}
+		if err := atomicReplaceSecretFile(secretsDir, "woodpecker_forgejo_client_id", wClientID); err != nil {
+			return fmt.Errorf("replace woodpecker_forgejo_client_id: %w", err)
+		}
+		if err := atomicReplaceSecretFile(secretsDir, "woodpecker_forgejo_client_secret", wClientSecret); err != nil {
+			return fmt.Errorf("replace woodpecker_forgejo_client_secret: %w", err)
+		}
+		// Also ensure canonical path when StateDir is custom (tests use temp, but compose expects /var/lib/omahab/secrets)
+		if secretsDir != "/var/lib/omahab/secrets" {
+			_ = os.MkdirAll("/var/lib/omahab/secrets", 0o700)
+			_ = atomicReplaceSecretFile("/var/lib/omahab/secrets", "woodpecker_forgejo_client_id", wClientID)
+			_ = atomicReplaceSecretFile("/var/lib/omahab/secrets", "woodpecker_forgejo_client_secret", wClientSecret)
+		}
+		log.Printf("setup oidc: forgejo client ensured")
 	}
 	return nil
 }

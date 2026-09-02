@@ -17,6 +17,9 @@ servers:
     description: omahabd default listen address
 security:
   - bearerAuth: []
+tags:
+  - name: setup
+    description: First-run setup status and Woodpecker PAT handoff
 paths:
   /up:
     get:
@@ -714,9 +717,384 @@ paths:
       responses:
         '204': { description: Deleted }
         '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/model-aliases:
+    get:
+      summary: List model aliases
+      operationId: listModelAliases
+      responses:
+        '200':
+          description: Aliases
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/ModelAlias' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/model-aliases/{name}:
+    put:
+      summary: Upsert model alias
+      operationId: setModelAlias
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string, enum: [omahab/fast, omahab/balanced, omahab/reasoning, omahab/embedding] }
+          description: Alias name
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetModelAliasRequest' }
+      responses:
+        '200': { description: Alias, content: { application/json: { schema: { $ref: '#/components/schemas/ModelAlias' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/model-keys:
+    get:
+      summary: List model keys (metadata)
+      description: Returns metadata only; plaintext keys never returned in list.
+      operationId: listModelKeys
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+      responses:
+        '200':
+          description: Keys
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/ModelKey' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      summary: Create model key
+      description: Creates a scoped virtual key via LiteLLM. Plaintext key returned once in response; stored only as hash/prefix.
+      operationId: createModelKey
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateModelKeyRequest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ModelKey'
+                  - type: object
+                    properties:
+                      key: { type: string, description: Plaintext key returned once, never persisted }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/model-keys/{id}:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    delete:
+      summary: Delete model key
+      description: Revokes virtual key in LiteLLM and marks metadata revoked.
+      operationId: deleteModelKey
+      responses:
+        '204': { description: Deleted }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/provider-oauth/{provider}/start:
+    post:
+      summary: Start provider OAuth flow
+      description: Initiates subscription OAuth for chatgpt (device_code) or xai (loopback). Returns verification URL and session metadata; never returns device codes, tokens, or master key.
+      operationId: startProviderOAuth
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema: { type: string, enum: [chatgpt, xai] }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StartProviderOAuthRequest' }
+      responses:
+        '201': { description: OAuth session, content: { application/json: { schema: { $ref: '#/components/schemas/OAuthSession' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/provider-oauth/{provider}/poll/{session_id}:
+    get:
+      summary: Poll provider OAuth session
+      description: Polls OAuth session status; returns safe OAuthSession without device codes, tokens, or master key.
+      operationId: pollProviderOAuth
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema: { type: string, enum: [chatgpt, xai] }
+        - name: session_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: OAuth session, content: { application/json: { schema: { $ref: '#/components/schemas/OAuthSession' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/provider-oauth/{provider}/callback/{session_id}:
+    post:
+      summary: Forward OAuth callback (device only)
+      description: |
+        Device-only endpoint. Forwards only the received /callback?<query> path to LiteLLM's fixed loopback at 127.0.0.1:56121.
+        Requires device token from an enrolled companion with allow_provider_oauth=true; admin bearer is rejected with 403.
+        Rejects foreign host/scheme/port, expired session, wrong device, or shell metacharacters.
+      operationId: forwardProviderOAuthCallback
+      security: [{ deviceAuth: [] }]
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema: { type: string, enum: [xai] }
+        - name: session_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ForwardOAuthCallbackRequest' }
+      responses:
+        '200': { description: OAuth session, content: { application/json: { schema: { $ref: '#/components/schemas/OAuthSession' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/tool-environment:
+    get:
+      summary: List tool-environment variables (metadata only)
+      description: |
+        Admin only. Returns names, versions, and timestamps only; values never returned.
+        Server authoritative singleton `agent-tools`; devices never upload edits.
+      operationId: listToolEnvironment
+      responses:
+        '200':
+          description: Tool environment metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/ToolEnvEntry' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/tool-environment/{NAME}:
+    parameters:
+      - name: NAME
+        in: path
+        required: true
+        schema: { type: string, pattern: '^[A-Z_][A-Z0-9_]{0,127}$' }
+        description: Tool environment variable name (e.g., PARALLEL_API_KEY)
+    put:
+      summary: Create or rotate tool-environment variable
+      description: |
+        Admin only. Creates or atomically rotates a write-only value via secrets broker (scope environment).
+        Validates name ^[A-Z_][A-Z0-9_]{0,127}$ (max 128), rejects reserved names (OPENAI_BASE_URL, OPENAI_API_KEY, ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY, OMAHAB_MODEL_FAST etc.) with distinct error, and rejects NUL/CR/LF in values so persistent one-line systemd assignments are unambiguous.
+        Bumps singleton revision; every mutation, grant change, or generated model-key rotation increments revision.
+        Reserved names cannot be overwritten; they are composed per device at fetch time.
+      operationId: putToolEnvironment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PutToolEnvRequest' }
+      responses:
+        '200':
+          description: Created/rotated metadata
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ToolEnvEntry' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    delete:
+      summary: Delete tool-environment variable
+      description: Admin only. Removes variable and bumps revision. Returns 404 if not found.
+      operationId: deleteToolEnvironment
+      responses:
+        '204': { description: Deleted }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/companion/environment:
+    get:
+      summary: Get companion device tool environment (device only)
+      description: |
+        Device-only. Returns authoritative bundle of raw values for this device, including per-device reserved vars
+        (OPENAI_BASE_URL=https://models.<domain>, ANTHROPIC_BASE_URL, OPENAI_API_KEY=distinct LiteLLM key, ANTHROPIC_API_KEY, OMAHAB_MODEL_*).
+        Reserved vars are composed per device at fetch time; admin cannot overwrite them.
+        Requires device token (oma_dev_...); admin bearer is rejected with 403.
+        Includes ETag W/"rev-<revision>-<deviceIDHash>" derived from revision/device key; honors If-None-Match with 304 so unchanged syncs never resend secrets.
+        If device grant removed while still enrolled, returns empty bundle so client clears local values. Fully revoking/losing device cannot erase already downloaded shared keys; dashboard must warn to rotate.
+      operationId: getCompanionEnvironment
+      security: [{ deviceAuth: [] }]
+      parameters:
+        - name: If-None-Match
+          in: header
+          required: false
+          schema: { type: string }
+          description: ETag from previous fetch; returns 304 if unchanged
+      responses:
+        '200':
+          description: Environment bundle (raw values)
+          headers:
+            ETag: { schema: { type: string }, description: 'W/"rev-<revision>-<hash>"' }
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: { type: string }
+        '304': { description: Not modified (If-None-Match matches current ETag) }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/companion-enrollments:
+    post:
+      summary: Create companion enrollment code (admin)
+      description: |
+        Admin only. Generates a single-use enrollment code with at least 192 random bits (24 bytes, base64url),
+        10-minute expiry, stored only as SHA-256 hash with constant-time compare.
+        Code is returned once and never stored plaintext. Consumed on claim via POST /api/v1/companion/enroll.
+      operationId: createCompanionEnrollment
+      responses:
+        '201':
+          description: Enrollment code (once)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, code, expires_at, created_at]
+                properties:
+                  id: { type: string }
+                  code: { type: string, description: "Single-use code, returned once, at least 192 bits" }
+                  expires_at: { type: string, format: date-time }
+                  created_at: { type: string, format: date-time }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/companion/enroll:
+    post:
+      summary: Claim enrollment code and create device (public, single-use)
+      description: |
+        Public (no bearer). Body {code}. Validates SHA-256 hash constant-time, 10-min expiry, single-use consumed_at.
+        On success returns oma_dev_... token (stored only as hash, prefix for display) and creates companion_devices row.
+        Code never as query/arg; only JSON body. Device token stored only as hash server-side, constant-time compare.
+      operationId: enrollCompanion
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string }
+              additionalProperties: false
+      responses:
+        '201':
+          description: Device token (once)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token, token_prefix]
+                properties:
+                  token: { type: string, description: "oma_dev_... token, returned once" }
+                  token_prefix: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/companion/status:
+    get:
+      summary: Get status (device only)
+      description: Device-only. Returns control-plane status visible to companion device. Admin bearer rejected with 403.
+      operationId: getCompanionStatus
+      security: [{ deviceAuth: [] }]
+      responses:
+        '200': { description: Status, content: { application/json: { schema: { $ref: '#/components/schemas/Status' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/companion/events:
+    get:
+      summary: List events (device only)
+      description: Device-only. Returns events visible to companion. Admin bearer rejected.
+      operationId: getCompanionEvents
+      security: [{ deviceAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200': { description: Events, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/Event' } } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/companion/projects:
+    get:
+      summary: List projects (device only)
+      description: Device-only. Returns projects visible to companion. Admin bearer rejected.
+      operationId: getCompanionProjects
+      security: [{ deviceAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200': { description: Projects, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/Project' } } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/companion/devices:
+    get:
+      summary: List companion devices (admin)
+      operationId: listCompanionDevices
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200': { description: Devices, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/CompanionDevice' } } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/companion/devices/{id}:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    delete:
+      summary: Revoke companion device
+      description: Admin only. Marks revoked_at, revokes its LiteLLM virtual key (owner_kind=device) and future companion API access. Idempotent.
+      operationId: revokeCompanionDevice
+      responses:
+        '204': { description: Revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/companion/devices/{id}/allow-oauth:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    put:
+      summary: Set device allow_provider_oauth
+      description: Admin only. Toggles whether device may relay xAI loopback callback (allow_provider_oauth). Used to gate POST /api/v1/provider-oauth/xai/callback/{session_id}.
+      operationId: setDeviceAllowOAuth
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                allow: { type: boolean }
+                allow_provider_oauth: { type: boolean }
+      responses:
+        '200': { description: Updated device, content: { application/json: { schema: { $ref: '#/components/schemas/CompanionDevice' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
 
   /api/v1/email/ingest:
-    post:
       summary: Ingest email from Email Worker (HMAC auth)
       description: |
         Separate HMAC auth path for the Cloudflare Email Worker. X-Omahab-Signature
@@ -992,6 +1370,7 @@ paths:
     get:
       summary: Get first-run setup status
       operationId: getSetup
+      tags: [setup]
       responses:
         '200':
           description: Setup status
@@ -1005,6 +1384,7 @@ paths:
     post:
       summary: Trigger setup reconciler
       operationId: triggerSetupReconcile
+      tags: [setup]
       responses:
         '200':
           description: Reconcile started
@@ -1028,6 +1408,55 @@ paths:
                   already_running: { type: boolean }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '500': { $ref: '#/components/responses/Error' }
+
+  /api/v1/setup/woodpecker:
+    put:
+      summary: Connect Woodpecker with Forgejo PAT
+      description: |
+        Validates a Woodpecker personal access token against Forgejo, verifies the user is a Woodpecker administrator,
+        persists the encrypted PAT, redeploys Woodpecker with WOODPECKER_ADMIN_USERNAME, and revalidates administration.
+        Strict validation, bounded non-empty inputs, never returns or logs the token. Failures leave setup check failed with redacted detail.
+      operationId: setupWoodpecker
+      tags: [setup]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, token]
+              properties:
+                username:
+                  type: string
+                  minLength: 1
+                  maxLength: 255
+                  description: Forgejo login that must match Woodpecker GET /api/user login
+                token:
+                  type: string
+                  minLength: 1
+                  maxLength: 4096
+                  description: Woodpecker personal access token
+              additionalProperties: false
+      responses:
+        '200':
+          description: Woodpecker PAT accepted and admin verified
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, example: ok }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503':
+          description: Woodpecker unavailable or token validation failed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+          headers:
+            X-Request-ID: { schema: { type: string } }
 
   /api/v1/users/{id}/enrollment:
     get:
@@ -1073,6 +1502,11 @@ components:
       scheme: bearer
       bearerFormat: opaque
       description: Bearer token verified via constant-time SHA256 comparison. Required for all /api/v1 routes except /up and /api/v1/email/ingest.
+    deviceAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: Device token issued via companion enrollment (oma_dev_...). Required for companion device endpoints; admin bearer is rejected with 403 on these routes.
     hmacAuth:
       type: apiKey
       in: header
@@ -1298,23 +1732,19 @@ components:
         name: { type: string }
         groups: { type: array, items: { type: string } }
         disabled: { type: boolean }
-        created_at: { type: string, format: date-time }
-        updated_at: { type: string, format: date-time }
-        enrollment_url: { type: string, format: uri, nullable: true, description: "Expiring Pocket ID enrollment link returned only on user creation when Pocket ID is configured" }
-        enrollment_expires_at: { type: string, format: date-time, nullable: true, description: "Expiry of enrollment_url when present" }
-        pocket_user_id: { type: string, nullable: true, description: "Pocket ID user ID when provisioned" }
-
     ProviderCredential:
       type: object
-      description: Metadata only; value never returned.
-      required: [id, provider, name, kind, status, configured, updated_at]
+      description: Metadata only; value and secret_id never returned. managed_by=omahab for API keys via secrets broker, litellm for subscription (chatgpt/xai_oauth) with external_ref.
+      required: [id, provider, name, kind, status, configured, managed_by, updated_at]
       properties:
         id: { type: string }
-        provider: { type: string }
+        provider: { type: string, enum: [openai, anthropic, openrouter, chatgpt, xai] }
         name: { type: string }
-        kind: { type: string }
+        kind: { type: string, enum: [api_key, oauth] }
         status: { type: string }
         configured: { type: boolean }
+        managed_by: { type: string, enum: [omahab, litellm], description: "omahab=API key via secrets broker (secret_id non-null), litellm=subscription via LiteLLM (external_ref chatgpt|xai_oauth)" }
+        external_ref: { type: string, nullable: true, description: "External reference for subscription credentials: chatgpt or xai_oauth; null for API keys" }
         entitlement: { type: string, nullable: true }
         expires_at: { type: string, format: date-time, nullable: true }
         updated_at: { type: string, format: date-time }
@@ -1654,3 +2084,111 @@ components:
         raw: { type: string, contentEncoding: base64, description: Base64-encoded raw RFC 5322 message }
         rawSize: { type: integer, minimum: 1, description: Decoded raw byte length }
       additionalProperties: false
+    ModelAlias:
+      type: object
+      description: Stable omahab alias routed via LiteLLM.
+      required: [name, credential_id, model, updated_at]
+      properties:
+        name: { type: string, enum: [omahab/fast, omahab/balanced, omahab/reasoning, omahab/embedding] }
+        credential_id: { type: string }
+        model: { type: string, description: Upstream model, e.g. gpt-4o, anthropic/claude-3-5-sonnet, xai/grok-4, chatgpt/gpt-4o }
+        fallback_order: { type: array, items: { type: string }, nullable: true, description: Ordered fallback credential IDs or model names; empty means no fallback } 
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    SetModelAliasRequest:
+      type: object
+      required: [credential_id, model]
+      properties:
+        credential_id: { type: string }
+        model: { type: string }
+        fallback_order: { type: array, items: { type: string } }
+      additionalProperties: false
+    ModelKey:
+      type: object
+      description: Metadata for a scoped LiteLLM virtual key; plaintext never returned except once on creation.
+      required: [id, name, key_prefix, owner_kind, owner_id, scopes, created_at]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        key_prefix: { type: string, description: First 7 chars of key for display, e.g. sk-... }
+        owner_kind: { type: string, enum: [hermes, device, harness] }
+        owner_id: { type: string }
+        scopes: { type: array, items: { type: string } }
+        rpm: { type: integer, nullable: true, minimum: 1 }
+        tpm: { type: integer, nullable: true, minimum: 1 }
+        concurrency: { type: integer, nullable: true, minimum: 1 }
+        budget: { type: number, nullable: true, minimum: 0 }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time, nullable: true }
+    CreateModelKeyRequest:
+      type: object
+      required: [name, owner_kind, owner_id]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 128 }
+        owner_kind: { type: string, enum: [hermes, device, harness] }
+        owner_id: { type: string, minLength: 1 }
+        scopes: { type: array, items: { type: string, enum: [omahab/fast, omahab/balanced, omahab/reasoning, omahab/embedding] } }
+        rpm: { type: integer, minimum: 1 }
+        tpm: { type: integer, minimum: 1 }
+        concurrency: { type: integer, minimum: 1 }
+        budget: { type: number, minimum: 0 }
+        expires_at: { type: string, format: date-time }
+      additionalProperties: false
+    OAuthSession:
+      type: object
+      description: Safe OAuth session; never includes device codes, access/refresh tokens, auth file contents, or LiteLLM master key.
+      required: [provider, flow, verification_url, expires_at, status]
+      properties:
+        id: { type: string }
+        provider: { type: string, enum: [chatgpt, xai] }
+        flow: { type: string, enum: [device_code, loopback] }
+        verification_url: { type: string, format: uri }
+        user_code: { type: string, nullable: true, description: Device-code user code for ChatGPT flow }
+        callback_port: { type: integer, nullable: true, description: Loopback callback port for xAI flow (fixed 56121) }
+        expires_at: { type: string, format: date-time }
+        status: { type: string, enum: [pending, connected, denied, expired, error] }
+    StartProviderOAuthRequest:
+      type: object
+      required: [flow]
+      properties:
+        flow: { type: string, enum: [device_code, loopback] }
+      additionalProperties: false
+    ForwardOAuthCallbackRequest:
+      type: object
+      required: [callback_path]
+      properties:
+        callback_path: { type: string, description: "Only the /callback?<query> path; host/scheme/port never accepted; shell metacharacters rejected" }
+      additionalProperties: false
+    ToolEnvEntry:
+      type: object
+      description: Metadata for a tool-environment variable (value never returned)
+      required: [name, version, created_at, updated_at]
+      properties:
+        name: { type: string, pattern: '^[A-Z_][A-Z0-9_]{0,127}$', description: Variable name }
+        version: { type: integer, minimum: 1 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    PutToolEnvRequest:
+      type: object
+      required: [value]
+      properties:
+        value: { type: string, description: Write-only value; must not contain NUL, CR, or LF }
+      additionalProperties: false
+    CompanionDevice:
+      type: object
+      description: Companion device record (device token never returned; only prefix)
+      required: [id, name, allow_provider_oauth, created_at, updated_at]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        allow_provider_oauth: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    CompanionEnrollment:
+      type: object
+      description: Enrollment metadata (code returned once, stored only as hash)
+      required: [id, expires_at, created_at]
+      properties:
+        id: { type: string }
+        expires_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }

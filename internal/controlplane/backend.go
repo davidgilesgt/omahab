@@ -5,11 +5,13 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"log"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -22,6 +24,7 @@ import (
 	"github.com/omahab/omahab/internal/config"
 	"github.com/omahab/omahab/internal/domain"
 	"github.com/omahab/omahab/internal/emailing"
+	"github.com/omahab/omahab/internal/environments"
 	"github.com/omahab/omahab/internal/events"
 	"github.com/omahab/omahab/internal/exposure"
 	"github.com/omahab/omahab/internal/health"
@@ -55,6 +58,8 @@ type Backend struct {
 	syncer       *syncer.Service
 	workspaces   *workspaces.Service
 	providers    *providers.Service
+	gateway      providers.GatewayAdmin
+	environments *environments.Service
 	emailing     *emailing.Service
 	backups      *backups.Service
 	hermes       *hermes.Service
@@ -87,6 +92,15 @@ type Backend struct {
 	httpsProbe    func(context.Context, string) error
 	httpsWait     time.Duration
 	httpsInterval time.Duration
+
+	// woodpecker_connection check overrides (test injectable)
+	podmanSocketPath          string
+	woodpeckerHTTPClient      *http.Client
+	woodpeckerBaseURLOverride string
+	// forgejo bootstrap overrides (test injectable)
+	forgejoExec                func(context.Context, ...string) (string, error)
+	forgejoBaseURLOverride     string
+	forgejoHTTPClientOverride  *http.Client
 }
 
 // Options for New
@@ -307,7 +321,29 @@ func (b *Backend) initServices(ctx context.Context) error {
 	b.backups = backupSvc
 
 	// hermes + approval emitter (exposed for future callers)
-	b.hermes = hermes.New(b.db, nil, newHermesSink(b.events))
+	// Hermes default profile's inference base URL/key remains pointed at LiteLLM
+	// (http://litellm:4000 / https://models.<domain>/v1) regardless of Nous
+	// Portal tool gateway connection. Nous only affects tool providers via the
+	// Hermes dashboard API; HERMES_MODEL_GATEWAY_URL is never switched.
+	hermesJWTSecret := ""
+	if b.secrets != nil {
+		if v, err := b.secrets.RevealByName(ctx, "platform-app", "hermes_jwt_secret"); err == nil {
+			hermesJWTSecret = strings.TrimSpace(v)
+		} else if v := strings.TrimSpace(os.Getenv("HERMES_JWT_SECRET")); v != "" {
+			hermesJWTSecret = v
+		}
+	} else if v := strings.TrimSpace(os.Getenv("HERMES_JWT_SECRET")); v != "" {
+		hermesJWTSecret = v
+	}
+	hermesBaseURL := strings.TrimSpace(os.Getenv("HERMES_BASE_URL"))
+	if hermesBaseURL == "" {
+		hermesBaseURL = "http://hermes:8080"
+	}
+	hermesClient := hermes.NewClient(hermes.ClientConfig{
+		BaseURL:   hermesBaseURL,
+		JWTSecret: hermesJWTSecret,
+	})
+	b.hermes = hermes.New(b.db, hermesClient, newHermesSink(b.events))
 	b.approvalEmitter = hermes.NewApprovalEmitter(newHermesSink(b.events))
 
 	// scm with real Forgejo/Woodpecker clients resolved from secrets
@@ -323,9 +359,16 @@ func (b *Backend) initServices(ctx context.Context) error {
 	if woodpeckerBase != "" && woodpeckerToken != "" {
 		woodpeckerClient = scm.NewWoodpeckerClient(scm.WoodpeckerConfig{BaseURL: woodpeckerBase, Token: woodpeckerToken})
 	}
-	b.scm = scm.New(b.db, forgejoClient, woodpeckerClient, secretsStoreAdapter{b.secrets}, newScmSink(b.events))
-
-	// identity with real PocketID client when api key available; otherwise noop
+	scmSvc, err := scm.New(b.db, forgejoClient, woodpeckerClient, secretsStoreAdapter{b.secrets}, newScmSink(b.events))
+	if err != nil {
+		_, _ = b.events.Publish(ctx, events.PublishInput{
+			Type:     "scm.init_failed",
+			Severity: "warning",
+			Message:  "scm init failed: " + err.Error(),
+		})
+	} else {
+		b.scm = scmSvc
+	}
 	b.identity, _ = identity.New(b.db, &noopPocketID{})
 	_ = b.bindPocketID(ctx)
 
@@ -389,7 +432,6 @@ func (b *Backend) initServices(ctx context.Context) error {
 			Message:  "exposure refresh failed: " + err.Error(),
 		})
 	}
-	// workspaces with DevPod runner and repo resolver
 	workspacesDir := b.cfg.DataDir + "/workspaces"
 	repoResolver := func(ctx context.Context, pid domain.ID) (string, error) {
 		p, err := b.projects.Get(ctx, pid)
@@ -400,6 +442,47 @@ func (b *Backend) initServices(ctx context.Context) error {
 	}
 	runner := workspaces.NewDevPodRunner(workspaces.DevPodRunnerConfig{WorkspacesDir: workspacesDir, RepoResolver: repoResolver})
 	b.workspaces = workspaces.New(b.db, runner)
+
+	// providers — single control-plane boundary for credentials, aliases, virtual keys.
+	// Migrations already run via AllMigrations(); instantiate with NoopOAuthClient and event sink.
+	b.providers = providers.NewWithSink(b.db, providers.NoopOAuthClient{}, newProvidersSink(b.events))
+	// gateway — LiteLLM control plane. Fail closed on pin check via Health; init tolerates missing LiteLLM.
+	cfgDir := b.cfg.DataDir + "/apps/litellm/config"
+	if strings.TrimSpace(b.cfg.DataDir) == "" {
+		cfgDir = "/srv/omahab/apps/litellm/config"
+	}
+	masterKey := secretOrEnv("litellm_master_key", "LITELLM_MASTER_KEY")
+	pinDigest := secretOrEnv("litellm_digest", "LITELLM_DIGEST")
+	if gw, err := providers.NewLiteLLMGateway(b.db, providers.GatewayOptions{
+		HTTPClient: http.DefaultClient,
+		BaseURL:    "http://127.0.0.1:4000",
+		MasterKey:  masterKey,
+		ConfigDir:  cfgDir,
+		PinDigest:  pinDigest,
+	}); err == nil {
+		b.gateway = gw
+		// Inject gateway into providers service for virtual key issuance
+		b.providers.SetVirtualKeyGateway(gw)
+	} else {
+		_, _ = b.events.Publish(ctx, events.PublishInput{
+			Type:     "gateway.init_failed",
+			Severity: "warning",
+			Message:  "gateway init failed: " + err.Error(),
+		})
+		b.gateway = providers.NoopGateway{}
+	}
+	// environments — companion enrollment + tool-environment sync
+	if envSvc, err := environments.New(b.db); err == nil {
+		envSvc.SetSecrets(b.secrets)
+		envSvc.SetProviders(b.providers)
+		b.environments = envSvc
+	} else {
+		_, _ = b.events.Publish(ctx, events.PublishInput{
+			Type:     "environments.init_failed",
+			Severity: "warning",
+			Message:  "environments init failed: " + err.Error(),
+		})
+	}
 
 	return nil
 }
@@ -445,6 +528,46 @@ func (b *Backend) bindPocketID(ctx context.Context) error {
 	}
 	b.pocketClient = client
 	b.identity = ident
+	return nil
+}
+
+func (b *Backend) bindSCM(ctx context.Context) error {
+	if b.secrets == nil || b.store == nil {
+		return fmt.Errorf("secrets or store not initialized")
+	}
+	secret := func(name string) string {
+		v, err := b.secrets.RevealByName(ctx, "platform-app", name)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return ""
+			}
+			return ""
+		}
+		return strings.TrimSpace(v)
+	}
+	secretOrEnv := func(name, env string) string {
+		if v := secret(name); v != "" {
+			return v
+		}
+		return strings.TrimSpace(os.Getenv(env))
+	}
+	forgejoBase := secretOrEnv("forgejo_base_url", "OMAHAB_FORGEJO_URL")
+	forgejoToken := secretOrEnv("forgejo_token", "OMAHAB_FORGEJO_TOKEN")
+	woodpeckerBase := secretOrEnv("woodpecker_base_url", "OMAHAB_WOODPECKER_URL")
+	woodpeckerToken := secretOrEnv("woodpecker_token", "OMAHAB_WOODPECKER_TOKEN")
+	var forgejoClient scm.ForgejoClient
+	var woodpeckerClient scm.WoodpeckerClient
+	if forgejoBase != "" && forgejoToken != "" {
+		forgejoClient = scm.NewForgejoClient(scm.ForgejoConfig{BaseURL: forgejoBase, Token: forgejoToken, SecretStore: secretsStoreAdapter{b.secrets}})
+	}
+	if woodpeckerBase != "" && woodpeckerToken != "" {
+		woodpeckerClient = scm.NewWoodpeckerClient(scm.WoodpeckerConfig{BaseURL: woodpeckerBase, Token: woodpeckerToken})
+	}
+	scmSvc, err := scm.New(b.db, forgejoClient, woodpeckerClient, secretsStoreAdapter{b.secrets}, newScmSink(b.events))
+	if err != nil {
+		return fmt.Errorf("scm: %w", err)
+	}
+	b.scm = scmSvc
 	return nil
 }
 
@@ -659,6 +782,21 @@ func translateError(err error) error {
 	}
 	if errors.Is(err, secrets.ErrConflict) {
 		return fmt.Errorf("%w: %v", api.ErrAlreadyExists, err)
+	}
+	if errors.Is(err, environments.ErrNotFound) {
+		return fmt.Errorf("%w: %v", api.ErrNotFound, err)
+	}
+	if errors.Is(err, environments.ErrValidation) || errors.Is(err, environments.ErrReservedName) || errors.Is(err, environments.ErrInvalidName) || errors.Is(err, environments.ErrInvalidValue) {
+		return fmt.Errorf("%w: %v", api.ErrValidation, err)
+	}
+	if errors.Is(err, environments.ErrConflict) || errors.Is(err, environments.ErrConsumed) {
+		return fmt.Errorf("%w: %v", api.ErrAlreadyExists, err)
+	}
+	if errors.Is(err, environments.ErrExpired) {
+		return fmt.Errorf("%w: %v", api.ErrValidation, err)
+	}
+	if errors.Is(err, environments.ErrRevoked) {
+		return fmt.Errorf("%w: %v", api.ErrForbidden, err)
 	}
 	if errors.Is(err, ErrNotConfigured) {
 		return fmt.Errorf("%w: %v", api.ErrValidation, err)
@@ -1082,13 +1220,13 @@ func (b *Backend) CreateProject(ctx context.Context, req api.CreateProjectReques
 			callbackBase = "https://" + inst.Domain
 		}
 		provInput := scm.ProvisionInput{
-			ProjectID:              pr.ID,
-			Owner:                  "omahab",
-			RepoName:               slug,
-			Description:            name,
-			DefaultBranch:          "main",
-			RegistryHost:           registryHost,
-			ReleaseCallbackBaseURL: callbackBase,
+			ProjectID:          pr.ID,
+			Owner:              "omahab",
+			RepoName:           slug,
+			Description:        name,
+			DefaultBranch:      "main",
+			RegistryHost:       registryHost,
+			ReleaseCallbackURL: callbackBase,
 		}
 		if provRes, err := b.scm.Provision(ctx, provInput); err != nil {
 			_, _ = b.events.Publish(ctx, events.PublishInput{Type: "ci.failed", Severity: "warning", Message: "scm provision failed: " + err.Error(), ResourceID: string(pr.ID)})
@@ -1837,6 +1975,9 @@ func (b *Backend) CreateUserRecoverySession(ctx context.Context, userID domain.I
 
 // Provider credentials
 func (b *Backend) ListProviderCredentials(ctx context.Context, p api.Pagination) ([]api.ProviderCredential, error) {
+	if b.providers == nil {
+		return nil, translateError(fmt.Errorf("%w: providers not configured", ErrNotConfigured))
+	}
 	list, err := b.providers.ListCredentials(ctx)
 	if err != nil {
 		return nil, translateError(err)
@@ -1851,6 +1992,8 @@ func (b *Backend) ListProviderCredentials(ctx context.Context, p api.Pagination)
 			Kind:        c.CredentialType,
 			Status:      string(c.Health),
 			Configured:  true,
+			ManagedBy:   c.ManagedBy,
+			ExternalRef: c.ExternalRef,
 			Entitlement: &ent,
 			ExpiresAt:   c.ExpiresAt,
 			UpdatedAt:   c.UpdatedAt,
@@ -1860,6 +2003,9 @@ func (b *Backend) ListProviderCredentials(ctx context.Context, p api.Pagination)
 }
 
 func (b *Backend) GetProviderCredential(ctx context.Context, id domain.ID) (api.ProviderCredential, error) {
+	if b.providers == nil {
+		return api.ProviderCredential{}, translateError(fmt.Errorf("%w: providers not configured", ErrNotConfigured))
+	}
 	c, err := b.providers.GetCredential(ctx, id)
 	if err != nil {
 		return api.ProviderCredential{}, translateError(err)
@@ -1872,6 +2018,8 @@ func (b *Backend) GetProviderCredential(ctx context.Context, id domain.ID) (api.
 		Kind:        c.CredentialType,
 		Status:      string(c.Health),
 		Configured:  true,
+		ManagedBy:   c.ManagedBy,
+		ExternalRef: c.ExternalRef,
 		Entitlement: &ent,
 		ExpiresAt:   c.ExpiresAt,
 		UpdatedAt:   c.UpdatedAt,
@@ -1879,43 +2027,923 @@ func (b *Backend) GetProviderCredential(ctx context.Context, id domain.ID) (api.
 }
 
 func (b *Backend) CreateProviderCredential(ctx context.Context, req api.CreateProviderCredentialRequest) (api.ProviderCredential, error) {
-	// Map to providers service; secret handling via secrets broker
-	// For metadata-only, we create a placeholder secret reference
-	secretID := store.NewID()
-	// create a dummy secret for the provider? Not needed for metadata test; use secret_id as generated
-	// We need to ensure secret exists? Instead use providers credential creation with secret_id
-	in := providers.CreateCredentialInput{
-		Provider:       req.Provider,
-		CredentialType: req.Kind,
-		DisplayName:    req.Name,
-		SecretID:       domain.ID(secretID),
+	if b.providers == nil || b.secrets == nil {
+		return api.ProviderCredential{}, translateError(fmt.Errorf("%w: providers or secrets not configured", ErrNotConfigured))
 	}
-	// If req.Value provided via extra field? The api request has no value for metadata-only? Check type
-	// CreateProviderCredentialRequest has Provider, Name, Kind; value is not stored
-	c, err := b.providers.CreateCredential(ctx, in)
+	provider := strings.TrimSpace(strings.ToLower(req.Provider))
+	kind := strings.TrimSpace(strings.ToLower(req.Kind))
+	displayName := strings.TrimSpace(req.Name)
+	value := req.Value
+
+	// Strict provider/kind validation. Reject mismatched pairs before touching secrets.
+	if provider == "" {
+		return api.ProviderCredential{}, translateError(fmt.Errorf("%w: provider is required", store.ErrValidation))
+	}
+	if kind == "" {
+		return api.ProviderCredential{}, translateError(fmt.Errorf("%w: kind is required", store.ErrValidation))
+	}
+	// Use providers constants for allowed checks; fallback to service validation if needed.
+	allowed := map[string]map[string]bool{
+		providers.ProviderOpenAI:     {providers.CredentialTypeAPIKey: true},
+		providers.ProviderAnthropic:  {providers.CredentialTypeAPIKey: true},
+		providers.ProviderOpenRouter: {providers.CredentialTypeAPIKey: true},
+		providers.ProviderChatGPT:    {providers.CredentialTypeOAuth: true},
+		providers.ProviderXAI:        {providers.CredentialTypeOAuth: true},
+	}
+	if m, ok := allowed[provider]; !ok || !m[kind] {
+		return api.ProviderCredential{}, translateError(fmt.Errorf("%w: credential type %q not allowed for provider %q", store.ErrValidation, kind, provider))
+	}
+	if kind == providers.CredentialTypeAPIKey {
+		// API-key path: managed_by omahab, secret via broker.
+		if strings.TrimSpace(value) == "" {
+			return api.ProviderCredential{}, translateError(fmt.Errorf("%w: value is required for api_key credentials", store.ErrValidation))
+		}
+		if strings.Contains(value, "\x00") || strings.Contains(displayName, "\x00") {
+			return api.ProviderCredential{}, translateError(fmt.Errorf("%w: value contains NUL", store.ErrValidation))
+		}
+		// Reject cookie/session/browser exfiltration substrings (case-insensitive) in value.
+		low := strings.ToLower(value)
+		for _, sub := range []string{"cookie", "session", "browser"} {
+			if strings.Contains(low, sub) {
+				return api.ProviderCredential{}, translateError(fmt.Errorf("%w: credential value contains rejected substring %q", store.ErrValidation, sub))
+			}
+		}
+	}
+	if kind == providers.CredentialTypeOAuth {
+		if strings.TrimSpace(value) != "" {
+			// OAuth credentials must not carry a raw value; they are managed by LiteLLM.
+			return api.ProviderCredential{}, translateError(fmt.Errorf("%w: value must be empty for oauth credentials", store.ErrValidation))
+		}
+	}
+
+	// Generate credential ID for secret naming; this will be the provider_credentials.id as well.
+	credentialID := domain.ID(store.NewID())
+	var secretID domain.ID
+	var managedBy string
+	var externalRef *string
+	var secretName string
+
+	switch kind {
+	case providers.CredentialTypeAPIKey:
+		managedBy = providers.ManagedByOmahab
+		secretName = "credential." + string(credentialID)
+		sec, err := b.secrets.Put(ctx, "provider", secretName, value)
+		if err != nil {
+			return api.ProviderCredential{}, translateError(err)
+		}
+		secretID = sec.ID
+		externalRef = nil
+	case providers.CredentialTypeOAuth:
+		managedBy = providers.ManagedByLiteLLM
+		// Do not create secret; set external_ref per provider.
+		switch provider {
+		case providers.ProviderChatGPT:
+			ref := providers.ExternalRefChatGPT
+			externalRef = &ref
+		case providers.ProviderXAI:
+			ref := providers.ExternalRefXAI
+			externalRef = &ref
+		default:
+			return api.ProviderCredential{}, translateError(fmt.Errorf("%w: oauth not supported for provider %q", store.ErrValidation, provider))
+		}
+		secretID = ""
+		secretName = ""
+	default:
+		return api.ProviderCredential{}, translateError(fmt.Errorf("%w: unsupported kind %q", store.ErrValidation, kind))
+	}
+
+	// Persist metadata. Use generated credentialID as primary key so secret name matches.
+	in := providers.CreateCredentialInput{
+		ID:             credentialID,
+		Provider:       provider,
+		CredentialType: kind,
+		DisplayName:    displayName,
+		SecretID:       secretID,
+		ManagedBy:      managedBy,
+		ExternalRef:    externalRef,
+	}
+	cred, err := b.providers.CreateCredential(ctx, in)
 	if err != nil {
+		// Roll back secret if it was created.
+		if managedBy == providers.ManagedByOmahab && secretID != "" {
+			_ = b.secrets.Delete(ctx, secretID)
+			if secretName != "" {
+				_ = b.secrets.DeleteByName(ctx, "provider", secretName)
+			}
+		}
 		return api.ProviderCredential{}, translateError(err)
 	}
-	ent := c.Entitlement
+
+	// After metadata persisted, reconcile LiteLLM. Capture lists for rollback.
+	if b.gateway != nil {
+		aliases, _ := b.providers.ListAliases(ctx)
+		creds, _ := b.providers.ListCredentials(ctx)
+		// Convert to value slices for gateway.
+		var aliasVals []providers.Alias
+		for _, a := range aliases {
+			if a != nil {
+				aliasVals = append(aliasVals, *a)
+			}
+		}
+		var credVals []providers.Credential
+		for _, c := range creds {
+			if c != nil {
+				credVals = append(credVals, *c)
+			}
+		}
+		if err := b.gateway.ReconcileModels(ctx, aliasVals, credVals); err != nil {
+			_ = b.providers.DeleteCredential(ctx, cred.ID)
+			if managedBy == providers.ManagedByOmahab && secretID != "" {
+				_ = b.secrets.Delete(ctx, secretID)
+				if secretName != "" {
+					_ = b.secrets.DeleteByName(ctx, "provider", secretName)
+				}
+			}
+			// Attempt to re-reconcile without the new credential to restore prior gateway state.
+			prevAliases, _ := b.providers.ListAliases(ctx)
+			prevCreds, _ := b.providers.ListCredentials(ctx)
+			var prevVals []providers.Alias
+			for _, a := range prevAliases {
+				if a != nil {
+					prevVals = append(prevVals, *a)
+				}
+			}
+			var prevCredVals []providers.Credential
+			for _, c := range prevCreds {
+				if c != nil {
+					prevCredVals = append(prevCredVals, *c)
+				}
+			}
+			_ = b.gateway.ReconcileModels(ctx, prevVals, prevCredVals)
+			return api.ProviderCredential{}, translateError(fmt.Errorf("gateway reconcile failed: %w", err))
+		}
+		if err := b.gateway.Health(ctx); err != nil {
+			_ = b.providers.DeleteCredential(ctx, cred.ID)
+			if managedBy == providers.ManagedByOmahab && secretID != "" {
+				_ = b.secrets.Delete(ctx, secretID)
+				if secretName != "" {
+					_ = b.secrets.DeleteByName(ctx, "provider", secretName)
+				}
+			}
+			prevAliases, _ := b.providers.ListAliases(ctx)
+			prevCreds, _ := b.providers.ListCredentials(ctx)
+			var prevVals2 []providers.Alias
+			for _, a := range prevAliases {
+				if a != nil {
+					prevVals2 = append(prevVals2, *a)
+				}
+			}
+			var prevCredVals2 []providers.Credential
+			for _, c := range prevCreds {
+				if c != nil {
+					prevCredVals2 = append(prevCredVals2, *c)
+				}
+			}
+			_ = b.gateway.ReconcileModels(ctx, prevVals2, prevCredVals2)
+			return api.ProviderCredential{}, translateError(err)
+		}
+	}
+
+	ent := cred.Entitlement
 	return api.ProviderCredential{
-		ID:          c.ID,
-		Provider:    c.Provider,
-		Name:        c.DisplayName,
-		Kind:        c.CredentialType,
-		Status:      string(c.Health),
+		ID:          cred.ID,
+		Provider:    cred.Provider,
+		Name:        cred.DisplayName,
+		Kind:        cred.CredentialType,
+		Status:      string(cred.Health),
 		Configured:  true,
+		ManagedBy:   cred.ManagedBy,
+		ExternalRef: cred.ExternalRef,
 		Entitlement: &ent,
-		ExpiresAt:   c.ExpiresAt,
-		UpdatedAt:   c.UpdatedAt,
+		ExpiresAt:   cred.ExpiresAt,
+		UpdatedAt:   cred.UpdatedAt,
 	}, nil
 }
 
 func (b *Backend) DeleteProviderCredential(ctx context.Context, id domain.ID) error {
+	if b.providers == nil {
+		return translateError(fmt.Errorf("%w: providers not configured", ErrNotConfigured))
+	}
+	if strings.TrimSpace(string(id)) == "" {
+		return translateError(fmt.Errorf("%w: id is required", store.ErrValidation))
+	}
+	// Fetch existing to know managed_by/secret_id for cleanup and to surface not-found.
+	cred, err := b.providers.GetCredential(ctx, id)
+	if err != nil {
+		return translateError(err)
+	}
+	// First, reject if any alias still references this credential (FK RESTRICT).
+	aliases, err := b.providers.ListAliases(ctx)
+	if err != nil {
+		return translateError(err)
+	}
+	for _, a := range aliases {
+		if a != nil && a.CredentialID == id {
+			return translateError(fmt.Errorf("%w: credential is referenced by alias %q", store.ErrValidation, a.Name))
+		}
+	}
+	// Remove LiteLLM deployment before deleting metadata.
+	if b.gateway != nil {
+		// Build lists without the credential being deleted.
+		allCreds, _ := b.providers.ListCredentials(ctx)
+		var remainingCredVals []providers.Credential
+		for _, c := range allCreds {
+			if c != nil && c.ID != id {
+				remainingCredVals = append(remainingCredVals, *c)
+			}
+		}
+		var aliasVals []providers.Alias
+		for _, a := range aliases {
+			if a != nil {
+				aliasVals = append(aliasVals, *a)
+			}
+		}
+		if err := b.gateway.ReconcileModels(ctx, aliasVals, remainingCredVals); err != nil {
+			return translateError(fmt.Errorf("gateway reconcile failed: %w", err))
+		}
+	}
+	// Delete metadata.
 	if err := b.providers.DeleteCredential(ctx, id); err != nil {
+		return translateError(err)
+	}
+	// Finally, delete encrypted secret if omahab-managed.
+	if cred.ManagedBy == providers.ManagedByOmahab {
+		// Secret was stored as provider/credential.<id>
+		secretName := "credential." + string(id)
+		if cred.SecretID != "" {
+			_ = b.secrets.Delete(ctx, cred.SecretID)
+		}
+		_ = b.secrets.DeleteByName(ctx, "provider", secretName)
+	}
+	return nil
+}
+// Model gateway — alias and virtual-key management via providers.Service and GatewayAdmin.
+func (b *Backend) ListModelAliases(ctx context.Context) ([]api.ModelAlias, error) {
+	if b.providers == nil {
+		return nil, translateError(fmt.Errorf("%w: providers not configured", ErrNotConfigured))
+	}
+	list, err := b.providers.ListAliases(ctx)
+	if err != nil {
+		return nil, translateError(err)
+	}
+	out := make([]api.ModelAlias, 0, len(list))
+	for _, a := range list {
+		out = append(out, api.ModelAlias{
+			Name:         a.Name,
+			CredentialID: a.CredentialID,
+			Model:        a.Model,
+			CreatedAt:    a.CreatedAt,
+			UpdatedAt:    a.UpdatedAt,
+		})
+	}
+	return out, nil
+}
+
+func (b *Backend) SetModelAlias(ctx context.Context, name string, req api.SetModelAliasRequest) (api.ModelAlias, error) {
+	if b.providers == nil {
+		return api.ModelAlias{}, translateError(fmt.Errorf("%w: providers not configured", ErrNotConfigured))
+	}
+	in := providers.SetAliasInput{
+		Name:         name,
+		CredentialID: domain.ID(req.CredentialID),
+		Model:        req.Model,
+	}
+	a, err := b.providers.SetAlias(ctx, in)
+	if err != nil {
+		return api.ModelAlias{}, translateError(err)
+	}
+	// Reconcile gateway after alias change, with rollback on failure.
+	if b.gateway != nil {
+		aliases, _ := b.providers.ListAliases(ctx)
+		creds, _ := b.providers.ListCredentials(ctx)
+		var aliasVals []providers.Alias
+		for _, al := range aliases {
+			if al != nil {
+				aliasVals = append(aliasVals, *al)
+			}
+		}
+		var credVals []providers.Credential
+		for _, c := range creds {
+			if c != nil {
+				credVals = append(credVals, *c)
+			}
+		}
+		if err := b.gateway.ReconcileModels(ctx, aliasVals, credVals); err != nil {
+			return api.ModelAlias{}, translateError(fmt.Errorf("gateway reconcile failed: %w", err))
+		}
+		if err := b.gateway.Health(ctx); err != nil {
+			return api.ModelAlias{}, translateError(err)
+		}
+	}
+	return api.ModelAlias{
+		Name:          a.Name,
+		CredentialID:  a.CredentialID,
+		Model:         a.Model,
+		FallbackOrder: req.FallbackOrder,
+		CreatedAt:     a.CreatedAt,
+		UpdatedAt:     a.UpdatedAt,
+	}, nil
+}
+
+func (b *Backend) ListModelKeys(ctx context.Context, p api.Pagination) ([]api.ModelKey, error) {
+	if b.providers == nil {
+		return []api.ModelKey{}, nil
+	}
+	list, err := b.providers.ListVirtualKeys(ctx)
+	if err != nil {
+		return nil, translateError(err)
+	}
+	out := make([]api.ModelKey, 0, len(list))
+	for _, vk := range list {
+		mk := api.ModelKey{
+			ID:        vk.ID,
+			Name:      vk.Name,
+			KeyPrefix: vk.KeyPrefix,
+			Scopes:    vk.Scopes,
+			CreatedAt: vk.CreatedAt,
+			ExpiresAt: vk.ExpiresAt,
+		}
+		if vk.OwnerKind != nil {
+			mk.OwnerKind = *vk.OwnerKind
+		} else {
+			mk.OwnerKind = "harness"
+		}
+		if vk.OwnerID != nil {
+			mk.OwnerID = *vk.OwnerID
+		} else {
+			mk.OwnerID = "unknown"
+		}
+		if vk.RPMLimit != nil {
+			v := *vk.RPMLimit
+			mk.RPM = &v
+		}
+		if vk.TPMLimit != nil {
+			v := *vk.TPMLimit
+			mk.TPM = &v
+		}
+		if vk.ConcurrencyLimit != nil {
+			v := *vk.ConcurrencyLimit
+			mk.Concurrency = &v
+		}
+		if vk.BudgetAmount != nil {
+			v := *vk.BudgetAmount
+			mk.Budget = &v
+		}
+		out = append(out, mk)
+	}
+	return paginate(out, p), nil
+}
+
+func (b *Backend) CreateModelKey(ctx context.Context, req api.CreateModelKeyRequest) (api.ModelKey, string, error) {
+	if b.providers == nil {
+		return api.ModelKey{}, "", translateError(fmt.Errorf("%w: providers not configured", ErrNotConfigured))
+	}
+	// Validate owner
+	ownerKind := strings.TrimSpace(req.OwnerKind)
+	if ownerKind == "" {
+		ownerKind = "harness"
+	}
+	if ownerKind != "hermes" && ownerKind != "device" && ownerKind != "harness" {
+		return api.ModelKey{}, "", translateError(fmt.Errorf("%w: owner_kind must be hermes, device, or harness", store.ErrValidation))
+	}
+	ownerID := strings.TrimSpace(req.OwnerID)
+	if ownerID == "" {
+		return api.ModelKey{}, "", translateError(fmt.Errorf("%w: owner_id is required", store.ErrValidation))
+	}
+	in := providers.IssueVirtualKeyInput{
+		Name:             req.Name,
+		Scopes:           req.Scopes,
+		ExpiresAt:        req.ExpiresAt,
+		OwnerKind:        &ownerKind,
+		OwnerID:          &ownerID,
+		RPMLimit:         req.RPM,
+		TPMLimit:         req.TPM,
+		ConcurrencyLimit: req.Concurrency,
+		BudgetAmount:     req.Budget,
+	}
+	res, err := b.providers.IssueVirtualKey(ctx, in)
+	if err != nil {
+		return api.ModelKey{}, "", translateError(err)
+	}
+	// Also provision in LiteLLM gateway if available.
+	if b.gateway != nil && res.VirtualKey.GatewayKeyID != nil && *res.VirtualKey.GatewayKeyID != "" {
+		// Gateway already called via providers.Service; no extra step needed.
+	}
+	mk := api.ModelKey{
+		ID:          res.VirtualKey.ID,
+		Name:        res.VirtualKey.Name,
+		KeyPrefix:   res.VirtualKey.KeyPrefix,
+		OwnerKind:   ownerKind,
+		OwnerID:     ownerID,
+		Scopes:      res.VirtualKey.Scopes,
+		RPM:         req.RPM,
+		TPM:         req.TPM,
+		Concurrency: req.Concurrency,
+		Budget:      req.Budget,
+		CreatedAt:   res.VirtualKey.CreatedAt,
+		ExpiresAt:   res.VirtualKey.ExpiresAt,
+	}
+	return mk, res.Token, nil
+}
+
+func (b *Backend) DeleteModelKey(ctx context.Context, id domain.ID) error {
+	if b.providers == nil {
+		return translateError(fmt.Errorf("%w: providers not configured", ErrNotConfigured))
+	}
+	if err := b.providers.RevokeVirtualKey(ctx, id); err != nil {
 		return translateError(err)
 	}
 	return nil
 }
+
+func (b *Backend) StartProviderOAuth(ctx context.Context, provider string, req api.StartProviderOAuthRequest) (api.OAuthSession, error) {
+	if b.gateway == nil {
+		return api.OAuthSession{}, translateError(fmt.Errorf("%w: gateway not configured", ErrNotConfigured))
+	}
+	provider = strings.TrimSpace(strings.ToLower(provider))
+	flow := strings.TrimSpace(req.Flow)
+	if flow == "" {
+		if provider == providers.ProviderChatGPT {
+			flow = providers.FlowDeviceCode
+		} else if provider == providers.ProviderXAI {
+			flow = providers.FlowLoopback
+		}
+	}
+	sess, err := b.gateway.StartOAuth(ctx, provider, flow)
+	if err != nil {
+		return api.OAuthSession{}, translateError(err)
+	}
+	out := api.OAuthSession{
+		ID:              sess.ID,
+		Provider:        sess.Provider,
+		Flow:            sess.Flow,
+		VerificationURL: sess.VerificationURL,
+		UserCode:        sess.UserCode,
+		CallbackPort:    sess.CallbackPort,
+		ExpiresAt:       sess.ExpiresAt,
+		Status:          sess.Status,
+	}
+	// Enforce spec: ChatGPT must be device_code with verification_url/user_code and 10m expiry; xAI must be loopback with 56121 and auth URL.
+	if provider == providers.ProviderChatGPT {
+		if out.Flow != providers.FlowDeviceCode {
+			return api.OAuthSession{}, translateError(fmt.Errorf("%w: chatgpt requires device_code flow", api.ErrValidation))
+		}
+		if strings.TrimSpace(out.VerificationURL) == "" {
+			return api.OAuthSession{}, translateError(fmt.Errorf("%w: missing verification_url for chatgpt", api.ErrValidation))
+		}
+		if out.UserCode == nil || strings.TrimSpace(*out.UserCode) == "" {
+			return api.OAuthSession{}, translateError(fmt.Errorf("%w: missing user_code for chatgpt", api.ErrValidation))
+		}
+		if out.ExpiresAt.IsZero() {
+			out.ExpiresAt = time.Now().UTC().Add(10 * time.Minute)
+		}
+	}
+	if provider == providers.ProviderXAI {
+		if out.Flow != providers.FlowLoopback {
+			return api.OAuthSession{}, translateError(fmt.Errorf("%w: xai requires loopback flow", api.ErrValidation))
+		}
+		if out.CallbackPort == nil || *out.CallbackPort != 56121 {
+			port := 56121
+			out.CallbackPort = &port
+		}
+		if strings.TrimSpace(out.VerificationURL) == "" {
+			return api.OAuthSession{}, translateError(fmt.Errorf("%w: missing auth url for xai", api.ErrValidation))
+		}
+	}
+	return out, nil
+}
+
+func (b *Backend) PollProviderOAuth(ctx context.Context, provider, sessionID string) (api.OAuthSession, error) {
+	if b.gateway == nil {
+		return api.OAuthSession{}, translateError(fmt.Errorf("%w: gateway not configured", ErrNotConfigured))
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	sess, err := b.gateway.PollOAuth(ctx, sessionID)
+	if err != nil {
+		return api.OAuthSession{}, translateError(err)
+	}
+	out := api.OAuthSession{
+		ID:              sess.ID,
+		Provider:        sess.Provider,
+		Flow:            sess.Flow,
+		VerificationURL: sess.VerificationURL,
+		UserCode:        sess.UserCode,
+		CallbackPort:    sess.CallbackPort,
+		ExpiresAt:       sess.ExpiresAt,
+		Status:          sess.Status,
+	}
+	// Handle terminal states; if connected, call concrete model through LiteLLM before marking credential healthy (ProbeModel).
+	switch out.Status {
+	case providers.OAuthStatusConnected:
+		// ProbeModel with mapping 401->token-invalid, 403->not_entitled (xAI tier restriction, retain record, don't loop), 429->quota/rate-limited.
+		_ = b.probeAndMarkHealthy(ctx, provider)
+		return out, nil
+	case providers.OAuthStatusPending, providers.OAuthStatusExpired, providers.OAuthStatusDenied, providers.OAuthStatusError:
+		return out, nil
+	default:
+		return out, nil
+	}
+}
+
+func (b *Backend) ForwardProviderOAuthCallback(ctx context.Context, provider, sessionID string, req api.ForwardProviderOAuthCallbackRequest) (api.OAuthSession, error) {
+	if b.gateway == nil {
+		return api.OAuthSession{}, translateError(fmt.Errorf("%w: gateway not configured", ErrNotConfigured))
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	cp := strings.TrimSpace(req.CallbackPath)
+	// Validate callback_path strictly via providers.ValidateCallbackPath: only /callback?<query>, reject foreign host/path/scheme/port/expired/device/shell metachars,
+	// never accept caller-supplied callback URL or shell fragment, use argv-safe exec to literal http://127.0.0.1:56121 inside named LiteLLM container.
+	if err := providers.ValidateCallbackPath(cp); err != nil {
+		return api.OAuthSession{}, translateError(err)
+	}
+	// Permit XAI callback relay only from enrolled companion with allow_provider_oauth=true.
+	if b.environments != nil {
+		deviceID := environments.DeviceIDFromContext(ctx)
+		if deviceID == "" {
+			if dev := environments.DeviceFromContext(ctx); dev != nil {
+				deviceID = dev.ID
+			}
+		}
+		if deviceID == "" {
+			return api.OAuthSession{}, translateError(fmt.Errorf("%w: device authentication required for callback", api.ErrForbidden))
+		}
+		dev, err := b.environments.GetDevice(ctx, deviceID)
+		if err != nil {
+			return api.OAuthSession{}, translateError(fmt.Errorf("%w: device not found", api.ErrForbidden))
+		}
+		if !dev.AllowProviderOAuth {
+			return api.OAuthSession{}, translateError(fmt.Errorf("%w: device not allowed for provider oauth (allow_provider_oauth=false)", api.ErrForbidden))
+		}
+	}
+	if provider != providers.ProviderXAI {
+		return api.OAuthSession{}, translateError(fmt.Errorf("%w: callback only for xai", api.ErrValidation))
+	}
+	// Delegate to gateway which validates path exactly /callback?<query>, rejects foreign host/path/scheme/port, shell metachars, expired session, wrong device,
+	// and forwards via argv-safe exec to literal http://127.0.0.1:56121 inside named LiteLLM container (curl without sh -c). Never use sh -c or accept shell fragments.
+	if err := b.gateway.ForwardOAuthCallback(ctx, sessionID, cp); err != nil {
+	}
+	// After forward, poll gateway for connected status, then ProbeModel as above.
+	sess, err := b.gateway.PollOAuth(ctx, sessionID)
+	if err != nil {
+		return api.OAuthSession{}, translateError(err)
+	}
+	out := api.OAuthSession{
+		ID:              sess.ID,
+		Provider:        sess.Provider,
+		Flow:            sess.Flow,
+		VerificationURL: sess.VerificationURL,
+		UserCode:        sess.UserCode,
+		CallbackPort:    sess.CallbackPort,
+		ExpiresAt:       sess.ExpiresAt,
+		Status:          sess.Status,
+	}
+	if out.Status == providers.OAuthStatusConnected {
+		_ = b.probeAndMarkHealthy(ctx, provider)
+	}
+	return out, nil
+}
+
+func (b *Backend) probeAndMarkHealthy(ctx context.Context, provider string) error {
+	if b.providers == nil || b.gateway == nil {
+		return nil
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	// Find a litellm-managed credential for this provider (external_ref chatgpt|xai_oauth), managed_by litellm, no secret_id.
+	creds, err := b.providers.ListCredentials(ctx)
+	if err != nil {
+		return err
+	}
+	var target *providers.Credential
+	expectedRef := ""
+	switch provider {
+	case providers.ProviderChatGPT:
+		expectedRef = providers.ExternalRefChatGPT
+	case providers.ProviderXAI:
+		expectedRef = providers.ExternalRefXAI
+	}
+	for _, c := range creds {
+		if c == nil {
+			continue
+		}
+		if strings.EqualFold(c.Provider, provider) && c.ManagedBy == providers.ManagedByLiteLLM {
+			if expectedRef != "" {
+				if c.ExternalRef != nil && strings.EqualFold(strings.TrimSpace(*c.ExternalRef), expectedRef) {
+					target = c
+					break
+				}
+			} else {
+				target = c
+				break
+			}
+		}
+	}
+	if target == nil {
+		return nil
+	}
+	// Choose concrete model to probe: prefer alias that uses this credential, else omahab/fast via LiteLLM.
+	aliases, err := b.providers.ListAliases(ctx)
+	if err != nil || len(aliases) == 0 {
+		return nil
+	}
+	modelToProbe := ""
+	for _, a := range aliases {
+		if a != nil && a.CredentialID == target.ID {
+			if a.Name == providers.AliasFast {
+				modelToProbe = a.Name
+				break
+			}
+			if modelToProbe == "" {
+				modelToProbe = a.Name
+			}
+		}
+	}
+	if modelToProbe == "" {
+		modelToProbe = providers.AliasFast
+	}
+	// Issue a short-lived probe virtual key scoped to modelToProbe; LiteLLM is authoritative for auth, not local ValidateVirtualKey.
+	ownerKind := "harness"
+	ownerID := "probe-" + string(store.NewID())
+	probeReq := providers.IssueVirtualKeyInput{
+		Name:      "probe-" + provider,
+		Scopes:    []string{modelToProbe},
+		OwnerKind: &ownerKind,
+		OwnerID:   &ownerID,
+	}
+	res, err := b.providers.IssueVirtualKey(ctx, probeReq)
+	if err != nil {
+		_ = b.providers.UpdateHealth(ctx, target.ID, domain.HealthDegraded, target.Entitlement, fmt.Sprintf("probe key issue failed: %v", err))
+		return err
+	}
+	defer func() {
+		_ = b.providers.RevokeVirtualKey(ctx, res.VirtualKey.ID)
+	}()
+	// After either flow completes, call concrete model through LiteLLM before marking credential healthy (ProbeModel).
+	err = b.gateway.ProbeModel(ctx, modelToProbe, res.Token)
+	if err == nil {
+		_ = b.providers.UpdateHealth(ctx, target.ID, domain.HealthHealthy, providers.EntitlementEntitled, "")
+		return nil
+	}
+	// Map via ClassifyHTTPStatus: 401->token-invalid, 403->not_entitled, 429->quota/rate-limited. For xAI 403 after OAuth, retain record, show tier restriction, offer API-key path, don't loop reauth.
+	if providers.IsTokenInvalidError(err) {
+		_ = b.providers.ReportTokenInvalid(ctx, target.ID, fmt.Sprintf("probe 401 token-invalid: %v", err))
+		return err
+	}
+	if providers.IsEntitlementError(err) {
+		msg := fmt.Sprintf("subscription tier restriction for %s: %v; retain OAuth record, show tier restriction, offer API-key path, don't loop reauth", provider, err)
+		_ = b.providers.ReportEntitlementFailure(ctx, target.ID, msg)
+		return err
+	}
+	lower := strings.ToLower(err.Error())
+	if strings.Contains(lower, "429") || strings.Contains(lower, "rate limited") || strings.Contains(lower, "quota") {
+		_ = b.providers.UpdateHealth(ctx, target.ID, domain.HealthDegraded, providers.EntitlementNotEntitled, fmt.Sprintf("quota/rate-limited (429) for %s: %v", provider, err))
+		return err
+	}
+	_ = b.providers.UpdateHealth(ctx, target.ID, domain.HealthDegraded, providers.EntitlementUnknown, fmt.Sprintf("probe failed: %v", err))
+	return err
+}
+
+// Companion / enrollment (Phase 6) — delegating to environments service when available.
+func (b *Backend) ListCompanionDevices(ctx context.Context, p api.Pagination) ([]api.CompanionDevice, error) {
+	if b.environments == nil {
+		return []api.CompanionDevice{}, nil
+	}
+	list, err := b.environments.ListDevices(ctx)
+	if err != nil {
+		return nil, translateError(err)
+	}
+	out := make([]api.CompanionDevice, 0, len(list))
+	for _, d := range list {
+		out = append(out, api.CompanionDevice{
+			ID:                 domain.ID(d.ID),
+			Name:               d.Name,
+			AllowProviderOAuth: d.AllowProviderOAuth,
+			CreatedAt:          d.CreatedAt,
+			UpdatedAt:          d.UpdatedAt,
+		})
+	}
+	return paginate(out, p), nil
+}
+
+func (b *Backend) GetCompanionDevice(ctx context.Context, id domain.ID) (api.CompanionDevice, error) {
+	if b.environments == nil {
+		return api.CompanionDevice{}, translateError(fmt.Errorf("%w: environments not configured", ErrNotConfigured))
+	}
+	d, err := b.environments.GetDevice(ctx, string(id))
+	if err != nil {
+		return api.CompanionDevice{}, translateError(err)
+	}
+	return api.CompanionDevice{
+		ID:                 domain.ID(d.ID),
+		Name:               d.Name,
+		AllowProviderOAuth: d.AllowProviderOAuth,
+		CreatedAt:          d.CreatedAt,
+		UpdatedAt:          d.UpdatedAt,
+	}, nil
+}
+
+func (b *Backend) CreateCompanionEnrollment(ctx context.Context) (api.CompanionEnrollment, string, error) {
+	if b.environments == nil {
+		return api.CompanionEnrollment{}, "", translateError(fmt.Errorf("%w: environments not configured", ErrNotConfigured))
+	}
+	enr, code, err := b.environments.CreateEnrollment(ctx)
+	if err != nil {
+		return api.CompanionEnrollment{}, "", translateError(err)
+	}
+	return api.CompanionEnrollment{
+		ID:        domain.ID(enr.ID),
+		ExpiresAt: enr.ExpiresAt,
+		CreatedAt: enr.CreatedAt,
+	}, code, nil
+}
+
+func (b *Backend) EnrollCompanion(ctx context.Context, code string) (string, error) {
+	if b.environments == nil {
+		return "", translateError(fmt.Errorf("%w: environments not configured", ErrNotConfigured))
+	}
+	if strings.TrimSpace(code) == "" {
+		return "", translateError(fmt.Errorf("%w: code is required", store.ErrValidation))
+	}
+	dev, token, err := b.environments.EnrollDevice(ctx, code)
+	if err != nil {
+		return "", translateError(err)
+	}
+	// Device token issued; no LiteLLM key yet — per-device key will be issued on first environment sync via ensureDeviceVirtualKey.
+	_ = dev
+	return token, nil
+}
+
+func (b *Backend) RevokeCompanionDevice(ctx context.Context, id domain.ID) error {
+	if b.environments == nil {
+		return translateError(fmt.Errorf("%w: environments not configured", ErrNotConfigured))
+	}
+	trimmed := strings.TrimSpace(string(id))
+	if trimmed == "" {
+		return translateError(fmt.Errorf("%w: id is required", store.ErrValidation))
+	}
+	// Mark device revoked first.
+	if _, err := b.environments.RevokeDevice(ctx, trimmed); err != nil {
+		return translateError(err)
+	}
+	// Immediately revoke its LiteLLM virtual keys (owner_kind=device, owner_id=deviceID).
+	if b.providers != nil {
+		// Query provider_virtual_keys for this device.
+		rows, err := b.db.QueryContext(ctx, `SELECT id FROM provider_virtual_keys WHERE owner_kind = 'device' AND owner_id = ? AND revoked_at IS NULL`, trimmed)
+		if err == nil {
+			defer rows.Close()
+			var ids []string
+			for rows.Next() {
+				var vkID string
+				if err := rows.Scan(&vkID); err == nil {
+					ids = append(ids, vkID)
+				}
+			}
+			for _, vkID := range ids {
+				_ = b.providers.RevokeVirtualKey(ctx, domain.ID(vkID))
+			}
+		}
+	}
+	// Also revoke cached device-key secret if present.
+	if b.secrets != nil {
+		_ = b.secrets.DeleteByName(ctx, "platform-app", "device-key."+trimmed)
+	}
+	return nil
+}
+
+func (b *Backend) SetDeviceAllowOAuth(ctx context.Context, id domain.ID, allow bool) (api.CompanionDevice, error) {
+	if b.environments == nil {
+		return api.CompanionDevice{}, translateError(fmt.Errorf("%w: environments not configured", ErrNotConfigured))
+	}
+	d, err := b.environments.SetDeviceAllowOAuth(ctx, string(id), allow)
+	if err != nil {
+		return api.CompanionDevice{}, translateError(err)
+	}
+	return api.CompanionDevice{
+		ID:                 domain.ID(d.ID),
+		Name:               d.Name,
+		AllowProviderOAuth: d.AllowProviderOAuth,
+		CreatedAt:          d.CreatedAt,
+		UpdatedAt:          d.UpdatedAt,
+	}, nil
+}
+
+func (b *Backend) GetCompanionEnvironment(ctx context.Context, deviceToken string) (map[string]string, string, error) {
+	if b.environments == nil {
+		return nil, "", translateError(fmt.Errorf("%w: environments not configured", ErrNotConfigured))
+	}
+	trimmed := strings.TrimSpace(deviceToken)
+	if trimmed == "" {
+		return nil, "", translateError(fmt.Errorf("%w: device token is required", store.ErrValidation))
+	}
+	// Validate token to get device ID (also checks prefix, revoked, constant-time).
+	dev, err := b.environments.ValidateDeviceToken(ctx, trimmed)
+	if err != nil {
+		return nil, "", translateError(err)
+	}
+	bundle, rev, err := b.environments.GetCompanionEnvironmentBundle(ctx, dev.ID)
+	if err != nil {
+		return nil, "", translateError(err)
+	}
+	// ETag derived from revision + device ID hash (per spec: W/"rev-<revision>-<deviceIDHash>")
+	h := sha256.Sum256([]byte(dev.ID))
+	hashPart := hex.EncodeToString(h[:4])
+	etag := fmt.Sprintf(`W/"rev-%d-%s"`, rev, hashPart)
+	return bundle, etag, nil
+}
+
+// Tool environment (server authoritative singleton agent-tools)
+func (b *Backend) ListToolEnvironments(ctx context.Context) ([]api.ToolEnvEntry, error) {
+	if b.environments == nil {
+		return []api.ToolEnvEntry{}, nil
+	}
+	list, err := b.environments.ListToolEnvs(ctx)
+	if err != nil {
+		return nil, translateError(err)
+	}
+	out := make([]api.ToolEnvEntry, 0, len(list))
+	for _, m := range list {
+		out = append(out, api.ToolEnvEntry{Name: m.Name, Version: m.Version, CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt})
+	}
+	return out, nil
+}
+func (b *Backend) PutToolEnvironment(ctx context.Context, name, value string) (api.ToolEnvEntry, error) {
+	if b.environments == nil {
+		return api.ToolEnvEntry{}, translateError(fmt.Errorf("%w: environments not configured", ErrNotConfigured))
+	}
+	if strings.Contains(value, "\x00") || strings.Contains(value, "\r") || strings.Contains(value, "\n") {
+		return api.ToolEnvEntry{}, translateError(fmt.Errorf("%w: value must not contain NUL, CR, or LF", store.ErrValidation))
+	}
+	meta, err := b.environments.PutToolEnv(ctx, name, value)
+	if err != nil {
+		return api.ToolEnvEntry{}, translateError(err)
+	}
+	return api.ToolEnvEntry{Name: meta.Name, Version: meta.Version, CreatedAt: meta.CreatedAt, UpdatedAt: meta.UpdatedAt}, nil
+}
+func (b *Backend) DeleteToolEnvironment(ctx context.Context, name string) error {
+	if b.environments == nil {
+		return translateError(fmt.Errorf("%w: environments not configured", ErrNotConfigured))
+	}
+	if err := b.environments.DeleteToolEnv(ctx, name); err != nil {
+		return translateError(err)
+	}
+	return nil
+}
+
+// Hermes Nous Portal tool gateway proxy — admin only, forwards with Hermes JWT. Inference stays on LiteLLM.
+func (b *Backend) ListHermesProvidersOAuth(ctx context.Context) ([]hermes.ProviderOAuth, error) {
+	if b.hermes == nil {
+		return nil, translateError(fmt.Errorf("%w: hermes not configured", ErrNotConfigured))
+	}
+	list, err := b.hermes.ListProvidersOAuth(ctx)
+	if err != nil {
+		return nil, translateError(err)
+	}
+	return list, nil
+}
+
+func (b *Backend) StartHermesNousOAuth(ctx context.Context) (*hermes.NousOAuthSession, error) {
+	if b.hermes == nil {
+		return nil, translateError(fmt.Errorf("%w: hermes not configured", ErrNotConfigured))
+	}
+	sess, err := b.hermes.StartNousOAuth(ctx)
+	if err != nil {
+		return nil, translateError(err)
+	}
+	return sess, nil
+}
+
+func (b *Backend) PollHermesNousOAuth(ctx context.Context, sessionID string) (*hermes.NousOAuthSession, error) {
+	if b.hermes == nil {
+		return nil, translateError(fmt.Errorf("%w: hermes not configured", ErrNotConfigured))
+	}
+	sess, err := b.hermes.PollNousOAuth(ctx, sessionID)
+	if err != nil {
+		return nil, translateError(err)
+	}
+	return sess, nil
+}
+
+func (b *Backend) SetHermesToolsetProvider(ctx context.Context, toolsetName, provider string) error {
+	if b.hermes == nil {
+		return translateError(fmt.Errorf("%w: hermes not configured", ErrNotConfigured))
+	}
+	if err := b.hermes.SetToolsetProvider(ctx, toolsetName, provider); err != nil {
+		return translateError(err)
+	}
+	return nil
+}
+
+func (b *Backend) ListHermesToolsets(ctx context.Context) ([]hermes.Toolset, error) {
+	if b.hermes == nil {
+		return nil, translateError(fmt.Errorf("%w: hermes not configured", ErrNotConfigured))
+	}
+	list, err := b.hermes.ListToolsets(ctx)
+	if err != nil {
+		return nil, translateError(err)
+	}
+	return list, nil
+}
+
+
 
 // Email ingestion
 func (b *Backend) IngestEmail(ctx context.Context, req api.EmailIngestRequest) (domain.EmailMessage, error) {
@@ -2534,7 +3562,9 @@ func (n *noopPocketID) EnsureOIDCClient(ctx context.Context, name string, callba
 func (n *noopPocketID) CreateOIDCClientSecret(ctx context.Context, clientID string) (string, error) {
 	return "", fmt.Errorf("%w: PocketID not configured", ErrNotConfigured)
 }
-
+func (n *noopPocketID) EnsureOIDCClientGroupAccess(ctx context.Context, clientID string, groupNames []string) error {
+	return fmt.Errorf("%w: PocketID not configured", ErrNotConfigured)
+}
 // additional sink wrappers to satisfy specific types
 type knowledgeSink struct{ *domainEventSink }
 

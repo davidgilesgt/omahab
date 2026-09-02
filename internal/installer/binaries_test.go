@@ -31,19 +31,23 @@ func newBinariesService(t *testing.T, probes Probes) *Service {
 
 func defaultBinariesAssets() fstest.MapFS {
 	return fstest.MapFS{
-		"bin/omahab":                     &fstest.MapFile{Data: []byte("omahab-bin-content")},
-		"bin/omahabd":                    &fstest.MapFile{Data: []byte("omahabd-bin-content")},
-		"systemd/omahabd.service":        &fstest.MapFile{Data: []byte("[Unit] omahabd")},
-		"systemd/omahab-backup.service":  &fstest.MapFile{Data: []byte("[Unit] backup service")},
-		"systemd/omahab-backup.timer":    &fstest.MapFile{Data: []byte("[Unit] backup timer")},
-		"systemd/omahab-verify.service":  &fstest.MapFile{Data: []byte("[Unit] verify service")},
-		"systemd/omahab-verify.timer":    &fstest.MapFile{Data: []byte("[Unit] verify timer")},
-		"systemd/cloudflared.service":    &fstest.MapFile{Data: []byte("[Unit] cloudflared")},
-		"tmpfiles.d/omahab.conf":         &fstest.MapFile{Data: []byte("tmpfiles omahab")},
-		"catalog/apps-catalog.json":      &fstest.MapFile{Data: []byte(`{"apps":[]}`)},
-		"catalog/compose/example.yml":    &fstest.MapFile{Data: []byte("compose-data")},
-		"web/index.html":                 &fstest.MapFile{Data: []byte("<html>hello</html>")},
-		"web/assets/app.js":              &fstest.MapFile{Data: []byte("console.log(1)")},
+		"bin/omahab":                          &fstest.MapFile{Data: []byte("omahab-bin-content")},
+		"bin/omahabd":                         &fstest.MapFile{Data: []byte("omahabd-bin-content")},
+		"systemd/omahabd.service":             &fstest.MapFile{Data: []byte("[Unit] omahabd")},
+		"systemd/omahab-builder.socket":       &fstest.MapFile{Data: []byte("[Unit] builder socket")},
+		"systemd/omahab-builder.service":      &fstest.MapFile{Data: []byte("[Unit] builder service")},
+		"systemd/omahab-builder-prune.service": &fstest.MapFile{Data: []byte("[Unit] builder prune service")},
+		"systemd/omahab-builder-prune.timer":  &fstest.MapFile{Data: []byte("[Unit] builder prune timer")},
+		"systemd/omahab-backup.service":       &fstest.MapFile{Data: []byte("[Unit] backup service")},
+		"systemd/omahab-backup.timer":         &fstest.MapFile{Data: []byte("[Unit] backup timer")},
+		"systemd/omahab-verify.service":       &fstest.MapFile{Data: []byte("[Unit] verify service")},
+		"systemd/omahab-verify.timer":         &fstest.MapFile{Data: []byte("[Unit] verify timer")},
+		"systemd/cloudflared.service":         &fstest.MapFile{Data: []byte("[Unit] cloudflared")},
+		"tmpfiles.d/omahab.conf":              &fstest.MapFile{Data: []byte("tmpfiles omahab")},
+		"catalog/apps-catalog.json":           &fstest.MapFile{Data: []byte(`{"apps":[]}`)},
+		"catalog/compose/example.yml":         &fstest.MapFile{Data: []byte("compose-data")},
+		"web/index.html":                      &fstest.MapFile{Data: []byte("<html>hello</html>")},
+		"web/assets/app.js":                   &fstest.MapFile{Data: []byte("console.log(1)")},
 	}
 }
 
@@ -128,22 +132,26 @@ func TestBinariesHappyPath(t *testing.T) {
 
 	// Expected dest → perm mapping (including shell completions)
 	wantPerm := map[string]uint32{
-		"/usr/bin/omahab":                              0o755,
-		"/usr/bin/omahabd":                             0o755,
-		"/usr/lib/systemd/system/omahabd.service":      0o644,
-		"/usr/lib/systemd/system/omahab-backup.service": 0o644,
-		"/usr/lib/systemd/system/omahab-backup.timer": 0o644,
-		"/usr/lib/systemd/system/omahab-verify.service": 0o644,
-		"/usr/lib/systemd/system/omahab-verify.timer": 0o644,
-		"/usr/lib/systemd/system/cloudflared.service": 0o644,
-		"/usr/lib/tmpfiles.d/omahab.conf":              0o644,
-		"/usr/share/omahab/catalog/apps-catalog.json":  0o644,
-		"/usr/share/omahab/catalog/compose/example.yml": 0o644,
-		"/usr/share/omahab/web/index.html":             0o644,
-		"/usr/share/omahab/web/assets/app.js":          0o644,
-		"/usr/share/bash-completion/completions/omahab": 0o644,
-		"/usr/share/zsh/site-functions/_omahab":        0o644,
-		"/usr/share/fish/vendor_completions.d/omahab.fish": 0o644,
+		"/usr/bin/omahab":                                   0o755,
+		"/usr/bin/omahabd":                                  0o755,
+		"/usr/lib/systemd/system/omahabd.service":           0o644,
+		"/usr/lib/systemd/system/omahab-builder.socket":     0o644,
+		"/usr/lib/systemd/system/omahab-builder.service":    0o644,
+		"/usr/lib/systemd/system/omahab-builder-prune.service": 0o644,
+		"/usr/lib/systemd/system/omahab-builder-prune.timer": 0o644,
+		"/usr/lib/systemd/system/omahab-backup.service":     0o644,
+		"/usr/lib/systemd/system/omahab-backup.timer":       0o644,
+		"/usr/lib/systemd/system/omahab-verify.service":     0o644,
+		"/usr/lib/systemd/system/omahab-verify.timer":       0o644,
+		"/usr/lib/systemd/system/cloudflared.service":       0o644,
+		"/usr/lib/tmpfiles.d/omahab.conf":                   0o644,
+		"/usr/share/omahab/catalog/apps-catalog.json":       0o644,
+		"/usr/share/omahab/catalog/compose/example.yml":     0o644,
+		"/usr/share/omahab/web/index.html":                  0o644,
+		"/usr/share/omahab/web/assets/app.js":               0o644,
+		"/usr/share/bash-completion/completions/omahab":     0o644,
+		"/usr/share/zsh/site-functions/_omahab":             0o644,
+		"/usr/share/fish/vendor_completions.d/omahab.fish":  0o644,
 	}
 	if !reflect.DeepEqual(destPerm, wantPerm) {
 		t.Fatalf("perms mismatch:\n got  %v\n want %v", destPerm, wantPerm)
@@ -153,6 +161,10 @@ func TestBinariesHappyPath(t *testing.T) {
 		{"bin/omahab", "/usr/bin/omahab"},
 		{"bin/omahabd", "/usr/bin/omahabd"},
 		{"systemd/omahabd.service", "/usr/lib/systemd/system/omahabd.service"},
+		{"systemd/omahab-builder.socket", "/usr/lib/systemd/system/omahab-builder.socket"},
+		{"systemd/omahab-builder.service", "/usr/lib/systemd/system/omahab-builder.service"},
+		{"systemd/omahab-builder-prune.service", "/usr/lib/systemd/system/omahab-builder-prune.service"},
+		{"systemd/omahab-builder-prune.timer", "/usr/lib/systemd/system/omahab-builder-prune.timer"},
 		{"systemd/omahab-backup.service", "/usr/lib/systemd/system/omahab-backup.service"},
 		{"systemd/omahab-backup.timer", "/usr/lib/systemd/system/omahab-backup.timer"},
 		{"systemd/omahab-verify.service", "/usr/lib/systemd/system/omahab-verify.service"},
@@ -508,6 +520,10 @@ func TestBinariesRollback(t *testing.T) {
 		"/usr/bin/omahab",
 		"/usr/bin/omahabd",
 		"/usr/lib/systemd/system/omahabd.service",
+		"/usr/lib/systemd/system/omahab-builder.socket",
+		"/usr/lib/systemd/system/omahab-builder.service",
+		"/usr/lib/systemd/system/omahab-builder-prune.service",
+		"/usr/lib/systemd/system/omahab-builder-prune.timer",
 		"/usr/lib/systemd/system/omahab-backup.service",
 		"/usr/lib/systemd/system/omahab-backup.timer",
 		"/usr/lib/systemd/system/omahab-verify.service",
@@ -553,8 +569,8 @@ func TestBinariesRollbackToleratesMissing(t *testing.T) {
 	if err := RollbackBinaries(ctx, probes); err != nil {
 		t.Fatalf("RollbackBinaries with missing files should not error, got %v", err)
 	}
-	if len(removed) != 12 {
-		t.Fatalf("removed count = %d, want 12 (tolerate missing but still attempt all) %v", len(removed), removed)
+	if len(removed) != 16 {
+		t.Fatalf("removed count = %d, want 16 (tolerate missing but still attempt all) %v", len(removed), removed)
 	}
 	// Also tolerates nil probes
 	if err := RollbackBinaries(ctx, Probes{}); err != nil {
@@ -591,57 +607,69 @@ func TestBinariesInstallPaths(t *testing.T) {
 	t.Parallel()
 
 	assets := fstest.MapFS{
-		"bin/omahab":                    &fstest.MapFile{Data: []byte("a")},
-		"bin/omahabd":                   &fstest.MapFile{Data: []byte("b")},
-		"systemd/omahabd.service":       &fstest.MapFile{Data: []byte("1")},
-		"systemd/omahab-backup.service": &fstest.MapFile{Data: []byte("2")},
-		"systemd/omahab-backup.timer":   &fstest.MapFile{Data: []byte("3")},
-		"systemd/omahab-verify.service": &fstest.MapFile{Data: []byte("4")},
-		"systemd/omahab-verify.timer":   &fstest.MapFile{Data: []byte("5")},
-		"systemd/cloudflared.service":   &fstest.MapFile{Data: []byte("6")},
-		"tmpfiles.d/omahab.conf":        &fstest.MapFile{Data: []byte("7")},
-		"catalog/a.json":                  &fstest.MapFile{Data: []byte("{}")},
-		"catalog/b.json":                  &fstest.MapFile{Data: []byte("{}")},
-		"catalog/apps-catalog.json":       &fstest.MapFile{Data: []byte("{}")},
-		"catalog/nested/c.yml":            &fstest.MapFile{Data: []byte("c")},
-		"web/app/index.html":              &fstest.MapFile{Data: []byte("html")},
+		"bin/omahab":                          &fstest.MapFile{Data: []byte("a")},
+		"bin/omahabd":                         &fstest.MapFile{Data: []byte("b")},
+		"systemd/omahabd.service":             &fstest.MapFile{Data: []byte("1")},
+		"systemd/omahab-builder.socket":       &fstest.MapFile{Data: []byte("s")},
+		"systemd/omahab-builder.service":      &fstest.MapFile{Data: []byte("sv")},
+		"systemd/omahab-builder-prune.service": &fstest.MapFile{Data: []byte("ps")},
+		"systemd/omahab-builder-prune.timer":  &fstest.MapFile{Data: []byte("pt")},
+		"systemd/omahab-backup.service":       &fstest.MapFile{Data: []byte("2")},
+		"systemd/omahab-backup.timer":         &fstest.MapFile{Data: []byte("3")},
+		"systemd/omahab-verify.service":       &fstest.MapFile{Data: []byte("4")},
+		"systemd/omahab-verify.timer":         &fstest.MapFile{Data: []byte("5")},
+		"systemd/cloudflared.service":         &fstest.MapFile{Data: []byte("6")},
+		"tmpfiles.d/omahab.conf":              &fstest.MapFile{Data: []byte("7")},
+		"catalog/a.json":                      &fstest.MapFile{Data: []byte("{}")},
+		"catalog/b.json":                      &fstest.MapFile{Data: []byte("{}")},
+		"catalog/apps-catalog.json":           &fstest.MapFile{Data: []byte("{}")},
+		"catalog/nested/c.yml":                &fstest.MapFile{Data: []byte("c")},
+		"web/app/index.html":                  &fstest.MapFile{Data: []byte("html")},
 	}
 	m, err := InstallPaths(assets)
 	if err != nil {
 		t.Fatalf("InstallPaths: %v", err)
 	}
 	want := map[string]uint32{
-		"/usr/bin/omahab":                              0o755,
-		"/usr/bin/omahabd":                             0o755,
-		"/usr/lib/systemd/system/omahabd.service":      0o644,
-		"/usr/lib/systemd/system/omahab-backup.service": 0o644,
-		"/usr/lib/systemd/system/omahab-backup.timer": 0o644,
-		"/usr/lib/systemd/system/omahab-verify.service": 0o644,
-		"/usr/lib/systemd/system/omahab-verify.timer": 0o644,
-		"/usr/lib/systemd/system/cloudflared.service": 0o644,
-		"/usr/lib/tmpfiles.d/omahab.conf":              0o644,
-		"/usr/share/omahab/catalog/a.json":             0o644,
-		"/usr/share/omahab/catalog/b.json":             0o644,
-		"/usr/share/omahab/catalog/apps-catalog.json":  0o644,
-		"/usr/share/omahab/catalog/nested/c.yml":       0o644,
-		"/usr/share/omahab/web/app/index.html":         0o644,
+		"/usr/bin/omahab":                                   0o755,
+		"/usr/bin/omahabd":                                  0o755,
+		"/usr/lib/systemd/system/omahabd.service":           0o644,
+		"/usr/lib/systemd/system/omahab-builder.socket":     0o644,
+		"/usr/lib/systemd/system/omahab-builder.service":    0o644,
+		"/usr/lib/systemd/system/omahab-builder-prune.service": 0o644,
+		"/usr/lib/systemd/system/omahab-builder-prune.timer": 0o644,
+		"/usr/lib/systemd/system/omahab-backup.service":     0o644,
+		"/usr/lib/systemd/system/omahab-backup.timer":       0o644,
+		"/usr/lib/systemd/system/omahab-verify.service":     0o644,
+		"/usr/lib/systemd/system/omahab-verify.timer":       0o644,
+		"/usr/lib/systemd/system/cloudflared.service":       0o644,
+		"/usr/lib/tmpfiles.d/omahab.conf":                   0o644,
+		"/usr/share/omahab/catalog/a.json":                  0o644,
+		"/usr/share/omahab/catalog/b.json":                  0o644,
+		"/usr/share/omahab/catalog/apps-catalog.json":       0o644,
+		"/usr/share/omahab/catalog/nested/c.yml":            0o644,
+		"/usr/share/omahab/web/app/index.html":              0o644,
 	}
 	if !reflect.DeepEqual(m, want) {
 		t.Fatalf("InstallPaths map mismatch:\n got  %v\n want %v", m, want)
 	}
 	// Optional web: absent should still succeed
 	assets2 := fstest.MapFS{
-		"bin/omahab":                    &fstest.MapFile{Data: []byte("a")},
-		"bin/omahabd":                   &fstest.MapFile{Data: []byte("b")},
-		"systemd/omahabd.service":       &fstest.MapFile{Data: []byte("1")},
-		"systemd/omahab-backup.service": &fstest.MapFile{Data: []byte("2")},
-		"systemd/omahab-backup.timer":   &fstest.MapFile{Data: []byte("3")},
-		"systemd/omahab-verify.service": &fstest.MapFile{Data: []byte("4")},
-		"systemd/omahab-verify.timer":   &fstest.MapFile{Data: []byte("5")},
-		"systemd/cloudflared.service":   &fstest.MapFile{Data: []byte("6")},
-		"tmpfiles.d/omahab.conf":        &fstest.MapFile{Data: []byte("7")},
-		"catalog/x.json":                &fstest.MapFile{Data: []byte("{}")},
-		"catalog/apps-catalog.json":     &fstest.MapFile{Data: []byte("{}")},
+		"bin/omahab":                          &fstest.MapFile{Data: []byte("a")},
+		"bin/omahabd":                         &fstest.MapFile{Data: []byte("b")},
+		"systemd/omahabd.service":             &fstest.MapFile{Data: []byte("1")},
+		"systemd/omahab-builder.socket":       &fstest.MapFile{Data: []byte("s")},
+		"systemd/omahab-builder.service":      &fstest.MapFile{Data: []byte("sv")},
+		"systemd/omahab-builder-prune.service": &fstest.MapFile{Data: []byte("ps")},
+		"systemd/omahab-builder-prune.timer":  &fstest.MapFile{Data: []byte("pt")},
+		"systemd/omahab-backup.service":       &fstest.MapFile{Data: []byte("2")},
+		"systemd/omahab-backup.timer":         &fstest.MapFile{Data: []byte("3")},
+		"systemd/omahab-verify.service":       &fstest.MapFile{Data: []byte("4")},
+		"systemd/omahab-verify.timer":         &fstest.MapFile{Data: []byte("5")},
+		"systemd/cloudflared.service":         &fstest.MapFile{Data: []byte("6")},
+		"tmpfiles.d/omahab.conf":              &fstest.MapFile{Data: []byte("7")},
+		"catalog/x.json":                      &fstest.MapFile{Data: []byte("{}")},
+		"catalog/apps-catalog.json":           &fstest.MapFile{Data: []byte("{}")},
 	}
 	m2, err := InstallPaths(assets2)
 	if err != nil {
@@ -650,8 +678,8 @@ func TestBinariesInstallPaths(t *testing.T) {
 	if _, ok := m2["/usr/share/omahab/web/app/index.html"]; ok {
 		t.Fatal("unexpected web entry when web absent")
 	}
-	if len(m2) != 11 { // 2 bins + 6 units + 1 tmpfiles + 2 catalog
-		t.Fatalf("expected 11 entries without web, got %d: %v", len(m2), m2)
+	if len(m2) != 15 { // 2 bins + 10 units + 1 tmpfiles + 2 catalog
+		t.Fatalf("expected 15 entries without web, got %d: %v", len(m2), m2)
 	}
 	// Missing required should error and mention missing
 	bad := fstest.MapFS{
@@ -678,17 +706,21 @@ func TestBinariesSHA256BestEffort(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	assets := fstest.MapFS{
-		"bin/omahab":                    &fstest.MapFile{Data: []byte("a")},
-		"bin/omahabd":                   &fstest.MapFile{Data: []byte("b")},
-		"systemd/omahabd.service":       &fstest.MapFile{Data: []byte("1")},
-		"systemd/omahab-backup.service": &fstest.MapFile{Data: []byte("2")},
-		"systemd/omahab-backup.timer":   &fstest.MapFile{Data: []byte("3")},
-		"systemd/omahab-verify.service": &fstest.MapFile{Data: []byte("4")},
-		"systemd/omahab-verify.timer":   &fstest.MapFile{Data: []byte("5")},
-		"systemd/cloudflared.service":   &fstest.MapFile{Data: []byte("6")},
-		"tmpfiles.d/omahab.conf":        &fstest.MapFile{Data: []byte("7")},
-		"catalog/c.json":                &fstest.MapFile{Data: []byte("{}")},
-		"catalog/apps-catalog.json":     &fstest.MapFile{Data: []byte("{}")},
+		"bin/omahab":                          &fstest.MapFile{Data: []byte("a")},
+		"bin/omahabd":                         &fstest.MapFile{Data: []byte("b")},
+		"systemd/omahabd.service":             &fstest.MapFile{Data: []byte("1")},
+		"systemd/omahab-builder.socket":       &fstest.MapFile{Data: []byte("s")},
+		"systemd/omahab-builder.service":      &fstest.MapFile{Data: []byte("sv")},
+		"systemd/omahab-builder-prune.service": &fstest.MapFile{Data: []byte("ps")},
+		"systemd/omahab-builder-prune.timer":  &fstest.MapFile{Data: []byte("pt")},
+		"systemd/omahab-backup.service":       &fstest.MapFile{Data: []byte("2")},
+		"systemd/omahab-backup.timer":         &fstest.MapFile{Data: []byte("3")},
+		"systemd/omahab-verify.service":       &fstest.MapFile{Data: []byte("4")},
+		"systemd/omahab-verify.timer":         &fstest.MapFile{Data: []byte("5")},
+		"systemd/cloudflared.service":         &fstest.MapFile{Data: []byte("6")},
+		"tmpfiles.d/omahab.conf":              &fstest.MapFile{Data: []byte("7")},
+		"catalog/c.json":                      &fstest.MapFile{Data: []byte("{}")},
+		"catalog/apps-catalog.json":           &fstest.MapFile{Data: []byte("{}")},
 	}
 
 	// SHA256File fails for one binary — step should still complete
@@ -761,17 +793,21 @@ func TestBinariesWriteFailurePropagation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	assets := fstest.MapFS{
-		"bin/omahab":                    &fstest.MapFile{Data: []byte("a")},
-		"bin/omahabd":                   &fstest.MapFile{Data: []byte("b")},
-		"systemd/omahabd.service":       &fstest.MapFile{Data: []byte("1")},
-		"systemd/omahab-backup.service": &fstest.MapFile{Data: []byte("2")},
-		"systemd/omahab-backup.timer":   &fstest.MapFile{Data: []byte("3")},
-		"systemd/omahab-verify.service": &fstest.MapFile{Data: []byte("4")},
-		"systemd/omahab-verify.timer":   &fstest.MapFile{Data: []byte("5")},
-		"systemd/cloudflared.service":   &fstest.MapFile{Data: []byte("6")},
-		"tmpfiles.d/omahab.conf":        &fstest.MapFile{Data: []byte("7")},
-		"catalog/c.json":                &fstest.MapFile{Data: []byte("{}")},
-		"catalog/apps-catalog.json":     &fstest.MapFile{Data: []byte("{}")},
+		"bin/omahab":                          &fstest.MapFile{Data: []byte("a")},
+		"bin/omahabd":                         &fstest.MapFile{Data: []byte("b")},
+		"systemd/omahabd.service":             &fstest.MapFile{Data: []byte("1")},
+		"systemd/omahab-builder.socket":       &fstest.MapFile{Data: []byte("s")},
+		"systemd/omahab-builder.service":      &fstest.MapFile{Data: []byte("sv")},
+		"systemd/omahab-builder-prune.service": &fstest.MapFile{Data: []byte("ps")},
+		"systemd/omahab-builder-prune.timer":  &fstest.MapFile{Data: []byte("pt")},
+		"systemd/omahab-backup.service":       &fstest.MapFile{Data: []byte("2")},
+		"systemd/omahab-backup.timer":         &fstest.MapFile{Data: []byte("3")},
+		"systemd/omahab-verify.service":       &fstest.MapFile{Data: []byte("4")},
+		"systemd/omahab-verify.timer":         &fstest.MapFile{Data: []byte("5")},
+		"systemd/cloudflared.service":         &fstest.MapFile{Data: []byte("6")},
+		"tmpfiles.d/omahab.conf":              &fstest.MapFile{Data: []byte("7")},
+		"catalog/c.json":                      &fstest.MapFile{Data: []byte("{}")},
+		"catalog/apps-catalog.json":           &fstest.MapFile{Data: []byte("{}")},
 	}
 	svc := newBinariesService(t, Probes{
 		MkdirAll: func(p string, perm uint32) error { return errors.New("mkdir failed") },

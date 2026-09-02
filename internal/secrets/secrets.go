@@ -60,9 +60,9 @@ var allowedScopes = map[string]bool{
 	"platform-app": true,
 	"project":      true,
 	"user":         true,
+	"environment":  true,
 }
-
-var nameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._\-]*$`)
+var nameRe = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._\-]*$`)
 
 // Sentinel re-exports for callers that reference secrets package directly.
 // Underlying values are store sentinels so errors.Is works.
@@ -78,7 +78,7 @@ func validateScope(scope string) error {
 		return store.Validation("secret scope is required")
 	}
 	if !allowedScopes[scope] {
-		return store.Validationf("invalid secret scope %q: must be one of provider, platform-app, project, user", scope)
+		return store.Validationf("invalid secret scope %q: must be one of provider, platform-app, project, user, environment", scope)
 	}
 	return nil
 }

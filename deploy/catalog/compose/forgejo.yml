@@ -16,7 +16,6 @@ services:
         condition: service_healthy
     expose:
       - "3000"
-      - "22"
     environment:
       USER_UID: "1000"
       USER_GID: "1000"
@@ -27,15 +26,22 @@ services:
       FORGEJO__database__PASSWD_FILE: /run/secrets/forgejo_db_password
       FORGEJO__security__SECRET_KEY_FILE: /run/secrets/forgejo_secret_key
       FORGEJO__security__INSTALL_LOCK: "true"
-      FORGEJO__service__DISABLE_REGISTRATION: "true"
+      FORGEJO__service__DISABLE_REGISTRATION: "false"
+      FORGEJO__service__ALLOW_ONLY_EXTERNAL_REGISTRATION: "true"
+      FORGEJO__service__SHOW_REGISTRATION_BUTTON: "false"
+      FORGEJO__service__ENABLE_INTERNAL_SIGNIN: "false"
+      FORGEJO__service__ENABLE_BASIC_AUTHENTICATION: "false"
       FORGEJO__server__ROOT_URL: "https://git.${DOMAIN:?domain required}/"
-      FORGEJO__server__SSH_DOMAIN: "git.${DOMAIN}"
+      FORGEJO__server__OFFLINE_MODE: "false"
+      FORGEJO__actions__ENABLED: "false"
+      FORGEJO__webhook__ALLOWED_HOST_LIST: "ci.${DOMAIN:?domain required},private,loopback"
+      FORGEJO__webhook__ALLOW_HOST_LIST: "ci.${DOMAIN:?domain required},private,loopback"
+      FORGEJO__webhook__BLOCKED_HOST_LIST: ""
     secrets:
       - forgejo_db_password
       - forgejo_secret_key
     volumes:
       - forgejo_data:/data
-      - /etc/omahab/forgejo/app.ini:/data/custom/conf/app.ini:ro
     networks:
       - omahab
     healthcheck:

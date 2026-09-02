@@ -18,8 +18,7 @@ import (
 // secrets, exposure observations, apps, identity, and backups.
 // It persists nothing new — all derivable — per plan step 6.
 func (b *Backend) GetSetupStatus(ctx context.Context) (api.SetupStatus, error) {
-	checks := make([]api.SetupCheck, 0, 8)
-
+	checks := make([]api.SetupCheck, 0, 12)
 	// --- domain check ---
 	inst, instErr := b.store.Instance(ctx)
 	domain := ""
@@ -377,9 +376,11 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (api.SetupStatus, error) {
 	}
 	checks = append(checks, tailCheck)
 
+	woodpeckerCheck := b.woodpeckerConnectionCheck(ctx)
+	checks = append(checks, woodpeckerCheck)
+
 	autoCheck := b.automaticReconciliationCheck(ctx)
 	checks = append(checks, autoCheck)
-
 	if unreadCF, ok := b.unreadCloudflareDNSFailure(ctx); ok {
 		for i := range checks {
 			if checks[i].ID == "cloudflare_dns" {
@@ -511,6 +512,10 @@ func applySetupCheckMeta(c api.SetupCheck) api.SetupCheck {
 	case "core_apps":
 		c.Label = "Install core services"
 		c.Owner = "system"
+	case "woodpecker_connection":
+		c.Label = "Connect Woodpecker"
+		c.Owner = "operator"
+		c.Action = "Sign into ci.<domain> via Pocket ID → Forgejo and submit Forgejo username + Woodpecker PAT."
 	case "automatic_reconciliation":
 		c.Label = "Verify DNS, TLS, and service routes"
 		c.Owner = "system"
@@ -520,11 +525,10 @@ func applySetupCheckMeta(c api.SetupCheck) api.SetupCheck {
 	}
 	return c
 }
-
 func orderSetupChecks(checks []api.SetupCheck) []api.SetupCheck {
 	order := []string{
 		"domain", "cloudflare_dns", "tailscale", "admin_passkeys", "recovery_tested", "backups_configured",
-		"tunnel", "dashboard_dns", "core_apps", "automatic_reconciliation",
+		"tunnel", "dashboard_dns", "core_apps", "woodpecker_connection", "automatic_reconciliation",
 	}
 	byID := make(map[string]api.SetupCheck, len(checks))
 	for _, c := range checks {

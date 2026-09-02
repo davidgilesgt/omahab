@@ -1,0 +1,16 @@
+[Unit]
+Description=Omahab builder Podman API socket
+Documentation=https://github.com/davidgilesgt/omahab
+Before=omahab-builder.service
+RequiresMountsFor=/run
+
+[Socket]
+ListenStream=/run/omahab-builder/podman.sock
+SocketMode=0660
+SocketUser=omahab-builder
+SocketGroup=omahab-builder
+RemoveOnStop=false
+Service=omahab-builder.service
+
+[Install]
+WantedBy=sockets.target

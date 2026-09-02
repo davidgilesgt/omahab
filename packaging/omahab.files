@@ -3,6 +3,10 @@ dist/@ARCH@/omahab -> usr/bin/
 dist/@ARCH@/omahab-install -> usr/bin/
 dist/@ARCH@/omahab-clientd -> usr/bin/
 deploy/systemd/omahabd.service -> lib/systemd/system/
+deploy/systemd/omahab-builder.socket -> lib/systemd/system/
+deploy/systemd/omahab-builder.service -> lib/systemd/system/
+deploy/systemd/omahab-builder-prune.service -> lib/systemd/system/
+deploy/systemd/omahab-builder-prune.timer -> lib/systemd/system/
 deploy/systemd/omahab-backup.service -> lib/systemd/system/
 deploy/systemd/omahab-backup.timer -> lib/systemd/system/
 deploy/systemd/omahab-verify.service -> lib/systemd/system/

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // ForgejoConfig holds configuration for the Forgejo HTTP client.
@@ -291,6 +292,172 @@ func (c *forgejoClient) PutFile(ctx context.Context, ref RepoRef, filePath strin
 
 func (c *forgejoClient) SeedWoodpeckerConfig(ctx context.Context, ref RepoRef, content string) error {
 	return c.PutFile(ctx, ref, ".woodpecker.yaml", []byte(content), "Add .woodpecker.yaml (managed by Omahab)")
+}
+func (c *forgejoClient) CreateUser(ctx context.Context, username, email string) error {
+	if strings.TrimSpace(username) == "" {
+		return fmt.Errorf("%w: username required", ErrValidation)
+	}
+	if strings.TrimSpace(email) == "" {
+		email = username + "@users.noreply.example.com"
+	}
+	// Use admin endpoint to create restricted user with random password.
+	body := map[string]any{
+		"source_id":            0,
+		"login_name":           username,
+		"username":             username,
+		"email":                email,
+		"password":             fmt.Sprintf("rand-%d", timeNowUnixNano()),
+		"must_change_password": false,
+		"restricted":           true,
+	}
+	err := c.do(ctx, http.MethodPost, "/api/v1/admin/users", body, nil)
+	if err != nil && isNotFoundErr(err) {
+		// fallback if admin endpoint not available, try generic user creation?
+		return err
+	}
+	if err != nil && (errors.Is(err, ErrConflict) || strings.Contains(strings.ToLower(err.Error()), "already exists")) {
+		return nil
+	}
+	return err
+}
+
+func timeNowUnixNano() int64 {
+	return time.Now().UnixNano()
+}
+
+
+func (c *forgejoClient) AddCollaborator(ctx context.Context, ref RepoRef, username, permission string) error {
+	if strings.TrimSpace(ref.Owner) == "" || strings.TrimSpace(ref.Name) == "" {
+		return fmt.Errorf("%w: owner and name required", ErrValidation)
+	}
+	if strings.TrimSpace(username) == "" {
+		return fmt.Errorf("%w: username required", ErrValidation)
+	}
+	if permission == "" {
+		permission = "write"
+	}
+	path := fmt.Sprintf("/api/v1/repos/%s/%s/collaborators/%s", url.PathEscape(ref.Owner), url.PathEscape(ref.Name), url.PathEscape(username))
+	body := map[string]any{"permission": permission}
+	return c.do(ctx, http.MethodPut, path, body, nil)
+}
+
+func (c *forgejoClient) CreateToken(ctx context.Context, username, tokenName string, scopes []string) (string, error) {
+	if strings.TrimSpace(username) == "" || strings.TrimSpace(tokenName) == "" {
+		return "", fmt.Errorf("%w: username and token name required", ErrValidation)
+	}
+	path := fmt.Sprintf("/api/v1/users/%s/tokens", url.PathEscape(username))
+	body := map[string]any{"name": tokenName, "scopes": scopes}
+	var out struct {
+		Sha1  string `json:"sha1"`
+		Token string `json:"token"`
+		Name  string `json:"name"`
+	}
+	if err := c.do(ctx, http.MethodPost, path, body, &out); err != nil {
+		// if already exists, try to get existing token list and return first matching
+		if errors.Is(err, ErrConflict) || strings.Contains(strings.ToLower(err.Error()), "already exists") {
+			// list tokens
+			var list []struct {
+				ID   int64  `json:"id"`
+				Name string `json:"name"`
+				Sha1 string `json:"sha1"`
+			}
+			lpath := fmt.Sprintf("/api/v1/users/%s/tokens", url.PathEscape(username))
+			if lerr := c.do(ctx, http.MethodGet, lpath, nil, &list); lerr == nil {
+				for _, t := range list {
+					if t.Name == tokenName && t.Sha1 != "" {
+						return t.Sha1, nil
+					}
+				}
+			}
+		}
+		return "", err
+	}
+	if out.Token != "" {
+		return out.Token, nil
+	}
+	if out.Sha1 != "" {
+		return out.Sha1, nil
+	}
+	return "", fmt.Errorf("forgejo token creation returned empty token")
+}
+
+func (c *forgejoClient) DeleteUser(ctx context.Context, username string) error {
+	if strings.TrimSpace(username) == "" {
+		return fmt.Errorf("%w: username required", ErrValidation)
+	}
+	path := fmt.Sprintf("/api/v1/admin/users/%s", url.PathEscape(username))
+	err := c.do(ctx, http.MethodDelete, path, nil, nil)
+	if err != nil && isNotFoundErr(err) {
+		return nil
+	}
+	return err
+}
+
+func (c *forgejoClient) DeleteToken(ctx context.Context, username, tokenName string) error {
+	if strings.TrimSpace(username) == "" || strings.TrimSpace(tokenName) == "" {
+		return fmt.Errorf("%w: username and token name required", ErrValidation)
+	}
+	// List tokens to find ID by name
+	var list []struct {
+		ID   int64  `json:"id"`
+		Name string `json:"name"`
+	}
+	lpath := fmt.Sprintf("/api/v1/users/%s/tokens", url.PathEscape(username))
+	if err := c.do(ctx, http.MethodGet, lpath, nil, &list); err != nil {
+		if isNotFoundErr(err) {
+			return nil
+		}
+		return err
+	}
+	for _, t := range list {
+		if t.Name == tokenName {
+			dpath := fmt.Sprintf("/api/v1/users/%s/tokens/%d", url.PathEscape(username), t.ID)
+			err := c.do(ctx, http.MethodDelete, dpath, nil, nil)
+			if err != nil && isNotFoundErr(err) {
+				return nil
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *forgejoClient) GetUser(ctx context.Context, username string) (bool, error) {
+	if strings.TrimSpace(username) == "" {
+		return false, fmt.Errorf("%w: username required", ErrValidation)
+	}
+	path := fmt.Sprintf("/api/v1/users/%s", url.PathEscape(username))
+	err := c.do(ctx, http.MethodGet, path, nil, nil)
+	if err != nil {
+		if isNotFoundErr(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func (c *forgejoClient) RemoveCollaborator(ctx context.Context, ref RepoRef, username string) error {
+	if strings.TrimSpace(ref.Owner) == "" || strings.TrimSpace(ref.Name) == "" {
+		return fmt.Errorf("%w: owner and name required", ErrValidation)
+	}
+	if strings.TrimSpace(username) == "" {
+		return fmt.Errorf("%w: username required", ErrValidation)
+	}
+	path := fmt.Sprintf("/api/v1/repos/%s/%s/collaborators/%s", url.PathEscape(ref.Owner), url.PathEscape(ref.Name), url.PathEscape(username))
+	err := c.do(ctx, http.MethodDelete, path, nil, nil)
+	if err != nil && isNotFoundErr(err) {
+		return nil
+	}
+	return err
+}
+
+func (c *forgejoClient) CreateAccessToken(ctx context.Context, username, tokenName string, scopes []string) (string, error) {
+	return c.CreateToken(ctx, username, tokenName, scopes)
+}
+
+func (c *forgejoClient) DeleteAccessToken(ctx context.Context, username, tokenName string) error {
+	return c.DeleteToken(ctx, username, tokenName)
 }
 
 var _ ForgejoClient = (*forgejoClient)(nil)

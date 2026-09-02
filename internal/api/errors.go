@@ -5,7 +5,6 @@ import (
 	"net/http"
 )
 
-// Stable error codes returned in {"error":{"code":"...","message":"..."}}.
 const (
 	CodeBadRequest       = "bad_request"
 	CodeUnauthorized     = "unauthorized"
@@ -20,16 +19,18 @@ const (
 	CodeConfirmation     = "confirmation_required"
 	CodePayloadTooLarge  = "payload_too_large"
 	CodeUnsupportedMedia = "unsupported_media_type"
+	CodeServiceUnavailable = "service_unavailable"
 )
 
 // Sentinel domain errors that backends may wrap with %w.
 var (
-	ErrNotFound      = errors.New("not found")
-	ErrAlreadyExists = errors.New("already exists")
-	ErrValidation    = errors.New("validation failed")
-	ErrUnauthorized  = errors.New("unauthorized")
-	ErrForbidden     = errors.New("forbidden")
-	ErrConflict      = errors.New("conflict")
+	ErrNotFound          = errors.New("not found")
+	ErrAlreadyExists     = errors.New("already exists")
+	ErrValidation        = errors.New("validation failed")
+	ErrUnauthorized      = errors.New("unauthorized")
+	ErrForbidden         = errors.New("forbidden")
+	ErrConflict          = errors.New("conflict")
+	ErrServiceUnavailable = errors.New("service unavailable")
 )
 
 type apiError struct {
@@ -43,7 +44,6 @@ func (e *apiError) Error() string { return e.Message }
 func newAPIError(status int, code, message string) *apiError {
 	return &apiError{HTTPStatus: status, Code: code, Message: message}
 }
-
 // httpStatus returns the HTTP status for an error.
 func httpStatus(err error) int {
 	var ae *apiError
@@ -65,9 +65,11 @@ func httpStatus(err error) int {
 	if errors.Is(err, ErrForbidden) {
 		return http.StatusForbidden
 	}
+	if errors.Is(err, ErrServiceUnavailable) {
+		return http.StatusServiceUnavailable
+	}
 	return http.StatusInternalServerError
 }
-
 // errorCode returns the stable code for an error.
 func errorCode(err error) string {
 	var ae *apiError
@@ -88,6 +90,9 @@ func errorCode(err error) string {
 	}
 	if errors.Is(err, ErrForbidden) {
 		return CodeForbidden
+	}
+	if errors.Is(err, ErrServiceUnavailable) {
+		return CodeServiceUnavailable
 	}
 	return CodeInternal
 }
@@ -129,4 +134,7 @@ func errUnprocessable(msg string) error {
 }
 func errConfirmation(msg string) error {
 	return newAPIError(http.StatusBadRequest, CodeConfirmation, msg)
+}
+func errServiceUnavailable(msg string) error {
+	return newAPIError(http.StatusServiceUnavailable, CodeServiceUnavailable, msg)
 }

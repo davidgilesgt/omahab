@@ -279,6 +279,72 @@ func (s *Service) hasReleases(ctx context.Context, projectID domain.ID) (bool, e
 	return count > 0, nil
 }
 
+// HasReleases is the exported check for whether a project has releases.
+func (s *Service) HasReleases(ctx context.Context, projectID domain.ID) (bool, error) {
+	return s.hasReleases(ctx, projectID)
+}
+
+// UndeployProject tears down the runtime deployment for a project if it has releases.
+// It is used by controlplane DeleteProject to undeploy before SCM/exposure teardown.
+func (s *Service) UndeployProject(ctx context.Context, id domain.ID) error {
+	p, err := s.fetchProject(ctx, "id = ?", string(id))
+	if err != nil {
+		return err
+	}
+	return s.withDeployLock(ctx, p.ID, func() error {
+		active, err := s.hasReleases(ctx, p.ID)
+		if err != nil {
+			return err
+		}
+		if active {
+			if err := s.runner.Undeploy(ctx, UndeployInput{
+				App:      p.Slug,
+				Hostname: s.routeHostname(p),
+			}); err != nil {
+				return fmt.Errorf("%w: %w", ErrUndeployFailed, err)
+			}
+		}
+		return nil
+	})
+}
+
+// DeleteProjectRecord deletes the project and its releases without undeploying.
+// It is used after external teardown has succeeded.
+func (s *Service) DeleteProjectRecord(ctx context.Context, id domain.ID) error {
+	if strings.TrimSpace(string(id)) == "" {
+		return invalidf("id", "must not be empty")
+	}
+	p, err := s.fetchProject(ctx, "id = ?", string(id))
+	if err != nil {
+		return err
+	}
+	return s.withDeployLock(ctx, p.ID, func() error {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("delete project transaction: %w", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err := tx.ExecContext(ctx, `DELETE FROM releases WHERE project_id = ?`, string(p.ID)); err != nil {
+			return fmt.Errorf("delete releases: %w", err)
+		}
+		res, err := tx.ExecContext(ctx, `DELETE FROM projects WHERE id = ?`, string(p.ID))
+		if err != nil {
+			return fmt.Errorf("delete project: %w", err)
+		}
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			return ErrNotFound
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit delete: %w", err)
+		}
+		s.emit(ctx, "project.deleted", severityInfo, p.ID,
+			fmt.Sprintf("project %q deleted", p.Slug),
+			map[string]any{"slug": p.Slug})
+		return nil
+	})
+}
+
 func (s *Service) fetchProject(ctx context.Context, where, arg string) (*Project, error) {
 	row := s.db.QueryRowContext(ctx, fmt.Sprintf(`
 SELECT id, slug, name, repository_url, image_base, bot_profile_id, exposure, hostname,

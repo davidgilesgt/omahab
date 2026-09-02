@@ -1,0 +1,29 @@
+[Unit]
+Description=Omahab builder image prune — weekly
+Documentation=https://github.com/davidgilesgt/omahab
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/var/lib/omahab-builder
+ConditionPathExists=/var/lib/omahab-builder
+
+[Service]
+Type=oneshot
+User=omahab-builder
+Group=omahab-builder
+Environment=HOME=/var/lib/omahab-builder
+ExecStart=/usr/bin/podman image prune --all --force --filter until=168h
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=no
+ReadWritePaths=/var/lib/omahab-builder /run/omahab-builder
+ReadOnlyPaths=/usr/bin/podman
+SupplementaryGroups=
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=no
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallArchitectures=native

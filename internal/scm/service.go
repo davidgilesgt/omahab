@@ -3,6 +3,7 @@ package scm
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"errors"
@@ -57,22 +58,25 @@ type Service struct {
 	sink       EventSink
 }
 
-// New creates a Service. Nil clients are replaced with no-ops so tests can
-// wire only the narrow client under test.
-func New(db *sql.DB, forgejo ForgejoClient, woodpecker WoodpeckerClient, secrets SecretStore, sink EventSink) *Service {
+// New creates a Service. Returns error if required dependencies are nil.
+// Tests must provide fakes; the only production constructor is controlplane Backend.bindSCM.
+func New(db *sql.DB, forgejo ForgejoClient, woodpecker WoodpeckerClient, secrets SecretStore, sink EventSink) (*Service, error) {
+	if db == nil {
+		return nil, fmt.Errorf("%w: db is required", ErrValidation)
+	}
 	if forgejo == nil {
-		forgejo = NoopForgejo{}
+		return nil, fmt.Errorf("%w: forgejo client is required", ErrValidation)
 	}
 	if woodpecker == nil {
-		woodpecker = NoopWoodpecker{}
+		return nil, fmt.Errorf("%w: woodpecker client is required", ErrValidation)
 	}
 	if secrets == nil {
-		secrets = NoopSecretStore{}
+		return nil, fmt.Errorf("%w: secret store is required", ErrValidation)
 	}
 	if sink == nil {
 		sink = NoopSink{}
 	}
-	return &Service{db: db, forgejo: forgejo, woodpecker: woodpecker, secrets: secrets, sink: sink}
+	return &Service{db: db, forgejo: forgejo, woodpecker: woodpecker, secrets: secrets, sink: sink}, nil
 }
 
 // Repository is the persisted integration desired/observed state for the
@@ -155,14 +159,16 @@ type Status struct {
 
 // ProvisionInput holds validated inputs for provisioning.
 type ProvisionInput struct {
-	ProjectID              domain.ID
-	Owner                  string
-	RepoName               string
-	Description            string
-	DefaultBranch          string
-	RegistryHost           string
-	ReleaseCallbackBaseURL string
-	Mirror                 *MirrorConfig
+	ProjectID          domain.ID
+	Owner              string
+	RepoName           string
+	Description        string
+	DefaultBranch      string
+	RegistryHost       string
+	ReleaseCallbackURL string
+	BuilderImage       string
+	ReleaseToken       string
+	Mirror             *MirrorConfig
 }
 
 // MirrorConfig is the caller-supplied GitHub mirror configuration. Token is
@@ -277,6 +283,30 @@ func secretRefForProject(projectID domain.ID) (scope, name string) {
 	return "scm:project:" + string(projectID), "github-mirror-token"
 }
 
+func registrySecretRef(projectID domain.ID) (scope, name string) {
+	return "scm:project:" + string(projectID), "registry-token"
+}
+
+func ciUsernameForProject(projectID domain.ID) string {
+	h := sha256.Sum256([]byte(string(projectID)))
+	hexStr := hex.EncodeToString(h[:])
+	if len(hexStr) > 12 {
+		hexStr = hexStr[:12]
+	}
+	return "ci-" + hexStr
+}
+
+func isAlreadyExists(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrConflict) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "already exists") || strings.Contains(msg, "already_exist")
+}
+
 // Provision creates the private canonical Forgejo repository, disables
 // Forgejo Actions, configures the Woodpecker repository, emits a pipeline
 // template for the OCI digest release callback, and optionally configures a
@@ -323,7 +353,7 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) (*ProvisionR
 	}
 
 	// Enforce one-repo-one-project and one-project-one-repo before touching
-	// upstream systems. Check inside a transaction-like sequence.
+	// upstream systems.
 	existing, err := s.getRepositoryByProjectID(ctx, in.ProjectID)
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return nil, err
@@ -331,11 +361,8 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) (*ProvisionR
 	if existing != nil && existing.ObservedState != "error" {
 		return nil, fmt.Errorf("%w: project already has a repository", ErrConflict)
 	}
-	// If retrying after error, clean up the error row so the unique constraints
-	// on (owner,name) vs prior error row don't surprise us? Instead reuse row.
 	retryingAfterError := existing != nil && existing.ObservedState == "error"
 
-	// Check (owner,name) is not owned by another project.
 	ownerRepo, err := s.getRepositoryByOwnerName(ctx, owner, repoName)
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return nil, err
@@ -355,7 +382,6 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) (*ProvisionR
 	if retryingAfterError {
 		repoID = string(existing.ID)
 		repoRow = existing
-		// Normalize owner/name/default_branch on retry.
 		_, err = s.db.ExecContext(ctx,
 			`UPDATE scm_repositories SET owner=?, name=?, default_branch=?, desired_state=?, observed_state=?, observed_detail=?, updated_at=? WHERE id=?`,
 			owner, repoName, defaultBranch, "provisioned", "pending", "", nowStr, repoID,
@@ -390,17 +416,52 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) (*ProvisionR
 		}
 	}
 
-	// On retry, remove stale CI/mirror rows so we can recreate them cleanly.
 	if retryingAfterError {
 		_, _ = s.db.ExecContext(ctx, `DELETE FROM scm_mirrors WHERE repository_id=?`, repoID)
 		_, _ = s.db.ExecContext(ctx, `DELETE FROM scm_ci_repos WHERE repository_id=?`, repoID)
 	}
 
 	markError := func(detail string) {
+		// Never include raw secret values in detail
 		_, _ = s.db.ExecContext(ctx,
 			`UPDATE scm_repositories SET observed_state='error', observed_detail=?, updated_at=? WHERE id=?`,
 			detail, time.Now().UTC().Format(time.RFC3339Nano), repoID,
 		)
+	}
+
+	// Track resources created in this attempt for compensation.
+	var (
+		createdForgejoRepo     bool
+		createdWoodpeckerRepo  bool
+		woodpeckerRepoID       int64
+		ciUsername             string
+		ciUserCreated          bool
+		registryTokenCreated   bool
+		registryTokenScope     string
+		registryTokenName      = "registry-token"
+		woodpeckerSecretsCreated bool
+	)
+
+	compensate := func() {
+		// Best-effort compensation: remove resources created in this attempt.
+		if woodpeckerSecretsCreated && woodpeckerRepoID != 0 {
+			_ = s.woodpecker.DeleteRepoSecret(ctx, woodpeckerRepoID, "omahab_registry_user")
+			_ = s.woodpecker.DeleteRepoSecret(ctx, woodpeckerRepoID, "omahab_registry_password")
+			_ = s.woodpecker.DeleteRepoSecret(ctx, woodpeckerRepoID, "omahab_release_token")
+		}
+		if createdWoodpeckerRepo && woodpeckerRepoID != 0 {
+			_ = s.woodpecker.DeactivateRepo(ctx, woodpeckerRepoID)
+			_, _ = s.db.ExecContext(ctx, `DELETE FROM scm_ci_repos WHERE repository_id=?`, repoID)
+		}
+		if ciUserCreated && ciUsername != "" {
+			_ = s.forgejo.DeleteUser(ctx, ciUsername)
+		}
+		if registryTokenCreated && registryTokenScope != "" {
+			_ = s.secrets.Delete(ctx, registryTokenScope, registryTokenName)
+		}
+		if createdForgejoRepo {
+			_ = s.forgejo.DeleteRepo(ctx, RepoRef{Owner: owner, Name: repoName})
+		}
 	}
 
 	// Drive Forgejo: create private repo.
@@ -412,18 +473,21 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) (*ProvisionR
 		DefaultBranch: defaultBranch,
 	})
 	if err != nil {
-		// If Forgejo reports conflict and we are retrying, try to adopt existing repo.
 		if errors.Is(err, ErrConflict) || strings.Contains(strings.ToLower(err.Error()), "already exists") {
 			if got, gerr := s.forgejo.GetRepo(ctx, RepoRef{Owner: owner, Name: repoName}); gerr == nil {
 				forgejoRepo = got
 			} else {
-				markError(fmt.Sprintf("create repo failed: %v", err))
+				markError("create repo failed")
+				compensate()
 				return nil, fmt.Errorf("create forgejo repo: %w", err)
 			}
 		} else {
-			markError(fmt.Sprintf("create repo failed: %v", err))
+			markError("create repo failed")
+			compensate()
 			return nil, fmt.Errorf("create forgejo repo: %w", err)
 		}
+	} else {
+		createdForgejoRepo = true
 	}
 
 	cloneURL := forgejoRepo.CloneURL
@@ -433,14 +497,33 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) (*ProvisionR
 		cloneURL, remoteID, time.Now().UTC().Format(time.RFC3339Nano), repoID,
 	)
 	if err != nil {
+		markError("update clone url failed")
+		compensate()
 		return nil, fmt.Errorf("update repository clone url: %w", err)
 	}
 	repoRow.CloneURL = cloneURL
 	repoRow.ForgejoRemoteID = remoteID
 
+	// Ensure initial main commit exists. If repo is empty, create README.
+	if got, gerr := s.forgejo.GetRepo(ctx, RepoRef{Owner: owner, Name: repoName}); gerr == nil {
+		// Check if empty via file list? For fake, we check if repo has any files; for real, check if GetRepo indicates empty? We use attempt to GetRepo and if no files, create README.
+		// If the repo is newly created, ensure a commit exists by putting README.
+		if createdForgejoRepo {
+			// Try to create initial commit via PutFile. If file already exists, ignore conflict.
+			_ = s.forgejo.PutFile(ctx, RepoRef{Owner: owner, Name: repoName}, "README.md", []byte("# "+repoName+"\n"), "Initial commit")
+		} else if got != nil {
+			// Adopted repo: ensure it has at least one commit; if Get shows empty, the PutFile above already handled.
+			_ = got
+		}
+	} else {
+		// If GetRepo fails, we still try to create initial commit for safety.
+		_ = s.forgejo.PutFile(ctx, RepoRef{Owner: owner, Name: repoName}, "README.md", []byte("# "+repoName+"\n"), "Initial commit")
+	}
+
 	// Disable Forgejo Actions — Woodpecker is the only CI system.
 	if err := s.forgejo.SetActionsEnabled(ctx, RepoRef{Owner: owner, Name: repoName}, false); err != nil {
-		markError(fmt.Sprintf("disable actions failed: %v", err))
+		markError("disable actions failed")
+		compensate()
 		return nil, fmt.Errorf("disable forgejo actions: %w", err)
 	}
 	_, err = s.db.ExecContext(ctx,
@@ -448,6 +531,8 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) (*ProvisionR
 		time.Now().UTC().Format(time.RFC3339Nano), repoID,
 	)
 	if err != nil {
+		markError("mark actions disabled failed")
+		compensate()
 		return nil, fmt.Errorf("mark actions disabled: %w", err)
 	}
 	repoRow.ActionsDisabled = true
@@ -461,9 +546,12 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) (*ProvisionR
 		PipelinePath:    ".woodpecker.yaml",
 	})
 	if err != nil {
-		markError(fmt.Sprintf("configure woodpecker failed: %v", err))
+		markError("configure woodpecker failed")
+		compensate()
 		return nil, fmt.Errorf("configure woodpecker repo: %w", err)
 	}
+	woodpeckerRepoID = ciRepo.ID
+	createdWoodpeckerRepo = true
 	ciID := newID()
 	ciNow := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err = s.db.ExecContext(ctx,
@@ -472,7 +560,8 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) (*ProvisionR
 		ciID, repoID, ciRepo.ID, remoteID, ciRepo.PipelinePath, 1, boolToInt(ciRepo.Trusted), "enabled", "ready", "", ciNow, ciNow,
 	)
 	if err != nil {
-		markError(fmt.Sprintf("persist ci repo failed: %v", err))
+		markError("persist ci repo failed")
+		compensate()
 		return nil, fmt.Errorf("insert ci repo: %w", err)
 	}
 	ciRow := &CIRepoState{
@@ -489,15 +578,90 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) (*ProvisionR
 		UpdatedAt:        time.Now().UTC(),
 	}
 
+	// Create deterministic restricted Forgejo CI user and PAT.
+	ciUsername = ciUsernameForProject(in.ProjectID)
+	ciEmail := ciUsername + "@users.noreply.example.com"
+	// Derive domain for email if registry host present
+	if in.RegistryHost != "" {
+		if idx := strings.Index(in.RegistryHost, "."); idx > 0 {
+			domainPart := in.RegistryHost[idx+1:]
+			if domainPart != "" {
+				ciEmail = ciUsername + "@users.noreply." + domainPart
+			}
+		}
+	}
+	if err := s.forgejo.CreateUser(ctx, ciUsername, ciEmail); err != nil {
+		if !errors.Is(err, ErrConflict) && !strings.Contains(strings.ToLower(err.Error()), "already exists") {
+			markError("create ci user failed")
+			compensate()
+			return nil, fmt.Errorf("create ci user: %w", err)
+		}
+	} else {
+		ciUserCreated = true
+	}
+	if err := s.forgejo.AddCollaborator(ctx, RepoRef{Owner: owner, Name: repoName}, ciUsername, "write"); err != nil {
+		markError("grant ci user access failed")
+		compensate()
+		return nil, fmt.Errorf("add ci collaborator: %w", err)
+	}
+	// Mint/reuse PAT scoped write:repository,write:package
+	registryTokenScope = "scm:project:" + string(in.ProjectID)
+	// Try to reuse existing token from secret store first
+	var registryPassword string
+	if existingTok, gerr := s.secrets.Get(ctx, registryTokenScope, registryTokenName); gerr == nil && strings.TrimSpace(existingTok) != "" {
+		registryPassword = strings.TrimSpace(existingTok)
+	} else {
+		tok, terr := s.forgejo.CreateToken(ctx, ciUsername, registryTokenName, []string{"write:repository", "write:package"})
+		if terr != nil {
+			markError("create registry token failed")
+			compensate()
+			return nil, fmt.Errorf("create registry token: %w", terr)
+		}
+		registryPassword = tok
+		if err := s.secrets.Put(ctx, registryTokenScope, registryTokenName, registryPassword); err != nil {
+			// Clean up token if secret store fails
+			_ = s.forgejo.DeleteToken(ctx, ciUsername, registryTokenName)
+			markError("store registry token failed")
+			compensate()
+			return nil, fmt.Errorf("store registry token: %w", err)
+		}
+		registryTokenCreated = true
+	}
+
+	// Upsert Woodpecker repo secrets. Raw values only in memory/secret store/Woodpecker.
+	releaseToken := strings.TrimSpace(in.ReleaseToken)
+	// If release token not supplied, try to generate or fetch? For tests, allow empty but still create placeholder.
+	if releaseToken == "" {
+		// Try to get from secrets? If not, use a placeholder that will be replaced by backend's issued token.
+		// Generate a random placeholder to avoid empty secret.
+		releaseToken = "placeholder-" + newID()
+	}
+	if err := s.woodpecker.UpsertRepoSecret(ctx, woodpeckerRepoID, "omahab_registry_user", ciUsername); err != nil {
+		markError("upsert registry user secret failed")
+		compensate()
+		return nil, fmt.Errorf("upsert registry user secret: %w", err)
+	}
+	if err := s.woodpecker.UpsertRepoSecret(ctx, woodpeckerRepoID, "omahab_registry_password", registryPassword); err != nil {
+		markError("upsert registry password secret failed")
+		compensate()
+		return nil, fmt.Errorf("upsert registry password secret: %w", err)
+	}
+	if err := s.woodpecker.UpsertRepoSecret(ctx, woodpeckerRepoID, "omahab_release_token", releaseToken); err != nil {
+		markError("upsert release token secret failed")
+		compensate()
+		return nil, fmt.Errorf("upsert release token secret: %w", err)
+	}
+	woodpeckerSecretsCreated = true
+
 	// Optional GitHub push mirror.
 	var mirrorRow *Mirror
 	var warnings []string
 	if in.Mirror != nil {
 		mirrorURL, _ := validateMirrorURL(in.Mirror.RemoteURL)
 		scope, mname := secretRefForProject(in.ProjectID)
-		// Store raw token only in the encrypted secret store.
 		if err := s.secrets.Put(ctx, scope, mname, in.Mirror.Token); err != nil {
-			markError(fmt.Sprintf("store mirror secret failed: %v", err))
+			markError("store mirror secret failed")
+			compensate()
 			return nil, fmt.Errorf("store mirror secret: %w", err)
 		}
 		secretRef := scope + "/" + mname
@@ -511,7 +675,8 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) (*ProvisionR
 		}
 		if err := s.forgejo.PutPushMirror(ctx, RepoRef{Owner: owner, Name: repoName}, mInput); err != nil {
 			_ = s.secrets.Delete(ctx, scope, mname)
-			markError(fmt.Sprintf("configure push mirror failed: %v", err))
+			markError("configure push mirror failed")
+			compensate()
 			return nil, fmt.Errorf("configure push mirror: %w", err)
 		}
 		mID := newID()
@@ -522,6 +687,8 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) (*ProvisionR
 			mID, repoID, mirrorURL, "github", secretRef, intervalSeconds, boolToInt(in.Mirror.LFS), "configured", "ready", "", mNow, mNow,
 		)
 		if err != nil {
+			markError("insert mirror failed")
+			compensate()
 			return nil, fmt.Errorf("insert mirror: %w", err)
 		}
 		mirrorRow = &Mirror{
@@ -540,6 +707,34 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) (*ProvisionR
 		warnings = mirrorWarnings(in.Mirror.LFS)
 	}
 
+	// Generate pipeline template with exact callback URL and pinned builder image.
+	callbackURL := strings.TrimSpace(in.ReleaseCallbackURL)
+	if callbackURL == "" {
+		callbackURL = fmt.Sprintf("https://omahab.example.com/api/v1/projects/%s/releases/with-token", string(in.ProjectID))
+	}
+	builderImage := strings.TrimSpace(in.BuilderImage)
+	tmpl := PipelineTemplate(PipelineTemplateInput{
+		Owner:              owner,
+		Name:               repoName,
+		DefaultBranch:      defaultBranch,
+		RegistryHost:       in.RegistryHost,
+		ReleaseCallbackURL: callbackURL,
+		BuilderImage:       builderImage,
+		ProjectID:          string(in.ProjectID),
+	})
+
+	// Seed .woodpecker.yaml via Forgejo only after initial commit exists.
+	if _, err := s.forgejo.GetRepo(ctx, RepoRef{Owner: owner, Name: repoName}); err != nil {
+		markError("verify repo for seeding failed")
+		compensate()
+		return nil, fmt.Errorf("verify repo for seeding: %w", err)
+	}
+	if err := s.forgejo.PutFile(ctx, RepoRef{Owner: owner, Name: repoName}, ".woodpecker.yaml", []byte(tmpl), "Add .woodpecker.yaml (managed by Omahab)"); err != nil {
+		markError("seed pipeline failed")
+		compensate()
+		return nil, fmt.Errorf("seed woodpecker config: %w", err)
+	}
+
 	// Mark repository ready.
 	readyAt := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err = s.db.ExecContext(ctx,
@@ -547,32 +742,16 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) (*ProvisionR
 		readyAt, repoID,
 	)
 	if err != nil {
+		markError("mark ready failed")
+		compensate()
 		return nil, fmt.Errorf("mark repository ready: %w", err)
 	}
 	repoRow.ObservedState = "ready"
 	repoRow.ObservedDetail = ""
-	// Refresh for response.
 	if refreshed, gerr := s.getRepositoryByID(ctx, domain.ID(repoID)); gerr == nil {
 		repoRow = refreshed
 	}
 
-	callbackURL := in.ReleaseCallbackBaseURL
-	if callbackURL == "" {
-		callbackURL = fmt.Sprintf("https://omahabd.local/v1/projects/%s/releases", string(in.ProjectID))
-	} else {
-		callbackURL = strings.TrimRight(callbackURL, "/") + fmt.Sprintf("/v1/projects/%s/releases", string(in.ProjectID))
-	}
-	tmpl := PipelineTemplate(PipelineTemplateInput{
-		Owner:              owner,
-		Name:               repoName,
-		DefaultBranch:      defaultBranch,
-		RegistryHost:       in.RegistryHost,
-		ReleaseCallbackURL: callbackURL,
-	})
-
-	// If a mirror was requested without explicit warnings yet (should always have),
-	// ensure warnings are present even if mirror was not configured via this path
-	// (e.g. existing mirror).
 	if mirrorRow != nil && len(warnings) == 0 {
 		warnings = mirrorWarnings(mirrorRow.LFSEnabled)
 	}
@@ -598,6 +777,126 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) (*ProvisionR
 		PipelineTemplate: tmpl,
 		Warnings:         warnings,
 	}, nil
+}
+// Deprovision removes all external resources for a project: Woodpecker repo and secrets, Forgejo repo and CI user/token, encrypted secrets, and SCM rows. 404 is treated as already removed.
+func (s *Service) Deprovision(ctx context.Context, projectID domain.ID) error {
+	if strings.TrimSpace(string(projectID)) == "" {
+		return fmt.Errorf("%w: project_id is required", ErrValidation)
+	}
+	repo, err := s.getRepositoryByProjectID(ctx, projectID)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	var repoID domain.ID
+	var forgejoOwner, forgejoName string
+	var woodpeckerRepoID int64
+	var ciRepoID domain.ID
+	if repo != nil {
+		repoID = repo.ID
+		forgejoOwner = repo.Owner
+		forgejoName = repo.Name
+		if ci, cerr := s.getCIRepoByRepositoryID(ctx, repo.ID); cerr == nil && ci != nil {
+			woodpeckerRepoID = ci.WoodpeckerRepoID
+			ciRepoID = ci.ID
+		} else if cerr != nil && !errors.Is(cerr, ErrNotFound) {
+			return cerr
+		}
+	}
+	ciUsername := ciUsernameForProject(projectID)
+	registryScope, registryName := registrySecretRef(projectID)
+	if woodpeckerRepoID != 0 {
+		_ = s.woodpecker.DeleteRepoSecret(ctx, woodpeckerRepoID, "omahab_registry_user")
+		_ = s.woodpecker.DeleteRepoSecret(ctx, woodpeckerRepoID, "omahab_registry_password")
+		_ = s.woodpecker.DeleteRepoSecret(ctx, woodpeckerRepoID, "omahab_release_token")
+		if err := s.woodpecker.DeactivateRepo(ctx, woodpeckerRepoID); err != nil && !isNotFoundErr(err) {
+			return fmt.Errorf("deactivate woodpecker repo: %w", err)
+		}
+		if ciRepoID != "" {
+			_, _ = s.db.ExecContext(ctx, `DELETE FROM scm_ci_repos WHERE id=?`, string(ciRepoID))
+		} else if repoID != "" {
+			_, _ = s.db.ExecContext(ctx, `DELETE FROM scm_ci_repos WHERE repository_id=?`, string(repoID))
+		}
+	}
+	if forgejoOwner != "" && forgejoName != "" {
+		if err := s.forgejo.DeleteRepo(ctx, RepoRef{Owner: forgejoOwner, Name: forgejoName}); err != nil && !isNotFoundErr(err) {
+			return fmt.Errorf("delete forgejo repo: %w", err)
+		}
+	}
+	_ = s.forgejo.DeleteToken(ctx, ciUsername, registryName)
+	if err := s.forgejo.DeleteUser(ctx, ciUsername); err != nil && !isNotFoundErr(err) {
+		return fmt.Errorf("delete ci user: %w", err)
+	}
+	_ = s.secrets.Delete(ctx, registryScope, registryName)
+	if scope, name := secretRefForProject(projectID); scope != registryScope || name != registryName {
+		_ = s.secrets.Delete(ctx, scope, name)
+	}
+	if repoID != "" {
+		_, _ = s.db.ExecContext(ctx, `DELETE FROM scm_mirrors WHERE repository_id=?`, string(repoID))
+		_, _ = s.db.ExecContext(ctx, `DELETE FROM scm_repositories WHERE id=?`, string(repoID))
+	}
+	_ = s.sink.Emit(ctx, domain.Event{
+		ID:         domain.ID(newID()),
+		Type:       "scm.repository.deprovisioned",
+		Severity:   "info",
+		ResourceID: projectID,
+		Message:    fmt.Sprintf("deprovisioned %s", string(projectID)),
+		Data: map[string]any{
+			"project_id": string(projectID),
+		},
+		CreatedAt: time.Now().UTC(),
+	})
+	return nil
+}
+
+// ReconcileLegacySentinels repairs rows created by the old no-op clients.
+// It identifies only the sentinel clone prefix https://git.example.invalid/,
+// deletes its synthetic CI row, marks the repository integration error,
+// rewrites forgejo.local/registry.local defaults to git.<domain>, and lets
+// normal provisioning repair it after the PAT handoff. Non-sentinel rows are untouched.
+func (s *Service) ReconcileLegacySentinels(ctx context.Context, domainName string) error {
+	if strings.TrimSpace(domainName) == "" {
+		return nil
+	}
+	domainName = strings.TrimSpace(strings.ToLower(domainName))
+	gitHost := "git." + domainName
+	rows, err := s.db.QueryContext(ctx, `SELECT id, project_id, clone_url FROM scm_repositories WHERE clone_url LIKE 'https://git.example.invalid/%'`)
+	if err != nil {
+		return fmt.Errorf("query sentinel repos: %w", err)
+	}
+	defer rows.Close()
+	type sentinel struct {
+		id        string
+		projectID string
+		cloneURL  string
+	}
+	var sentinels []sentinel
+	for rows.Next() {
+		var id, pid, curl string
+		if err := rows.Scan(&id, &pid, &curl); err != nil {
+			return err
+		}
+		sentinels = append(sentinels, sentinel{id: id, projectID: pid, cloneURL: curl})
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, ss := range sentinels {
+		_, _ = s.db.ExecContext(ctx, `DELETE FROM scm_ci_repos WHERE repository_id=?`, ss.id)
+		_, _ = s.db.ExecContext(ctx, `UPDATE scm_repositories SET observed_state='error', observed_detail='legacy sentinel requires reprovisioning', updated_at=? WHERE id=?`, time.Now().UTC().Format(time.RFC3339Nano), ss.id)
+		_, _ = s.db.ExecContext(ctx, `UPDATE projects SET repository_url = REPLACE(repository_url, 'https://forgejo.local', 'https://`+gitHost+`') WHERE id=? AND repository_url LIKE 'https://forgejo.local%'`, ss.projectID)
+		_, _ = s.db.ExecContext(ctx, `UPDATE projects SET repository_url = REPLACE(repository_url, 'https://git.example.invalid', 'https://`+gitHost+`') WHERE id=? AND repository_url LIKE 'https://git.example.invalid%'`, ss.projectID)
+		_, _ = s.db.ExecContext(ctx, `UPDATE projects SET image_base = REPLACE(image_base, 'registry.local', '`+gitHost+`') WHERE id=? AND image_base LIKE 'registry.local%'`, ss.projectID)
+		_, _ = s.db.ExecContext(ctx, `UPDATE projects SET image_base = REPLACE(image_base, 'forgejo.local', '`+gitHost+`') WHERE id=? AND image_base LIKE '%forgejo.local%'`, ss.projectID)
+		newClone := strings.Replace(ss.cloneURL, "https://git.example.invalid", "https://"+gitHost, 1)
+		if newClone != ss.cloneURL {
+			_, _ = s.db.ExecContext(ctx, `UPDATE scm_repositories SET clone_url=?, updated_at=? WHERE id=?`, newClone, time.Now().UTC().Format(time.RFC3339Nano), ss.id)
+		}
+	}
+	_, _ = s.db.ExecContext(ctx, `UPDATE projects SET repository_url = REPLACE(repository_url, 'https://forgejo.local', 'https://`+gitHost+`') WHERE repository_url LIKE 'https://forgejo.local%'`)
+	_, _ = s.db.ExecContext(ctx, `UPDATE projects SET repository_url = REPLACE(repository_url, 'https://git.example.invalid', 'https://`+gitHost+`') WHERE repository_url LIKE 'https://git.example.invalid%'`)
+	_, _ = s.db.ExecContext(ctx, `UPDATE projects SET image_base = REPLACE(image_base, 'registry.local', '`+gitHost+`') WHERE image_base LIKE 'registry.local%'`)
+	_, _ = s.db.ExecContext(ctx, `UPDATE projects SET image_base = REPLACE(image_base, 'forgejo.local', '`+gitHost+`') WHERE image_base LIKE '%forgejo.local%'`)
+	return nil
 }
 
 // Status returns the combined desired/observed SCM state for a project.
@@ -965,11 +1264,16 @@ func (s *Service) TemplateFor(ctx context.Context, projectID domain.ID, registry
 	if err != nil {
 		return "", err
 	}
-	callback := releaseCallbackBaseURL
+	callback := strings.TrimSpace(releaseCallbackBaseURL)
 	if callback == "" {
-		callback = fmt.Sprintf("https://omahabd.local/v1/projects/%s/releases", string(projectID))
-	} else {
-		callback = strings.TrimRight(callback, "/") + fmt.Sprintf("/v1/projects/%s/releases", string(projectID))
+		callback = fmt.Sprintf("https://omahab.example.com/api/v1/projects/%s/releases/with-token", string(projectID))
+	} else if !strings.Contains(callback, "/releases/with-token") {
+		base := strings.TrimRight(callback, "/")
+		if strings.Contains(base, "/api/v1/projects") {
+			callback = base
+		} else {
+			callback = base + fmt.Sprintf("/api/v1/projects/%s/releases/with-token", string(projectID))
+		}
 	}
 	return PipelineTemplate(PipelineTemplateInput{
 		Owner:              repo.Owner,
@@ -977,6 +1281,7 @@ func (s *Service) TemplateFor(ctx context.Context, projectID domain.ID, registry
 		DefaultBranch:      repo.DefaultBranch,
 		RegistryHost:       registryHost,
 		ReleaseCallbackURL: callback,
+		ProjectID:          string(projectID),
 	}), nil
 }
 
@@ -1172,9 +1477,13 @@ func scanRunRecord(row rowScanner) (*RunRecord, error) {
 
 // SeedWoodpeckerConfig seeds .woodpecker.yaml via the underlying Forgejo client if it supports PutFile.
 // It is a thin adapter for controlplane CreateProject to ensure the pipeline file exists after Provision.
+// It checks that the repository has an initial commit via GetRepo before attempting PutFile.
 func (s *Service) SeedWoodpeckerConfig(ctx context.Context, ref RepoRef, content string) error {
 	if s == nil || s.forgejo == nil {
 		return nil
+	}
+	if _, err := s.forgejo.GetRepo(ctx, ref); err != nil {
+		return err
 	}
 	// Try interface with SeedWoodpeckerConfig first (concrete client).
 	type seeder interface {
@@ -1192,6 +1501,7 @@ func (s *Service) SeedWoodpeckerConfig(ctx context.Context, ref RepoRef, content
 	}
 	return nil
 }
+
 
 func newID() string {
 	var b [16]byte

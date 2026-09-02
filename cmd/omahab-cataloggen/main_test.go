@@ -409,11 +409,28 @@ func TestConvertRealCatalogDefaultsAndHealth(t *testing.T) {
 		for key := range cb.Images {
 			digests[key] = "sha256:" + strings.Repeat("a", 64)
 		}
+		if cb.PipelineImage != "" {
+			if _, _, ok := splitImageRef(cb.PipelineImage); ok {
+				// Extract variable to key mapping similar to convert logic
+				_, variable, _ := splitImageRef(cb.PipelineImage)
+				lowerVar := strings.ToLower(variable)
+				if strings.HasSuffix(lowerVar, "_digest") {
+					candidate := strings.TrimSuffix(lowerVar, "_digest")
+					candidate = strings.ReplaceAll(candidate, "_", "-")
+					digests[candidate] = "sha256:" + strings.Repeat("a", 64)
+				}
+			}
+		}
+		if cb.PipelineImageKey != "" {
+			digests[cb.PipelineImageKey] = "sha256:" + strings.Repeat("b", 64)
+		}
 	}
 	var defaults []string
 	var immich apps.Bundle
 	var caddy apps.Bundle
 	var pocketID apps.Bundle
+	var forgejo apps.Bundle
+	var woodpecker apps.Bundle
 	for _, cb := range doc.Bundles {
 		b, err := convert(cb, realComposeDir, digests)
 		if err != nil {
@@ -429,6 +446,10 @@ func TestConvertRealCatalogDefaultsAndHealth(t *testing.T) {
 			immich = b
 		case "pocket-id":
 			pocketID = b
+		case "forgejo":
+			forgejo = b
+		case "woodpecker":
+			woodpecker = b
 		}
 		if strings.TrimSpace(b.Route) != "" && b.Port <= 0 {
 			t.Fatalf("routed bundle %s missing positive port", b.ID)
@@ -437,7 +458,7 @@ func TestConvertRealCatalogDefaultsAndHealth(t *testing.T) {
 			t.Fatalf("%s health check kind = %q want command: %+v", b.ID, b.HealthCheck.Kind, b.HealthCheck)
 		}
 	}
-	wantDefaults := "caddy,pocket-id,immich"
+	wantDefaults := "caddy,pocket-id,forgejo,woodpecker"
 	if got := strings.Join(defaults, ","); got != wantDefaults {
 		t.Fatalf("default bundles = %q want %q", got, wantDefaults)
 	}
@@ -447,8 +468,41 @@ func TestConvertRealCatalogDefaultsAndHealth(t *testing.T) {
 	if !strings.Contains(caddy.Compose, "id.${DOMAIN:?domain required}") {
 		t.Fatalf("caddy compose missing identity hostname alias:\n%s", caddy.Compose)
 	}
+	if !strings.Contains(caddy.Compose, "git.${DOMAIN") || !strings.Contains(caddy.Compose, "ci.${DOMAIN") {
+		t.Fatalf("caddy compose missing git/ci aliases:\n%s", caddy.Compose)
+	}
 	if pocketID.Port != 1411 {
 		t.Fatalf("pocket-id port = %d want 1411", pocketID.Port)
+	}
+	if forgejo.Port != 3000 {
+		t.Fatalf("forgejo port = %d want 3000", forgejo.Port)
+	}
+	if !strings.Contains(forgejo.Compose, "FORGEJO__actions__ENABLED") || !strings.Contains(forgejo.Compose, "FORGEJO__webhook__ALLOWED_HOST_LIST") {
+		t.Fatalf("forgejo compose missing actions/webhook hardening:\n%s", forgejo.Compose)
+	}
+	if strings.Contains(forgejo.Compose, "/etc/omahab/forgejo/app.ini") {
+		t.Fatalf("forgejo compose still references unmanaged app.ini mount:\n%s", forgejo.Compose)
+	}
+	if strings.Contains(forgejo.Compose, "expose:\n      - \"22\"") {
+		t.Fatalf("forgejo compose still exposes SSH 22:\n%s", forgejo.Compose)
+	}
+	if woodpecker.Port != 8000 {
+		t.Fatalf("woodpecker port = %d want 8000", woodpecker.Port)
+	}
+	if woodpecker.PipelineImage == "" || !strings.Contains(woodpecker.PipelineImage, "quay.io/podman/stable@sha256:") {
+		t.Fatalf("woodpecker pipeline image missing or not podman: %q", woodpecker.PipelineImage)
+	}
+	if !strings.Contains(woodpecker.Compose, "WOODPECKER_FORGEJO_CLIENT_FILE") || !strings.Contains(woodpecker.Compose, "WOODPECKER_FORGEJO_SECRET_FILE") {
+		t.Fatalf("woodpecker compose missing forgejo client file vars:\n%s", woodpecker.Compose)
+	}
+	if !strings.Contains(woodpecker.Compose, "WOODPECKER_DATABASE_DATASOURCE_FILE") || !strings.Contains(woodpecker.Compose, "WOODPECKER_GRPC_SECRET_FILE") {
+		t.Fatalf("woodpecker compose missing datasource/grpc secret file vars:\n%s", woodpecker.Compose)
+	}
+	if !strings.Contains(woodpecker.Compose, "/run/omahab-builder/podman.sock") {
+		t.Fatalf("woodpecker compose missing podman socket mount:\n%s", woodpecker.Compose)
+	}
+	if strings.Contains(woodpecker.Compose, "/var/run/docker.sock") || strings.Contains(woodpecker.Compose, "tcp://omahabd-builder:2375") {
+		t.Fatalf("woodpecker compose still references docker socket or buildkit tcp:\n%s", woodpecker.Compose)
 	}
 	if immich.Port != 2283 {
 		t.Fatalf("immich port = %d want 2283", immich.Port)

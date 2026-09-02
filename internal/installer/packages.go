@@ -33,6 +33,10 @@ func PackagesForOS(osID string) ([]string, error) {
 			"unattended-upgrades",
 			"tailscale",
 			"cloudflared",
+			"podman",
+			"uidmap",
+			"slirp4netns",
+			"fuse-overlayfs",
 		}, nil
 	case "ubuntu":
 		return []string{
@@ -43,6 +47,10 @@ func PackagesForOS(osID string) ([]string, error) {
 			"unattended-upgrades",
 			"tailscale",
 			"cloudflared",
+			"podman",
+			"uidmap",
+			"slirp4netns",
+			"fuse-overlayfs",
 		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported OS %q: need debian or ubuntu", osID)

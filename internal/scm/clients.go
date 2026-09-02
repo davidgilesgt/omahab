@@ -63,6 +63,16 @@ type ForgejoClient interface {
 	SetActionsEnabled(ctx context.Context, ref RepoRef, enabled bool) error
 	PutPushMirror(ctx context.Context, ref RepoRef, in MirrorInput) error
 	DeletePushMirror(ctx context.Context, ref RepoRef, remoteName string) error
+	PutFile(ctx context.Context, ref RepoRef, filePath string, content []byte, message string) error
+	CreateUser(ctx context.Context, username, email string) error
+	GetUser(ctx context.Context, username string) (bool, error)
+	AddCollaborator(ctx context.Context, ref RepoRef, username, permission string) error
+	RemoveCollaborator(ctx context.Context, ref RepoRef, username string) error
+	CreateToken(ctx context.Context, username, tokenName string, scopes []string) (string, error)
+	CreateAccessToken(ctx context.Context, username, tokenName string, scopes []string) (string, error)
+	DeleteUser(ctx context.Context, username string) error
+	DeleteToken(ctx context.Context, username, tokenName string) error
+	DeleteAccessToken(ctx context.Context, username, tokenName string) error
 }
 
 // EnsureCIRepoInput is the narrow input for activating a repository in Woodpecker.
@@ -125,6 +135,12 @@ type WoodpeckerClient interface {
 	LogRefs(ctx context.Context, repoID int64, number int) ([]*LogRef, error)
 	Rerun(ctx context.Context, repoID int64, number int) error
 	Cancel(ctx context.Context, repoID int64, number int) error
+	CurrentUser(ctx context.Context) (*WoodpeckerUser, error)
+	ListRepoSecrets(ctx context.Context, repoID int64) ([]string, error)
+	CreateRepoSecret(ctx context.Context, repoID int64, name, value string) error
+	UpdateRepoSecret(ctx context.Context, repoID int64, name, value string) error
+	DeleteRepoSecret(ctx context.Context, repoID int64, name string) error
+	UpsertRepoSecret(ctx context.Context, repoID int64, name, value string) error
 }
 
 // SecretStore persists repository-scoped secret references for push mirrors.
@@ -174,13 +190,25 @@ func (NoopSecretStore) Get(_ context.Context, _, _ string) (string, error) {
 type FakeForgejo struct {
 	Repos   map[string]*Repo
 	Mirrors map[string]MirrorInput
+	Users   map[string]bool
+	Tokens  map[string]string            // key: username/tokenName -> token value
+	Collabs map[string]map[string]string // repoKey -> username -> permission
+	Files   map[string]map[string][]byte // repoKey -> filePath -> content
 	// Hooks for fault injection
-	CreateErr            error
-	SetActionsEnabledErr error
-	PutMirrorErr         error
-	DeleteMirrorErr      error
-	DeleteRepoErr        error
-	GetErr               error
+	CreateErr             error
+	SetActionsEnabledErr  error
+	PutMirrorErr          error
+	DeleteMirrorErr       error
+	DeleteRepoErr         error
+	GetErr                error
+	PutFileErr            error
+	CreateUserErr         error
+	AddCollabErr          error
+	CreateTokenErr        error
+	DeleteUserErr         error
+	DeleteTokenErr        error
+	GetUserErr            error
+	RemoveCollaboratorErr error
 	// Call capture
 	CreateCalls     []CreateRepoInput
 	SetActionsCalls []struct {
@@ -191,12 +219,45 @@ type FakeForgejo struct {
 		Ref RepoRef
 		In  MirrorInput
 	}
+	PutFileCalls []struct {
+		Ref      RepoRef
+		FilePath string
+		Content  []byte
+		Message  string
+	}
+	CreateUserCalls []struct {
+		Username string
+		Email    string
+	}
+	AddCollabCalls []struct {
+		Ref        RepoRef
+		Username   string
+		Permission string
+	}
+	CreateTokenCalls []struct {
+		Username  string
+		TokenName string
+		Scopes    []string
+	}
+	RemoveCollaboratorCalls []struct {
+		Ref      RepoRef
+		Username string
+	}
+	DeleteTokenCalls []struct {
+		Username  string
+		TokenName string
+	}
+	DeleteUserCalls []string
 }
 
 func NewFakeForgejo() *FakeForgejo {
 	return &FakeForgejo{
 		Repos:   make(map[string]*Repo),
 		Mirrors: make(map[string]MirrorInput),
+		Users:   make(map[string]bool),
+		Tokens:  make(map[string]string),
+		Collabs: make(map[string]map[string]string),
+		Files:   make(map[string]map[string][]byte),
 	}
 }
 
@@ -245,6 +306,8 @@ func (f *FakeForgejo) DeleteRepo(_ context.Context, ref RepoRef) error {
 		return f.DeleteRepoErr
 	}
 	delete(f.Repos, repoKey(ref))
+	delete(f.Files, repoKey(ref))
+	delete(f.Collabs, repoKey(ref))
 	return nil
 }
 
@@ -284,19 +347,181 @@ func (f *FakeForgejo) DeletePushMirror(_ context.Context, ref RepoRef, remoteNam
 	return nil
 }
 
+func (f *FakeForgejo) PutFile(_ context.Context, ref RepoRef, filePath string, content []byte, message string) error {
+	if f.PutFileErr != nil {
+		return f.PutFileErr
+	}
+	f.PutFileCalls = append(f.PutFileCalls, struct {
+		Ref      RepoRef
+		FilePath string
+		Content  []byte
+		Message  string
+	}{Ref: ref, FilePath: filePath, Content: append([]byte(nil), content...), Message: message})
+	key := repoKey(ref)
+	if f.Files[key] == nil {
+		f.Files[key] = make(map[string][]byte)
+	}
+	if _, ok := f.Repos[key]; !ok {
+		return fmt.Errorf("%w: repository not found", ErrNotFound)
+	}
+	f.Files[key][filePath] = append([]byte(nil), content...)
+	return nil
+}
+
+func (f *FakeForgejo) CreateUser(_ context.Context, username, email string) error {
+	if f.CreateUserErr != nil {
+		return f.CreateUserErr
+	}
+	if username == "" {
+		return fmt.Errorf("%w: username required", ErrValidation)
+	}
+	f.CreateUserCalls = append(f.CreateUserCalls, struct {
+		Username string
+		Email    string
+	}{Username: username, Email: email})
+	if f.Users == nil {
+		f.Users = make(map[string]bool)
+	}
+	if f.Users[username] {
+		return fmt.Errorf("%w: user already exists", ErrConflict)
+	}
+	f.Users[username] = true
+	return nil
+}
+
+func (f *FakeForgejo) GetUser(_ context.Context, username string) (bool, error) {
+	if f.GetUserErr != nil {
+		return false, f.GetUserErr
+	}
+	if f.Users == nil {
+		return false, nil
+	}
+	_, ok := f.Users[username]
+	return ok, nil
+}
+
+func (f *FakeForgejo) AddCollaborator(_ context.Context, ref RepoRef, username, permission string) error {
+	if f.AddCollabErr != nil {
+		return f.AddCollabErr
+	}
+	f.AddCollabCalls = append(f.AddCollabCalls, struct {
+		Ref        RepoRef
+		Username   string
+		Permission string
+	}{Ref: ref, Username: username, Permission: permission})
+	if _, ok := f.Repos[repoKey(ref)]; !ok {
+		return fmt.Errorf("%w: repository not found", ErrNotFound)
+	}
+	if f.Collabs == nil {
+		f.Collabs = make(map[string]map[string]string)
+	}
+	key := repoKey(ref)
+	if f.Collabs[key] == nil {
+		f.Collabs[key] = make(map[string]string)
+	}
+	f.Collabs[key][username] = permission
+	return nil
+}
+
+func (f *FakeForgejo) RemoveCollaborator(_ context.Context, ref RepoRef, username string) error {
+	if f.RemoveCollaboratorErr != nil {
+		return f.RemoveCollaboratorErr
+	}
+	key := repoKey(ref)
+	if m, ok := f.Collabs[key]; ok {
+		delete(m, username)
+		if len(m) == 0 {
+			delete(f.Collabs, key)
+		}
+	}
+	f.RemoveCollaboratorCalls = append(f.RemoveCollaboratorCalls, struct {
+		Ref      RepoRef
+		Username string
+	}{Ref: ref, Username: username})
+	return nil
+}
+
+func (f *FakeForgejo) CreateToken(_ context.Context, username, tokenName string, scopes []string) (string, error) {
+	if f.CreateTokenErr != nil {
+		return "", f.CreateTokenErr
+	}
+	f.CreateTokenCalls = append(f.CreateTokenCalls, struct {
+		Username  string
+		TokenName string
+		Scopes    []string
+	}{Username: username, TokenName: tokenName, Scopes: append([]string(nil), scopes...)})
+	if f.Users == nil || !f.Users[username] {
+		if f.Users == nil {
+			f.Users = make(map[string]bool)
+		}
+		f.Users[username] = true
+	}
+	key := username + "/" + tokenName
+	if tok, ok := f.Tokens[key]; ok {
+		return tok, nil
+	}
+	tok := fmt.Sprintf("token-%s-%s-%d", username, tokenName, len(f.Tokens)+1)
+	if f.Tokens == nil {
+		f.Tokens = make(map[string]string)
+	}
+	f.Tokens[key] = tok
+	return tok, nil
+}
+
+func (f *FakeForgejo) CreateAccessToken(ctx context.Context, username, tokenName string, scopes []string) (string, error) {
+	return f.CreateToken(ctx, username, tokenName, scopes)
+}
+
+func (f *FakeForgejo) DeleteUser(_ context.Context, username string) error {
+	if f.DeleteUserErr != nil {
+		return f.DeleteUserErr
+	}
+	f.DeleteUserCalls = append(f.DeleteUserCalls, username)
+	delete(f.Users, username)
+	for k := range f.Tokens {
+		if len(k) > len(username) && k[:len(username)] == username && k[len(username)] == '/' {
+			delete(f.Tokens, k)
+		}
+	}
+	for _, m := range f.Collabs {
+		delete(m, username)
+	}
+	return nil
+}
+
+func (f *FakeForgejo) DeleteToken(_ context.Context, username, tokenName string) error {
+	if f.DeleteTokenErr != nil {
+		return f.DeleteTokenErr
+	}
+	f.DeleteTokenCalls = append(f.DeleteTokenCalls, struct {
+		Username  string
+		TokenName string
+	}{Username: username, TokenName: tokenName})
+	delete(f.Tokens, username+"/"+tokenName)
+	return nil
+}
+
+func (f *FakeForgejo) DeleteAccessToken(ctx context.Context, username, tokenName string) error {
+	return f.DeleteToken(ctx, username, tokenName)
+}
+
 // FakeWoodpecker is a fake WoodpeckerClient for tests.
 type FakeWoodpecker struct {
-	Repos map[int64]*CIRepo
-	Runs  map[int64]map[int]*Run
-	Logs  map[int64]map[int][]*LogRef
+	Repos   map[int64]*CIRepo
+	Runs    map[int64]map[int]*Run
+	Logs    map[int64]map[int][]*LogRef
+	Secrets map[int64]map[string]string // repoID -> secret name -> value
+	User    *WoodpeckerUser
 
-	EnsureErr     error
-	DeactivateErr error
-	ListRunsErr   error
-	GetRunErr     error
-	LogRefsErr    error
-	RerunErr      error
-	CancelErr     error
+	EnsureErr      error
+	DeactivateErr  error
+	ListRunsErr    error
+	GetRunErr      error
+	LogRefsErr     error
+	RerunErr       error
+	CancelErr      error
+	CurrentUserErr error
+	SecretErr      error
 
 	EnsureCalls     []EnsureCIRepoInput
 	DeactivateCalls []int64
@@ -312,13 +537,24 @@ type FakeWoodpecker struct {
 		RepoID int64
 		Number int
 	}
+	UpsertSecretCalls []struct {
+		RepoID int64
+		Name   string
+		Value  string
+	}
+	DeleteSecretCalls []struct {
+		RepoID int64
+		Name   string
+	}
 }
 
 func NewFakeWoodpecker() *FakeWoodpecker {
 	return &FakeWoodpecker{
-		Repos: make(map[int64]*CIRepo),
-		Runs:  make(map[int64]map[int]*Run),
-		Logs:  make(map[int64]map[int][]*LogRef),
+		Repos:   make(map[int64]*CIRepo),
+		Runs:    make(map[int64]map[int]*Run),
+		Logs:    make(map[int64]map[int][]*LogRef),
+		Secrets: make(map[int64]map[string]string),
+		User:    &WoodpeckerUser{Login: "ci-user", Admin: true},
 	}
 }
 
@@ -347,6 +583,9 @@ func (f *FakeWoodpecker) EnsureRepo(_ context.Context, in EnsureCIRepoInput) (*C
 	if _, ok := f.Runs[id]; !ok {
 		f.Runs[id] = make(map[int]*Run)
 	}
+	if _, ok := f.Secrets[id]; !ok {
+		f.Secrets[id] = make(map[string]string)
+	}
 	return repo, nil
 }
 
@@ -356,6 +595,7 @@ func (f *FakeWoodpecker) DeactivateRepo(_ context.Context, repoID int64) error {
 	}
 	f.DeactivateCalls = append(f.DeactivateCalls, repoID)
 	delete(f.Repos, repoID)
+	delete(f.Secrets, repoID)
 	return nil
 }
 
@@ -376,8 +616,7 @@ func (f *FakeWoodpecker) ListRuns(_ context.Context, repoID int64, limit int) ([
 		cp := *r
 		out = append(out, &cp)
 	}
-	// Deterministic order: descending by number.
-	for i := 0; i < len(out); i++ {
+	for i := range out {
 		for j := i + 1; j < len(out); j++ {
 			if out[j].Number > out[i].Number {
 				out[i], out[j] = out[j], out[i]
@@ -459,6 +698,87 @@ func (f *FakeWoodpecker) Cancel(_ context.Context, repoID int64, number int) err
 	return nil
 }
 
+func (f *FakeWoodpecker) CurrentUser(_ context.Context) (*WoodpeckerUser, error) {
+	if f.CurrentUserErr != nil {
+		return nil, f.CurrentUserErr
+	}
+	if f.User != nil {
+		cp := *f.User
+		return &cp, nil
+	}
+	return &WoodpeckerUser{Login: "test", Admin: true}, nil
+}
+
+func (f *FakeWoodpecker) ListRepoSecrets(_ context.Context, repoID int64) ([]string, error) {
+	if f.SecretErr != nil {
+		return nil, f.SecretErr
+	}
+	m, ok := f.Secrets[repoID]
+	if !ok {
+		return nil, nil
+	}
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out, nil
+}
+
+func (f *FakeWoodpecker) CreateRepoSecret(_ context.Context, repoID int64, name, value string) error {
+	if f.SecretErr != nil {
+		return f.SecretErr
+	}
+	if f.Secrets[repoID] == nil {
+		f.Secrets[repoID] = make(map[string]string)
+	}
+	if _, exists := f.Secrets[repoID][name]; exists {
+		return fmt.Errorf("%w: secret already exists", ErrConflict)
+	}
+	f.Secrets[repoID][name] = value
+	return nil
+}
+
+func (f *FakeWoodpecker) UpdateRepoSecret(_ context.Context, repoID int64, name, value string) error {
+	if f.SecretErr != nil {
+		return f.SecretErr
+	}
+	if f.Secrets[repoID] == nil {
+		f.Secrets[repoID] = make(map[string]string)
+	}
+	f.Secrets[repoID][name] = value
+	return nil
+}
+
+func (f *FakeWoodpecker) DeleteRepoSecret(_ context.Context, repoID int64, name string) error {
+	if f.SecretErr != nil {
+		return f.SecretErr
+	}
+	f.DeleteSecretCalls = append(f.DeleteSecretCalls, struct {
+		RepoID int64
+		Name   string
+	}{RepoID: repoID, Name: name})
+	if m, ok := f.Secrets[repoID]; ok {
+		delete(m, name)
+	}
+	return nil
+}
+
+func (f *FakeWoodpecker) UpsertRepoSecret(_ context.Context, repoID int64, name, value string) error {
+	if f.SecretErr != nil {
+		return f.SecretErr
+	}
+	f.UpsertSecretCalls = append(f.UpsertSecretCalls, struct {
+		RepoID int64
+		Name   string
+		Value  string
+	}{RepoID: repoID, Name: name, Value: value})
+	if f.Secrets[repoID] == nil {
+		f.Secrets[repoID] = make(map[string]string)
+	}
+	f.Secrets[repoID][name] = value
+	return nil
+}
+
 // AddRun is a test helper to seed a run.
 func (f *FakeWoodpecker) AddRun(repoID int64, run *Run) {
 	if _, ok := f.Runs[repoID]; !ok {
@@ -497,6 +817,28 @@ func (NoopForgejo) DeleteRepo(_ context.Context, _ RepoRef) error               
 func (NoopForgejo) SetActionsEnabled(_ context.Context, _ RepoRef, _ bool) error    { return nil }
 func (NoopForgejo) PutPushMirror(_ context.Context, _ RepoRef, _ MirrorInput) error { return nil }
 func (NoopForgejo) DeletePushMirror(_ context.Context, _ RepoRef, _ string) error   { return nil }
+func (NoopForgejo) PutFile(_ context.Context, ref RepoRef, filePath string, content []byte, message string) error {
+	return nil
+}
+func (NoopForgejo) CreateUser(_ context.Context, username, email string) error { return nil }
+func (NoopForgejo) GetUser(_ context.Context, username string) (bool, error) { return true, nil }
+func (NoopForgejo) AddCollaborator(_ context.Context, ref RepoRef, username, permission string) error {
+	return nil
+}
+func (NoopForgejo) RemoveCollaborator(_ context.Context, ref RepoRef, username string) error {
+	return nil
+}
+func (NoopForgejo) CreateToken(_ context.Context, username, tokenName string, scopes []string) (string, error) {
+	return "noop-token", nil
+}
+func (NoopForgejo) CreateAccessToken(_ context.Context, username, tokenName string, scopes []string) (string, error) {
+	return "noop-token", nil
+}
+func (NoopForgejo) DeleteUser(_ context.Context, username string) error { return nil }
+func (NoopForgejo) DeleteToken(_ context.Context, username, tokenName string) error { return nil }
+func (NoopForgejo) DeleteAccessToken(_ context.Context, username, tokenName string) error {
+	return nil
+}
 
 // NoopWoodpecker is a no-op WoodpeckerClient for wiring without a real Woodpecker.
 type NoopWoodpecker struct{}
@@ -512,3 +854,19 @@ func (NoopWoodpecker) GetRun(_ context.Context, _ int64, _ int) (*Run, error) {
 func (NoopWoodpecker) LogRefs(_ context.Context, _ int64, _ int) ([]*LogRef, error) { return nil, nil }
 func (NoopWoodpecker) Rerun(_ context.Context, _ int64, _ int) error                { return nil }
 func (NoopWoodpecker) Cancel(_ context.Context, _ int64, _ int) error               { return nil }
+func (NoopWoodpecker) CurrentUser(_ context.Context) (*WoodpeckerUser, error) {
+	return &WoodpeckerUser{Login: "noop", Admin: true}, nil
+}
+func (NoopWoodpecker) ListRepoSecrets(_ context.Context, repoID int64) ([]string, error) {
+	return nil, nil
+}
+func (NoopWoodpecker) CreateRepoSecret(_ context.Context, repoID int64, name, value string) error {
+	return nil
+}
+func (NoopWoodpecker) UpdateRepoSecret(_ context.Context, repoID int64, name, value string) error {
+	return nil
+}
+func (NoopWoodpecker) DeleteRepoSecret(_ context.Context, repoID int64, name string) error { return nil }
+func (NoopWoodpecker) UpsertRepoSecret(_ context.Context, repoID int64, name, value string) error {
+	return nil
+}

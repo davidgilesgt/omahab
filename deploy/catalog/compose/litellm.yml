@@ -1,5 +1,14 @@
 # LiteLLM gateway — curated Omahab bundle
 # OpenAI-compatible proxy + credential broker. Private-only, no Tunnel public exposure.
+# Config is Omahab-managed bind directory at /srv/omahab/apps/litellm/config (rebuildable from provider/alias state).
+# Generated litellm.yaml is rendered by omahabd (internal/providers/litellm.go, Phase 3) with
+#   general_settings.store_prompts_in_spend_logs: false and litellm_settings.turn_off_message_logging: true
+#   (spend/error metadata retained for limits/diagnosis; no external callbacks; never persist prompts/responses).
+# OAuth refresh state persisted in litellm_auth volume at /var/lib/litellm-auth (0700, umask 077) — authoritative backup.
+# CHATGPT_TOKEN_DIR=/var/lib/litellm-auth/chatgpt and XAI_OAUTH_TOKEN_DIR=/var/lib/litellm-auth/xai are literal env (not secrets).
+# Container runs with umask 077 and creates token dirs with 0700 via entrypoint wrapper.
+# LiteLLM image MUST be pinned to a release containing merged xAI OAuth support (BerriAI/litellm#29866).
+# Fail catalog generation / provider setup if image does not expose `litellm xai-oauth login` and `use_xai_oauth` model option.
 name: omahab-litellm
 networks:
   omahab:
@@ -18,15 +27,29 @@ services:
       LITELLM_MASTER_KEY_FILE: /run/secrets/litellm_master_key
       DATABASE_URL_FILE: /run/secrets/litellm_db_url
       LITELLM_SALT_KEY_FILE: /run/secrets/litellm_salt_key
-      STORE_MODEL_IN_DB: "true"
       LITELLM_CONFIG_PATH: /app/config/litellm.yaml
+      CHATGPT_TOKEN_DIR: /var/lib/litellm-auth/chatgpt
+      XAI_OAUTH_TOKEN_DIR: /var/lib/litellm-auth/xai
     secrets:
       - litellm_master_key
       - litellm_db_url
       - litellm_salt_key
     volumes:
-      - litellm_config:/app/config:ro
-    command: ["--config", "/app/config/litellm.yaml", "--detailed_debug"]
+      # Omahab-managed bind directory — rebuildable, not backed up (derived from provider/alias state).
+      - type: bind
+        source: /srv/omahab/apps/litellm/config
+        target: /app/config
+        read_only: true
+      # OAuth refresh state — 0700 dirs, umask 077 (see entrypoint), authoritative backup.
+      - litellm_auth:/var/lib/litellm-auth
+      # Entrypoint wrapper — reads secrets from /run/secrets, exports only in process, execs litellm.
+      # No raw secrets appear in Compose env, YAML, labels, args, or logs.
+      - type: bind
+        source: /srv/omahab/apps/litellm/entrypoint.sh
+        target: /app/entrypoint.sh
+        read_only: true
+    # Wrapper handles umask 077, mkdir -p 0700 for token dirs, reads /run/secrets/*, exports, and execs litellm.
+    command: ["/app/entrypoint.sh", "--config", "/app/config/litellm.yaml"]
     networks:
       - omahab
     healthcheck:
@@ -74,7 +97,7 @@ secrets:
   litellm_db_password:
     file: /var/lib/omahab/secrets/litellm_db_password
 volumes:
-  litellm_config:
-    name: litellm_config
   litellm_postgres_data:
     name: litellm_postgres_data
+  litellm_auth:
+    name: litellm_auth

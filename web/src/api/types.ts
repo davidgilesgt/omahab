@@ -129,14 +129,57 @@ export interface User {
 
 export interface ProviderCredential {
   id: ID;
-  provider: string;
+  provider: "openai" | "anthropic" | "openrouter" | "chatgpt" | "xai" | string;
   name: string;
-  kind: string;
+  kind: "api_key" | "oauth" | string;
   status: string;
   configured: boolean;
+  managed_by: "omahab" | "litellm" | string;
+  external_ref?: string | null;
   entitlement?: string | null;
   expires_at?: string | null;
   updated_at: string;
+}
+
+export type ModelAliasName = "omahab/fast" | "omahab/balanced" | "omahab/reasoning" | "omahab/embedding";
+
+export interface ModelAlias {
+  name: ModelAliasName;
+  credential_id: ID;
+  model: string;
+  fallback_order?: string[] | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ModelKey {
+  id: ID;
+  name: string;
+  key_prefix: string;
+  owner_kind: "hermes" | "device" | "harness";
+  owner_id: string;
+  scopes: ModelAliasName[];
+  rpm?: number | null;
+  tpm?: number | null;
+  concurrency?: number | null;
+  budget?: number | null;
+  created_at: string;
+  expires_at?: string | null;
+}
+
+export interface CreateModelKeyResponse extends ModelKey {
+  key: string;
+}
+
+export interface OAuthSession {
+  id: string;
+  provider: "chatgpt" | "xai" | string;
+  flow: "device_code" | "loopback";
+  verification_url: string;
+  user_code?: string | null;
+  callback_port?: number | null;
+  expires_at: string;
+  status: "pending" | "connected" | "denied" | "expired" | "error";
 }
 
 export interface RecoverySession {
@@ -146,7 +189,6 @@ export interface RecoverySession {
 }
 
 export interface Instance {
-  id: ID;
   domain: string;
   tailnet: string;
   tailscale_ip: string;
@@ -208,4 +250,56 @@ export interface KnowledgeConsent {
   principal: string;
   provider: string;
   granted: boolean;
+}
+
+export interface ToolVariableMeta {
+  name: string;
+  version: number;
+  updated_at: string;
+}
+
+export interface CompanionDevice {
+  id: ID;
+  name: string;
+  device_token_prefix?: string | null;
+  allow_provider_oauth: boolean;
+  granted?: boolean;
+  last_sync_at?: string | null;
+  revoked_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CompanionEnrollment {
+  id: ID;
+  code: string;
+  expires_at: string;
+  created_at: string;
+  consumed_at?: string | null;
+}
+
+export interface CreateCompanionEnrollmentResponse {
+  id: string;
+  code: string;
+  expires_at: string;
+}
+
+export interface HermesProviderOAuth {
+  provider: string;
+  connected: boolean;
+  status?: string;
+}
+
+export interface HermesNousSession {
+  session_id: string;
+  verification_url: string;
+  status?: string;
+  provider?: string;
+  expires_at?: string;
+}
+
+export interface HermesToolset {
+  name: string;
+  provider?: string;
+  description?: string;
 }

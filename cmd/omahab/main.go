@@ -102,10 +102,11 @@ Use --server to target a different control plane (env OMAHAB_SERVER, then ~/.con
 	root.AddCommand(newIdentityCmd())
 	root.AddCommand(newHermesCmd())
 	root.AddCommand(newSecretsCmd())
+	root.AddCommand(newProviderCmd())
+	root.AddCommand(newEnvCmd())
 	root.AddCommand(newVersionCmd())
 	// Completion
 	root.AddCommand(newCompletionCmd())
-
 	// Host/admin: expose doctor already, status, identity recover
 	// Ensure help is discoverable
 	root.InitDefaultHelpFlag()

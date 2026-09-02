@@ -1,6 +1,9 @@
 package scm
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // PipelineTemplateInput holds the values substituted into the Woodpecker
 // pipeline template. No secret values are interpolated; secrets are referenced
@@ -11,6 +14,8 @@ type PipelineTemplateInput struct {
 	DefaultBranch      string
 	RegistryHost       string
 	ReleaseCallbackURL string
+	BuilderImage       string
+	ProjectID          string
 }
 
 // PipelineTemplate returns a Woodpecker pipeline YAML for the repository.
@@ -43,9 +48,16 @@ func PipelineTemplate(in PipelineTemplateInput) string {
 	if registry == "" {
 		registry = "git.example.com"
 	}
-	callback := in.ReleaseCallbackURL
+	callback := strings.TrimSpace(in.ReleaseCallbackURL)
 	if callback == "" {
 		callback = fmt.Sprintf("https://omahabd.example.com/v1/projects/%s/releases", name)
+		if strings.TrimSpace(in.ProjectID) != "" {
+			callback = fmt.Sprintf("https://omahab.example.com/api/v1/projects/%s/releases/with-token", strings.TrimSpace(in.ProjectID))
+		}
+	}
+	builderImage := strings.TrimSpace(in.BuilderImage)
+	if builderImage == "" {
+		builderImage = "quay.io/podman/stable"
 	}
 	image := fmt.Sprintf("%s/%s/%s", registry, owner, name)
 
@@ -65,21 +77,22 @@ when:
 
 steps:
   build-and-push:
-    image: docker:27-cli
+    image: %s
     environment:
       IMAGE: %s
     secrets: [omahab_registry_user, omahab_registry_password, omahab_release_token]
     commands:
-      - echo "$OMAHAB_REGISTRY_PASSWORD" | docker login %s -u "$OMAHAB_REGISTRY_USER" --password-stdin
-      - docker buildx create --use --name omahab-builder || docker buildx use omahab-builder
-      - docker buildx build --push --provenance=false -t "$IMAGE:sha-$CI_COMMIT_SHA" .
-      - DIGEST="$(docker buildx imagetools inspect "$IMAGE:sha-$CI_COMMIT_SHA" --format '{{.Manifest.Digest}}')"
-      - test -n "$DIGEST" || (echo "failed to resolve image digest" >&2; exit 1)
+      - echo "$OMAHAB_REGISTRY_PASSWORD" | podman --remote --url unix:///run/omahab-builder/podman.sock login %s -u "$OMAHAB_REGISTRY_USER" --password-stdin
+      - podman --remote --url unix:///run/omahab-builder/podman.sock build -t "$IMAGE:sha-$CI_COMMIT_SHA" .
+      - podman --remote --url unix:///run/omahab-builder/podman.sock push --digestfile /tmp/digestfile "$IMAGE:sha-$CI_COMMIT_SHA"
+      - DIGEST="$(cat /tmp/digestfile)"
+      - echo "$DIGEST" | grep -Eq "^sha256:[0-9a-f]{64}$" || (echo "invalid digest $DIGEST" >&2; exit 1)
       - echo "image digest: $DIGEST"
       - >
         curl -fsS -X POST %s
         -H "Authorization: Bearer $OMAHAB_RELEASE_TOKEN"
         -H "Content-Type: application/json"
         -d "{\"commit\":\"$CI_COMMIT_SHA\",\"digest\":\"$DIGEST\"}"
-`, branch, image, registry, callback)
+`, branch, builderImage, image, registry, callback)
 }
+

@@ -10,17 +10,21 @@ import (
 
 func validMapFS() fstest.MapFS {
 	return fstest.MapFS{
-		"bin/omahab":                     &fstest.MapFile{Data: []byte("binary-omahab")},
-		"bin/omahabd":                    &fstest.MapFile{Data: []byte("binary-omahabd")},
-		"systemd/omahabd.service":        &fstest.MapFile{Data: []byte("[Unit]\nDescription=omahabd")},
-		"systemd/omahab-backup.service":  &fstest.MapFile{Data: []byte("[Unit]\nDescription=backup")},
-		"systemd/omahab-backup.timer":    &fstest.MapFile{Data: []byte("[Unit]\nDescription=backup timer")},
-		"systemd/omahab-verify.service":  &fstest.MapFile{Data: []byte("[Unit]\nDescription=verify")},
-		"systemd/omahab-verify.timer":    &fstest.MapFile{Data: []byte("[Unit]\nDescription=verify timer")},
-		"systemd/cloudflared.service":    &fstest.MapFile{Data: []byte("[Unit]\nDescription=cloudflared")},
-		"catalog/catalog.json":           &fstest.MapFile{Data: []byte(`{"bundles":[]}`)},
-		"catalog/compose/caddy.yml":      &fstest.MapFile{Data: []byte("services: {}")},
-		"tmpfiles.d/omahab.conf":         &fstest.MapFile{Data: []byte("d /etc/omahab 0755 root root - -")},
+		"bin/omahab":                          &fstest.MapFile{Data: []byte("binary-omahab")},
+		"bin/omahabd":                         &fstest.MapFile{Data: []byte("binary-omahabd")},
+		"systemd/omahabd.service":             &fstest.MapFile{Data: []byte("[Unit]\nDescription=omahabd")},
+		"systemd/omahab-builder.socket":       &fstest.MapFile{Data: []byte("[Unit]\nDescription=builder socket")},
+		"systemd/omahab-builder.service":      &fstest.MapFile{Data: []byte("[Unit]\nDescription=builder service")},
+		"systemd/omahab-builder-prune.service": &fstest.MapFile{Data: []byte("[Unit]\nDescription=builder prune")},
+		"systemd/omahab-builder-prune.timer":  &fstest.MapFile{Data: []byte("[Unit]\nDescription=builder prune timer")},
+		"systemd/omahab-backup.service":       &fstest.MapFile{Data: []byte("[Unit]\nDescription=backup")},
+		"systemd/omahab-backup.timer":         &fstest.MapFile{Data: []byte("[Unit]\nDescription=backup timer")},
+		"systemd/omahab-verify.service":       &fstest.MapFile{Data: []byte("[Unit]\nDescription=verify")},
+		"systemd/omahab-verify.timer":         &fstest.MapFile{Data: []byte("[Unit]\nDescription=verify timer")},
+		"systemd/cloudflared.service":         &fstest.MapFile{Data: []byte("[Unit]\nDescription=cloudflared")},
+		"catalog/catalog.json":                &fstest.MapFile{Data: []byte(`{"bundles":[]}`)},
+		"catalog/compose/caddy.yml":           &fstest.MapFile{Data: []byte("services: {}")},
+		"tmpfiles.d/omahab.conf":              &fstest.MapFile{Data: []byte("d /etc/omahab 0755 root root - -")},
 	}
 }
 
@@ -49,6 +53,10 @@ func TestValidateMissingEachRequired(t *testing.T) {
 		"bin/omahab",
 		"bin/omahabd",
 		"systemd/omahabd.service",
+		"systemd/omahab-builder.socket",
+		"systemd/omahab-builder.service",
+		"systemd/omahab-builder-prune.service",
+		"systemd/omahab-builder-prune.timer",
 		"systemd/omahab-backup.service",
 		"systemd/omahab-backup.timer",
 		"systemd/omahab-verify.service",

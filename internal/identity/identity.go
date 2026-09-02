@@ -62,8 +62,10 @@ type PocketID interface {
 	EnsureOIDCClient(ctx context.Context, name string, callbackURLs []string) (clientID string, clientSecret string, err error)
 	// CreateOIDCClientSecret mints a new secret for an existing OIDC client.
 	CreateOIDCClientSecret(ctx context.Context, clientID string) (string, error)
+	// EnsureOIDCClientGroupAccess idempotently ensures that only the named groups have access to the given OIDC client.
+	// It appends the client to allowed groups without clobbering other clients, and ensures excluded default groups (guests) do not have access.
+	EnsureOIDCClientGroupAccess(ctx context.Context, clientID string, groupNames []string) error
 }
-
 // EventRecorder records security events for audit.
 // If nil, the service falls back to the local identity_security_events table.
 type EventRecorder interface {

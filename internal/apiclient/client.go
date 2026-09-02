@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/omahab/omahab/internal/api"
 	"github.com/omahab/omahab/internal/domain"
 )
 
@@ -714,7 +715,6 @@ func (c *Client) ListEmails(ctx context.Context) ([]domain.EmailMessage, error) 
 	}
 	return env.Items, nil
 }
-
 func (c *Client) GetEmail(ctx context.Context, id string) (*domain.EmailMessage, error) {
 	var out domain.EmailMessage
 	if err := c.get(ctx, "/emails/"+url.PathEscape(id), &out); err != nil {
@@ -722,3 +722,36 @@ func (c *Client) GetEmail(ctx context.Context, id string) (*domain.EmailMessage,
 	}
 	return &out, nil
 }
+
+// --- provider OAuth (subscription) ---
+
+// StartProviderOAuth initiates subscription OAuth for chatgpt (device_code) or xai (loopback).
+// Returns verification URL and session metadata; never returns device codes, tokens, or master key.
+func (c *Client) StartProviderOAuth(ctx context.Context, provider, flow string) (*api.OAuthSession, error) {
+	var out api.OAuthSession
+	if err := c.post(ctx, "/provider-oauth/"+url.PathEscape(provider)+"/start", api.StartProviderOAuthRequest{Flow: flow}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// PollProviderOAuth polls OAuth session status; returns safe OAuthSession without device codes, tokens, or master key.
+func (c *Client) PollProviderOAuth(ctx context.Context, provider, sessionID string) (*api.OAuthSession, error) {
+	var out api.OAuthSession
+	if err := c.get(ctx, "/provider-oauth/"+url.PathEscape(provider)+"/poll/"+url.PathEscape(sessionID), &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ForwardProviderOAuthCallback forwards only the received /callback?<query> path to LiteLLM's fixed loopback at 127.0.0.1:56121.
+// Requires device token from an enrolled companion with allow_provider_oauth=true; admin bearer is rejected with 403.
+// This is device-only; for CLI non-QML use the same relay is attempted, but fallback is SSH local forward: ssh -L 56121:127.0.0.1:56121 omahab@<server>.
+func (c *Client) ForwardProviderOAuthCallback(ctx context.Context, provider, sessionID, callbackPath string) (*api.OAuthSession, error) {
+	var out api.OAuthSession
+	if err := c.post(ctx, "/provider-oauth/"+url.PathEscape(provider)+"/callback/"+url.PathEscape(sessionID), api.ForwardProviderOAuthCallbackRequest{CallbackPath: callbackPath}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+

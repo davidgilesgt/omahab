@@ -187,3 +187,109 @@ func (c *PocketIDClient) UpdateApplicationAccessForGroup(ctx context.Context, gr
 	payload := map[string]any{"oidcClientIds": clientIDs}
 	return c.doJSON(ctx, http.MethodPut, "/api/user-groups/"+url.PathEscape(groupID)+"/allowed-oidc-clients", payload, nil)
 }
+
+// EnsureOIDCClientGroupAccess idempotently ensures that the given OIDC client is allowed for the named groups
+// without clobbering other clients. It appends the client to allowed groups and ensures the default excluded group
+// "guests" does not have access.
+func (c *PocketIDClient) EnsureOIDCClientGroupAccess(ctx context.Context, clientID string, groupNames []string) error {
+	clientID = strings.TrimSpace(clientID)
+	if clientID == "" {
+		return store.Validation("clientID is required")
+	}
+	clean := make([]string, 0, len(groupNames))
+	for _, n := range groupNames {
+		if s := strings.TrimSpace(n); s != "" {
+			clean = append(clean, s)
+		}
+	}
+	if len(clean) == 0 {
+		return nil
+	}
+	if err := c.ensureConfigured(); err != nil {
+		return err
+	}
+	// Ensure allowed groups exist and get their IDs.
+	allowedGroups, err := c.EnsureGroups(ctx, clean)
+	if err != nil {
+		return err
+	}
+	allowedIDs := make(map[string]bool, len(allowedGroups))
+	for _, g := range allowedGroups {
+		allowedIDs[g.ID] = true
+	}
+	// Append client to each allowed group if missing, preserving existing.
+	for _, g := range allowedGroups {
+		var full pocketUserGroupDto
+		if err := c.doJSON(ctx, http.MethodGet, "/api/user-groups/"+url.PathEscape(g.ID), nil, &full); err != nil {
+			return err
+		}
+		found := false
+		for _, cl := range full.AllowedOidcClients {
+			if strings.TrimSpace(cl.ID) == clientID {
+				found = true
+				break
+			}
+		}
+		if found {
+			continue
+		}
+		newIDs := make([]string, 0, len(full.AllowedOidcClients)+1)
+		for _, cl := range full.AllowedOidcClients {
+			if id := strings.TrimSpace(cl.ID); id != "" {
+				newIDs = append(newIDs, id)
+			}
+		}
+		// Deduplicate before append (should not duplicate).
+		seen := make(map[string]bool, len(newIDs)+1)
+		for _, id := range newIDs {
+			seen[id] = true
+		}
+		if !seen[clientID] {
+			newIDs = append(newIDs, clientID)
+		}
+		if err := c.UpdateApplicationAccessForGroup(ctx, g.ID, newIDs); err != nil {
+			return err
+		}
+	}
+	// Ensure guests does not have access, preserving its other clients.
+	allGroups, err := c.ListGroups(ctx)
+	if err != nil {
+		// If listing fails, allowed groups already handled; don't fail the whole operation.
+		return nil
+	}
+	for _, grp := range allGroups {
+		lname := strings.ToLower(strings.TrimSpace(grp.Name))
+		if lname != "guests" {
+			continue
+		}
+		if allowedIDs[grp.ID] {
+			continue
+		}
+		var full pocketUserGroupDto
+		if err := c.doJSON(ctx, http.MethodGet, "/api/user-groups/"+url.PathEscape(grp.ID), nil, &full); err != nil {
+			continue
+		}
+		has := false
+		for _, cl := range full.AllowedOidcClients {
+			if strings.TrimSpace(cl.ID) == clientID {
+				has = true
+				break
+			}
+		}
+		if !has {
+			continue
+		}
+		newIDs := make([]string, 0, len(full.AllowedOidcClients))
+		for _, cl := range full.AllowedOidcClients {
+			id := strings.TrimSpace(cl.ID)
+			if id == "" || id == clientID {
+				continue
+			}
+			newIDs = append(newIDs, id)
+		}
+		if err := c.UpdateApplicationAccessForGroup(ctx, grp.ID, newIDs); err != nil {
+			return err
+		}
+	}
+	return nil
+}

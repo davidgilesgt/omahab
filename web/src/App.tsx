@@ -3,9 +3,9 @@ import { LoginPage, ProtectedRoute } from "./auth";
 import { AppShell } from "./components/shell";
 import { ApplicationsPage, BackupsPage, EventsPage, OverviewPage, ProjectsPage } from "./views/operations";
 import { PeoplePage, ProvidersPage, SyncFoldersPage, WorkspacesPage } from "./views/administration";
+import { ToolEnvironmentPage } from "./views/tool-environment";
 import { ChatPage } from "./views/chat";
 import { SetupPage } from "./views/setup";
-
 function DashboardRoutes() {
   return (
     <ProtectedRoute>
@@ -21,6 +21,7 @@ function DashboardRoutes() {
           <Route path="/workspaces" element={<WorkspacesPage />} />
           <Route path="/people" element={<PeoplePage />} />
           <Route path="/providers" element={<ProvidersPage />} />
+          <Route path="/tool-environment" element={<ToolEnvironmentPage />} />
           <Route path="/ai" element={<ChatPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

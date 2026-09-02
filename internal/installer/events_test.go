@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -296,7 +297,12 @@ func TestServiceRunEmitsEvents(t *testing.T) {
 		ActiveSSHSession: func() (bool, string, error) { return true, "1.2.3.4", nil },
 		FileExists: func(path string) bool { return false },
 		DownloadFile: func(ctx context.Context, url, destPath string) error { return nil },
+		LookupUser: func(name string) (int, int, string, error) { return 1001, 1001, "/var/lib/omahab-builder", nil },
+		Chown: func(path string, uid, gid int) error { return nil },
 		ReadFile: func(path string) ([]byte, error) {
+			if strings.Contains(path, "subuid") || strings.Contains(path, "subgid") {
+				return nil, fmt.Errorf("no such file")
+			}
 			if strings.Contains(path, "master.key") {
 				return bytes.Repeat([]byte("k"), 32), nil
 			}
@@ -328,17 +334,21 @@ func TestServiceRunEmitsEvents(t *testing.T) {
 	}
 	svc := NewService(db, probes)
 	svc.SetAssets(fstest.MapFS{
-		"bin/omahab":                          {Data: []byte("dummy")},
-		"bin/omahabd":                         {Data: []byte("dummy")},
-		"systemd/omahabd.service":             {Data: []byte("[Unit]\nDescription=test")},
-		"systemd/omahab-backup.service":       {Data: []byte("[Unit]\nDescription=test")},
-		"systemd/omahab-backup.timer":         {Data: []byte("[Unit]\nDescription=test")},
-		"systemd/omahab-verify.service":       {Data: []byte("[Unit]\nDescription=test")},
-		"systemd/omahab-verify.timer":         {Data: []byte("[Unit]\nDescription=test")},
-		"systemd/cloudflared.service":         {Data: []byte("[Unit]\nDescription=test")},
-		"tmpfiles.d/omahab.conf":              {Data: []byte("test")},
-		"catalog/catalog.json":                {Data: []byte(`{"apps":[]}`)},
-		"catalog/apps-catalog.json":           {Data: []byte(`{"bundles":[]}`)},
+		"bin/omahab":                            {Data: []byte("dummy")},
+		"bin/omahabd":                           {Data: []byte("dummy")},
+		"systemd/omahabd.service":               {Data: []byte("[Unit]\nDescription=test")},
+		"systemd/omahab-builder.socket":         {Data: []byte("[Unit]\nDescription=test")},
+		"systemd/omahab-builder.service":        {Data: []byte("[Unit]\nDescription=test")},
+		"systemd/omahab-builder-prune.service": {Data: []byte("[Unit]\nDescription=test")},
+		"systemd/omahab-builder-prune.timer":   {Data: []byte("[Unit]\nDescription=test")},
+		"systemd/omahab-backup.service":         {Data: []byte("[Unit]\nDescription=test")},
+		"systemd/omahab-backup.timer":           {Data: []byte("[Unit]\nDescription=test")},
+		"systemd/omahab-verify.service":         {Data: []byte("[Unit]\nDescription=test")},
+		"systemd/omahab-verify.timer":           {Data: []byte("[Unit]\nDescription=test")},
+		"systemd/cloudflared.service":           {Data: []byte("[Unit]\nDescription=test")},
+		"tmpfiles.d/omahab.conf":                {Data: []byte("test")},
+		"catalog/catalog.json":                  {Data: []byte(`{"apps":[]}`)},
+		"catalog/apps-catalog.json":             {Data: []byte(`{"bundles":[]}`)},
 	})
 	opts := InstallOptions{Version: "0.0.0-test", UntilStep: StepManifest, StateDir: stateDir, RecoveryKey: pub, Emit: emit}
 	if _, err := svc.Run(ctx, opts); err != nil {

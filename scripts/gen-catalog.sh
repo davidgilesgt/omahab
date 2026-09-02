@@ -40,6 +40,7 @@ KEYS=(
   redis
   woodpecker-server
   woodpecker-agent
+  podman
   hermes
   immich-server
   immich-machine-learning
@@ -65,6 +66,7 @@ get_repo() {
     redis) echo "docker.io/library/redis:7-alpine" ;;
     woodpecker-server) echo "docker.io/woodpeckerci/woodpecker-server:latest" ;;
     woodpecker-agent) echo "docker.io/woodpeckerci/woodpecker-agent:latest" ;;
+    podman) echo "quay.io/podman/stable:latest" ;;
     hermes) echo "ghcr.io/omahab/hermes:latest" ;;
     immich-server) echo "ghcr.io/immich-app/immich-server:release" ;;
     immich-machine-learning) echo "ghcr.io/immich-app/immich-machine-learning:release" ;;
@@ -83,9 +85,8 @@ get_repo() {
     *) echo "" ;;
   esac
 }
-
 # Enabled-by-default images must resolve; optional bundles may be skipped.
-REQUIRED_KEYS=("caddy" "pocket-id" "immich-server" "immich-machine-learning" "immich-postgres" "valkey")
+REQUIRED_KEYS=("caddy" "pocket-id" "forgejo" "postgres" "redis" "woodpecker-server" "woodpecker-agent" "podman")
 
 is_required() {
   local k="$1"
@@ -213,8 +214,12 @@ if ! grep -q '"id": "pocket-id"' deploy/catalog/apps-catalog.json; then
   echo "error: generated catalog missing required bundle pocket-id" >&2
   exit 1
 fi
-if ! grep -q '"id": "immich"' deploy/catalog/apps-catalog.json; then
-  echo "error: generated catalog missing required bundle immich" >&2
+if ! grep -q '"id": "forgejo"' deploy/catalog/apps-catalog.json; then
+  echo "error: generated catalog missing required bundle forgejo" >&2
+  exit 1
+fi
+if ! grep -q '"id": "woodpecker"' deploy/catalog/apps-catalog.json; then
+  echo "error: generated catalog missing required bundle woodpecker" >&2
   exit 1
 fi
 

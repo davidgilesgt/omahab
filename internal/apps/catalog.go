@@ -31,13 +31,14 @@ var supportedArchitectures = map[string]bool{
 }
 
 var (
-	slugRe      = regexp.MustCompile(`^[a-z]([a-z0-9-]*[a-z0-9])?$`)
-	hostnameRe  = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
-	imageRe     = regexp.MustCompile(`^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)*$`)
-	digestRe    = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
-	volumeName  = regexp.MustCompile(`^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$`)
-	imageLineRe = regexp.MustCompile(`(?m)^[ \t-]*image:[ \t]*(\S+)`)
-	routeRe     = regexp.MustCompile(`^[a-z0-9-]*$`)
+	slugRe        = regexp.MustCompile(`^[a-z]([a-z0-9-]*[a-z0-9])?$`)
+	hostnameRe    = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
+	imageRe       = regexp.MustCompile(`^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)*$`)
+	digestRe      = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	pinnedImageRe = regexp.MustCompile(`^[^@]+@sha256:[a-f0-9]{64}$`)
+	volumeName    = regexp.MustCompile(`^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$`)
+	imageLineRe   = regexp.MustCompile(`(?m)^[ \t-]*image:[ \t]*(\S+)`)
+	routeRe       = regexp.MustCompile(`^[a-z0-9-]*$`)
 )
 
 // ValidDigest reports whether d is a canonical pinned sha256 digest.
@@ -122,6 +123,7 @@ type Bundle struct {
 	Route           string           `json:"route"`
 	Dependencies    []string         `json:"dependencies,omitempty"`
 	SecretSources   []string         `json:"secret_sources,omitempty"`
+	PipelineImage   string           `json:"pipeline_image,omitempty"`
 }
 
 // exposureRank orders exposure so requests can be checked against a bundle's
@@ -253,6 +255,11 @@ func (b Bundle) validate() (Bundle, error) {
 			problems = append(problems, fmt.Sprintf("secret source %q listed twice", src))
 		}
 		seenSecret[src] = true
+	}
+	if strings.TrimSpace(b.PipelineImage) != "" {
+		if !pinnedImageRe.MatchString(strings.TrimSpace(b.PipelineImage)) {
+			problems = append(problems, fmt.Sprintf("pipeline_image %q must be repository@sha256:<64 lowercase hex>", b.PipelineImage))
+		}
 	}
 	if len(problems) > 0 {
 		return Bundle{}, &ValidationError{Problems: problems}

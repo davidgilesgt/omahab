@@ -29,6 +29,11 @@ Item {
   property int unreadEvents: 0
   property string checkedAt: ""
   property int problemCount: 0
+  property int environmentRevision: 0
+  property int environmentVariableCount: 0
+  property string environmentSyncedAt: ""
+  property string environmentError: ""
+  property bool hasXaiOAuthSession: false
 
   property var requestQueue: []
   property var currentRequest: null
@@ -53,6 +58,11 @@ Item {
     syncConflicts = 0
     unreadEvents = 0
     problemCount = 0
+    environmentRevision = 0
+    environmentVariableCount = 0
+    environmentSyncedAt = ""
+    environmentError = ""
+    hasXaiOAuthSession = false
   }
 
   function hasQueuedKind(kind) {
@@ -202,8 +212,34 @@ Item {
       ? status.unread_events
       : (status.unreadEvents !== undefined ? status.unreadEvents
         : (status.unread_count !== undefined ? status.unread_count : countUnreadEvents(status.events, ""))))
-    checkedAt = String(status.checked_at || status.checkedAt || status.last_sync_at || "")
+    checkedAt = String(status.checked_at || status.checkedAt || status.last_sync_at || status.environment_synced_at || "")
     problemCount = String(status.error || "") === "" ? 0 : 1
+    environmentRevision = boundedCount(status.environment_revision !== undefined ? status.environment_revision : status.environmentRevision)
+    environmentVariableCount = boundedCount(status.environment_variable_count !== undefined ? status.environment_variable_count : status.environmentVariableCount)
+    environmentSyncedAt = String(status.environment_synced_at !== undefined ? status.environment_synced_at : (status.environmentSyncedAt || status.checked_at || ""))
+    environmentError = String(status.environment_error !== undefined ? status.environment_error : (status.environmentError || ""))
+    // xAI loopback OAuth session assigned to this device — server reports via status field when active
+    var xaiFlag = status.xai_oauth_active !== undefined ? status.xai_oauth_active
+      : status.has_xai_oauth_session !== undefined ? status.has_xai_oauth_session
+      : status.xaiOAuthActive !== undefined ? status.xaiOAuthActive
+      : status.companion_has_xai_oauth !== undefined ? status.companion_has_xai_oauth
+      : false
+    // Also consider oauth_sessions array or pending provider hint
+    if (!xaiFlag && status.oauth_sessions instanceof Array) {
+      for (var i = 0; i < status.oauth_sessions.length; i++) {
+        var s = status.oauth_sessions[i] || {}
+        if (String(s.provider || "") === "xai" && String(s.status || "") === "pending" && s.assigned_to_device === true) {
+          xaiFlag = true
+          break
+        }
+        if (String(s.provider || "") === "xai" && String(s.flow || "") === "loopback" && String(s.status || "") === "pending") {
+          xaiFlag = true
+          break
+        }
+      }
+    }
+    if (!xaiFlag && String(status.oauth_pending_provider || "") === "xai") xaiFlag = true
+    hasXaiOAuthSession = xaiFlag === true
   }
 
   function applyActionResult(action, label, data) {
@@ -214,6 +250,10 @@ Item {
       actionStatus = failures === 0
         ? "All connection checks passed"
         : failures + (failures === 1 ? " connection check needs attention" : " connection checks need attention")
+      return
+    }
+    if (action === "environment.sync" || action === "environment_sync" || action === "env.sync" || action === "environment_sync" || label === "Sync tool variables") {
+      actionStatus = "Applied to new apps; restart existing apps"
       return
     }
     actionStatus = label + " opened"

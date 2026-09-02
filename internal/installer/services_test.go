@@ -30,7 +30,7 @@ func TestServicesEnabledUnits(t *testing.T) {
 	t.Parallel()
 
 	units := EnabledUnits()
-	want := []string{"tailscaled", "omahabd"}
+	want := []string{"tailscaled", "omahab-builder.socket", "omahab-builder-prune.timer", "omahabd"}
 	if !reflect.DeepEqual(units, want) {
 		t.Fatalf("EnabledUnits() = %v, want %v", units, want)
 	}
@@ -90,6 +90,8 @@ func TestServicesHappyPath(t *testing.T) {
 	want := [][]string{
 		{"daemon-reload"},
 		{"enable", "tailscaled"},
+		{"enable", "omahab-builder.socket"},
+		{"enable", "omahab-builder-prune.timer"},
 		{"enable", "omahabd"},
 	}
 	if !reflect.DeepEqual(calls, want) {
@@ -206,6 +208,8 @@ func TestServicesEnableOmahabdFailure(t *testing.T) {
 	want := [][]string{
 		{"daemon-reload"},
 		{"enable", "tailscaled"},
+		{"enable", "omahab-builder.socket"},
+		{"enable", "omahab-builder-prune.timer"},
 		{"enable", "omahabd"},
 	}
 	if !reflect.DeepEqual(calls, want) {
@@ -261,6 +265,8 @@ func TestServicesIdempotentSecondRun(t *testing.T) {
 	want := [][]string{
 		{"daemon-reload"},
 		{"enable", "tailscaled"},
+		{"enable", "omahab-builder.socket"},
+		{"enable", "omahab-builder-prune.timer"},
 		{"enable", "omahabd"},
 	}
 	if !reflect.DeepEqual(first, want) || !reflect.DeepEqual(second, want) {
@@ -320,6 +326,8 @@ func TestServicesRollback(t *testing.T) {
 		t.Fatalf("RollbackServices error = %v, want nil", err)
 	}
 	want := [][]string{
+		{"disable", "omahab-builder-prune.timer"},
+		{"disable", "omahab-builder.socket"},
 		{"disable", "omahabd"},
 		{"daemon-reload"},
 	}
@@ -361,14 +369,20 @@ func TestServicesRollbackBestEffort(t *testing.T) {
 	if err := RollbackServices(ctx, probes); err != nil {
 		t.Fatalf("RollbackServices best-effort should return nil even on disable error, got %v", err)
 	}
-	if len(calls) != 2 {
-		t.Fatalf("expected 2 calls even when disable fails, got %d: %v", len(calls), calls)
+	if len(calls) != 4 {
+		t.Fatalf("expected 4 calls even when disable fails, got %d: %v", len(calls), calls)
 	}
-	if !reflect.DeepEqual(calls[0], []string{"disable", "omahabd"}) {
-		t.Fatalf("first rollback call = %v, want [disable omahabd]", calls[0])
+	if !reflect.DeepEqual(calls[0], []string{"disable", "omahab-builder-prune.timer"}) {
+		t.Fatalf("first rollback call = %v, want [disable omahab-builder-prune.timer]", calls[0])
 	}
-	if !reflect.DeepEqual(calls[1], []string{"daemon-reload"}) {
-		t.Fatalf("second rollback call = %v, want [daemon-reload]", calls[1])
+	if !reflect.DeepEqual(calls[1], []string{"disable", "omahab-builder.socket"}) {
+		t.Fatalf("second rollback call = %v, want [disable omahab-builder.socket]", calls[1])
+	}
+	if !reflect.DeepEqual(calls[2], []string{"disable", "omahabd"}) {
+		t.Fatalf("third rollback call = %v, want [disable omahabd]", calls[2])
+	}
+	if !reflect.DeepEqual(calls[3], []string{"daemon-reload"}) {
+		t.Fatalf("fourth rollback call = %v, want [daemon-reload]", calls[3])
 	}
 }
 
@@ -407,7 +421,7 @@ func TestServicesRollbackDaemonReloadStillCalledWhenDisableFails(t *testing.T) {
 	if err := RollbackServices(ctx, probes); err != nil {
 		t.Fatalf("RollbackServices should return nil even when daemon-reload fails, got %v", err)
 	}
-	if len(calls) != 2 {
-		t.Fatalf("expected 2 calls, got %d: %v", len(calls), calls)
+	if len(calls) != 4 {
+		t.Fatalf("expected 4 calls, got %d: %v", len(calls), calls)
 	}
 }

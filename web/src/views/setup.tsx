@@ -88,6 +88,9 @@ export function SetupPage() {
   const [enrollmentUrl, setEnrollmentUrl] = useState<string | null>(null);
   const [enrollmentExpires, setEnrollmentExpires] = useState<string | null>(null);
 
+  const [woodpeckerUsername, setWoodpeckerUsername] = useState("");
+  const [woodpeckerToken, setWoodpeckerToken] = useState("");
+
   const reconcileMutation = useMutation({
     mutationFn: client.reconcileSetup,
     onSuccess: () => {
@@ -158,6 +161,19 @@ export function SetupPage() {
     onError: (err) => toast.error(err instanceof Error ? err.message : "Enrollment failed"),
   });
 
+  const woodpeckerMutation = useMutation({
+    mutationFn: async () => {
+      if (!woodpeckerUsername.trim() || !woodpeckerToken.trim()) throw new Error("Username and token required");
+      return client.setupWoodpecker({ username: woodpeckerUsername.trim(), token: woodpeckerToken.trim() });
+    },
+    onSuccess: () => {
+      setWoodpeckerToken("");
+      toast.success("Woodpecker connected");
+      void queryClient.invalidateQueries({ queryKey: ["setup"] });
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Woodpecker connect failed"),
+  });
+
 
   if (setupQuery.isLoading) return <LoadingState label="Loading setup status" />;
   if (setupQuery.isError) return <ErrorState error={setupQuery.error} retry={() => void setupQuery.refetch()} />;
@@ -177,6 +193,9 @@ export function SetupPage() {
   const isCoreAppsOk = coreAppsCheck?.status === "ok";
   const isIdentityNotConfigured = adminCheck?.detail?.includes("identity not configured");
   const inviteDisabled = inviteMutation.isPending || !isCoreAppsOk || !!isIdentityNotConfigured;
+  const woodpeckerCheck = setup.checks.find((c) => c.id === "woodpecker_connection");
+  const isWoodpeckerSectionVisible =
+    !!woodpeckerCheck || (isCoreAppsOk && !!instanceDomain && instanceDomain !== "example.com" && instanceDomain !== "not-configured.invalid");
 
   return (
     <div className="page">
@@ -238,6 +257,69 @@ export function SetupPage() {
       )}
 
       <Checklist setup={setup} />
+
+      {isWoodpeckerSectionVisible && (
+        <Section title="Connect Woodpecker" description="Authorize Woodpecker CI with Forgejo using a personal access token.">
+          <div className="form-stack">
+            <p>
+              Woodpecker authenticates through Forgejo. Ensure{" "}
+              <a href={`https://git.${instanceDomain}`} target="_blank" rel="noreferrer">
+                {`https://git.${instanceDomain}`}
+              </a>{" "}
+              and{" "}
+              <a href={`https://ci.${instanceDomain}`} target="_blank" rel="noreferrer">
+                {`https://ci.${instanceDomain}`}
+              </a>{" "}
+              are reachable, then sign in to{" "}
+              <a href={`https://ci.${instanceDomain}`} target="_blank" rel="noreferrer">
+                {`https://ci.${instanceDomain}`}
+              </a>{" "}
+              via Pocket ID → Forgejo and copy the token from Woodpecker’s CLI &amp; API settings.
+            </p>
+            {woodpeckerCheck && (
+              <p style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                Status: <StatusPill value={woodpeckerCheck.status} />
+                {woodpeckerCheck.detail && <span style={{ opacity: 0.7, fontSize: "0.9em" }}>{woodpeckerCheck.detail}</span>}
+              </p>
+            )}
+            <label className="field">
+              <span>Forgejo username</span>
+              <input
+                value={woodpeckerUsername}
+                onChange={(e) => setWoodpeckerUsername(e.target.value)}
+                placeholder="forgejo username"
+                autoComplete="username"
+              />
+            </label>
+            <label className="field">
+              <span>Woodpecker PAT</span>
+              <input
+                type="password"
+                value={woodpeckerToken}
+                onChange={(e) => setWoodpeckerToken(e.target.value)}
+                placeholder="woodpecker token"
+                autoComplete="off"
+              />
+            </label>
+            <button
+              className="button primary"
+              type="button"
+              onClick={() => void woodpeckerMutation.mutate()}
+              disabled={woodpeckerMutation.isPending || !woodpeckerUsername.trim() || !woodpeckerToken.trim()}
+            >
+              {woodpeckerMutation.isPending ? "Connecting…" : "Connect Woodpecker"}
+            </button>
+            {woodpeckerMutation.isError && (
+              <p className="inline-error" role="alert">
+                {woodpeckerMutation.error instanceof Error ? woodpeckerMutation.error.message : "Connect failed"}
+              </p>
+            )}
+            {woodpeckerMutation.isSuccess && (
+              <p style={{ color: "var(--success, #15803d)", fontSize: "0.9em" }}>Woodpecker connected. Token cleared and not displayed.</p>
+            )}
+          </div>
+        </Section>
+      )}
 
       <Section title="Admin passkeys" description="Invite an admin and register passkeys via Pocket ID.">
         {!hasUsers ? (

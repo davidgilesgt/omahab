@@ -10,9 +10,12 @@ require (
 	github.com/charmbracelet/x/term v0.2.2
 	github.com/cloudflare/cloudflare-go/v2 v2.4.0
 	github.com/go-chi/chi/v5 v5.2.3
+	github.com/godbus/dbus/v5 v5.2.2
 	github.com/google/go-tpm v0.9.8
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	github.com/spf13/cobra v1.9.1
+	github.com/zalando/go-keyring v0.2.8
+	golang.org/x/term v0.45.0
 	modernc.org/sqlite v1.39.1
 )
 
@@ -29,6 +32,7 @@ require (
 	github.com/clipperhouse/displaywidth v0.9.0 // indirect
 	github.com/clipperhouse/stringish v0.1.1 // indirect
 	github.com/clipperhouse/uax29/v2 v2.5.0 // indirect
+	github.com/danieljoos/wincred v1.2.3 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
 	github.com/google/uuid v1.6.0 // indirect
@@ -52,7 +56,7 @@ require (
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	golang.org/x/crypto v0.45.0 // indirect
 	golang.org/x/exp v0.0.0-20250620022241-b7579e27df2b // indirect
-	golang.org/x/sys v0.38.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.31.0 // indirect
 	modernc.org/libc v1.66.10 // indirect
 	modernc.org/mathutil v1.7.1 // indirect

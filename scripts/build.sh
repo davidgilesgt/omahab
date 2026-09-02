@@ -74,7 +74,7 @@ for arch in "${ARCHES[@]}"; do
   rm -rf "$ASSET_ROOT"
   mkdir -p "$ASSET_ROOT/bin" "$ASSET_ROOT/systemd" "$ASSET_ROOT/catalog" "$ASSET_ROOT/tmpfiles.d"
   cp "$target/omahab" "$target/omahabd" "$ASSET_ROOT/bin/"
-  cp deploy/systemd/omahabd.service deploy/systemd/omahab-backup.service deploy/systemd/omahab-backup.timer deploy/systemd/omahab-verify.service deploy/systemd/omahab-verify.timer deploy/systemd/cloudflared.service "$ASSET_ROOT/systemd/"
+  cp deploy/systemd/omahabd.service deploy/systemd/omahab-builder.socket deploy/systemd/omahab-builder.service deploy/systemd/omahab-builder-prune.service deploy/systemd/omahab-builder-prune.timer deploy/systemd/omahab-backup.service deploy/systemd/omahab-backup.timer deploy/systemd/omahab-verify.service deploy/systemd/omahab-verify.timer deploy/systemd/cloudflared.service "$ASSET_ROOT/systemd/"
   # Copy the entire catalog tree. If deploy/catalog/apps-catalog.json exists (generated
   # by scripts/release.sh via omahab-cataloggen), include it — it is the runtime
   # catalog that the installer and daemon expect under /usr/share/omahab/catalog/.

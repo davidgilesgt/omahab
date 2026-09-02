@@ -35,6 +35,8 @@ type curatedBundle struct {
 	ComposeFile            string            `json:"composeFile"`
 	SupportedArchitectures []string          `json:"supportedArchitectures"`
 	Images                 map[string]string `json:"images"`
+	PipelineImage          string            `json:"pipelineImage,omitempty"`
+	PipelineImageKey       string            `json:"pipelineImageKey,omitempty"`
 	Resources              struct {
 		MemoryRecommendedMiB int `json:"memoryRecommendedMiB"`
 	} `json:"resources"`
@@ -263,6 +265,62 @@ func convert(cb curatedBundle, composeDir string, digests map[string]string) (ap
 		if s := strings.TrimSpace(sf.Source); s != "" {
 			b.SecretSources = append(b.SecretSources, s)
 		}
+	}
+	pipelineImage := strings.TrimSpace(cb.PipelineImage)
+	pipelineKey := strings.TrimSpace(cb.PipelineImageKey)
+	if pipelineImage != "" && pipelineKey != "" {
+		return apps.Bundle{}, fmt.Errorf("bundle %q: pipelineImage and pipelineImageKey are mutually exclusive", cb.Name)
+	}
+	if pipelineKey != "" {
+		digest, ok := digests[pipelineKey]
+		if !ok {
+			return apps.Bundle{}, fmt.Errorf("no resolved digest for pipeline image key %q", pipelineKey)
+		}
+		if !apps.ValidDigest(digest) {
+			return apps.Bundle{}, fmt.Errorf("pipeline image digest %q is not a pinned sha256 digest", digest)
+		}
+		// pipelineImageKey expects a known repository; for podman use quay.io/podman/stable
+		repo := ""
+		switch pipelineKey {
+		case "podman":
+			repo = "quay.io/podman/stable"
+		default:
+			return apps.Bundle{}, fmt.Errorf("unknown pipeline image key %q", pipelineKey)
+		}
+		b.PipelineImage = repo + "@" + digest
+	} else if pipelineImage != "" {
+		repo, variable, ok := splitImageRef(pipelineImage)
+		if !ok {
+			return apps.Bundle{}, fmt.Errorf("pipelineImage %q must be repo@sha256:${VAR} with a digest placeholder", pipelineImage)
+		}
+		// variable corresponds to digest key with _DIGEST suffix; try to map: e.g. PODMAN_DIGEST -> podman
+		key := ""
+		// First try exact variable lowercased without _DIGEST suffix
+		lowerVar := strings.ToLower(variable)
+		if strings.HasSuffix(lowerVar, "_digest") {
+			candidate := strings.TrimSuffix(lowerVar, "_digest")
+			candidate = strings.ReplaceAll(candidate, "_", "-")
+			if _, ok := digests[candidate]; ok {
+				key = candidate
+			}
+		}
+		if key == "" {
+			// fallback: search digests keys whose variable matches case-insensitively
+			for k := range digests {
+				if strings.EqualFold(k+"_digest", variable) || strings.EqualFold(strings.ReplaceAll(k, "-", "_")+"_digest", variable) {
+					key = k
+					break
+				}
+			}
+		}
+		if key == "" {
+			return apps.Bundle{}, fmt.Errorf("no resolved digest for pipeline image variable %q", variable)
+		}
+		digest, ok := digests[key]
+		if !ok {
+			return apps.Bundle{}, fmt.Errorf("no resolved digest for pipeline image key %q", key)
+		}
+		b.PipelineImage = repo + "@" + digest
 	}
 	return b, nil
 }

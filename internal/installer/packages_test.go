@@ -38,7 +38,7 @@ func TestPackagesPackagesForOS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("debian: %v", err)
 	}
-	wantDeb := []string{"ca-certificates", "docker.io", "docker-compose", "nftables", "unattended-upgrades", "tailscale", "cloudflared"}
+	wantDeb := []string{"ca-certificates", "docker.io", "docker-compose", "nftables", "unattended-upgrades", "tailscale", "cloudflared", "podman", "uidmap", "slirp4netns", "fuse-overlayfs"}
 	if !reflect.DeepEqual(deb, wantDeb) {
 		t.Fatalf("debian packages = %v, want %v", deb, wantDeb)
 	}
@@ -47,7 +47,7 @@ func TestPackagesPackagesForOS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ubuntu: %v", err)
 	}
-	wantUb := []string{"ca-certificates", "docker.io", "docker-compose-v2", "nftables", "unattended-upgrades", "tailscale", "cloudflared"}
+	wantUb := []string{"ca-certificates", "docker.io", "docker-compose-v2", "nftables", "unattended-upgrades", "tailscale", "cloudflared", "podman", "uidmap", "slirp4netns", "fuse-overlayfs"}
 	if !reflect.DeepEqual(ub, wantUb) {
 		t.Fatalf("ubuntu packages = %v, want %v", ub, wantUb)
 	}
@@ -87,7 +87,7 @@ func TestPackagesHappyPath(t *testing.T) {
 			name:      "debian trixie",
 			osID:      "debian",
 			codename:  "trixie",
-			wantPkgs:  []string{"ca-certificates", "docker.io", "docker-compose", "nftables", "unattended-upgrades", "tailscale", "cloudflared"},
+			wantPkgs:  []string{"ca-certificates", "docker.io", "docker-compose", "nftables", "unattended-upgrades", "tailscale", "cloudflared", "podman", "uidmap", "slirp4netns", "fuse-overlayfs"},
 			wantTSURL: "https://pkgs.tailscale.com/stable/debian/trixie.noarmor.gpg",
 			wantTSSrc: "deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/debian trixie main\n",
 		},
@@ -95,7 +95,7 @@ func TestPackagesHappyPath(t *testing.T) {
 			name:      "ubuntu resolute",
 			osID:      "ubuntu",
 			codename:  "resolute",
-			wantPkgs:  []string{"ca-certificates", "docker.io", "docker-compose-v2", "nftables", "unattended-upgrades", "tailscale", "cloudflared"},
+			wantPkgs:  []string{"ca-certificates", "docker.io", "docker-compose-v2", "nftables", "unattended-upgrades", "tailscale", "cloudflared", "podman", "uidmap", "slirp4netns", "fuse-overlayfs"},
 			wantTSURL: "https://pkgs.tailscale.com/stable/ubuntu/resolute.noarmor.gpg",
 			wantTSSrc: "deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/ubuntu resolute main\n",
 		},

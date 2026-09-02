@@ -80,8 +80,8 @@ var (
 	hostnamePattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$`)
 	digestPattern   = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	hexPattern      = regexp.MustCompile(`^[0-9a-f]+$`)
+	deriveSlugRe    = regexp.MustCompile(`[^a-z0-9]+`)
 )
-
 func validateSlug(s string) (string, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -94,6 +94,29 @@ func validateSlug(s string) (string, error) {
 		return "", invalidf("slug", "must be lowercase letters, digits, or hyphens, and must start and end with an alphanumeric; got %q", s)
 	}
 	return s, nil
+}
+
+// ValidateSlug is the exported form of validateSlug for external callers.
+func ValidateSlug(s string) (string, error) { return validateSlug(s) }
+
+// DeriveSlug derives a slug from an arbitrary name: lowercase, replace runs of
+// non-alphanumerics with '-', trim '-', truncate to 63 without trailing '-',
+// then validate via existing slug validation.
+func DeriveSlug(name string) (string, error) {
+	s := strings.ToLower(strings.TrimSpace(name))
+	if s == "" {
+		return "", invalidf("slug", "must not be empty")
+	}
+	s = deriveSlugRe.ReplaceAllString(s, "-")
+	s = strings.Trim(s, "-")
+	if len(s) > 63 {
+		s = s[:63]
+		s = strings.TrimRight(s, "-")
+	}
+	if s == "" {
+		return "", invalidf("slug", "must not be empty")
+	}
+	return validateSlug(s)
 }
 
 func normalizeAndValidateCommit(s string) (string, error) {

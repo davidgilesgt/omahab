@@ -152,6 +152,7 @@ func TestSetupStatusMetadataAndTailscaleAction(t *testing.T) {
 		"tunnel":                   {"Provision Cloudflare Tunnel", "system"},
 		"dashboard_dns":            {"Publish dashboard DNS", "system"},
 		"core_apps":                {"Install core services", "system"},
+		"woodpecker_connection":    {"Connect Woodpecker", "operator"},
 		"automatic_reconciliation": {"Verify DNS, TLS, and service routes", "system"},
 	}
 	if len(st.Checks) != len(want) {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -334,6 +335,104 @@ func (c *woodpeckerClient) Cancel(ctx context.Context, repoID int64, number int)
 	}
 	path := fmt.Sprintf("/api/repos/%d/pipelines/%d/cancel", repoID, number)
 	return c.do(ctx, http.MethodPost, path, nil, nil)
+}
+
+// WoodpeckerUser is the authenticated user returned by CurrentUser.
+type WoodpeckerUser struct {
+	Login string `json:"login"`
+	Admin bool   `json:"admin"`
+}
+
+func (c *woodpeckerClient) CurrentUser(ctx context.Context) (*WoodpeckerUser, error) {
+	var out WoodpeckerUser
+	if err := c.do(ctx, http.MethodGet, "/api/user", nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+type woodpeckerSecretJSON struct {
+	Name  string `json:"name"`
+	Value string `json:"value,omitempty"`
+	Image string `json:"image,omitempty"`
+}
+
+func (c *woodpeckerClient) ListRepoSecrets(ctx context.Context, repoID int64) ([]string, error) {
+	if repoID == 0 {
+		return nil, fmt.Errorf("%w: repo id required", ErrValidation)
+	}
+	path := fmt.Sprintf("/api/repos/%d/secrets", repoID)
+	var out []woodpeckerSecretJSON
+	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(out))
+	for _, s := range out {
+		names = append(names, s.Name)
+	}
+	return names, nil
+}
+
+func (c *woodpeckerClient) CreateRepoSecret(ctx context.Context, repoID int64, name, value string) error {
+	if repoID == 0 {
+		return fmt.Errorf("%w: repo id required", ErrValidation)
+	}
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("%w: secret name required", ErrValidation)
+	}
+	path := fmt.Sprintf("/api/repos/%d/secrets", repoID)
+	body := woodpeckerSecretJSON{Name: name, Value: value, Image: "*"}
+	return c.do(ctx, http.MethodPost, path, body, nil)
+}
+
+func (c *woodpeckerClient) UpdateRepoSecret(ctx context.Context, repoID int64, name, value string) error {
+	if repoID == 0 {
+		return fmt.Errorf("%w: repo id required", ErrValidation)
+	}
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("%w: secret name required", ErrValidation)
+	}
+	path := fmt.Sprintf("/api/repos/%d/secrets/%s", repoID, url.PathEscape(name))
+	body := woodpeckerSecretJSON{Name: name, Value: value, Image: "*"}
+	return c.do(ctx, http.MethodPatch, path, body, nil)
+}
+
+func (c *woodpeckerClient) DeleteRepoSecret(ctx context.Context, repoID int64, name string) error {
+	if repoID == 0 {
+		return fmt.Errorf("%w: repo id required", ErrValidation)
+	}
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("%w: secret name required", ErrValidation)
+	}
+	path := fmt.Sprintf("/api/repos/%d/secrets/%s", repoID, url.PathEscape(name))
+	err := c.do(ctx, http.MethodDelete, path, nil, nil)
+	if err != nil && isNotFoundErr(err) {
+		return nil
+	}
+	return err
+}
+
+func (c *woodpeckerClient) UpsertRepoSecret(ctx context.Context, repoID int64, name, value string) error {
+	if repoID == 0 {
+		return fmt.Errorf("%w: repo id required", ErrValidation)
+	}
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("%w: secret name required", ErrValidation)
+	}
+	// Try create first
+	err := c.CreateRepoSecret(ctx, repoID, name, value)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, ErrConflict) || strings.Contains(strings.ToLower(err.Error()), "already exists") || strings.Contains(strings.ToLower(err.Error()), "conflict") {
+		return c.UpdateRepoSecret(ctx, repoID, name, value)
+	}
+	// If not conflict, try to check if already exists via list fallback?
+	// Fallback to patch
+	if strings.Contains(err.Error(), "400") || strings.Contains(err.Error(), "422") {
+		_ = c.UpdateRepoSecret(ctx, repoID, name, value)
+	}
+	return err
 }
 
 var _ WoodpeckerClient = (*woodpeckerClient)(nil)

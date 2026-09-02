@@ -572,10 +572,12 @@ Omahab does not claim to protect secrets from root on a running compromised host
 
 ## 10. Model providers and subscriptions
 
+LiteLLM is the sole network-facing model gateway. All model traffic from Hermes, coding harnesses, and other Tailscale clients passes through LiteLLM; no client receives an upstream provider credential or the LiteLLM master key.
+
 Remote models are the default. Omahab supports both:
 
-1. API-key providers through an OpenAI-compatible model gateway such as LiteLLM.
-2. Provider-sanctioned subscription OAuth.
+1. API-key providers through LiteLLM.
+2. Provider-sanctioned subscription OAuth wired through LiteLLM.
 
 Initial credential types:
 
@@ -585,17 +587,24 @@ Initial credential types:
 - ChatGPT subscription OAuth where supported;
 - xAI Grok OAuth for eligible SuperGrok or X Premium+ subscriptions.
 
-The setup dashboard conducts device authorization, stores refresh credentials through the secrets broker, reports entitlement separately from expiration, and supports revoke/reauthorize.
+The setup dashboard conducts device authorization, stores refresh credentials through the secrets broker, reports entitlement separately from expiration, and supports revoke/reauthorize. Provider-sanctioned OAuth only; if a provider removes the documented flow or rejects the subscription tier, mark it unavailable/not-entitled and require its API-key path. Never extract browser cookies or copy consumer session state.
 
-Where the gateway supports subscription OAuth, route it through the gateway. Where Hermes provides the supported adapter first, project the credential into Hermes's protected auth store. Centralized credentials do not require every protocol to pass through one proxy.
+Gateway boundary:
+
+- Serve clients only through the private `https://models.<domain>` Caddy/Tailscale route (DNS-only `models.home.<domain>` → Tailscale IP; no Cloudflare Tunnel public exposure). Do not publish LiteLLM port 4000 to the host and do not permit `shared` or `public` exposure for the model gateway.
+- Keep the OpenAI-compatible endpoint at `https://models.<domain>/v1`; also preserve LiteLLM's native Anthropic-compatible `/v1/messages` endpoint for harnesses that support an Anthropic base URL.
+- Give Hermes (`default` profile), each enrolled companion device, and each separately registered harness a distinct LiteLLM virtual key with scoped aliases and per-key RPM/TPM/concurrency. Never give any client the LiteLLM master key or an upstream credential.
+- Keep `omahab/fast`, `omahab/balanced`, `omahab/reasoning`, and `omahab/embedding` as the stable model names. Alias changes update LiteLLM without changing client configuration.
+- Default to no cross-provider fallback. A subscription quota, entitlement failure, or `429` must not silently incur metered API charges; an administrator may explicitly add and order a paid fallback later through the alias configuration.
+- Treat provider quota dashboards as authoritative for subscription caps. LiteLLM tracks returned token usage, per-key RPM/TPM/concurrency, and API-key spend, but must not present estimated subscription cost as a provider quota balance.
 
 Rules:
 
 - supported OAuth or API credentials only;
 - no browser-cookie extraction;
 - no reverse-engineered consumer session cookies;
-- no provider token in logs;
-- prefer auth files over environment variables;
+- no provider token in logs, Docker labels, or user-visible configuration;
+- prefer auth files over environment variables for gateway-managed OAuth state;
 - show provider, quota, fallback, and current health;
 - handle subscription-tier `403` as entitlement failure, not token corruption.
 
@@ -608,7 +617,7 @@ omahab/reasoning
 omahab/embedding
 ```
 
-No prompt-content logging by default.
+No prompt-content logging by default. LiteLLM is configured with `general_settings.store_prompts_in_spend_logs: false` and `litellm_settings.turn_off_message_logging: true`; spend/error metadata needed for limits and diagnosis is retained, but no external callbacks are configured and prompts/responses are never persisted. The canary checked in verification is that a unique prompt canary never appears in LiteLLM container logs or spend rows.
 
 ## 11. Git and CI
 
@@ -679,16 +688,7 @@ Project synchronization on Omarchy is intentional:
 
 ### 13.1 Default assistant
 
-The stable Hermes `default` profile is the primary assistant. Its default display name is `AI`, but the user can rename it during setup.
-
-The default assistant may access user-approved life sources such as:
-
-- shared synced notes;
-- Paperless search;
-- Karakeep;
-- authenticated inbound email;
-- Home Assistant through `hass-cli`;
-- project metadata and bot status.
+The stable Hermes `default` profile is the primary assistant. Its default display name is `AI`, but the user can rename it during setup. The `default` profile's inference base URL and API key point at the centralized LiteLLM gateway (`https://models.<domain>/v1` with `ANTHROPIC_BASE_URL` at `https://models.<domain>` for `/v1/messages`), using a distinct per-profile LiteLLM virtual key. Connecting a tool gateway (e.g., Nous Portal) must not switch the inference provider.
 
 ### 13.2 Project bots
 
@@ -712,7 +712,7 @@ It does not receive:
 - other repositories;
 - other project bot transcripts.
 
-LLM provider credentials may use Hermes's shared provider token pool. Tool and application credentials remain isolated.
+LLM inference for both the default assistant and project bots goes through the centralized LiteLLM gateway at `https://models.<domain>` via scoped virtual keys (`omahab/fast`, `omahab/balanced`, `omahab/reasoning`, `omahab/embedding`). No bot receives an upstream provider credential or the LiteLLM master key. Tool and application credentials remain isolated. The Nous Portal tool gateway (pay-as-you-use web search/extract, image generation, TTS, cloud browser) is a separate Hermes tool integration and does not change the inference gateway.
 
 ### 13.3 Bot authority and communication
 

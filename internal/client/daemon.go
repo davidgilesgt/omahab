@@ -68,8 +68,14 @@ type DaemonStatus struct {
 	Projects      []ProjectState `json:"projects,omitempty"`
 	LastSyncAt    *time.Time     `json:"last_sync_at,omitempty"`
 	Error         string         `json:"error,omitempty"`
+	// Environment sync state (values never included).
+	EnvironmentRevision      int        `json:"environment_revision"`
+	EnvironmentVariableCount int        `json:"environment_variable_count"`
+	EnvironmentSyncedAt      *time.Time `json:"environment_synced_at,omitempty"`
+	EnvironmentError         string     `json:"environment_error,omitempty"`
+	// xAI subscription OAuth loopback session assigned to this device (no secrets).
+	HasXaiOAuthSession bool `json:"has_xai_oauth_session,omitempty"`
 }
-
 // Daemon is the user-level omahab-clientd. It owns the Unix socket, background
 // status/event sync, project fetch state, and launch delegation.
 type Daemon struct {
@@ -82,6 +88,7 @@ type Daemon struct {
 	tlsChecker TLSChecker
 	projects   *ProjectStore
 	gitRunner  GitRunner
+	envManager *EnvironmentManager
 
 	socketPath string
 	listener   net.Listener
@@ -98,6 +105,7 @@ type Daemon struct {
 
 	syncInterval  time.Duration
 	fetchInterval time.Duration
+	envInterval   time.Duration
 
 	log *slog.Logger
 }
@@ -116,6 +124,10 @@ type DaemonOpts struct {
 	Logger          *slog.Logger
 	SyncInterval    time.Duration
 	FetchInterval   time.Duration
+	EnvInterval     time.Duration
+	EnvManager      *EnvironmentManager // injectable for tests; if nil, one is created
+	EnvFilePath     string              // override managed file path (tests)
+	EnvDBus         SystemdDBus         // injectable D-Bus (tests)
 }
 
 func NewDaemon(opts DaemonOpts) (*Daemon, error) {
@@ -168,6 +180,21 @@ func NewDaemon(opts DaemonOpts) (*Daemon, error) {
 	if fetchInt == 0 {
 		fetchInt = 5 * time.Minute
 	}
+	envInt := opts.EnvInterval
+	if envInt == 0 {
+		envInt = 5 * time.Minute
+	}
+	// Environment manager: prefer injected, else create with remote/creds.
+	envMgr := opts.EnvManager
+	if envMgr == nil {
+		envMgr = NewEnvironmentManager(EnvironmentManagerOpts{
+			Remote:   remote,
+			Creds:    opts.CredentialStore,
+			Logger:   opts.Logger,
+			FilePath: opts.EnvFilePath,
+			DBus:     opts.EnvDBus,
+		})
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Daemon{
 		cfg:           opts.Config,
@@ -179,9 +206,11 @@ func NewDaemon(opts DaemonOpts) (*Daemon, error) {
 		tlsChecker:    opts.TLSChecker,
 		projects:      opts.ProjectStore,
 		gitRunner:     opts.GitRunner,
+		envManager:    envMgr,
 		socketPath:    opts.Config.EffectiveSocketPath(),
 		syncInterval:  syncInt,
 		fetchInterval: fetchInt,
+		envInterval:   envInt,
 		log:           opts.Logger,
 		ctx:           ctx,
 		cancel:        cancel,
@@ -189,7 +218,6 @@ func NewDaemon(opts DaemonOpts) (*Daemon, error) {
 }
 
 // SocketPath returns the Unix socket path.
-func (d *Daemon) SocketPath() string { return d.socketPath }
 
 // Start creates the Unix socket (0600) and begins serving and background sync.
 // It is idempotent with respect to stale socket files.
@@ -224,6 +252,9 @@ func (d *Daemon) Start() error {
 
 	d.wg.Add(1)
 	go d.fetchLoop()
+
+	d.wg.Add(1)
+	go d.envLoop()
 
 	d.log.Info("clientd started", "socket", d.socketPath, "server", redactServerURL(d.cfg.ServerURL))
 	return nil
@@ -444,6 +475,24 @@ func (d *Daemon) dispatch(req Request) Response {
 			return Response{OK: false, Error: err.Error()}
 		}
 		return Response{OK: true, Data: map[string]string{"result": "hermes launched"}}
+	case "environment.sync", "environment_sync", "env.sync", "env_sync", "environment-sync", "env-sync":
+		if err := d.envSyncOnce(); err != nil {
+			return Response{OK: false, Error: sanitizeEnvError(err)}
+		}
+		return Response{OK: true, Data: map[string]string{"result": "environment synced", "detail": "Applied to new apps; restart existing apps"}}
+	case "environment.clear", "environment_clear", "env.clear", "env_clear", "environment-clear", "env-clear":
+		if err := d.envClear(); err != nil {
+			return Response{OK: false, Error: sanitizeEnvError(err)}
+		}
+		return Response{OK: true, Data: map[string]string{"result": "environment cleared"}}
+	case "environment.status", "environment_status", "env.status", "env_status":
+		rev, cnt, syncedAt, envErr := d.envManager.Status()
+		return Response{OK: true, Data: map[string]any{"revision": rev, "variable_count": cnt, "synced_at": syncedAt, "error": envErr}}
+	case "xai.oauth.connect", "xai_oauth.connect", "xai-oauth.connect", "xai.oauth_connect", "provider.xai.connect", "connect-xai":
+		if !d.buildStatus().HasXaiOAuthSession {
+			return Response{OK: false, Error: "no active xAI OAuth session assigned to this device"}
+		}
+		return Response{OK: true, Data: map[string]string{"result": "xai oauth connect initiated"}}
 	default:
 		return Response{OK: false, Error: fmt.Sprintf("unknown action %q", req.Action)}
 	}
@@ -547,6 +596,26 @@ func (d *Daemon) dispatchSocket(req SocketRequest) SocketResponse {
 			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: err.Error()}}
 		}
 		return SocketResponse{ID: req.ID, Result: map[string]string{"name": name, "result": "sync picker launched"}}
+	case "environment.sync", "environment_sync", "env.sync", "env_sync", "environment-sync", "env-sync":
+		if err := d.envSyncOnce(); err != nil {
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: sanitizeEnvError(err)}}
+		}
+		return SocketResponse{ID: req.ID, Result: map[string]string{"result": "environment synced", "detail": "Applied to new apps; restart existing apps"}}
+	case "environment.clear", "environment_clear", "env.clear", "env_clear", "environment-clear", "env-clear":
+		if err := d.envClear(); err != nil {
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: sanitizeEnvError(err)}}
+		}
+		return SocketResponse{ID: req.ID, Result: map[string]string{"result": "environment cleared"}}
+	case "environment.status", "environment_status", "env.status", "env_status":
+		rev, cnt, syncedAt, envErr := d.envManager.Status()
+		return SocketResponse{ID: req.ID, Result: map[string]any{"revision": rev, "variable_count": cnt, "synced_at": syncedAt, "error": envErr}}
+	case "xai.oauth.connect", "xai_oauth.connect", "xai-oauth.connect", "xai.oauth_connect", "provider.xai.connect", "connect-xai":
+		// xAI loopback OAuth connect — requires companion enrollment with allow_provider_oauth and active session assigned to this device.
+		// No secrets in response; actual relay is via omahab provider login xai or companion port 56121.
+		if !d.buildStatus().HasXaiOAuthSession {
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "not_found", Message: "no active xAI OAuth session assigned to this device"}}
+		}
+		return SocketResponse{ID: req.ID, Result: map[string]string{"result": "xai oauth connect initiated"}}
 	default:
 		return SocketResponse{ID: req.ID, Error: &SocketError{Code: "bad_request", Message: fmt.Sprintf("unknown method %q", req.Method)}}
 	}
@@ -557,7 +626,6 @@ func (d *Daemon) aiURL() string {
 	if base == "" {
 		return ""
 	}
-	// By default AI is at ai.<domain> or /ai; use base + "/ai" heuristic if not subdomain.
 	// If base already contains ai subdomain, keep it. Otherwise append.
 	u := base
 	// Try to construct ai.<host> when host is like omahab.example.com
@@ -665,6 +733,30 @@ func (d *Daemon) buildStatus() DaemonStatus {
 		// No status yet but no error means offline until first sync.
 		ds.Online = false
 	}
+	// Environment sync state (values never included).
+	if d.envManager != nil {
+		rev, cnt, syncedAt, envErr := d.envManager.Status()
+		ds.EnvironmentRevision = rev
+		ds.EnvironmentVariableCount = cnt
+		ds.EnvironmentSyncedAt = syncedAt
+		ds.EnvironmentError = envErr
+	}
+	// xAI loopback OAuth session assigned to this device — surface only assignment, never secrets.
+	// Detect via unread events of type provider_oauth pending for xAI; explicit status field when server exposes.
+	for _, e := range d.events {
+		if e.ReadAt != nil {
+			continue
+		}
+		t := string(e.Type)
+		if t == "provider_oauth.xai_pending" || t == "provider.oauth.xai_pending" || t == "xai.oauth.pending" {
+			ds.HasXaiOAuthSession = true
+			break
+		}
+		if len(t) >= 3 && (t == "xai_oauth" || t == "xai.oauth") {
+			ds.HasXaiOAuthSession = true
+			break
+		}
+	}
 	return ds
 }
 
@@ -703,6 +795,51 @@ func (d *Daemon) fetchLoop() {
 		}
 	}
 }
+
+func (d *Daemon) envLoop() {
+	defer d.wg.Done()
+	// Initial sync immediately (startup).
+	_ = d.envSyncOnce()
+	ticker := time.NewTicker(d.envInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-d.ctx.Done():
+			return
+		case <-ticker.C:
+			_ = d.envSyncOnce()
+		}
+	}
+}
+
+func (d *Daemon) envSyncOnce() error {
+	if d.envManager == nil {
+		return fmt.Errorf("environment manager not configured")
+	}
+	ctx, cancel := context.WithTimeout(d.ctx, 15*time.Second)
+	defer cancel()
+	err := d.envManager.Sync(ctx)
+	if err != nil {
+		// Error already recorded in manager's status with redacted message.
+		d.log.Warn("environment sync failed", "err", sanitizeEnvError(err))
+		return err
+	}
+	return nil
+}
+
+func (d *Daemon) envClear() error {
+	if d.envManager == nil {
+		return fmt.Errorf("environment manager not configured")
+	}
+	ctx, cancel := context.WithTimeout(d.ctx, 15*time.Second)
+	defer cancel()
+	if err := d.envManager.Clear(ctx); err != nil {
+		d.log.Warn("environment clear failed", "err", sanitizeEnvError(err))
+		return err
+	}
+	return nil
+}
+
 
 func (d *Daemon) syncOnce() {
 	if d.remote == nil {

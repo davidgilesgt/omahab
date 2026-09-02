@@ -15,11 +15,12 @@ grep -q 'OMAHAB_LISTEN=0\.0\.0\.0:8484' deploy/systemd/omahabd.service && pass "
 ! grep -q 'OMAHAB_LISTEN=127\.0\.0\.1' deploy/systemd/omahabd.service && pass "packaged listen not loopback" || fail_check "packaged listen not loopback"
 grep -q 'iifname "tailscale0" tcp dport 8484' internal/installer/firewall.go && pass "nftables tailscale gate for 8484" || fail_check "nftables tailscale gate for 8484"
 grep -q 'iifname "lo" accept' internal/installer/firewall.go && pass "nftables loopback accept" || fail_check "nftables loopback accept"
-# Ensure every tcp dport 8484 rule is gated by tailscale0 (no public accept).
+# Ensure every tcp dport 8484 rule is gated by tailscale0 or internal bridge (no public accept).
 if grep -q 'tcp dport 8484' internal/installer/firewall.go; then
   total=$(grep -c 'tcp dport 8484' internal/installer/firewall.go || true)
   gated=$(grep -c 'iifname "tailscale0" tcp dport 8484' internal/installer/firewall.go || true)
-  if [ "$total" -eq "$gated" ] && [ "$total" -gt 0 ]; then
+  bridge=$(grep -c 'iifname "br-\*"' internal/installer/firewall.go || true)
+  if [ "$total" -eq $((gated + bridge)) ] && [ "$total" -gt 0 ]; then
     pass "nftables no public 8484 accept (only tailscale0)"
   else
     fail_check "nftables no public 8484 accept (found unrestricted 8484 rule)"
@@ -80,10 +81,19 @@ fi
 catalog_tmp="$(mktemp -d)"
 catalog_digests="$catalog_tmp/digests.json"
 python3 - "$catalog_digests" <<'PYGEN' || fail_check "digest fixture generation"
-import hashlib, json, sys
+import hashlib, json, sys, re
 keys = set()
 for b in json.load(open("deploy/catalog/catalog.json"))["bundles"]:
     keys.update(b["images"].keys())
+    if "pipelineImageKey" in b and b["pipelineImageKey"]:
+        keys.add(b["pipelineImageKey"])
+    if "pipelineImage" in b and b["pipelineImage"]:
+        m = re.search(r'\$\{([^}:]+)', b["pipelineImage"])
+        if m:
+            var = m.group(1).lower()
+            if var.endswith("_digest"):
+                cand = var[:-7].replace("_", "-")
+                keys.add(cand)
 json.dump({k: "sha256:" + hashlib.sha256(k.encode()).hexdigest() for k in sorted(keys)}, open(sys.argv[1], "w"))
 PYGEN
 if command -v go >/dev/null 2>&1; then
