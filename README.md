@@ -6,7 +6,7 @@ You do not configure each application by hand.
 
 Omahab gives you:
 
-- one installer,
+- one NixOS system image (the OS, every application, and the control plane in one declarative closure),
 - one command line tool (`omahab`),
 - one daemon (`omahabd`).
 
@@ -16,310 +16,175 @@ No service is open to the internet by default. Your data stays on your machine.
 
 | Item | Requirement |
 | --- | --- |
-| Operating system | Fresh Debian 13 (trixie) minimal, or fresh Ubuntu 26.04 LTS |
-| Prior software | None. Docker must not be installed before Omahab |
+| Operating system | NixOS (the Omahab module builds the whole system from the flake) |
 | CPU | amd64 (x86_64) or arm64 (aarch64) |
 | Network | Internet access with working DNS |
-| Access | An SSH session (or the local console) as a regular user with `sudo` permission |
+| Access | The machine's console (first boot) and an SSH session afterwards |
 | Administrator key | One SSH public key for the first user |
 
-The installer does not adopt a machine that already runs Docker or Kubernetes. Install Omahab on a fresh system only.
+Docker remains only for user-project deploys (ONCE) and CI job containers; every platform application itself is a native systemd service in the NixOS closure.
 
-## Installation with one command
+## First boot: the console wizard
 
-Log in to the fresh machine as a regular user with `sudo` permission.
+Boot the appliance image (or a machine whose NixOS configuration imports `nix/module.nix` with `services.omahab.enable = true`). The console on tty1 shows:
 
-If `git` is not installed yet, install it first:
+```
+  ┌─────────────────────────────────────────────┐
+  │            OMAHAB  ·  first boot            │
+  └─────────────────────────────────────────────┘
+
+  Complete setup from any device on this network:
+
+      http://192.168.1.42:8485
+
+  One-time code:
+      7gc3x9k2mq
+```
+
+Open the URL on any device in the same LAN (mDNS `omahab.local` also works, best-effort). The wizard:
+
+1. **Claim** — enter the one-time code shown on the console. The code is single-use, rotates after 20 failed attempts (5/min per host), and the claim returns your administrator token.
+2. **SSH keys** — import from GitHub or paste public keys for the `omahab` admin account (skippable; the console remains the recovery path).
+3. **Tailscale** — approve the server into your tailnet. The dashboard is reachable only over the tailnet.
+4. **Handoff** — the wizard points you at `http://<tailscale-ip>:8484/#token=…`; everything after (domain, Cloudflare, recovery key, storage, AI providers, backups) happens on the authenticated dashboard. Secrets never transit the LAN page.
+
+When the wizard completes, port 8485 closes.
+
+### `omahab setup` (SSH fallback)
+
+No browser on the LAN? SSH in and run:
 
 ```sh
-sudo apt-get update && sudo apt-get install -y git ca-certificates
+sudo omahab setup
 ```
 
-Then copy this command and paste it into the terminal. It clones the repository into your home directory and starts the setup script:
+It walks Tailscale enrollment and Cloudflare domain/token entry in the terminal, then points you at the dashboard.
 
-```sh
-git clone --depth 1 https://github.com/davidgilesgt/omahab ~/omahab && sh ~/omahab/scripts/setup
-```
+## The dashboard's first-run wizard
 
-The repository stays in `~/omahab`. It is owned by your user, not by root. Do not run the setup script as root. The script stops when it runs as root.
+After the handoff, complete enrollment at `http://<tailscale-ip>:8484`:
 
-The setup script bundles these steps:
-
-1. `sudo apt-get update` gets the current package lists.
-2. `sudo apt-get install` adds `ca-certificates` and `golang-go`.
-3. `scripts/build.sh` compiles Omahab into `~/omahab/dist`. `GOTOOLCHAIN=auto` downloads the Go version that the source needs. The build takes several minutes.
-4. The script starts the installer with `sudo`. The installer guides you through the setup.
-
-Run the command from an SSH session. The installer asks for your SSH public key during the setup.
-
-### Installation step by step
-
-Run the same steps one by one:
-
-```sh
-sudo apt-get update && sudo apt-get install -y git ca-certificates golang-go
-git clone --depth 1 https://github.com/davidgilesgt/omahab ~/omahab
-cd ~/omahab
-GOTOOLCHAIN=auto bash scripts/build.sh --version 0.0.0-dev
-sudo dist/amd64/omahab-install      # use arm64 on an arm64 machine
-```
-
-`scripts/build.sh` stages the embedded assets before building the installer. The installer binary is larger because it embeds `omahab`, `omahabd`, the catalog, and the systemd units.
-
-### Installation from a signed release
-
-When a signed release is published on GitHub, use the bootstrap script instead:
-
-```sh
-sudo sh -c 'apt-get update && apt-get install -y curl minisign && curl -fL -o omahab-install https://raw.githubusercontent.com/davidgilesgt/omahab/master/scripts/install && sh omahab-install'
-```
-
-The bootstrap script downloads the installer and the checksum file from the latest GitHub release. `minisign` checks the signature of the checksum file. The script then checks the SHA-256 checksum of the installer. If a check does not pass, the installation stops.
-
-The command downloads the script to a file first. Then it runs the file. No data goes from the network directly into a shell.
-
-### Automatic installation
-
-For automation, add flags to the installer. The setup script forwards every flag to the installer:
-
-```sh
-sh ~/omahab/scripts/setup --non-interactive --json --github-user <github-user>
-```
-
-You can also run the built installer directly, for example `sudo ~/omahab/dist/amd64/omahab-install --non-interactive`.
-
-| Flag or command | Function |
-| --- | --- |
-| `--github-user <user>` | Gets SSH keys from a GitHub user. You can use the flag more than one time |
-| `--key-file <path>` | Gets SSH keys from a file |
-| `--target-user <name>` | Sets the user that gets the keys. Default: `$SUDO_USER`, `omahab`, `ubuntu`, `admin`, or `$USER` |
-| `--non-interactive` | Asks no questions. The installer fails if it needs input |
-| `--json` | Prints output as JSON. This flag sets `--non-interactive` |
-| `--yes` | Answers yes to prompts. This flag needs `--non-interactive` |
-| `--resume` | Continues an installation that stopped |
-| `--until <step>` | Stops after a named step. Valid: `preflight`, `ssh_keys`, `sshd_hardening`, `system_prepare`, `packages`, `binaries`, `firewall`, `services`, `daemon`, `manifest` |
-| `--asset-dir <dir>` | Dev override for embedded assets. Uses files from `<dir>` instead of the embedded catalog and units |
-| `preflight` | Runs the checks only. Example: `sudo ~/omahab/dist/amd64/omahab-install preflight` |
-| `manifest` | Shows the install manifest |
-
-If `TERM=dumb`, the installer prints a warning and runs in non-interactive mode.
-
-## What the installer does on the machine
-
-The installer runs 10 steps in order. Each step is journaled and idempotent. Use `--resume` to continue after a stop. Use `--until <step>` to stop after a named step.
-
-1. `preflight` — checks OS (Debian 13 or Ubuntu 26.04), CPU, `systemd` (`/run/systemd/system` must exist, fails in containers and chroots), ports, memory, disk, filesystem, time, DNS, and HTTPS. Apt check allows only Omahab-managed vendor sources (`/etc/apt/sources.list.d/omahab-tailscale.list` for `pkgs.tailscale.com` and `omahab-cloudflared.list` for `pkg.cloudflare.com`); any other third-party repo fails as dirty.
-2. `ssh_keys` — adds your SSH public keys. New keys do not remove old keys.
-3. `sshd_hardening` — hardens `sshd`. Open a second SSH session and log in to confirm. If you do not confirm within 10 minutes, `sshd` goes back to the old settings.
-4. `system_prepare` — creates directories via `systemd-tmpfiles` from `/usr/lib/tmpfiles.d/omahab.conf`: `/var/lib/omahab/secrets`, `/srv/omahab/{apps,projects,sync,backups,workspaces,derived-indexes}`, `/var/log/omahab`, `/var/cache/omahab`.
-5. `packages` — installs `ca-certificates`, `docker.io`, `docker-compose` (Debian) or `docker-compose-v2` (Ubuntu 26.04), `nftables`, `unattended-upgrades`, `tailscale`, `cloudflared`. Downloads vendor keyrings to `/usr/share/keyrings/{tailscale-archive-keyring,cloudflare-main}.gpg`, writes the two `omahab-*.list` sources, enables `unattended-upgrades` via `/etc/apt/apt.conf.d/20auto-upgrades`.
-6. `binaries` — installs `/usr/bin/{omahab,omahabd}` (0755), six systemd units to `/usr/lib/systemd/system/` (`omahabd.service`, `omahab-backup.{service,timer}`, `omahab-verify.{service,timer}`, `cloudflared.service`), `/usr/lib/tmpfiles.d/omahab.conf`, catalog to `/usr/share/omahab/catalog/`, web assets to `/usr/share/omahab/web/` (when built). Runs `systemd-tmpfiles --create`. Assets are embedded in the installer binary (staged by `scripts/build.sh`); dev builds can pass `--asset-dir`.
-7. `firewall` — writes `/etc/nftables.conf` (`table inet omahab`, default-deny inbound, allows `lo`, `established/related`, `ICMP/ICMPv6`, SSH `22`, Tailscale UDP `41641`, and TCP `8484` only on `tailscale0` (`iifname "tailscale0" tcp dport 8484`); loopback traffic to `8484` remains allowed via `lo`; no public `8484` accept). Validates with `nft -c` before applying. Backs up any prior config to `/etc/nftables.conf.pre-omahab`. Enables and starts `nftables.service`. Docker forward rules untouched.
-8. `services` — runs `systemctl daemon-reload`, enables `tailscaled` and `omahabd`. Does not enable `cloudflared` (needs tunnel enrollment), `omahab-backup.timer` / `omahab-verify.timer` (need a backup repository), or `omahab-clientd` (companion-only).
-9. `daemon` — enables and restarts `omahabd` (`Type=simple`), polls `http://127.0.0.1:8484/up` until `200`, and provisions the generated API token to the administrator's `~/.config/omahab/token` (0600, administrator-owned) so local CLI commands authenticate immediately. It also writes `/etc/omahab/backup.env` (0600, `OMAHAB_SERVER` + `OMAHAB_TOKEN`) for the backup and verify units (`omahab backup create` and `omahab backup verify` without an id verifies the latest snapshot).
-10. `manifest` — writes `/var/lib/omahab/install-manifest.json`.
-
-After a full install, the installer **guides you interactively** when run on a TTY
-(automation with `--json`/`--non-interactive` prints the same information statically
-and never blocks):
-
-1. **Tailscale — private mesh (loops until satisfied).** The installer checks
-   `tailscale status --json` for `BackendState:"Running"` and `tailscale ip -4`
-   for a `100.x.y.z` address, with an animated status indicator while each
-   check runs. If not enrolled it runs `tailscale up`, prints the
-   `https://login.tailscale.com/a/<code>` URL, and prompts:
-   `Press Enter after approving at https://login.tailscale.com/admin/machines`
-   (`skip` to defer, `retry` to re-run `tailscale up`). It re-checks until
-   an IP appears, then explicitly transitions to Cloudflare setup. Cloudflare
-   can be deferred only by typing `skip`; blank input reprompts instead.
-
-2. **Cloudflare — domain + scoped API token(s) (loops until satisfied).**
-   Prompts for the apex domain (`example.com` — not `https://…`, not a
-   subdomain) validated with `validateApexDomain` (lower-cased, `^[a-z0-9…]\.[a-z]{2,}$`,
-   no scheme/port/path, at least one dot), then for tokens with
-   `validateCloudflareToken` (`^[A-Za-z0-9_-]{30,200}$`) and **live verification**
-   via `GET https://api.cloudflare.com/client/v4/user/tokens/verify`
-   (`Authorization: Bearer <token>` must return `success && status:"active"`).
-   The terminal prints the exact dashboard path and **minimal permissions**:
-
-```text
-Token A — DNS (zone, required [Omahab-DNS])
-  Zone Resources: Include → Specific zone → example.com
-  Permissions:    Zone → Zone → Read  +  Zone → DNS → Edit
-
-Token B — Tunnel + Access (account+zone, for shared/public [Omahab-Tunnel])
-  Account Resources: Include → Specific account → <your account>
-  Zone Resources:    Include → Specific zone → example.com
-  Permissions:    Account → Cloudflare Tunnel → Edit
-                  Account → Access: Apps and Policies → Edit
-                  Zone    → Zone → Read
-
-Token C — Email (optional): Workers Scripts Edit + Workers Routes Edit
-Never use the Global API Key. Paste tokens in the dashboard at http://<tailscale-ip>:8484
-(Settings → Domain / Secrets) — Token A alone is enough for private DNS.
-```
-
-Non-interactive transcript (also what `--json` callers see as prose when they
-run without `--json`) lists the same dashboard path
-(`https://dash.cloudflare.com` → Profile → API Tokens → Create Custom Token),
-the per-token permissions above (DESIGN.md 7.4, `internal/exposure/clients.go`
-`ScopeDNS|Tunnel|Access`), how to verify (`dig ai.example.com`,
-`sudo systemctl status cloudflared`), and that the packaged control API listens on
-`0.0.0.0:8484` (IPv4 wildcard, `ss` shows `0.0.0.0:8484`) and is gated by nftables:
-only `tailscale0` (`iifname "tailscale0" tcp dport 8484`) and `lo` may reach `8484`;
-public interfaces remain blocked. The standalone default (`internal/config.DefaultListen`)
-remains `127.0.0.1:8484` for non-packaged runs (`go run`, Docker). Reach the
-dashboard via Tailscale IP or MagicDNS (`http://<hostname>.<tailnet>.ts.net:8484`).
-`cloudflared` and the backup timers remain disabled until tunnel enrollment and a
-backup repository are configured — by design. Finish with `omahab doctor`.
-
-When the installer can read the generated API token at `/var/lib/omahab/api.token`
-and the Tailscale IPv4 address, the final guided summary, the immediate
-post-install dashboard line, the Tailscale success line, and the Cloudflare
-“Next: open” line all use an authenticated fragment URL
-`http://<tailscale-ip>:8484/#token=<percent-encoded-token>` and an identical QR.
-The fragment is never sent to the HTTP server (never `?token=`), is moved to
-`sessionStorage` key `omahab.session` and then stripped from the address bar
-via `history.replaceState` before any API request. **Keep this link private —
-it grants full administrator access.** If the token or IP cannot be read, the
-installer keeps the plain `http://<tailscale-ip>:8484` URL, shows a short note
-to log in manually with the token from `/var/lib/omahab/api.token` or
-`~/.config/omahab/token`, and does not fail the otherwise successful install.
-
-
-
-Packaged `omahabd` (`deploy/systemd/omahabd.service` sets `OMAHAB_LISTEN=0.0.0.0:8484`) listens on all IPv4 interfaces so both `127.0.0.1:8484` and the node's `100.x` Tailscale address work; nftables remains the admission boundary and permits TCP `8484` only on `tailscale0` (loopback remains usable via `iifname "lo"`); no public `8484` accept rule exists. Non-packaged execution keeps the loopback default (`127.0.0.1:8484`).
-
-Paths on the machine:
-
-| Path | Content |
-| --- | --- |
-| `/var/lib/omahab` | State, mode 0700. Contains `control.db` (journal) and `install-manifest.json` |
-| `/srv/omahab` | Application data (`apps`, `projects`, `sync`, `backups`, `workspaces`, `derived-indexes`) |
-| `/var/log/omahab` | Logs |
-| `/var/cache/omahab` | Cache |
-| `/etc/omahab` | Configuration |
-| `/etc/omahab/backup.env` | Backup credentials (`OMAHAB_SERVER` + `OMAHAB_TOKEN`), mode 0600, used by backup and verify units |
-| `~/.config/omahab/token` | Administrator CLI bearer token, mode 0600 and administrator-owned; provisioned automatically during install |
-| `/etc/nftables.conf` | Firewall rules (`table inet omahab`). Backup at `/etc/nftables.conf.pre-omahab` |
-| `/usr/bin/omahab` | CLI, mode 0755 |
-| `/usr/bin/omahabd` | Daemon, mode 0755 |
-| `/usr/lib/systemd/system/` | Six units: `omahabd.service` (`Type=simple`), `omahab-backup.{service,timer}`, `omahab-verify.{service,timer}`, `cloudflared.service` |
-| `/usr/lib/tmpfiles.d/omahab.conf` | Directory definitions for `systemd-tmpfiles` |
-| `/usr/share/omahab/catalog` | Application catalog |
-| `/usr/share/omahab/web` | Dashboard assets (when built) |
-| `/usr/share/keyrings/tailscale-archive-keyring.gpg` | Tailscale vendor keyring |
-| `/usr/share/keyrings/cloudflare-main.gpg` | Cloudflare vendor keyring |
-| `/etc/apt/sources.list.d/omahab-tailscale.list` | Tailscale apt source (`pkgs.tailscale.com`) |
-| `/etc/apt/sources.list.d/omahab-cloudflared.list` | Cloudflare apt source (`pkg.cloudflare.com`) |
-
-Example output of `preflight` on a clean machine:
-
-```text
-  PASS os               Debian 13 (trixie)
-  PASS arch             amd64
-  PASS ports            required ports are free
-  PASS ram              15860 MiB RAM
-  PASS disk             852 GiB free
-  ...
-Preflight passed.
-```
+- **Domain + Cloudflare** — apex domain and scoped API tokens (Token A DNS is required; live token verification runs server-side before save).
+- **Recovery key** — generate an age key pair; the private key and armored kit are shown exactly once. Confirming stores the kit at `/var/lib/omahab/recovery.age`.
+- **Storage placement** *(optional)* — dedicate a disk to media (photos) or data; the `omahab-storage` unit mounts it before the app services start.
+- **AI providers** — provider credentials/OAuth and model aliases.
+- **Backups** — add a restic repository; the daily backup and weekly verify timers enable automatically.
+- **Semantic index** — pick the pinned embedding model (or full-text only).
 
 ## Applications
 
-Omahab installs these applications from the catalog:
+All of these install automatically (no click-to-install) as native NixOS services:
 
 | Application | Function |
 | --- | --- |
-| Caddy | Reverse proxy |
+| Caddy | Reverse proxy (TLS via Cloudflare DNS-01, mutable JSON config driven by omahabd) |
 | Pocket ID | Sign-in with passkeys (OIDC) |
-| Forgejo | Git repositories |
-| Woodpecker | CI pipelines |
-| Hermes | AI assistant |
-| Immich | Photos |
-| Paperless-ngx | Documents |
+| Forgejo | Git repositories (native PostgreSQL) |
+| Woodpecker | CI pipelines (agent on the rootless podman builder) |
+| Hermes | AI assistant (container; Omahab-owned image) |
+| Immich | Photos (native PostgreSQL + ML) |
+| Paperless-ngx | Documents (with tika/gotenberg) |
 | Karakeep | Bookmarks and notes |
 | Syncthing | File synchronization |
 | LiteLLM | Gateway for model providers |
-| Embedding worker | Local semantic index |
+| Embedding worker | Local semantic index (own hardened unit, UDS) |
 | ntfy | Notifications |
 
-All applications run on one private Docker network. No application opens a port on the host. Public access, if you want it, goes through a Cloudflare Tunnel with outbound connections only.
+Cross-app integrations are provisioned automatically: Pocket ID OIDC clients for every supporting service (Forgejo, Woodpecker, Immich, Paperless, Karakeep, Hermes), Forgejo↔Woodpecker OAuth, and a real LiteLLM virtual key for Hermes. Application versions track the nixpkgs pin in `flake.lock` — the flake is the release gate.
+
+Docker Compose remains only for user project deploys and CI job containers.
+
+## The three-tier model
+
+1. **NixOS closure (immutable)** — packages, systemd units, nftables, sshd, docker/podman, and every platform app service. `services.omahab.enable = true` is the only knob; a `.nix` file never contains a secret or per-household value.
+2. **Enrollment (one-time, guided)** — SSH keys, Tailscale, Cloudflare domain+tokens, passkeys, recovery key.
+3. **Runtime state (omahabd-owned, mutable)** — `/var/lib/omahab` (control.db, secrets, rendered configs, `appenv/` per-bundle env files) and `/srv/omahab` (app data). Backups cover both.
+
+## Paths on the machine
+
+| Path | Content |
+| --- | --- |
+| `/var/lib/omahab` | State: `control.db`, `secrets/`, `appenv/`, `caddy/`, `cloudflared/`, `dumps/`, `recovery.age` |
+| `/var/lib/omahab/appenv/<bundle>.env` | Per-bundle env file; its existence gates the domain-dependent systemd units |
+| `/srv/omahab` | Application data (`apps`, `projects`, `sync`, `backups`, `workspaces`) |
+| `/run/omahab/bootstrap-code` | First-boot one-time claim code (tmpfs, 0600) |
+| `~omahab/.config/omahab/token` | Administrator CLI token (provisioned by omahabd, 0600) |
+| `/etc/omahab-release` | Pinned flake ref for `omahab system upgrade` |
 
 ## Security model
 
-- Packaged `omahabd` binds `0.0.0.0:8484` (IPv4 wildcard, `ss` shows `0.0.0.0:8484`) so both `127.0.0.1:8484` and the node's `100.x` Tailscale IP work; nftables is the admission boundary — TCP `8484` is allowed only on `tailscale0` (`iifname "tailscale0" tcp dport 8484`) and via `lo`; public interfaces have no `8484` accept rule. Standalone default stays loopback-only (`internal/config.DefaultListen` = `127.0.0.1:8484`).
-- The installer stops when a check fails. It does not continue with an unknown state.
-- Signed releases carry a `SHA256SUMS` file and a minisign signature. The bootstrap script checks both before it runs the installer.
-- The public key is in `release/minisign.pub` and inside the bootstrap script. The private key stays offline.
+- `omahabd` binds `0.0.0.0:8484`; the nftables table `inet omahab` is the admission boundary: TCP 8484 only on `tailscale0` and `lo`; port 8485 (first-boot wizard) only from RFC1918 LAN ranges and closes after completion.
+- Default-deny inbound; SSH 22, Tailscale UDP 41641, and 80/443 on `tailscale0` are the only other accepts.
+- sshd: no passwords, no root login; config is atomic with the generation.
+- Secrets live under `/var/lib/omahab/secrets` (0700) and per-bundle `appenv` files (0640, service-user group); a `.nix` file never holds a secret.
+- The claim code carries ~50 bits, is single-use, and rate-limited; exhaustion rotates it.
+- Restic backups cover state + data + native-service directories; databases are dumped (`pg_dump -Fc` into `/var/lib/omahab/dumps`) before every backup — raw DB files are never backed up.
 
-You can use a private mirror with the bootstrap script:
+## Upgrades
 
 ```sh
-sudo OMAHAB_RELEASE_URL=https://mirror.example.com/releases/stable sh omahab-install
+sudo omahab system upgrade        # nixos-rebuild switch --flake $(cat /etc/omahab-release)
+sudo omahab system check-update   # probe the release manifest
 ```
 
-`OMAHAB_RELEASE_URL` must be an `https://` URL. For a mirror with its own certificate, set `OMAHAB_CACERT` to the path of the CA file. The path must be absolute. The signature check stays on in all cases.
+`upgrade` polls `/up` for 120s after the switch and runs `nixos-rebuild switch --rollback` automatically if the new generation fails the health gate. A nightly timer checks for new releases. There is no unattended rebuild — omahabd remains supervised during upgrades by design.
 
 ## Development
-
-The one-command installation already builds from the source. For development, clone the repository and run the checks:
 
 ```sh
 git clone https://github.com/davidgilesgt/omahab
 cd omahab
-bash scripts/check.sh        # repository checks
-go vet ./...
-go test ./...
-```
+nix develop                # Go, Node, sqlc
+go vet ./... && go test ./...
+(cd web && npm ci && npm run build)
+bash scripts/check.sh      # repository checks
 
-You need Go 1.25 or newer, Python 3, and Node.js with npm. `scripts/build.sh` and `scripts/release.sh` run `npm ci` plus the production web build and refuse to emit an installer unless `web/dist/index.html` is embedded.
+nix run .#vm               # boot the dev VM (omahabd, caddy, postgres, ...)
+nix build .#checks.x86_64-linux.integration   # NixOS integration test
+```
 
 Repository layout:
 
 | Directory | Content |
 | --- | --- |
-| `cmd/omahab-install` | The installer |
+| `flake.nix` | Packages (omahab, web, embedding worker, catalog), NixOS module, VM, appliance, checks |
+| `nix/module.nix` | The system tier: omahabd unit, builder, cloudflared, nftables, sshd, tailscale, console |
+| `nix/apps.nix` | Native platform app services (caddy, pocket-id, forgejo, …) with appenv gating |
+| `nix/vm.nix`, `nix/tests/` | Dev VM and the NixOS integration test |
+| `cmd/omahab` | The CLI (`console`, `setup`, `system`, apps, backups, …) |
 | `cmd/omahabd` | The daemon (control plane) |
-| `cmd/omahab` | The command line tool |
 | `cmd/omahab-clientd` | Companion daemon for Omarchy workstations |
-| `internal/` | Install, backups, secrets, API, catalog, events, health, and more |
-| `deploy/catalog/` | The application bundles and the Compose files |
+| `internal/` | apps, controlplane, api, backups, secrets, providers, … |
+| `deploy/catalog/` | Curated bundle catalog (+ the one compose file, hermes) |
 | `web/` | Dashboard (Vite, React 19) |
 | `workers/` | Embedding worker (Python) and email worker (Cloudflare, TypeScript) |
 | `companion/omarchy/` | Omarchy shell plugin |
 | `api/openapi.yaml` | API specification |
-| `packaging/` | Debian packaging, systemd units, tmpfiles |
-| `release/` | Public signing key and manifest schema |
-| `scripts/` | Build, check, release, and verify scripts |
+| `scripts/` | `build.sh` (nix wrapper), `check.sh`, `gen-catalog.sh` |
 
-## Publish a release
+Regenerating the runtime catalog (digest pinning for the hermes image):
 
-A signed release makes the bootstrap installation work. Do this before you tell users to use it:
+```sh
+bash scripts/gen-catalog.sh   # needs skopeo or docker buildx; run on a linux host
+```
 
-1. Set `MINISIGN_KEY` to the path of the offline private key.
-2. Run `bash scripts/release.sh`. The script builds the dashboard and both CPU types, refuses API-only installers, resolves the image digests, writes `SHA256SUMS`, and signs it.
-3. Run `bash scripts/verify-release.sh dist/release` to check the release.
-4. Upload all files from `dist/release` to a new GitHub release. Do not mark it as a draft.
+## Building images
 
-When the release is the latest one, the bootstrap command in this document uses it.
+```sh
+nix build .#image-iso    # bootable installer ISO (console wizard on first boot)
+nix build .#image-qcow   # qcow2 appliance disk
+```
 
 ## Troubleshooting
 
 | Message | Cause and solution |
 | --- | --- |
-| `required tool 'minisign' not found` | You ran the bootstrap script without preparation. Install `minisign` first, or use the one-command installation |
-| `unsupported operating system` | The system is not Debian 13 or Ubuntu 26.04. Install a supported system |
-| `unsupported Debian version` / `unsupported Ubuntu version` | Use Debian 13 (trixie) or Ubuntu 26.04 |
-| `go.mod requires go >= 1.25.0` (during a manual build) | Start the build with `GOTOOLCHAIN=auto`, as in the one-command installation |
-| `no installer artifact for linux/<arch>` | The release has no artifact for your CPU. Open an issue on GitHub |
-| `minisign verification of SHA256SUMS failed` | The checksum file does not match the published key. Stop. Open an issue on GitHub |
-| `checksum mismatch` | The download is damaged or was changed. Stop. Download again; if it fails again, open an issue |
-| Preflight reports a container runtime, or `/srv/omahab` exists | The machine is not fresh. Install Omahab on a fresh system |
-| `WARN ssh_keys` during preflight | The session has no SSH key. Add a key with `--github-user` or `--key-file` |
-| `systemd` check failed | Preflight needs `/run/systemd/system`. Containers and chroots are not supported. Run on a real machine or VM with `systemd` |
-| `assets missing` | The installer has no embedded assets. Rebuild with `scripts/build.sh` or pass `--asset-dir <dir>` for a dev build |
-| `omahabd` health check timed out | Check `journalctl -u omahabd -n 50 --no-pager`. The daemon did not return `200` on `http://127.0.0.1:8484/up` |
+| Bootstrap wizard unreachable on :8485 | The wizard closes after completion. Check `test -f /var/lib/omahab/bootstrap-done`; to re-run, remove the file and restart `omahabd` |
+| `invalid code` on claim | The code rotates after 20 failed attempts; read the current one on the tty1 console |
+| `omahabd` health check timed out | `journalctl -u omahabd -n 50 --no-pager`; the daemon did not return `200` on `http://127.0.0.1:8484/up` |
+| Domain-gated service inactive | Expected before domain enrollment: the unit waits for `/var/lib/omahab/appenv/<bundle>.env` |
+| `omahab system upgrade` rolled back | The new generation failed the 120s health gate; check `journalctl -u omahabd` on the previous generation |
+| Hermes not in the catalog | The `ghcr.io/omahab/hermes` image is not yet published; the bundle is skipped until then |
 
 ## License
 

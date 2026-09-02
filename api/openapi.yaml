@@ -21,6 +21,283 @@ tags:
   - name: setup
     description: First-run setup status and Woodpecker PAT handoff
 paths:
+  /api/bootstrap/claim:
+    post:
+      summary: Claim the appliance with the one-time bootstrap code
+      description: |
+        First-boot only (served on the LAN listener, port 8485). Exchanges the
+        one-time code shown on the tty1 console for the administrator API
+        token. Single-use; 5 attempts/min per host and 20 total, after which
+        the code rotates. Inert once bootstrap is complete.
+      operationId: claimBootstrap
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string, example: 7gc3x9k2mq }
+      responses:
+        '200':
+          description: Claimed; the token is returned once
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/Error' }
+
+  /api/bootstrap/ssh-keys:
+    post:
+      summary: Install administrator SSH keys (bootstrap)
+      description: First-boot only; requires the bootstrap-claimed bearer token. Imports keys from a GitHub user and/or pasted public keys for the omahab admin account. Empty input skips the step.
+      operationId: bootstrapSSHKeys
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                github_user: { type: string }
+                keys:
+                  type: array
+                  items: { type: string }
+      responses:
+        '200':
+          description: Keys merged additively
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  added: { type: integer }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /api/bootstrap/tailscale/up:
+    post:
+      summary: Start Tailscale enrollment (bootstrap)
+      description: First-boot only; runs `tailscale up` and returns the printed auth URL.
+      operationId: bootstrapTailscaleUp
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Enrollment started
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  auth_url: { type: string }
+        '502': { $ref: '#/components/responses/Error' }
+
+  /api/bootstrap/tailscale/status:
+    get:
+      summary: Poll Tailscale enrollment state (bootstrap)
+      operationId: bootstrapTailscaleStatus
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Current state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  running: { type: boolean }
+                  ip: { type: string }
+                  state: { type: string }
+
+  /api/bootstrap/complete:
+    post:
+      summary: Finish first-boot bootstrap
+      description: Writes /var/lib/omahab/bootstrap-done and closes the LAN listener. Further enrollment happens on the authenticated dashboard.
+      operationId: bootstrapComplete
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Bootstrap complete
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  complete: { type: boolean }
+
+  /api/v1/setup/verify-cloudflare:
+    post:
+      summary: Live-verify a Cloudflare API token
+      description: Server-side call to Cloudflare's token verify endpoint (the browser cannot call it cross-origin).
+      operationId: verifyCloudflareToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string }
+      responses:
+        '200':
+          description: Verification result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  status: { type: string }
+                  detail: { type: string }
+        '400': { $ref: '#/components/responses/Error' }
+
+  /api/v1/recovery/generate:
+    post:
+      summary: Generate a recovery key pair (one-time)
+      description: Creates an age key pair and an armored recovery kit. The private key is returned exactly once and never persisted; nothing is stored until /api/v1/recovery/confirm.
+      operationId: generateRecoveryKey
+      responses:
+        '200':
+          description: Key material (shown once)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [public_key, private_key, kit]
+                properties:
+                  public_key: { type: string }
+                  private_key: { type: string }
+                  kit: { type: string }
+
+  /api/v1/recovery/confirm:
+    post:
+      summary: Confirm the saved recovery key
+      description: Re-exports the kit to the confirmed public key, persists it at /var/lib/omahab/recovery.age, stores the recovery_age_recipient secret, and marks the recovery_key setup check.
+      operationId: confirmRecoveryKey
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [public_key]
+              properties:
+                public_key: { type: string, example: age1... }
+      responses:
+        '200':
+          description: Kit stored
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  confirmed: { type: boolean }
+        '400': { $ref: '#/components/responses/Error' }
+
+  /api/v1/system/disks:
+    get:
+      summary: List candidate storage disks
+      description: Parses `lsblk -J` and returns non-root/boot filesystems.
+      operationId: listDisks
+      responses:
+        '200':
+          description: Candidate disks
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    name: { type: string }
+                    size: { type: string }
+                    type: { type: string }
+                    fstype: { type: string }
+                    uuid: { type: string }
+                    mountpoint: { type: string }
+
+  /api/v1/system/storage:
+    put:
+      summary: Assign a filesystem to a volume role
+      description: Appends to /var/lib/omahab/storage.json (consumed by the omahab-storage oneshot unit). volume is media or data; rejected once the target holds data.
+      operationId: configureStorage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [volume, fs_uuid]
+              properties:
+                volume: { type: string, enum: [media, data] }
+                fs_uuid: { type: string }
+      responses:
+        '200':
+          description: Placement recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  configured: { type: boolean }
+        '400': { $ref: '#/components/responses/Error' }
+
+  /api/v1/backup-repositories:
+    get:
+      summary: List backup repositories
+      operationId: listBackupRepositories
+      responses:
+        '200':
+          description: Configured repositories
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/BackupRepository'
+    post:
+      summary: Configure a backup repository
+      description: Stores credentials via the secrets broker and configures the repository by secret reference; enables the daily backup and weekly verify timers.
+      operationId: createBackupRepository
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [label, location, password]
+              properties:
+                label: { type: string }
+                location: { type: string, example: "sftp:user@host:restic-repo" }
+                password: { type: string, format: password }
+      responses:
+        '201':
+          description: Repository configured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BackupRepository'
+        '400': { $ref: '#/components/responses/Error' }
+
+  /api/v1/backup-repositories/{id}:
+    delete:
+      summary: Delete a backup repository
+      description: Repositories with recorded runs are retained for audit.
+      operationId: deleteBackupRepository
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '204': { description: Deleted }
+        '409': { $ref: '#/components/responses/Error' }
+
   /up:
     get:
       summary: Liveness probe
@@ -1565,6 +1842,21 @@ components:
       schema: { type: string }
 
   schemas:
+    BackupRepository:
+      type: object
+      required: [id, label, location]
+      properties:
+        id: { type: string }
+        label: { type: string }
+        location: { type: string }
+        secret_ref:
+          type: object
+          properties:
+            id: { type: string }
+            version: { type: integer }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
     ErrorEnvelope:
       type: object
       required: [error]

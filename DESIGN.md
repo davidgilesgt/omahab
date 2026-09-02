@@ -60,7 +60,7 @@ Omahab initially targets a single household with:
 - remote LLM providers and supported subscription OAuth;
 - an Omarchy desktop companion.
 
-The system supports data on the same disk as Debian. A separate data disk is recommended but not required.
+The system supports data on the same disk as the OS. A separate data disk is recommended but not required; the first-run wizard can dedicate a disk to media or data after boot.
 
 Omahab does not manage RAID or ZFS. On Proxmox, storage redundancy and snapshots remain Proxmox responsibilities. Home Assistant should normally run in its own Home Assistant OS VM and be connected to Omahab as an external integration.
 
@@ -76,7 +76,7 @@ Initial non-goals:
 - self-hosting a general-purpose SMTP mailbox;
 - consumer budgeting applications without reliable bank integration.
 
-A future immutable host, likely using bootc or another OCI-delivered OS mechanism, is desirable after the Debian-based product and application contracts stabilize.
+The host is now a declarative NixOS closure (see §5): the OS, all Omahab binaries, and every platform application form one generation-managed system. Docker remains only for user-project deploys (ONCE) and CI job containers.
 
 ## 4. System architecture
 
@@ -179,112 +179,50 @@ Language consolidation must not collapse failure domains. Embedding inference an
 
 ### 5.1 Base OS
 
-The initial supported host is **Debian 13 minimal**.
+The host is **NixOS**: the OS, Omahab's binaries, and every platform application are one declarative closure built from the repository flake (`nix/module.nix` + `nix/apps.nix`, pinned by `flake.lock`).
 
 Reasons:
 
-- stable support lifecycle;
-- strong Docker, systemd, cloud-init, and Proxmox compatibility;
-- normal Linux recovery tools;
-- amd64 and arm64 availability;
-- conservative host changes while applications update independently.
+- the whole appliance — kernel, systemd units, nftables, sshd, tailscale, docker/podman, and the application services — is versioned as one generation with atomic switch and rollback;
+- application versions track the pinned nixpkgs revision, so the flake lock is the release gate;
+- no imperative package installation, no unattended-upgrades divergence, no installer journal — `nixos-rebuild` is the safety net;
+- amd64 and arm64 availability.
 
-Ubuntu 26.04 is also a supported host (preflight, installer, and package selection accept it — see `preflight.go:checkDebian`, `scripts/install`, `packages.go:PackagesForOS`). Debian 13 remains the reference host; the Ubuntu path exists to reduce friction on hosts already running it, at the cost of the extra variance above.
+Docker remains only for user-project deploys (ONCE) and CI job containers. Platform applications are native systemd services.
 
 ### 5.2 Installation form
 
-Omahab initially installs on a fresh Debian system rather than shipping a custom ISO.
+Omahab ships appliance images and a NixOS module:
 
-Typical bare-metal flow:
-
-1. Install Debian 13 minimal.
-2. Create the administrator account.
-3. Establish SSH access.
-4. Continue the Omahab installation through SSH.
-5. Complete browser-based Tailscale, Cloudflare, Pocket ID, and model-provider authorization from another device.
-
-Typical Proxmox flow:
-
-1. Import an official Debian cloud image.
-2. Create a VM with cloud-init and the administrator SSH key.
-3. Attach the desired virtual data disk or disks.
-4. Run the same Omahab installer through SSH.
-
-ARM uses the same installer on a supported Debian arm64 base. The architecture should support arm64 from the beginning, but hardware support remains explicit. Initial targets should include generic arm64 UEFI and one tested board profile such as Raspberry Pi 5.
-
-### 5.3 Bootstrap
-
-The convenience installation may use a small shell bootstrap, but the real installer should be a signed, versioned binary.
-
-Recommended documented flow:
-
-```bash
-curl -fL -o omahab-install https://raw.githubusercontent.com/davidgilesgt/omahab/master/scripts/install
-less omahab-install
-sudo sh omahab-install
+```sh
+nix build .#image-iso     # bootable installer ISO
+nix build .#image-qcow    # qcow2 appliance disk (Proxmox: import)
 ```
 
-The bootstrap only:
+Or add to any NixOS host:
 
-1. identifies Debian version and architecture;
-2. downloads the versioned installer;
-3. verifies signed release metadata;
-4. executes the installer.
+```nix
+imports = [ github:davidgilesgt/omahab#nixosModules.omahab ];
+services.omahab.enable = true;
+```
 
-The installer maintains a journal, can resume safe interrupted steps, and writes `/var/lib/omahab/install-manifest.json` when complete.
+`services.omahab.enable` is the only user-facing option; domain, tokens, and per-household values are runtime state, never in a `.nix` file.
 
-The Go installer uses Huh for forms and Bubble Tea with Bubbles and Lip Gloss for progress, diagnostics, and recovery views. Prefer inline, SSH-safe rendering so a disconnected session leaves a useful transcript. The install journal, rollback timers, and resumable state belong to the installer domain layer, never to the TUI process.
+### 5.3 First-boot bootstrap
 
-Every interactive operation has a non-interactive and structured-output equivalent. A non-TTY, `TERM=dumb`, `--json`, or `--non-interactive` invocation must not depend on full-screen terminal behavior. `NO_COLOR` disables color without changing content.
+On first boot the console (tty1) shows the LAN wizard URL and a one-time claim code; `omahabd` serves the wizard on `:8485` (LAN-only, per the nftables rules) while `/var/lib/omahab/bootstrap-done` is absent. The wizard claims the appliance with the code (single-use, rate-limited, rotated on exhaustion), installs SSH keys for the `omahab` admin account, enrolls Tailscale, and hands off to the authenticated dashboard over the tailnet; port 8485 then closes. `sudo omahab setup` is the SSH fallback for the same flow.
 
-### 5.4 Strict preflight
+Secrets never transit the LAN page: everything after the Tailscale step happens on the authenticated dashboard.
 
-A shell installer cannot prove that a machine is fresh or uncompromised. It can enforce a supported baseline. Initial Omahab supports strict appliance installation only; it does not adopt arbitrary existing servers.
+### 5.4 Strict appliance posture
 
-Preflight rejects or warns on:
-
-- a host other than Debian 13;
-- unsupported architecture;
-- existing Docker, Podman, Kubernetes, or container workloads;
-- existing `/srv/omahab` state;
-- occupied required ports;
-- conflicting reverse proxies, DNS servers, databases, or VPNs;
-- unexpected third-party APT repositories;
-- insufficient RAM or disk;
-- unsuitable filesystem ownership semantics;
-- invalid system time;
-- failed DNS, HTTPS, or signed-package checks;
-- password-only SSH without a verified public key.
-
-A materially dirty host must be reinstalled rather than accumulated into a growing exception system.
+The system remains an appliance: it does not adopt arbitrary existing servers. Fresh-image boot is the only supported path; disaster recovery restores `/var/lib/omahab` + `/srv/omahab` from restic onto a fresh image.
 
 ### 5.5 SSH-first setup and hardening
 
-The installer expects to run through SSH and must keep the active session safe.
+sshd is hardened declaratively in the closure: pubkey-only, no password or keyboard-interactive authentication, no root login. SSH keys are runtime state (`~omahab/.ssh/authorized_keys`, provisioned by the first-boot wizard or `omahab setup`); GitHub import is one-time and never continuously synchronized. Because sshd configuration is atomic with the generation, the installer-era rollback timers are obsolete — `nixos-rebuild test`/`switch --rollback` is the recovery mechanism.
 
-SSH key setup options:
-
-- retain existing authorized keys;
-- paste one or more public keys;
-- import public keys once from `https://github.com/<username>.keys`;
-- read public keys from a file.
-
-For every imported key, show the type, fingerprint, comment, and source. GitHub import is one-time and must not continuously synchronize `authorized_keys`.
-
-Hardening sequence:
-
-1. Preserve existing valid keys.
-2. Add selected keys without replacing the file wholesale.
-3. Write an `sshd_config.d` drop-in.
-4. Validate the full SSH configuration with `sshd -t`.
-5. Keep the current connection open.
-6. Schedule an automatic rollback timer.
-7. Reload `sshd`.
-8. Ask the user to establish a second SSH session.
-9. Cancel rollback only after the second connection is confirmed.
-10. Disable password and keyboard-interactive authentication.
-
-Default final policy:
+Default policy (from the module):
 
 ```text
 PubkeyAuthentication yes
@@ -293,21 +231,17 @@ KbdInteractiveAuthentication no
 PermitRootLogin no
 ```
 
-Tailscale SSH is optional. Standard OpenSSH keys remain the break-glass recovery mechanism.
-
 ### 5.6 Host security baseline
 
-- Debian signed repositories and pinned Omahab sources;
-- automatic Debian security updates;
-- nftables default-deny inbound;
-- no direct application port publication;
+- one NixOS closure, signed store paths, atomic generations with rollback;
+- nftables default-deny inbound (`table inet omahab`); TCP 8484 only on tailscale0/lo; first-boot 8485 LAN-only and closed after bootstrap;
+- no direct application port publication; native services bind loopback, Caddy is the only edge;
 - Cloudflare Tunnel uses outbound connections;
-- Docker socket available only to `omahabd` and the controlled deployment layer;
-- AppArmor defaults retained;
-- root-owned secret material;
-- key-only SSH after verification;
+- Docker socket available only to `omahabd`; CI builds use the rootless podman builder socket;
+- root-owned secret material under `/var/lib/omahab` (0700/0600), per-bundle env files 0640 with service-user group;
+- key-only SSH after bootstrap;
 - health and security checks through `omahab doctor`;
-- explicit update and rollback records.
+- explicit, supervised upgrades (`omahab system upgrade` with health gate + automatic rollback); no unattended rebuilds.
 
 ## 6. Application runtime boundaries
 
@@ -315,35 +249,22 @@ Omahab deliberately uses different runtime designs for different workload classe
 
 ### 6.1 Platform applications
 
-Major applications use curated Docker Compose bundles managed by `omahabd`:
+Platform applications are **native NixOS systemd services** managed by `omahabd` — Caddy, Pocket ID, Forgejo, Woodpecker (server + agent), Immich, Paperless-ngx, Karakeep, Syncthing, LiteLLM, the embedding worker, and ntfy — except Hermes, which stays a container (Omahab-owned image, digest-pinned) until a native package exists.
 
-- Immich;
-- Forgejo;
-- Woodpecker;
-- Hermes;
-- Pocket ID;
-- Paperless-ngx;
-- Karakeep;
-- Syncthing;
-- the model gateway;
-- edge and Cloudflare components;
-- optional ntfy delivery.
+A platform bundle entry in the curated catalog declares:
 
-A platform bundle includes:
-
-- pinned image digests;
-- Compose definition;
-- supported architectures;
-- health checks;
+- runtime placement (`systemd` with its unit set, or `compose`);
+- health checks (HTTP probes against the loopback port map);
 - resource guidance;
-- persistent-data declarations;
-- database-safe backup hooks;
-- restore hooks;
+- persistent-data locations (host paths under `/srv/omahab` and `/var/lib/<svc>`);
+- database-safe backup hooks (native `pg_dump -Fc` into `/var/lib/omahab/dumps`);
+- restore hooks (pg_restore + unit restarts);
 - OIDC configuration;
-- exposure capability;
-- update and rollback procedure.
+- exposure capability.
 
-Users do not normally edit these Compose definitions.
+Domain-dependent units gate on their `appenv/<bundle>.env` file: before enrollment systemd skips them cleanly (condition-skip, not failure); `omahabd` renders the env file after enrollment and starts the units. Versions of native services track the nixpkgs pin — there is no per-app image update; `omahab system upgrade` switches the whole generation.
+
+Users do not edit application configuration; everything flows through omahabd.
 
 ### 6.2 Project applications
 
@@ -383,12 +304,13 @@ Edge topology:
 
 ```text
 Caddy/Omahab edge :80/:443
-  ├── platform Compose services
+  ├── native platform services on 127.0.0.1:<port>
+  ├── hermes container on 127.0.0.1:8085
   └── ONCE Kamal Proxy on 127.0.0.1:8080
         └── project containers
 ```
 
-Caddy owns external TLS and host routing. ONCE operates on a loopback internal port with internal TLS disabled.
+Caddy owns external TLS and host routing, routing to loopback upstreams (compose-internal DNS names no longer resolve). ONCE operates on a loopback internal port with internal TLS disabled.
 
 ### 6.4 Deployment flow
 
@@ -1125,8 +1047,8 @@ Applications not selected for the initial default:
 
 ### 23.2 Foundation release
 
-- Debian bootstrap installer;
-- strict preflight and SSH hardening;
+- NixOS closure, appliance images, and the first-boot console wizard;
+- one-time claim code + LAN bootstrap, SSH-key enrollment, declarative sshd hardening;
 - amd64 and arm64 support;
 - same-disk and separate-data layouts;
 - `omahabd` and control database;
@@ -1178,13 +1100,12 @@ Omahab is not complete until these scenarios work end to end.
 
 ### Installation and recovery
 
-1. Install fresh Debian.
-2. Configure and verify SSH keys from an SSH session.
-3. Install Omahab.
-4. Join Tailscale and configure Cloudflare.
-5. Enroll two passkeys.
-6. Lose passkey access.
-7. Recover through SSH without modifying the database manually.
+1. Boot the appliance image on a fresh machine.
+2. Claim it with the one-time code from the LAN wizard and install SSH keys.
+3. Join Tailscale and configure Cloudflare from the dashboard.
+4. Enroll two passkeys.
+5. Lose passkey access.
+6. Recover through SSH without modifying the database manually.
 
 ### Private and public exposure
 
@@ -1201,7 +1122,7 @@ Omahab is not complete until these scenarios work end to end.
 2. Create Forgejo repositories and project data.
 3. Configure encrypted Hetzner backup.
 4. Destroy the Omahab machine.
-5. Install Debian on a replacement.
+5. Boot a fresh appliance image on a replacement.
 6. Restore the recovery kit and backup.
 7. Confirm photos, databases, repositories, identities, and projects are usable.
 
@@ -1244,9 +1165,9 @@ Omahab is not complete until these scenarios work end to end.
 
 ## 25. External references
 
-- Debian 13 lifecycle: <https://www.debian.org/releases/trixie/>
-- Debian cloud images: <https://cloud.debian.org/images/cloud/>
-- Debian package signing: <https://www.debian.org/doc/manuals/securing-debian-manual/deb-pack-sign.en.html>
+- NixOS manual: <https://nixos.org/manual/nixos/stable/>
+- nixpkgs: <https://github.com/NixOS/nixpkgs>
+- NixOS flakes: <https://nixos.wiki/wiki/Flakes>
 - ONCE README: <https://github.com/basecamp/once/blob/main/README.md>
 - ONCE architecture: <https://github.com/basecamp/once/blob/main/AGENTS.md>
 - ONCE proxy implementation: <https://github.com/basecamp/once/blob/main/internal/docker/proxy.go>
