@@ -9,7 +9,6 @@ import (
 	"github.com/omahab/omahab/internal/health"
 	"github.com/omahab/omahab/internal/hermes"
 	"github.com/omahab/omahab/internal/identity"
-	"github.com/omahab/omahab/internal/installer"
 	"github.com/omahab/omahab/internal/integrations"
 	"github.com/omahab/omahab/internal/knowledge"
 	"github.com/omahab/omahab/internal/projects"
@@ -61,8 +60,30 @@ func AllMigrations() []store.Migration {
 	out = append(out, emailing.Migrations()...)
 	// environments (companion devices + enrollments + env meta)
 	out = append(out, environments.Migrations()...)
-	// installer
-	out = append(out, installer.Migrations()...)
+	// installer journal (legacy Debian installer schema; tables kept so
+	// restored databases remain compatible — no code reads them anymore)
+	out = append(out, store.Migration{
+		Name: "installer_journal",
+		SQL: `
+CREATE TABLE IF NOT EXISTS installer_journal (
+    id            TEXT PRIMARY KEY,
+    step          TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'pending',
+    attempt       INTEGER NOT NULL DEFAULT 0,
+    started_at    TEXT,
+    finished_at    TEXT,
+    error         TEXT NOT NULL DEFAULT '',
+    rollback_data TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_installer_journal_step ON installer_journal(step);
+CREATE INDEX IF NOT EXISTS idx_installer_journal_status ON installer_journal(status);
+
+CREATE TABLE IF NOT EXISTS installer_state (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL DEFAULT ''
+);
+`,
+	})
 	// controlplane glue (users, release tokens)
 	out = append(out, glueMigrations()...)
 	return out

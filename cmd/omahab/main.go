@@ -19,7 +19,6 @@ import (
 
 	"github.com/omahab/omahab/internal/apiclient"
 	"github.com/omahab/omahab/internal/domain"
-	"github.com/omahab/omahab/internal/installer"
 	"github.com/omahab/omahab/internal/tui"
 )
 
@@ -469,7 +468,7 @@ func humanStatus(s *domain.Status) {
 		return
 	}
 	// Reuse StepBar compact strip for TUI layer — preserves data content, adds styled glyph.
-	caps := installer.ResolveCapabilities(term.IsTerminal(os.Stdout.Fd()), false, os.Getenv("TERM"), os.Getenv("NO_COLOR"))
+	caps := tui.ResolveCaps(term.IsTerminal(os.Stdout.Fd()), os.Getenv("TERM"), os.Getenv("NO_COLOR"))
 	if caps.IsTTY && caps.ColorEnabled {
 		strip := tui.CompactStatusStrip(string(s.Health), caps)
 		fmt.Println(strip)
@@ -669,7 +668,7 @@ func newDoctorCmd() *cobra.Command {
 				return printJSON(res)
 			}
 			// Preserve data content: overall healthy flag plus checklist rendering via tui.
-			caps := installer.ResolveCapabilities(term.IsTerminal(os.Stdout.Fd()), false, os.Getenv("TERM"), os.Getenv("NO_COLOR"))
+			caps := tui.ResolveCaps(term.IsTerminal(os.Stdout.Fd()), os.Getenv("TERM"), os.Getenv("NO_COLOR"))
 			if caps.IsTTY && caps.ColorEnabled {
 				// Use tui checklist component — same logic as PreflightChecklist but for health.
 				var views []tui.DoctorCheckView

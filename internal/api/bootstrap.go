@@ -168,7 +168,6 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
-
 // bootstrapGateActive middleware: 404 when bootstrap is not pending.
 func (s *Server) bootstrapGateActive(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -1,124 +1,99 @@
+// Package tui provides terminal styling helpers shared by the omahab CLI
+// (status strip, doctor checklist chips). The installer-specific TUI
+// (stepbar, renderer, forms, checklist) was deleted with the Debian
+// installer.
 package tui
 
 import (
+	"strings"
+
 	"github.com/charmbracelet/lipgloss"
-	"github.com/omahab/omahab/internal/installer"
 )
 
-// Caps is the TUI-local capability ladder, matched to installer.Capabilities.
-type Caps = installer.Capabilities
+// Caps is the terminal capability snapshot.
+type Caps struct {
+	IsTTY        bool
+	ColorEnabled bool
+}
 
 // Accent tokens match web/src/styles.css exactly.
 // Light: #4C5B36, Dark: #B2C27D
-var Accent = lipgloss.AdaptiveColor{Light: "#4C5B36", Dark: "#B2C27D"}
-
-// Positive / Warning / Negative palettes mirror web .status-*
-// Light mode values from :root, dark from :root[data-theme="dark"].
 var (
-	PositiveFG = lipgloss.AdaptiveColor{Light: "#35613f", Dark: "#9bc39c"}
-	PositiveBG = lipgloss.AdaptiveColor{Light: "#dfeade", Dark: "#263b29"}
-	WarningFG  = lipgloss.AdaptiveColor{Light: "#765b14", Dark: "#ddc46f"}
-	WarningBG  = lipgloss.AdaptiveColor{Light: "#f2e8c7", Dark: "#41381d"}
-	NegativeFG = lipgloss.AdaptiveColor{Light: "#8b332b", Dark: "#e6a09a"}
-	NegativeBG = lipgloss.AdaptiveColor{Light: "#f3dfdc", Dark: "#472925"}
-)
+	PositiveFG = lipgloss.Color("#15803d")
+	PositiveBG = lipgloss.Color("#dcfce7")
+	NegativeFG = lipgloss.Color("#b91c1c")
+	NegativeBG = lipgloss.Color("#fee2e2")
+	WarnFG     = lipgloss.Color("#a16207")
+	WarnBG     = lipgloss.Color("#fef3c7")
+	NeutralFG  = lipgloss.Color("#525252")
+	NeutralBG  = lipgloss.Color("#f5f5f5")
 
-// Chip styles — used for PASS/WARN/FAIL rendering.
-// They are AdaptiveColor aware; when ColorEnabled is false callers should
-// bypass styling and emit plain ASCII like [PASS].
-var (
 	PassChip = lipgloss.NewStyle().Foreground(PositiveFG).Background(PositiveBG).Padding(0, 1).Bold(true)
-	WarnChip = lipgloss.NewStyle().Foreground(WarningFG).Background(WarningBG).Padding(0, 1).Bold(true)
 	FailChip = lipgloss.NewStyle().Foreground(NegativeFG).Background(NegativeBG).Padding(0, 1).Bold(true)
-
-	AccentStyle = lipgloss.NewStyle().Foreground(Accent).Bold(true)
-	MutedStyle  = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#66695d", Dark: "#aaa99e"})
+	WarnChip = lipgloss.NewStyle().Foreground(WarnFG).Background(WarnBG).Padding(0, 1).Bold(true)
+	InfoChip = lipgloss.NewStyle().Foreground(NeutralFG).Background(NeutralBG).Padding(0, 1)
 )
 
-func chipForLevel(level string, caps Caps) string {
-	// caps is local alias to avoid import cycle; defined in renderer.go
-	// but we also support installer.Capabilities via interface.
-	// This helper is called with hasColor bool.
-	return level
-}
-
-// RenderChip returns a styled or plain chip for a level string.
-// levels: "pass", "warn", "fail" (case-insensitive)
-func RenderChip(level string, colorEnabled bool) string {
-	switch level {
-	case "pass", "PASS", "ok", "healthy", "positive":
-		if colorEnabled {
-			return PassChip.Render(" PASS ")
-		}
-		return " PASS "
-	case "warn", "WARN", "warning", "degraded":
-		if colorEnabled {
-			return WarnChip.Render(" WARN ")
-		}
-		return " WARN "
-	case "fail", "FAIL", "error", "unhealthy", "negative":
-		if colorEnabled {
-			return FailChip.Render(" FAIL ")
-		}
-		return " FAIL "
+// HealthChip renders a pass/warn/fail chip for a health status.
+func HealthChip(status string) string {
+	switch strings.ToLower(status) {
+	case "healthy", "ok", "pass", "positive":
+		return PassChip.Render(" PASS ")
+	case "degraded", "warn", "warning":
+		return WarnChip.Render(" WARN ")
+	case "unhealthy", "fail", "error", "negative":
+		return FailChip.Render(" FAIL ")
 	default:
-		if colorEnabled {
-			return lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#66695d", Dark: "#aaa99e"}).Padding(0, 1).Render(" " + level + " ")
-		}
-		return " " + level + " "
+		return InfoChip.Render(" · ")
 	}
 }
 
-// Glyphs with fallback per rendering contract.
-// When color is disabled or TERM=dumb / non-TTY, fall back to ASCII.
-func GlyphPass(caps Caps) string {
-	if caps.IsTTY && caps.ColorEnabled {
-		return "●"
-	}
-	return "[x]"
-}
-
-func GlyphFail(caps Caps) string {
-	if caps.IsTTY && caps.ColorEnabled {
-		return "✗"
-	}
-	return "[!]"
-}
-
-func GlyphWarn(caps Caps) string {
-	if caps.IsTTY && caps.ColorEnabled {
-		return "◐"
-	}
-	return "[~]"
-}
-
-func GlyphSpinner(caps Caps, frame int) string {
+// CompactStatusStrip renders a one-line status strip for `omahab status`.
+func CompactStatusStrip(health string, caps Caps) string {
 	if !caps.IsTTY || !caps.ColorEnabled {
-		return "[.]"
+		return "status: " + health
 	}
-	frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-	return frames[frame%len(frames)]
+	return HealthChip(health) + " " + health
 }
 
-func GlyphStepDone(caps Caps) string {
-	if caps.IsTTY && caps.ColorEnabled {
-		return "✓"
-	}
-	return "[x]"
+// DoctorCheckView is a presentation-level check for doctor.
+type DoctorCheckView struct {
+	Name    string
+	Status  string
+	Message string
+	Detail  string
 }
 
-func GlyphStepRunning(caps Caps) string {
-	if caps.IsTTY && caps.ColorEnabled {
-		return "●"
+// RenderDoctorChecklist renders health checks as chips with messages.
+func RenderDoctorChecklist(checks []DoctorCheckView, caps Caps) string {
+	var b strings.Builder
+	for _, dc := range checks {
+		if caps.IsTTY && caps.ColorEnabled {
+			b.WriteString(HealthChip(dc.Status))
+			b.WriteByte(' ')
+		}
+		b.WriteString(dc.Name)
+		if dc.Message != "" {
+			b.WriteString(" — ")
+			b.WriteString(dc.Message)
+		}
+		b.WriteByte('\n')
+		if dc.Detail != "" {
+			b.WriteString("    ")
+			b.WriteString(dc.Detail)
+			b.WriteByte('\n')
+		}
 	}
-	return "[o]"
+	return strings.TrimRight(b.String(), "\n")
 }
 
-func GlyphStepPending(caps Caps) string {
-	if caps.IsTTY && caps.ColorEnabled {
-		return "○"
+// ResolveCaps computes capabilities from stdio state and env.
+func ResolveCaps(isTTY bool, term, noColorEnv string) Caps {
+	caps := Caps{IsTTY: isTTY}
+	if isTTY {
+		if noColorEnv == "" && term != "" && term != "dumb" {
+			caps.ColorEnabled = true
+		}
 	}
-	return "[ ]"
+	return caps
 }
-
-func GlyphDot() string { return "·" }
