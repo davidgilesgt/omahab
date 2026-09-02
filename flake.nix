@@ -78,6 +78,15 @@ EOF
         packages = {
           inherit omahab omahab-web omahab-embedding-worker omahab-catalog;
           default = omahab;
+          # Appliance images (nixos-rebuild build-image under the hood).
+          image-qcow = self.nixosConfigurations.omahab-appliance.config.system.build.vmware or
+            self.nixosConfigurations.omahab-appliance.config.system.build.vm;
+          image-iso = self.nixosConfigurations.omahab-appliance.config.system.build.isoImage;
+        };
+        apps.vm = {
+          type = "app";
+          description = "Run the Omahab dev VM";
+          program = "${self.nixosConfigurations.omahab-vm.config.system.build.vm}/bin/${self.nixosConfigurations.omahab-vm.config.system.build.vm.vmDerivationName or "run-nixos-vm"}";
         };
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
@@ -99,6 +108,7 @@ EOF
             checkPhase = "go test ./...";
             installPhase = "touch $out";
           });
+          integration = pkgs.testers.nixosTest (import ./nix/tests/install.nix { inherit self pkgs; });
         };
       }
     ) // {
@@ -113,6 +123,30 @@ EOF
           "${nixpkgs}/nixos/modules/virtualisation/qemu-vm.nix"
           self.nixosModules.omahab
           ./nix/vm.nix
+        ];
+      };
+      # Appliance: single-disk ext4 image, console wizard, no password
+      # (SSH-key-only after bootstrap).
+      nixosConfigurations.omahab-appliance = nixpkgs.lib.nixosSystem {
+        system = "x86_64-linux";
+        specialArgs = { inherit self; };
+        modules = [
+          self.nixosModules.omahab
+          "${nixpkgs}/nixos/modules/installer/cd-dvd/installation-cd-minimal.nix"
+          {
+            services.openssh.settings.PasswordAuthentication = false;
+            users.users.root.initialHashedPassword = "";
+            users.users.omahab = {
+              isNormalUser = true;
+              extraGroups = [ "wheel" ];
+              openssh.authorizedKeys.keys = [ ];
+            };
+            # The appliance boots straight into first-boot setup.
+            services.omahab.enable = true;
+            # redis + the installer profile both set this; ours wins.
+            boot.kernel.sysctl."vm.overcommit_memory" = nixpkgs.lib.mkForce "1";
+            system.stateVersion = "25.05";
+          }
         ];
       };
     };

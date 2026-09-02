@@ -90,6 +90,18 @@ in
       default = "0.0.0.0:8484";
       description = "omahabd listen address. nftables is the admission boundary.";
     };
+
+    releaseRef = mkOption {
+      type = types.str;
+      default = "github:davidgilesgt/omahab/master";
+      description = "Flake ref `omahab system upgrade` switches to.";
+    };
+
+    releaseURL = mkOption {
+      type = types.str;
+      default = "https://raw.githubusercontent.com/davidgilesgt/omahab/master/version";
+      description = "Version manifest URL for update discovery.";
+    };
   };
 
   imports = [ ./apps.nix ];
@@ -162,8 +174,13 @@ in
         "docker.service"
         "tailscaled.service"
       ];
-      wants = [ "network-online.target" ];
-      requires = [ "docker.service" ];
+      wants = [
+        "network-online.target"
+        "docker.service"
+      ];
+      # docker is a runtime dependency (project deploys), not a hard one:
+      # omahabd must serve /up and reconcile even while docker restarts.
+      requires = [ ];
       unitConfig = {
         RequiresMountsFor = [ dataDir ];
         StartLimitIntervalSec = 60;
@@ -587,6 +604,29 @@ in
 
     # Tailscale
     services.tailscale.enable = true;
+
+    # Release ref for `omahab system upgrade` (nixos-rebuild --flake).
+    environment.etc."omahab-release".text = cfg.releaseRef;
+
+    # Nightly update discovery.
+    systemd.services.omahab-update-check = {
+      description = "Omahab release check";
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = "${cfg.package}/bin/omahab system check-update";
+      };
+      environment.OMAHAB_RELEASE_URL = cfg.releaseURL;
+    };
+    systemd.timers.omahab-update-check = {
+      description = "Omahab release check — nightly";
+      timerConfig = {
+        OnCalendar = "daily";
+        RandomizedDelaySec = "2h";
+        Persistent = true;
+        Unit = "omahab-update-check.service";
+      };
+      wantedBy = [ "timers.target" ];
+    };
 
     # mDNS: best-effort omahab.local on the LAN (IP URL is primary).
     services.avahi = {

@@ -99,6 +99,7 @@ Use --server to target a different control plane (env OMAHAB_SERVER, then ~/.con
 	root.AddCommand(newRunnerCmd())
 	root.AddCommand(newConsoleCmd())
 	root.AddCommand(newSetupCmd())
+	root.AddCommand(newSystemCmd())
 	root.AddCommand(newWorkspaceCmd()) // alias
 	root.AddCommand(newIdentityCmd())
 	root.AddCommand(newHermesCmd())
