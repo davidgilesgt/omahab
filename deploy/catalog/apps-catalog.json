@@ -147,12 +147,12 @@
         "pre_backup": [
           "/bin/sh",
           "-c",
-          "docker compose -f /srv/omahab/apps/forgejo/compose.yaml exec forgejo-postgres pg_dump -U ${POSTGRES_USER:-forgejo} -Fc -d ${POSTGRES_DB:-forgejo} -f /tmp/forgejo.pgdump \u0026\u0026 docker compose -f /srv/omahab/apps/forgejo/compose.yaml exec forgejo forgejo dump --file /tmp/forgejo_app.zip --type zip || true"
+          "runuser -u postgres -- pg_dump -Fc -d forgejo -f /var/lib/omahab/dumps/forgejo.pgdump"
         ],
         "post_restore": [
           "/bin/sh",
           "-c",
-          "docker compose -f /srv/omahab/apps/forgejo/compose.yaml exec forgejo-postgres pg_restore -U ${POSTGRES_USER:-forgejo} -d ${POSTGRES_DB:-forgejo} --clean --if-exists /tmp/forgejo.pgdump \u0026\u0026 docker compose -f /srv/omahab/apps/forgejo/compose.yaml restart forgejo"
+          "runuser -u postgres -- pg_restore --clean --if-exists -d forgejo /var/lib/omahab/dumps/forgejo.pgdump \u0026\u0026 systemctl restart forgejo.service"
         ]
       },
       "oidc": {
@@ -212,12 +212,12 @@
         "pre_backup": [
           "/bin/sh",
           "-c",
-          "docker compose -f /srv/omahab/apps/woodpecker/compose.yaml exec woodpecker-postgres pg_dump -U ${WOODPECKER_POSTGRES_USER:-woodpecker} -Fc -d ${WOODPECKER_POSTGRES_DB:-woodpecker} -f /tmp/woodpecker.pgdump"
+          "runuser -u postgres -- pg_dump -Fc -d woodpecker -f /var/lib/omahab/dumps/woodpecker.pgdump"
         ],
         "post_restore": [
           "/bin/sh",
           "-c",
-          "docker compose -f /srv/omahab/apps/woodpecker/compose.yaml exec woodpecker-postgres pg_restore -U ${WOODPECKER_POSTGRES_USER:-woodpecker} -d ${WOODPECKER_POSTGRES_DB:-woodpecker} --clean --if-exists /tmp/woodpecker.pgdump \u0026\u0026 docker compose -f /srv/omahab/apps/woodpecker/compose.yaml restart woodpecker-server woodpecker-agent"
+          "runuser -u postgres -- pg_restore --clean --if-exists -d woodpecker /var/lib/omahab/dumps/woodpecker.pgdump \u0026\u0026 systemctl restart woodpecker-server.service woodpecker-agent.service"
         ]
       },
       "oidc": {
@@ -287,12 +287,12 @@
         "pre_backup": [
           "/bin/sh",
           "-c",
-          "docker compose -f /srv/omahab/apps/immich/compose.yaml exec immich-postgres pg_dump -U ${IMMICH_POSTGRES_USER:-postgres} -Fc -d ${IMMICH_POSTGRES_DB:-immich} -f /tmp/immich.pgdump \u0026\u0026 docker compose -f /srv/omahab/apps/immich/compose.yaml exec immich-server immich backup --out /tmp/immich_library_manifest.json || echo 'library manifest hook placeholder'"
+          "runuser -u postgres -- pg_dump -Fc -d immich -f /var/lib/omahab/dumps/immich.pgdump"
         ],
         "post_restore": [
           "/bin/sh",
           "-c",
-          "docker compose -f /srv/omahab/apps/immich/compose.yaml exec immich-postgres pg_restore -U ${IMMICH_POSTGRES_USER:-postgres} -d ${IMMICH_POSTGRES_DB:-immich} --clean --if-exists /tmp/immich.pgdump \u0026\u0026 rsync -a /backups/immich/library/ /srv/omahab/apps/immich/library/ || cp -a /tmp/immich_library/* /srv/omahab/apps/immich/library/ \u0026\u0026 docker compose -f /srv/omahab/apps/immich/compose.yaml restart immich-server"
+          "runuser -u postgres -- pg_restore --clean --if-exists -d immich /var/lib/omahab/dumps/immich.pgdump \u0026\u0026 systemctl restart immich-server.service immich-machine-learning.service"
         ]
       },
       "oidc": {
@@ -348,12 +348,12 @@
         "pre_backup": [
           "/bin/sh",
           "-c",
-          "docker compose -f /srv/omahab/apps/paperless-ngx/compose.yaml exec paperless-postgres pg_dump -U ${PAPERLESS_POSTGRES_USER:-paperless} -Fc -d ${PAPERLESS_POSTGRES_DB:-paperless} -f /tmp/paperless.pgdump \u0026\u0026 docker compose -f /srv/omahab/apps/paperless-ngx/compose.yaml exec paperless document_exporter --no-progress --zip /tmp/paperless_export.zip || docker compose -f /srv/omahab/apps/paperless-ngx/compose.yaml exec paperless python3 manage.py document_exporter /tmp/paperless_export --zip --no-progress || true"
+          "runuser -u postgres -- pg_dump -Fc -d paperless -f /var/lib/omahab/dumps/paperless-ngx.pgdump"
         ],
         "post_restore": [
           "/bin/sh",
           "-c",
-          "docker compose -f /srv/omahab/apps/paperless-ngx/compose.yaml exec paperless-postgres pg_restore -U ${PAPERLESS_POSTGRES_USER:-paperless} -d ${PAPERLESS_POSTGRES_DB:-paperless} --clean --if-exists /tmp/paperless.pgdump \u0026\u0026 docker compose -f /srv/omahab/apps/paperless-ngx/compose.yaml exec paperless python3 manage.py document_importer /tmp/paperless_export --no-progress || rsync -a /backups/paperless/media/ /srv/omahab/apps/paperless/media/ \u0026\u0026 docker compose -f /srv/omahab/apps/paperless-ngx/compose.yaml restart paperless"
+          "runuser -u postgres -- pg_restore --clean --if-exists -d paperless /var/lib/omahab/dumps/paperless-ngx.pgdump \u0026\u0026 systemctl restart paperless-web.service paperless-consumer.service paperless-scheduler.service"
         ]
       },
       "oidc": {
@@ -421,12 +421,12 @@
         "pre_backup": [
           "/bin/sh",
           "-c",
-          "docker compose -f /srv/omahab/apps/karakeep/compose.yaml exec karakeep-postgres pg_dump -U ${KARAKEEP_POSTGRES_USER:-karakeep} -Fc -d ${KARAKEEP_POSTGRES_DB:-karakeep} -f /tmp/karakeep.pgdump"
+          "runuser -u postgres -- pg_dump -Fc -d karakeep -f /var/lib/omahab/dumps/karakeep.pgdump"
         ],
         "post_restore": [
           "/bin/sh",
           "-c",
-          "docker compose -f /srv/omahab/apps/karakeep/compose.yaml exec karakeep-postgres pg_restore -U ${KARAKEEP_POSTGRES_USER:-karakeep} -d ${KARAKEEP_POSTGRES_DB:-karakeep} --clean --if-exists /tmp/karakeep.pgdump \u0026\u0026 docker compose -f /srv/omahab/apps/karakeep/compose.yaml restart karakeep karakeep-meilisearch karakeep-chrome"
+          "runuser -u postgres -- pg_restore --clean --if-exists -d karakeep /var/lib/omahab/dumps/karakeep.pgdump \u0026\u0026 systemctl restart karakeep.service"
         ]
       },
       "oidc": {
@@ -547,12 +547,12 @@
         "pre_backup": [
           "/bin/sh",
           "-c",
-          "docker compose -f /srv/omahab/apps/litellm/compose.yaml exec litellm-postgres pg_dump -U ${LITELLM_POSTGRES_USER:-litellm} -Fc -d ${LITELLM_POSTGRES_DB:-litellm} -f /tmp/litellm.pgdump"
+          "runuser -u postgres -- pg_dump -Fc -d litellm -f /var/lib/omahab/dumps/litellm.pgdump"
         ],
         "post_restore": [
           "/bin/sh",
           "-c",
-          "docker compose -f /srv/omahab/apps/litellm/compose.yaml exec litellm-postgres pg_restore -U ${LITELLM_POSTGRES_USER:-litellm} -d ${LITELLM_POSTGRES_DB:-litellm} --clean --if-exists /tmp/litellm.pgdump \u0026\u0026 docker compose -f /srv/omahab/apps/litellm/compose.yaml restart litellm"
+          "runuser -u postgres -- pg_restore --clean --if-exists -d litellm /var/lib/omahab/dumps/litellm.pgdump \u0026\u0026 systemctl restart litellm.service"
         ]
       },
       "oidc": {

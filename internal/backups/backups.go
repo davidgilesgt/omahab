@@ -56,6 +56,14 @@ func DefaultPaths() []string {
 		"/srv/omahab/apps",
 		"/srv/omahab/projects",
 		"/srv/omahab/sync",
+		// Native (NixOS systemd) services relocated app state from docker
+		// volumes to these host paths; they follow the backup contract.
+		"/var/lib/forgejo",
+		"/var/lib/pocket-id",
+		"/var/lib/karakeep",
+		"/var/lib/syncthing",
+		"/var/lib/ntfy-sh",
+		"/var/lib/omahab/dumps",
 	}
 }
 // Config holds controller-level defaults.

@@ -132,6 +132,7 @@ in
     systemd.tmpfiles.rules = [
       "d ${stateDir} 0700 root root - -"
       "d ${secretsDir} 0700 root root - -"
+      "d ${stateDir}/dumps 0700 root root - -"
       "d ${appEnvDir} 0700 root root - -"
       "d ${stateDir}/caddy 0755 root root - -"
       "d ${stateDir}/cloudflared 0700 cloudflared cloudflared - -"

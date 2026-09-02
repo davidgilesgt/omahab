@@ -257,24 +257,16 @@
         "endpoint": "http://forgejo:3000/-/healthz"
       },
       "backup": {
-        "strategy": "database-dump-and-volume",
+        "strategy": "database-dump-and-path",
         "preHooks": [
-          "docker compose -f {{.ComposeFile}} exec forgejo-postgres pg_dump -U ${POSTGRES_USER:-forgejo} -Fc -d ${POSTGRES_DB:-forgejo} -f /tmp/forgejo.pgdump",
-          "docker compose -f {{.ComposeFile}} exec forgejo forgejo dump --file /tmp/forgejo_app.zip --type zip || true"
-        ],
-        "postHooks": [],
-        "volumes": [
-          "forgejo_data",
-          "forgejo_postgres_data"
-        ],
-        "notes": "Database MUST be dumped via pg_dump; raw volume copy alone is NOT a valid backup. Repos on volume + pgdump together are restorable."
+          "runuser -u postgres -- pg_dump -Fc -d forgejo -f /var/lib/omahab/dumps/forgejo.pgdump"
+        ]
       },
       "restore": {
         "hooks": [
-          "docker compose -f {{.ComposeFile}} exec forgejo-postgres pg_restore -U ${POSTGRES_USER:-forgejo} -d ${POSTGRES_DB:-forgejo} --clean --if-exists /tmp/forgejo.pgdump",
-          "docker compose -f {{.ComposeFile}} restart forgejo"
-        ],
-        "notes": "Restore Postgres dump before app start; repos are on forgejo_data volume."
+          "runuser -u postgres -- pg_restore --clean --if-exists -d forgejo /var/lib/omahab/dumps/forgejo.pgdump",
+          "systemctl restart forgejo.service"
+        ]
       },
       "secrets": {
         "secretFilesSupported": true,
@@ -374,20 +366,15 @@
         "endpoint": "http://woodpecker-server:8000/healthz"
       },
       "backup": {
-        "strategy": "database-dump-and-volume",
+        "strategy": "database-dump-and-path",
         "preHooks": [
-          "docker compose -f {{.ComposeFile}} exec woodpecker-postgres pg_dump -U ${WOODPECKER_POSTGRES_USER:-woodpecker} -Fc -d ${WOODPECKER_POSTGRES_DB:-woodpecker} -f /tmp/woodpecker.pgdump"
-        ],
-        "postHooks": [],
-        "volumes": [
-          "woodpecker_postgres_data"
-        ],
-        "notes": "Consistent Postgres dump required; do not snapshot live DB files alone."
+          "runuser -u postgres -- pg_dump -Fc -d woodpecker -f /var/lib/omahab/dumps/woodpecker.pgdump"
+        ]
       },
       "restore": {
         "hooks": [
-          "docker compose -f {{.ComposeFile}} exec woodpecker-postgres pg_restore -U ${WOODPECKER_POSTGRES_USER:-woodpecker} -d ${WOODPECKER_POSTGRES_DB:-woodpecker} --clean --if-exists /tmp/woodpecker.pgdump",
-          "docker compose -f {{.ComposeFile}} restart woodpecker-server woodpecker-agent"
+          "runuser -u postgres -- pg_restore --clean --if-exists -d woodpecker /var/lib/omahab/dumps/woodpecker.pgdump",
+          "systemctl restart woodpecker-server.service woodpecker-agent.service"
         ]
       },
       "secrets": {
@@ -627,27 +614,16 @@
         "endpoint": "http://immich-server:2283/api/server/ping"
       },
       "backup": {
-        "strategy": "database-dump-and-library",
+        "strategy": "database-dump-and-path",
         "preHooks": [
-          "docker compose -f {{.ComposeFile}} exec immich-postgres pg_dump -U ${IMMICH_POSTGRES_USER:-postgres} -Fc -d ${IMMICH_POSTGRES_DB:-immich} -f /tmp/immich.pgdump",
-          "docker compose -f {{.ComposeFile}} exec immich-server immich backup --out /tmp/immich_library_manifest.json || echo 'library manifest hook placeholder'"
-        ],
-        "postHooks": [],
-        "volumes": [
-          "immich_postgres_data"
-        ],
-        "hostPaths": [
-          "/srv/omahab/apps/immich/library"
-        ],
-        "notes": "Per https://docs.immich.app/administration/backup-and-restore/ : database dump + upload folder are both required and must be consistent. Raw DB files alone are invalid."
+          "runuser -u postgres -- pg_dump -Fc -d immich -f /var/lib/omahab/dumps/immich.pgdump"
+        ]
       },
       "restore": {
         "hooks": [
-          "docker compose -f {{.ComposeFile}} exec immich-postgres pg_restore -U ${IMMICH_POSTGRES_USER:-postgres} -d ${IMMICH_POSTGRES_DB:-immich} --clean --if-exists /tmp/immich.pgdump",
-          "rsync -a /backups/immich/library/ /srv/omahab/apps/immich/library/ || cp -a /tmp/immich_library/* /srv/omahab/apps/immich/library/",
-          "docker compose -f {{.ComposeFile}} restart immich-server"
-        ],
-        "notes": "Restore DB dump, then restore library files, then restart. Verify with `immich admin` check."
+          "runuser -u postgres -- pg_restore --clean --if-exists -d immich /var/lib/omahab/dumps/immich.pgdump",
+          "systemctl restart immich-server.service immich-machine-learning.service"
+        ]
       },
       "secrets": {
         "secretFilesSupported": true,
@@ -756,26 +732,15 @@
         "endpoint": "http://paperless:8000/api/"
       },
       "backup": {
-        "strategy": "database-dump-and-volume",
+        "strategy": "database-dump-and-path",
         "preHooks": [
-          "docker compose -f {{.ComposeFile}} exec paperless-postgres pg_dump -U ${PAPERLESS_POSTGRES_USER:-paperless} -Fc -d ${PAPERLESS_POSTGRES_DB:-paperless} -f /tmp/paperless.pgdump",
-          "docker compose -f {{.ComposeFile}} exec paperless document_exporter --no-progress --zip /tmp/paperless_export.zip || docker compose -f {{.ComposeFile}} exec paperless python3 manage.py document_exporter /tmp/paperless_export --zip --no-progress || true"
-        ],
-        "postHooks": [],
-        "volumes": [
-          "paperless_postgres_data"
-        ],
-        "hostPaths": [
-          "/srv/omahab/apps/paperless/data",
-          "/srv/omahab/apps/paperless/media"
-        ],
-        "notes": "Consistent DB dump + media/data volume snapshot required; raw DB files alone are invalid. document_exporter provides portable fallback."
+          "runuser -u postgres -- pg_dump -Fc -d paperless -f /var/lib/omahab/dumps/paperless-ngx.pgdump"
+        ]
       },
       "restore": {
         "hooks": [
-          "docker compose -f {{.ComposeFile}} exec paperless-postgres pg_restore -U ${PAPERLESS_POSTGRES_USER:-paperless} -d ${PAPERLESS_POSTGRES_DB:-paperless} --clean --if-exists /tmp/paperless.pgdump",
-          "docker compose -f {{.ComposeFile}} exec paperless python3 manage.py document_importer /tmp/paperless_export --no-progress || rsync -a /backups/paperless/media/ /srv/omahab/apps/paperless/media/",
-          "docker compose -f {{.ComposeFile}} restart paperless"
+          "runuser -u postgres -- pg_restore --clean --if-exists -d paperless /var/lib/omahab/dumps/paperless-ngx.pgdump",
+          "systemctl restart paperless-web.service paperless-consumer.service paperless-scheduler.service"
         ]
       },
       "secrets": {
@@ -883,21 +848,15 @@
         "endpoint": "http://karakeep:3000/api/health"
       },
       "backup": {
-        "strategy": "database-dump-and-volume",
+        "strategy": "database-dump-and-path",
         "preHooks": [
-          "docker compose -f {{.ComposeFile}} exec karakeep-postgres pg_dump -U ${KARAKEEP_POSTGRES_USER:-karakeep} -Fc -d ${KARAKEEP_POSTGRES_DB:-karakeep} -f /tmp/karakeep.pgdump"
-        ],
-        "postHooks": [],
-        "volumes": [
-          "karakeep_data",
-          "karakeep_postgres_data"
-        ],
-        "notes": "Meilisearch index can be rebuilt from DB+data volume; only DB and data volume are authoritative backups."
+          "runuser -u postgres -- pg_dump -Fc -d karakeep -f /var/lib/omahab/dumps/karakeep.pgdump"
+        ]
       },
       "restore": {
         "hooks": [
-          "docker compose -f {{.ComposeFile}} exec karakeep-postgres pg_restore -U ${KARAKEEP_POSTGRES_USER:-karakeep} -d ${KARAKEEP_POSTGRES_DB:-karakeep} --clean --if-exists /tmp/karakeep.pgdump",
-          "docker compose -f {{.ComposeFile}} restart karakeep karakeep-meilisearch karakeep-chrome"
+          "runuser -u postgres -- pg_restore --clean --if-exists -d karakeep /var/lib/omahab/dumps/karakeep.pgdump",
+          "systemctl restart karakeep.service"
         ]
       },
       "secrets": {
@@ -1114,21 +1073,15 @@
         "endpoint": "http://litellm:4000/health/liveliness"
       },
       "backup": {
-        "strategy": "database-dump",
+        "strategy": "database-dump-and-path",
         "preHooks": [
-          "docker compose -f {{.ComposeFile}} exec litellm-postgres pg_dump -U ${LITELLM_POSTGRES_USER:-litellm} -Fc -d ${LITELLM_POSTGRES_DB:-litellm} -f /tmp/litellm.pgdump"
-        ],
-        "postHooks": [],
-        "volumes": [
-          "litellm_postgres_data",
-          "litellm_auth"
-        ],
-        "notes": "Credential ciphertext backup is encrypted via omahabd secrets broker; DB dump contains virtual keys and routing. litellm_auth (OAuth refresh state, 0700/umask 077) is authoritative; generated config under /srv/omahab/apps/litellm/config is rebuildable and not backed up. Pinned image must contain xAI OAuth support (BerriAI/litellm#29866); fail closed if `litellm xai-oauth login` or `use_xai_oauth` is missing."
+          "runuser -u postgres -- pg_dump -Fc -d litellm -f /var/lib/omahab/dumps/litellm.pgdump"
+        ]
       },
       "restore": {
         "hooks": [
-          "docker compose -f {{.ComposeFile}} exec litellm-postgres pg_restore -U ${LITELLM_POSTGRES_USER:-litellm} -d ${LITELLM_POSTGRES_DB:-litellm} --clean --if-exists /tmp/litellm.pgdump",
-          "docker compose -f {{.ComposeFile}} restart litellm"
+          "runuser -u postgres -- pg_restore --clean --if-exists -d litellm /var/lib/omahab/dumps/litellm.pgdump",
+          "systemctl restart litellm.service"
         ]
       },
       "secrets": {
