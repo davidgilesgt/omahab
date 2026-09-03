@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -12,11 +13,11 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
 	"time"
-
 	"github.com/omahab/omahab/internal/api"
 	"github.com/omahab/omahab/internal/apps"
 	"github.com/omahab/omahab/internal/backups"
@@ -3391,11 +3392,12 @@ func (b *Backend) ForgejoWebhookSecret(ctx context.Context) (string, error) {
 	}
 	return strings.TrimSpace(sec), nil
 }
-
 // OnPullRequest handles a verified pull_request webhook event (opened/synchronized/reopened).
-// It records a normalized domain event and is the hook for Step 6 automated review (stub for now).
+// It records a normalized domain event and performs the Step 6 automated review:
+// - Fork PRs (HeadRepoFullName != BaseRepoFullName) are skipped with ci.review_skipped_untrusted.
+// - Same-repo PRs get a review workspace (review-pr-<index>, SkipBranchCreate reusing the PR head branch, RunPrint) that posts a Forgejo review.
+// Concurrency is one review per PR (UNIQUE(project_id,branch) + stop running on synchronized).
 func (b *Backend) OnPullRequest(ctx context.Context, ev scm.PullRequestEvent) error {
-	// Record event for observability; Step 6 will create a review workspace here, fork PRs are skipped.
 	_, _ = b.events.Publish(ctx, events.PublishInput{
 		Type:       "scm.pull_request",
 		Severity:   "info",
@@ -3418,10 +3420,212 @@ func (b *Backend) OnPullRequest(ctx context.Context, ev scm.PullRequestEvent) er
 			"sender":               ev.Sender,
 		},
 	})
+	// Fork detection: skip untrusted forks until microVM isolation exists.
+	headFull := strings.TrimSpace(ev.PullRequest.HeadRepoFullName)
+	baseFull := strings.TrimSpace(ev.PullRequest.BaseRepoFullName)
+	if headFull != "" && baseFull != "" && headFull != baseFull {
+		_, _ = b.events.Publish(ctx, events.PublishInput{
+			Type:       "ci.review_skipped_untrusted",
+			Severity:   "info",
+			ResourceID: ev.Repository.Owner + "/" + ev.Repository.Name,
+			Message:    fmt.Sprintf("fork PR #%d skipped (untrusted) %s != %s", ev.PullRequest.Index, headFull, baseFull),
+			Data: map[string]any{
+				"pull_index":          ev.PullRequest.Index,
+				"head_repo_full_name": headFull,
+				"base_repo_full_name": baseFull,
+				"head_branch":         ev.PullRequest.HeadBranch,
+				"base_branch":         ev.PullRequest.BaseBranch,
+			},
+		})
+		return nil
+	}
+	// Automated review for same-repo PRs.
+	if b.projects == nil || b.workspaces == nil {
+		return nil
+	}
+	proj, err := b.findProjectForRepo(ctx, ev.Repository.Owner, ev.Repository.Name)
+	if err != nil {
+		_, _ = b.events.Publish(ctx, events.PublishInput{
+			Type:       "ci.review_failed",
+			Severity:   "warning",
+			ResourceID: ev.Repository.Owner + "/" + ev.Repository.Name,
+			Message:    fmt.Sprintf("review failed for PR #%d: project not found for %s/%s", ev.PullRequest.Index, ev.Repository.Owner, ev.Repository.Name),
+			Data: map[string]any{
+				"pull_index": ev.PullRequest.Index,
+				"owner":      ev.Repository.Owner,
+				"repo":       ev.Repository.Name,
+				"reason":     err.Error(),
+			},
+		})
+		// Still attempt to notify via Forgejo if possible.
+		b.postReviewFailure(ctx, ev, "project not found for "+ev.Repository.Owner+"/"+ev.Repository.Name)
+		return nil
+	}
+	headBranch := strings.TrimSpace(ev.PullRequest.HeadBranch)
+	if headBranch == "" {
+		headBranch = fmt.Sprintf("review-pr-%d", ev.PullRequest.Index)
+	}
+	// Concurrency: one review per PR at a time. UNIQUE(project_id,branch) blocks duplicates;
+	// on synchronized while a review is running, stop the running one first.
+	if list, err := b.workspaces.ListByProject(ctx, proj.ID); err == nil {
+		for _, ws := range list {
+			if ws.Branch == headBranch && (ws.Status == workspaces.StatusPending || ws.Status == workspaces.StatusRunning) {
+				// Delete (which stops and revokes) to free the UNIQUE(project_id,branch) slot.
+				// Spec says "stop", but Delete is required to satisfy the DB UNIQUE; Stop alone would still block.
+				_ = b.workspaces.Delete(ctx, string(ws.ID))
+				break
+			}
+		}
+	}
+	title := fmt.Sprintf("review-pr-%d", ev.PullRequest.Index)
+	prompt := buildReviewPrompt(ev)
+	ws, err := b.workspaces.Create(ctx, workspaces.CreateInput{
+		ProjectID:        proj.ID,
+		Title:            title,
+		Branch:           headBranch,
+		SkipBranchCreate: true,
+		Instructions:     prompt,
+		Agent:            "omp",
+		DevcontainerSource: "default",
+	})
+	if err != nil {
+		if errors.Is(err, workspaces.ErrAlreadyExists) {
+			// Retry once after deleting any remaining runner (race).
+			if list, lerr := b.workspaces.ListByProject(ctx, proj.ID); lerr == nil {
+				for _, existing := range list {
+					if existing.Branch == headBranch && (existing.Status == workspaces.StatusPending || existing.Status == workspaces.StatusRunning) {
+						_ = b.workspaces.Delete(ctx, string(existing.ID))
+						break
+					}
+				}
+			}
+			// Also try deleting any stopped row with same branch to free UNIQUE.
+			// Since UNIQUE is unconditional, we must delete the old row even if stopped.
+			// Query directly for any workspace with same branch (any status) and delete it.
+			if list2, lerr := b.workspaces.ListByProject(ctx, proj.ID); lerr == nil {
+				for _, existing := range list2 {
+					if existing.Branch == headBranch {
+						_ = b.workspaces.Delete(ctx, string(existing.ID))
+						break
+					}
+				}
+			}
+			ws, err = b.workspaces.Create(ctx, workspaces.CreateInput{
+				ProjectID:        proj.ID,
+				Title:            title,
+				Branch:           headBranch,
+				SkipBranchCreate: true,
+				Instructions:     prompt,
+				Agent:            "omp",
+				DevcontainerSource: "default",
+			})
+		}
+		if err != nil {
+			reason := err.Error()
+			if len(reason) > 500 {
+				reason = reason[:500]
+			}
+			b.postReviewFailure(ctx, ev, reason)
+			return nil
+		}
+	}
+	// Ensure workspace is cleaned up after review (best-effort, background context).
+	defer func(id domain.ID) {
+		delCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		_ = b.workspaces.Delete(delCtx, string(id))
+	}(ws.ID)
+	// Run non-interactively with 20m timeout.
+	runCtx, cancel := context.WithTimeout(ctx, 20*time.Minute)
+	defer cancel()
+	stdout, err := b.workspaces.RunPrint(runCtx, string(ws.ID), prompt)
+	if err != nil {
+		reason := err.Error()
+		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+			reason = "review timed out after 20m"
+		}
+		if len(reason) > 500 {
+			reason = reason[:500]
+		}
+		b.postReviewFailure(ctx, ev, reason)
+		return nil
+	}
+	reviewEvent, reviewBody, reviewComments, parseErr := parseReviewOutput(stdout)
+	if parseErr != nil {
+		reason := "could not parse model output: " + parseErr.Error()
+		if len(reason) > 500 {
+			reason = reason[:500]
+		}
+		b.postReviewFailure(ctx, ev, reason)
+		return nil
+	}
+	finalEvent := strings.ToUpper(strings.TrimSpace(reviewEvent))
+	finalBody := strings.TrimSpace(reviewBody)
+	if finalEvent == "APPROVED" {
+		finalEvent = "COMMENT"
+		if finalBody == "" {
+			finalBody = "LGTM (automated review; merge manually)"
+		} else {
+			finalBody = "LGTM (automated review; merge manually)\n\n" + finalBody
+		}
+	} else if finalEvent == "REQUEST_CHANGES" {
+		// keep as is; never auto-merge, only comment or request changes
+	} else {
+		finalEvent = "COMMENT"
+	}
+	if b.scm == nil {
+		b.postReviewFailure(ctx, ev, "scm not configured")
+		return nil
+	}
+	fc := b.scm.ForgejoClient()
+	if fc == nil {
+		b.postReviewFailure(ctx, ev, "forgejo client not configured")
+		return nil
+	}
+	repoRef := scm.RepoRef{Owner: ev.Repository.Owner, Name: ev.Repository.Name}
+	var outComments []scm.PullReviewComment
+	for _, c := range reviewComments {
+		if strings.TrimSpace(c.Path) == "" && strings.TrimSpace(c.Body) == "" {
+			continue
+		}
+		outComments = append(outComments, scm.PullReviewComment{
+			Path:        c.Path,
+			Body:        c.Body,
+			NewPosition: c.NewPosition,
+		})
+	}
+	input := scm.PullReviewInput{
+		Event:    finalEvent,
+		Body:     finalBody,
+		CommitID: ev.PullRequest.HeadSHA,
+		Comments: outComments,
+	}
+	if err := fc.CreatePullReview(ctx, repoRef, ev.PullRequest.Index, input); err != nil {
+		_, _ = b.events.Publish(ctx, events.PublishInput{
+			Type:       "ci.review_failed",
+			Severity:   "warning",
+			ResourceID: ev.Repository.Owner + "/" + ev.Repository.Name,
+			Message:    fmt.Sprintf("review failed to post for PR #%d: %v", ev.PullRequest.Index, err),
+			Data: map[string]any{
+				"pull_index": ev.PullRequest.Index,
+				"error":      err.Error(),
+			},
+		})
+		// As a fallback, try to post a generic failure comment.
+		reason := err.Error()
+		if len(reason) > 500 {
+			reason = reason[:500]
+		}
+		_ = fc.CreatePullReview(ctx, repoRef, ev.PullRequest.Index, scm.PullReviewInput{
+			Event:    "COMMENT",
+			Body:     "Automated review failed: " + reason,
+			CommitID: ev.PullRequest.HeadSHA,
+		})
+		return nil
+	}
 	return nil
 }
 
-// OnPush handles a verified push webhook event. It records scm.push for observability.
 func (b *Backend) OnPush(ctx context.Context, ev scm.PushEvent) error {
 	_, _ = b.events.Publish(ctx, events.PublishInput{
 		Type:       "scm.push",
@@ -3439,6 +3643,142 @@ func (b *Backend) OnPush(ctx context.Context, ev scm.PushEvent) error {
 	})
 	return nil
 }
+// Helpers for OnPullRequest automated review (Step 6).
+
+func buildReviewPrompt(ev scm.PullRequestEvent) string {
+	return fmt.Sprintf("You are reviewing PR #%d '%s' in %s/%s. Base: %s. Run the project's tests if present. Produce a review as JSON to stdout: {\"event\":\"COMMENT\"|\"REQUEST_CHANGES\",\"body\":\"...\",\"comments\":[{\"path\",\"new_position\",\"body\"}]}.", ev.PullRequest.Index, ev.PullRequest.Title, ev.Repository.Owner, ev.Repository.Name, ev.PullRequest.BaseBranch)
+}
+
+func (b *Backend) postReviewFailure(ctx context.Context, ev scm.PullRequestEvent, reason string) {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "unknown error"
+	}
+	if len(reason) > 500 {
+		reason = reason[:500]
+	}
+	body := "Automated review failed: " + reason
+	_, _ = b.events.Publish(ctx, events.PublishInput{
+		Type:       "ci.review_failed",
+		Severity:   "warning",
+		ResourceID: ev.Repository.Owner + "/" + ev.Repository.Name,
+		Message:    fmt.Sprintf("automated review failed for PR #%d: %s", ev.PullRequest.Index, reason),
+		Data: map[string]any{
+			"pull_index":  ev.PullRequest.Index,
+			"reason":      reason,
+			"head_branch": ev.PullRequest.HeadBranch,
+			"head_sha":    ev.PullRequest.HeadSHA,
+		},
+	})
+	if b.scm != nil {
+		if fc := b.scm.ForgejoClient(); fc != nil {
+			repoRef := scm.RepoRef{Owner: ev.Repository.Owner, Name: ev.Repository.Name}
+			_ = fc.CreatePullReview(ctx, repoRef, ev.PullRequest.Index, scm.PullReviewInput{
+				Event:    "COMMENT",
+				Body:     body,
+				CommitID: ev.PullRequest.HeadSHA,
+			})
+		}
+	}
+}
+
+func (b *Backend) findProjectForRepo(ctx context.Context, owner, name string) (*projects.Project, error) {
+	if b.projects == nil {
+		return nil, fmt.Errorf("%w: projects not configured", ErrNotConfigured)
+	}
+	list, err := b.projects.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	owner = strings.TrimSpace(owner)
+	name = strings.TrimSpace(name)
+	for _, p := range list {
+		o, n, err := parseRepoOwnerName(p.RepositoryURL)
+		if err != nil {
+			continue
+		}
+		if strings.EqualFold(o, owner) && strings.EqualFold(n, name) {
+			proj := p
+			return &proj, nil
+		}
+	}
+	return nil, fmt.Errorf("%w: project for %s/%s not found", store.ErrNotFound, owner, name)
+}
+
+func parseRepoOwnerName(raw string) (string, string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", "", fmt.Errorf("empty repository url")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", "", err
+	}
+	path := strings.Trim(u.Path, "/")
+	path = strings.TrimSuffix(path, ".git")
+	parts := strings.Split(path, "/")
+	if len(parts) < 2 {
+		return "", "", fmt.Errorf("invalid repo path %q", u.Path)
+	}
+	owner := parts[len(parts)-2]
+	nm := parts[len(parts)-1]
+	if owner == "" || nm == "" {
+		return "", "", fmt.Errorf("empty owner/name in %q", raw)
+	}
+	return owner, nm, nil
+}
+
+type reviewPayload struct {
+	Event    string `json:"event"`
+	Body     string `json:"body"`
+	Comments []struct {
+		Path        string `json:"path"`
+		Body        string `json:"body"`
+		NewPosition int    `json:"new_position"`
+	} `json:"comments"`
+}
+
+func parseReviewOutput(stdout []byte) (string, string, []scm.PullReviewComment, error) {
+	trimmed := bytes.TrimSpace(stdout)
+	if len(trimmed) == 0 {
+		return "", "", nil, fmt.Errorf("empty output")
+	}
+	var direct reviewPayload
+	if err := json.Unmarshal(trimmed, &direct); err == nil && strings.TrimSpace(direct.Event) != "" {
+		var out []scm.PullReviewComment
+		for _, c := range direct.Comments {
+			out = append(out, scm.PullReviewComment{Path: c.Path, Body: c.Body, NewPosition: c.NewPosition})
+		}
+		return direct.Event, direct.Body, out, nil
+	}
+	for i := len(stdout) - 1; i >= 0; i-- {
+		if stdout[i] != '{' {
+			continue
+		}
+		dec := json.NewDecoder(bytes.NewReader(stdout[i:]))
+		var cand reviewPayload
+		if err := dec.Decode(&cand); err != nil {
+			continue
+		}
+		if strings.TrimSpace(cand.Event) == "" {
+			continue
+		}
+		var out []scm.PullReviewComment
+		for _, c := range cand.Comments {
+			out = append(out, scm.PullReviewComment{Path: c.Path, Body: c.Body, NewPosition: c.NewPosition})
+		}
+		return cand.Event, cand.Body, out, nil
+	}
+	return "", "", nil, fmt.Errorf("no JSON review object found in output: %q", truncateForLog(string(trimmed), 500))
+}
+
+func truncateForLog(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
+}
+
 
 
 

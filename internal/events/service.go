@@ -32,6 +32,8 @@ var allowedTypes = map[string]bool{
 	"service.unhealthy":            true,
 	"service.update_available":     true,
 	"ci.failed":                    true,
+	"ci.review_skipped_untrusted":  true,
+	"ci.review_failed":             true,
 	"deployment.completed":         true,
 	"agent.awaiting_approval":      true,
 	"syncthing.conflict":           true,
@@ -44,6 +46,8 @@ var allowedTypes = map[string]bool{
 	"applications.catalog_missing": true,
 	"setup.step_failed":            true,
 	"setup.reconciled":             true,
+	"scm.pull_request":             true,
+	"scm.push":                     true,
 }
 
 // Allowed severities.

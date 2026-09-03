@@ -676,7 +676,6 @@ func (s *Service) Attach(ctx context.Context, id string) error {
 	_, _ = s.db.ExecContext(ctx, `UPDATE workspaces SET last_active_at = ?, updated_at = ? WHERE id = ?`, now, now, id)
 	return nil
 }
-
 // Send sends a message to the workspace tmux session via the Runner.
 func (s *Service) Send(ctx context.Context, id string, message string) error {
 	ws, err := s.Get(ctx, id)
@@ -695,6 +694,28 @@ func (s *Service) Send(ctx context.Context, id string, message string) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, _ = s.db.ExecContext(ctx, `UPDATE workspaces SET last_active_at = ?, updated_at = ? WHERE id = ?`, now, now, id)
 	return nil
+}
+
+// RunPrint runs a non-interactive prompt inside the workspace and returns stdout.
+// It validates the workspace is not stopped/expired and delegates to the Runner.
+func (s *Service) RunPrint(ctx context.Context, id string, prompt string) ([]byte, error) {
+	ws, err := s.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if ws.Status == StatusStopped || ws.Status == StatusExpired {
+		return nil, fmt.Errorf("%w: workspace is %s", ErrValidation, ws.Status)
+	}
+	if strings.TrimSpace(prompt) == "" {
+		return nil, fmt.Errorf("%w: prompt is required", ErrValidation)
+	}
+	out, err := s.runner.RunPrint(ctx, id, prompt)
+	if err != nil {
+		return nil, fmt.Errorf("runner runprint: %w", err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, _ = s.db.ExecContext(ctx, `UPDATE workspaces SET last_active_at = ?, updated_at = ? WHERE id = ?`, now, now, id)
+	return out, nil
 }
 
 // Touch updates last_active_at to now, extending idle expiry.
