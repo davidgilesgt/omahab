@@ -106,7 +106,10 @@ export function BootstrapPage() {
       const snaps = (data.snapshots as Array<{ id: string; time: string; hostname: string }>) ?? [];
       setRestoreSnapshots(snaps);
       if (snaps.length === 0) toast.error("No snapshots found");
-      else if (snaps.length === 1) setRestoreSelected(snaps[0].id);
+      else if (snaps.length === 1) {
+        const first = snaps[0];
+        if (first) setRestoreSelected(first.id);
+      }
       toast.success(`Found ${snaps.length} snapshot(s)`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "connect failed");

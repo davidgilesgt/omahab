@@ -285,23 +285,3 @@ export interface CreateCompanionEnrollmentResponse {
   code: string;
   expires_at: string;
 }
-
-export interface HermesProviderOAuth {
-  provider: string;
-  connected: boolean;
-  status?: string;
-}
-
-export interface HermesNousSession {
-  session_id: string;
-  verification_url: string;
-  status?: string;
-  provider?: string;
-  expires_at?: string;
-}
-
-export interface HermesToolset {
-  name: string;
-  provider?: string;
-  description?: string;
-}

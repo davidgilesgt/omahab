@@ -202,19 +202,6 @@ export class ApiClient {
   setToolEnvironmentGrant = (deviceId: string, granted: boolean) =>
     this.request<void>(`/tool-environment/grants/${encodeURIComponent(deviceId)}`, { method: granted ? "PUT" : "DELETE", body: JSON.stringify({}) });
 
-  // Hermes Nous Portal tool gateway proxy — admin, forwards with Hermes JWT. Inference stays on LiteLLM.
-  hermesProvidersOAuth = () => this.list<HermesProviderOAuth>("/hermes/providers/oauth");
-  // Direct alias for GET /api/providers/oauth as per assignment spec.
-  providersOAuth = () => this.list<HermesProviderOAuth>("/hermes/providers/oauth");
-  startHermesNousOAuth = () =>
-    this.request<HermesNousSession>("/hermes/providers/oauth/nous/start", { method: "POST", body: JSON.stringify({}) });
-  pollHermesNousOAuth = (sessionId: string) =>
-    this.request<HermesNousSession>(`/hermes/providers/oauth/nous/poll/${encodeURIComponent(sessionId)}`);
-  hermesToolsets = () => this.list<HermesToolset>("/hermes/tools/toolsets");
-  // Assignment also mentions GET /api/tools/toolsets via handlers; alias handled server-side but client uses hermes path.
-  setHermesToolsetProvider = (name: string, provider: string) =>
-    this.request<HermesToolset>(`/hermes/tools/toolsets/${encodeURIComponent(name)}/provider`, { method: "PUT", body: JSON.stringify({ provider }) });
-
   knowledgeIndexSetupOptions = () => this.list<IndexSetupOption>("/knowledge/index-setup-options");
 
   knowledgePinnedModels = () => this.list<ModelInfo>("/knowledge/pinned-models");

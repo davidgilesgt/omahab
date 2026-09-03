@@ -504,7 +504,12 @@ export function ProvidersPage() {
   const [oauthError, setOAuthError] = useState<Record<string, string | null>>({});
   const [polling, setPolling] = useState<Record<string, boolean>>({});
   const [toolsetPending, setToolsetPending] = useState<Record<string, boolean>>({});
-useEffect(() => {
+  const allowedKindsForProvider = (provider: string) => {
+    const entry = SUPPORTED_PROVIDERS.find((p) => p.value === provider);
+    return entry ? [...entry.kinds] : [];
+  };
+
+  useEffect(() => {
     const allowed = allowedKindsForProvider(selectedProvider);
     if (!allowed.includes(selectedKind as never)) {
       setSelectedKind(allowed[0] ?? "api_key");
