@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -1772,7 +1773,7 @@ func newRunnerCmd() *cobra.Command {
 		},
 	})
 	// create
-	var createProject, createBranch, createAgent string
+	var createProject, createTitle, createInstructions, createBranch, createAgent, createDevcontainer string
 	createCmd := &cobra.Command{
 		Use:   "create",
 		Short: "Create a runner/workspace",
@@ -1780,43 +1781,85 @@ func newRunnerCmd() *cobra.Command {
 			if strings.TrimSpace(createProject) == "" {
 				return errors.New("--project is required")
 			}
+			if strings.TrimSpace(createTitle) == "" && strings.TrimSpace(createBranch) == "" {
+				return errors.New("--title is required")
+			}
 			ctx, cancel := newContext()
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
-			w, err := c.CreateWorkspace(ctx, apiclient.CreateWorkspaceRequest{ProjectID: createProject, Branch: createBranch, Agent: createAgent})
+				return handleFailure(err)
+			}
+			req := apiclient.CreateWorkspaceRequest{
+				ProjectID:          createProject,
+				Title:              createTitle,
+				Instructions:       createInstructions,
+				Branch:             createBranch,
+				Agent:              createAgent,
+				DevcontainerSource: createDevcontainer,
+			}
+			if req.Title == "" && req.Branch != "" {
+				req.Title = req.Branch
+			}
+			w, err := c.CreateWorkspace(ctx, req)
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			if flagJSON {
 				return printJSON(w)
 			}
-			fmt.Printf("created workspace %s for project %s\n", w.ID, w.ProjectID)
+			fmt.Printf("created workspace %s branch %s for project %s\n", w.ID, w.Branch, w.ProjectID)
 			return nil
 		},
 	}
-	createCmd.Flags().StringVar(&createProject, "project", "", "project id (required)")
-	createCmd.Flags().StringVar(&createBranch, "branch", "", "git branch (default main)")
-	createCmd.Flags().StringVar(&createAgent, "agent", "", "coding agent (omp, codex, etc.)")
+	createCmd.Flags().StringVar(&createProject, "project", "", "project id or slug (required)")
+	createCmd.Flags().StringVar(&createTitle, "title", "", "workspace title (required, used for branch ws/<slug>-XXXX)")
+	createCmd.Flags().StringVar(&createInstructions, "instructions", "", "task instructions (optional, written to .omahab/TASK.md)")
+	createCmd.Flags().StringVar(&createBranch, "branch", "", "git branch (deprecated, use --title)")
+	_ = createCmd.Flags().MarkHidden("branch")
+	createCmd.Flags().StringVar(&createAgent, "agent", "", "coding agent (omp only)")
+	createCmd.Flags().StringVar(&createDevcontainer, "devcontainer", "", "devcontainer source (default or devcontainer)")
 	runner.AddCommand(createCmd)
 
 	runner.AddCommand(&cobra.Command{
 		Use:   "attach <id>",
-		Short: "Attach to a runner via clientd terminal",
+		Short: "Attach to a runner via clientd or direct",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := newContext()
 			defer cancel()
 			cd := clientd()
-			if !cd.Available(ctx) {
-				err := errors.New("omahab-clientd not available; ensure it is running and OMAHAB_CLIENTD_SOCKET is correct")
+			if cd.Available(ctx) {
+				if err := cd.RunnerAttach(ctx, args[0]); err != nil {
+					return handleFailure(err)
+				}
+				if flagJSON {
+					return printJSON(map[string]string{"attached": args[0]})
+				}
+				fmt.Printf("attached to %s via clientd\n", args[0])
+				return nil
+			}
+			// Server path: re-exec via sudo when not root, then POST /api/v1/workspaces/{id}/attach
+			if os.Geteuid() != 0 {
+				if sudoPath, err := exec.LookPath("sudo"); err == nil {
+					sudoArgs := os.Args
+					c := exec.Command(sudoPath, sudoArgs...)
+					c.Stdin = os.Stdin
+					c.Stdout = os.Stdout
+					c.Stderr = os.Stderr
+					if err := c.Run(); err != nil {
+						return handleFailure(err)
+					}
+					return nil
+				}
+			}
+			c, err := resolveClient()
+			if err != nil {
 				return handleFailure(err)
-}
-			if err := cd.RunnerAttach(ctx, args[0]); err != nil {
+			}
+			if err := c.AttachWorkspace(ctx, args[0]); err != nil {
 				return handleFailure(err)
-}
+			}
 			if flagJSON {
 				return printJSON(map[string]string{"attached": args[0]})
 			}
@@ -1824,6 +1867,39 @@ func newRunnerCmd() *cobra.Command {
 			return nil
 		},
 	})
+	// send
+	sendCmd := &cobra.Command{
+		Use:   "send <id> <message>",
+		Short: "Send a message to a workspace tmux session",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id := args[0]
+			msgFlag, _ := cmd.Flags().GetString("message")
+			message := strings.TrimSpace(msgFlag)
+			if message == "" && len(args) > 1 {
+				message = strings.Join(args[1:], " ")
+			}
+			if strings.TrimSpace(message) == "" {
+				return errors.New("message is required (provide as args or --message)")
+			}
+			ctx, cancel := newContext()
+			defer cancel()
+			c, err := resolveClient()
+			if err != nil {
+				return handleFailure(err)
+			}
+			if err := c.SendWorkspace(ctx, id, message); err != nil {
+				return handleFailure(err)
+			}
+			if flagJSON {
+				return printJSON(map[string]string{"sent": id})
+			}
+			fmt.Printf("sent to %s\n", id)
+			return nil
+		},
+	}
+	sendCmd.Flags().String("message", "", "message to send (alternative to positional args)")
+	runner.AddCommand(sendCmd)
 	stopCmd := &cobra.Command{
 		Use:   "stop <id>",
 		Short: "Stop a runner/workspace",
@@ -1837,11 +1913,11 @@ func newRunnerCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			if err := c.StopWorkspace(ctx, args[0]); err != nil {
 				return handleFailure(err)
-}
+			}
 			if flagJSON {
 				return printJSON(map[string]string{"stopped": args[0]})
 			}

@@ -34,12 +34,10 @@ Item {
   property string environmentSyncedAt: ""
   property string environmentError: ""
   property bool hasXaiOAuthSession: false
+  property var workspaces: []
+  property var projects: []
 
   property var requestQueue: []
-  property var currentRequest: null
-  property bool expectedDisconnect: false
-  property int nextRequestId: 1
-
 
   signal actionFinished(string action, bool succeeded)
 
@@ -63,6 +61,8 @@ Item {
     environmentSyncedAt = ""
     environmentError = ""
     hasXaiOAuthSession = false
+    workspaces = []
+    projects = []
   }
 
   function hasQueuedKind(kind) {
@@ -97,6 +97,34 @@ Item {
 
   function refresh() {
     enqueue("status", {}, "status", "")
+    // also refresh workspaces and projects for the picker and live list
+    Qt.callLater(function() {
+      enqueue("workspace.list", {}, "workspace_list", "")
+      enqueue("project.list", {}, "project_list", "")
+    })
+  }
+
+  function refreshWorkspaces() {
+    enqueue("workspace.list", {}, "workspace_list", "")
+  }
+
+  function refreshProjects() {
+    enqueue("project.list", {}, "project_list", "")
+  }
+
+  function workspaceCreate(projectSlug, title) {
+    if (actionBusy) return
+    actionBusy = true
+    actionStatus = ""
+    enqueue("workspace.create", {project_slug: projectSlug, title: title}, "action", "Create workspace")
+  }
+
+  function workspaceAttach(id) {
+    enqueue("workspace.attach", {id: id}, "action", "Attach workspace")
+  }
+
+  function workspaceStop(id) {
+    enqueue("workspace.stop", {id: id}, "action", "Stop workspace")
   }
 
   function runAction(method, label) {
@@ -167,6 +195,26 @@ Item {
         lastErrorCode = String(response.error.code || "status_failed")
       } else {
         applyStatus(response.result || ({}))
+      }
+    } else if (completed.kind === "workspace_list") {
+      if (response.error) {
+        workspaces = []
+      } else {
+        var r = response.result
+        if (r && r.items instanceof Array) workspaces = r.items
+        else if (r instanceof Array) workspaces = r
+        else if (r && r.workspaces instanceof Array) workspaces = r.workspaces
+        else workspaces = []
+      }
+    } else if (completed.kind === "project_list") {
+      if (response.error) {
+        projects = []
+      } else {
+        var r2 = response.result
+        if (r2 && r2.items instanceof Array) projects = r2.items
+        else if (r2 instanceof Array) projects = r2
+        else if (r2 && r2.projects instanceof Array) projects = r2.projects
+        else projects = []
       }
     } else {
       actionBusy = false

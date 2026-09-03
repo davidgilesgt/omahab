@@ -41,24 +41,17 @@ Panel {
     { label: "Tool variables", value: (client.environmentVariableCount + " · rev " + client.environmentRevision) + (client.environmentError !== "" ? " · error" : ""), urgent: client.environmentError !== "" }
   ]
 
+  property bool showNewWorkspacePicker: false
+  property string newWorkspaceTitle: ""
+  property string newWorkspaceProject: ""
+
   readonly property var baseActions: [
     { label: "Open AI", action: "open-ai", icon: "󰚩", requiresOnline: true },
-    { label: "New Project", action: "project.new", icon: "󰙅", requiresOnline: true },
-    { label: "Clone Project", action: "project.clone", icon: "󰜘", requiresOnline: true },
-    { label: "Start or Resume Runner", action: "runner.start", icon: "󰆍", requiresOnline: true },
+    { label: "New workspace…", action: "workspace.new", icon: "󰆍", requiresOnline: true },
     { label: "Open Omahab", action: "open-omahab", icon: "󰖟", requiresOnline: true },
     { label: "Sync tool variables", action: "environment.sync", icon: "󰑓", requiresOnline: true },
     { label: "Diagnose Connection", action: "diagnose", icon: "󰒓", requiresOnline: false }
   ]
-
-  readonly property var actions: {
-    var list = baseActions.slice()
-    if (client.hasXaiOAuthSession) {
-      // Insert Connect xAI just before Diagnose to keep Diagnose last
-      list.splice(list.length - 1, 0, { label: "Connect xAI subscription", action: "xai.oauth.connect", icon: "󰭹", requiresOnline: true })
-    }
-    return list
-  }
 
   function actionEnabled(action) {
     if (client.actionBusy || !client.clientdReachable) return false
@@ -94,6 +87,11 @@ Panel {
 
   function runAction(action) {
     if (!action || !actionEnabled(action)) return
+    if (action.action === "workspace.new") {
+      client.refreshProjects()
+      showNewWorkspacePicker = true
+      return
+    }
     client.runAction(action.action, action.label)
     if (action.action !== "diagnose") root.close()
   }
@@ -325,6 +323,103 @@ Panel {
             }
           }
 
+          Column {
+            visible: client.hasStatus
+            width: parent.width
+            spacing: Style.space(6)
+            PanelSectionHeader {
+              text: "WORKSPACES"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+            Column {
+              visible: root.showNewWorkspacePicker
+              width: parent.width
+              spacing: Style.space(6)
+              ComboBox {
+                id: projectPicker
+                width: parent.width
+                model: client.projects
+                textRole: "slug"
+                displayText: currentText
+                onActivated: root.newWorkspaceProject = currentText
+                Component.onCompleted: if (client.projects.length > 0) root.newWorkspaceProject = client.projects[0].slug
+              }
+              TextField {
+                width: parent.width
+                placeholderText: "Workspace title"
+                text: root.newWorkspaceTitle
+                onTextChanged: root.newWorkspaceTitle = text
+              }
+              Row {
+                spacing: Style.space(8)
+                Button {
+                  text: "Create"
+                  enabled: root.newWorkspaceTitle !== "" && root.newWorkspaceProject !== ""
+                  onClicked: {
+                    client.workspaceCreate(root.newWorkspaceProject, root.newWorkspaceTitle)
+                    root.showNewWorkspacePicker = false
+                    root.newWorkspaceTitle = ""
+                  }
+                }
+                Button {
+                  text: "Cancel"
+                  onClicked: root.showNewWorkspacePicker = false
+                }
+              }
+            }
+            Button {
+              visible: !root.showNewWorkspacePicker
+              width: parent.width
+              text: "New workspace…"
+              onClicked: {
+                client.refreshProjects()
+                root.showNewWorkspacePicker = true
+              }
+            }
+            Repeater {
+              model: client.workspaces
+              Item {
+                required property var modelData
+                width: parent.width
+                implicitHeight: 32
+                Row {
+                  anchors.fill: parent
+                  spacing: Style.space(8)
+                  Text {
+                    text: (modelData.title || modelData.branch) + " · " + modelData.project_id
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    elide: Text.ElideRight
+                    width: parent.width * 0.4
+                  }
+                  Text {
+                    property int idleMin: Math.floor((Date.now() - new Date(modelData.last_active_at).getTime()) / 60000)
+                    text: idleMin + "m idle"
+                    color: root.dim
+                    font.family: root.fontFamily
+                    width: 60
+                  }
+                  Button {
+                    text: "Attach"
+                    onClicked: client.workspaceAttach(modelData.id)
+                  }
+                  Button {
+                    text: "Stop"
+                    onClicked: client.workspaceStop(modelData.id)
+                  }
+                }
+              }
+            }
+            Text {
+              visible: client.workspaces.length === 0
+              width: parent.width
+              text: "No workspaces"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+          }
           PanelSeparator {
             foreground: root.foreground
           }

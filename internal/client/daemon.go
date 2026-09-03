@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -436,13 +437,70 @@ func (d *Daemon) dispatch(req Request) Response {
 			return Response{OK: false, Error: err.Error()}
 		}
 		return Response{OK: true, Data: map[string]string{"result": "clone terminal opened"}}
-	case "runner.create", "runner_create", "workspace.create", "runner.start", "runner.resume", "runner.startOrResume", "runner_start_or_resume", "runner.start-or-resume", "runner-start-or-resume":
-		// No-param picker: QML clickable bar without soliciting IDs.
-		if err := d.launcher.OpenTerminal(os.Getenv("HOME")); err != nil {
+	case "runner.create", "runner_create", "workspace.create", "workspace_create", "runner.start", "runner.resume", "runner.startOrResume", "runner_start_or_resume", "runner.start-or-resume", "runner-start-or-resume":
+		projectSlug, _ := req.Params["project_slug"].(string)
+		if projectSlug == "" {
+			projectSlug, _ = req.Params["slug"].(string)
+		}
+		if projectSlug == "" {
+			projectSlug, _ = req.Params["project_id"].(string)
+		}
+		if projectSlug == "" {
+			projectSlug, _ = req.Params["project"].(string)
+		}
+		title, _ := req.Params["title"].(string)
+		if title == "" {
+			title, _ = req.Params["task_title"].(string)
+		}
+		if title == "" {
+			title, _ = req.Params["name"].(string)
+		}
+		instructions, _ := req.Params["instructions"].(string)
+		if projectSlug == "" || title == "" {
+			if err := d.launcher.OpenTerminal(os.Getenv("HOME")); err != nil {
+				return Response{OK: false, Error: err.Error()}
+			}
+			return Response{OK: true, Data: map[string]string{"result": "runner picker launched"}}
+		}
+		if d.remote == nil {
+			return Response{OK: false, Error: "not connected to server"}
+		}
+		ctx2, cancel := context.WithTimeout(d.ctx, 30*time.Second)
+		ws, err := d.remote.CreateCompanionWorkspace(ctx2, projectSlug, title, instructions)
+		cancel()
+		if err != nil {
 			return Response{OK: false, Error: err.Error()}
 		}
-		return Response{OK: true, Data: map[string]string{"result": "runner picker launched"}}
+		if ws.Status == "running" || ws.Status == "pending" {
+			host := d.serverHost()
+			if host == "" {
+				host = "omahab"
+			}
+			sshArgs := []string{"ssh", "-t", "omahab@" + host, "sudo", "omahab", "runner", "attach", string(ws.ID)}
+			if err := d.launcher.OpenTerminalCommand(sshArgs); err != nil {
+				return Response{OK: false, Error: err.Error()}
+			}
+		}
+		return Response{OK: true, Data: ws}
 	case "runner.attach", "runner_attach", "workspace.attach":
+		id, _ := req.Params["id"].(string)
+		if id == "" {
+			id, _ = req.Params["workspace_id"].(string)
+		}
+		if id == "" {
+			id, _ = req.Params["workspaceId"].(string)
+		}
+		if strings.TrimSpace(id) != "" {
+			host := d.serverHost()
+			if host == "" {
+				host = "omahab"
+			}
+			sshArgs := []string{"ssh", "-t", "omahab@" + host, "sudo", "omahab", "runner", "attach", id}
+			if err := d.launcher.OpenTerminalCommand(sshArgs); err != nil {
+				return Response{OK: false, Error: err.Error()}
+			}
+			return Response{OK: true, Data: map[string]string{"workspace_id": id, "result": "terminal opened"}}
+		}
 		dir, _ := req.Params["dir"].(string)
 		if dir == "" {
 			dir, _ = req.Params["local_path"].(string)
@@ -455,6 +513,17 @@ func (d *Daemon) dispatch(req Request) Response {
 			return Response{OK: false, Error: err.Error()}
 		}
 		return Response{OK: true, Data: map[string]string{"result": "terminal opened"}}
+	case "runner.list", "runner_list", "workspace.list", "workspace_list", "workspaces", "list-workspaces", "workspace-list":
+		if d.remote == nil {
+			return Response{OK: false, Error: "not connected to server"}
+		}
+		ctx2, cancel := context.WithTimeout(d.ctx, 10*time.Second)
+		list, err := d.remote.GetCompanionWorkspaces(ctx2)
+		cancel()
+		if err != nil {
+			return Response{OK: false, Error: err.Error()}
+		}
+		return Response{OK: true, Data: list}
 	case "sync.add", "sync_add", "sync_add_folder":
 		return Response{OK: false, Error: "sync add: use server API"}
 	case "launch.terminal", "terminal.open":
@@ -563,18 +632,69 @@ func (d *Daemon) dispatchSocket(req SocketRequest) SocketResponse {
 			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: err.Error()}}
 		}
 		return SocketResponse{ID: req.ID, Result: map[string]string{"project_id": slug, "dir": dir}}
-	case "runner.startOrResume", "runner.start-or-resume", "runner.start", "runner.resume", "runner.create", "runner_create", "runner-start-or-resume":
-		if err := d.launcher.OpenTerminal(os.Getenv("HOME")); err != nil {
+	case "runner.startOrResume", "runner.start-or-resume", "runner.start", "runner.resume", "runner.create", "runner_create", "runner-start-or-resume", "workspace.create", "workspace_create":
+		projectSlug, _ := req.Params["project_slug"].(string)
+		if projectSlug == "" {
+			projectSlug, _ = req.Params["slug"].(string)
+		}
+		if projectSlug == "" {
+			projectSlug, _ = req.Params["project_id"].(string)
+		}
+		if projectSlug == "" {
+			projectSlug, _ = req.Params["project"].(string)
+		}
+		title, _ := req.Params["title"].(string)
+		if title == "" {
+			title, _ = req.Params["task_title"].(string)
+		}
+		if title == "" {
+			title, _ = req.Params["name"].(string)
+		}
+		instructions, _ := req.Params["instructions"].(string)
+		if projectSlug == "" || title == "" {
+			if err := d.launcher.OpenTerminal(os.Getenv("HOME")); err != nil {
+				return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: err.Error()}}
+			}
+			return SocketResponse{ID: req.ID, Result: map[string]string{"result": "runner picker launched"}}
+		}
+		if d.remote == nil {
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: "not connected to server"}}
+		}
+		ctx2, cancel := context.WithTimeout(d.ctx, 30*time.Second)
+		ws, err := d.remote.CreateCompanionWorkspace(ctx2, projectSlug, title, instructions)
+		cancel()
+		if err != nil {
 			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: err.Error()}}
 		}
-		return SocketResponse{ID: req.ID, Result: map[string]string{"result": "runner picker launched"}}
+		if ws.Status == "running" || ws.Status == "pending" {
+			host := d.serverHost()
+			if host == "" {
+				host = "omahab"
+			}
+			sshArgs := []string{"ssh", "-t", "omahab@" + host, "sudo", "omahab", "runner", "attach", string(ws.ID)}
+			if err := d.launcher.OpenTerminalCommand(sshArgs); err != nil {
+				return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: err.Error()}}
+			}
+		}
+		return SocketResponse{ID: req.ID, Result: ws}
 	case "runner.attach", "runner_attach", "workspace.attach":
 		id, _ := req.Params["workspace_id"].(string)
 		if id == "" {
 			id, _ = req.Params["id"].(string)
 		}
 		if id == "" {
-			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "bad_request", Message: "workspace_id required"}}
+			id, _ = req.Params["workspaceId"].(string)
+		}
+		if strings.TrimSpace(id) != "" {
+			host := d.serverHost()
+			if host == "" {
+				host = "omahab"
+			}
+			sshArgs := []string{"ssh", "-t", "omahab@" + host, "sudo", "omahab", "runner", "attach", id}
+			if err := d.launcher.OpenTerminalCommand(sshArgs); err != nil {
+				return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: err.Error()}}
+			}
+			return SocketResponse{ID: req.ID, Result: map[string]string{"workspace_id": id, "result": "terminal opened"}}
 		}
 		dir, _ := req.Params["dir"].(string)
 		if dir == "" {
@@ -587,6 +707,17 @@ func (d *Daemon) dispatchSocket(req SocketRequest) SocketResponse {
 			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: err.Error()}}
 		}
 		return SocketResponse{ID: req.ID, Result: map[string]string{"workspace_id": id, "result": "terminal opened"}}
+	case "runner.list", "runner_list", "workspace.list", "workspace_list", "workspaces", "list-workspaces", "workspace-list":
+		if d.remote == nil {
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: "not connected to server"}}
+		}
+		ctx2, cancel := context.WithTimeout(d.ctx, 10*time.Second)
+		list, err := d.remote.GetCompanionWorkspaces(ctx2)
+		cancel()
+		if err != nil {
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: err.Error()}}
+		}
+		return SocketResponse{ID: req.ID, Result: list}
 	case "sync.add":
 		name, _ := req.Params["name"].(string)
 		if strings.TrimSpace(name) == "" {
@@ -665,6 +796,36 @@ func (d *Daemon) openOmahab() error {
 	return d.launcher.OpenURL(u)
 }
 
+func (d *Daemon) serverHost() string {
+	raw := strings.TrimSpace(d.cfg.ServerURL)
+	if raw == "" && d.remote != nil {
+		raw = d.remote.BaseURL()
+	}
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		h := raw
+		if strings.Contains(h, "://") {
+			h = strings.TrimPrefix(h, "http://")
+			h = strings.TrimPrefix(h, "https://")
+		}
+		if idx := strings.Index(h, "/"); idx != -1 {
+			h = h[:idx]
+		}
+		if idx := strings.Index(h, ":"); idx != -1 {
+			h = h[:idx]
+		}
+		return strings.TrimSpace(h)
+	}
+	host := u.Host
+	if strings.Contains(host, ":") {
+		h, _, _ := strings.Cut(host, ":")
+		host = h
+	}
+	return host
+}
 func (d *Daemon) buildStatus() DaemonStatus {
 	d.mu.RLock()
 	defer d.mu.RUnlock()

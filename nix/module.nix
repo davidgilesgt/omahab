@@ -148,6 +148,7 @@ in
       "d ${appEnvDir} 0700 root root - -"
       "d ${stateDir}/caddy 0755 root root - -"
       "d ${stateDir}/cloudflared 0700 cloudflared cloudflared - -"
+      "d ${stateDir}/devpod 0700 root root - -"
       "d ${dataDir} 0755 root root - -"
       "d ${dataDir}/apps 0755 root root - -"
       "d ${dataDir}/projects 0755 root root - -"
@@ -239,6 +240,35 @@ in
         OMAHAB_WEB_DIR = "${cfg.webPackage}";
         # First-boot LAN wizard listener; inert once bootstrap-done exists.
         OMAHAB_BOOTSTRAP_LISTEN = "0.0.0.0:8485";
+        DEVPOD_HOME = "${stateDir}/devpod";
+        HOME = "${stateDir}/devpod";
+      };
+    };
+
+    systemd.services.omahab-devpod-init = {
+      description = "Omahab DevPod provider init (docker)";
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
+      unitConfig = {
+        ConditionPathExists = "!${stateDir}/devpod-provider-done";
+      };
+      serviceConfig = {
+        Type = "oneshot";
+        User = "root";
+        Group = "root";
+        ExecStart = pkgs.writeShellScript "omahab-devpod-init" ''
+          set -eu
+          export HOME="${stateDir}/devpod"
+          export DEVPOD_HOME="${stateDir}/devpod"
+          mkdir -p "$HOME"
+          ${pkgs.devpod}/bin/devpod provider add docker --option INACTIVITY_TIMEOUT=45m
+          touch "${stateDir}/devpod-provider-done"
+        '';
+        RemainAfterExit = true;
+      };
+      environment = {
+        HOME = "${stateDir}/devpod";
+        DEVPOD_HOME = "${stateDir}/devpod";
       };
       wantedBy = [ "multi-user.target" ];
     };
@@ -546,6 +576,17 @@ in
       # runtime-writable authorized_keys (bootstrap wizard writes it)
       openssh.authorizedKeys.keys = [ ];
     };
+    security.sudo.extraRules = [
+      {
+        users = [ "omahab" ];
+        commands = [
+          {
+            command = "${cfg.package}/bin/omahab runner attach *";
+            options = [ "NOPASSWD" ];
+          }
+        ];
+      }
+    ];
     # Authorized keys file is runtime state, not declarative.
     services.getty.autologinUser = lib.mkForce "omahab";
     systemd.services."getty@tty1".serviceConfig.ExecStart = lib.mkForce [
@@ -650,6 +691,8 @@ in
       git
       tailscale
       util-linux
+      devpod
+      tmux
     ];
   };
 }

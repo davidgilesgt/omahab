@@ -289,9 +289,23 @@ type UpdateSyncFolderRequest struct {
 }
 
 type CreateWorkspaceRequest struct {
-	ProjectID domain.ID `json:"project_id"`
-	Branch    string    `json:"branch"`
-	Agent     string    `json:"agent"`
+	ProjectID          domain.ID `json:"project_id"`
+	Title              string    `json:"title"`
+	Instructions       string    `json:"instructions,omitempty"`
+	Agent              string    `json:"agent,omitempty"`
+	DevcontainerSource string    `json:"devcontainer_source,omitempty"`
+	// Branch is deprecated: use Title. Kept for internal SkipBranchCreate tests.
+	Branch string `json:"branch,omitempty"`
+}
+
+type SendWorkspaceRequest struct {
+	Message string `json:"message"`
+}
+
+type CompanionCreateWorkspaceRequest struct {
+	ProjectSlug  string `json:"project_slug"`
+	Title        string `json:"title"`
+	Instructions string `json:"instructions,omitempty"`
 }
 
 type CreateUserRequest struct {
@@ -447,7 +461,10 @@ type Backend interface {
 	CreateWorkspace(ctx context.Context, req CreateWorkspaceRequest) (domain.Workspace, error)
 	StopWorkspace(ctx context.Context, id domain.ID) (domain.Workspace, error)
 	DeleteWorkspace(ctx context.Context, id domain.ID) error
-
+	SendWorkspace(ctx context.Context, id domain.ID, message string) error
+	AttachWorkspace(ctx context.Context, id domain.ID) error
+	ListCompanionWorkspaces(ctx context.Context, p Pagination) ([]domain.Workspace, error)
+	CreateCompanionWorkspace(ctx context.Context, req CompanionCreateWorkspaceRequest) (domain.Workspace, error)
 	// Users / identity
 	ListUsers(ctx context.Context, p Pagination) ([]domain.User, error)
 	GetUser(ctx context.Context, id domain.ID) (domain.User, error)

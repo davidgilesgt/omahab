@@ -699,6 +699,10 @@ func (s *Server) handleCreateWorkspace(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, errBadRequest("project_id is required"))
 		return
 	}
+	if strings.TrimSpace(req.Title) == "" && strings.TrimSpace(req.Branch) == "" {
+		writeError(w, r, errBadRequest("title is required"))
+		return
+	}
 	ws, err := s.backend.CreateWorkspace(r.Context(), req)
 	if err != nil {
 		writeError(w, r, err)
@@ -724,6 +728,63 @@ func (s *Server) handleDeleteWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleSendWorkspace(w http.ResponseWriter, r *http.Request) {
+	id := domain.ID(chi.URLParam(r, "id"))
+	var req SendWorkspaceRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.Message) == "" {
+		writeError(w, r, errBadRequest("message is required"))
+		return
+	}
+	if err := s.backend.SendWorkspace(r.Context(), id, req.Message); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sent": true, "id": id})
+}
+
+func (s *Server) handleAttachWorkspace(w http.ResponseWriter, r *http.Request) {
+	id := domain.ID(chi.URLParam(r, "id"))
+	if err := s.backend.AttachWorkspace(r.Context(), id); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"attached": true, "id": id})
+}
+
+func (s *Server) handleCompanionListWorkspaces(w http.ResponseWriter, r *http.Request) {
+	p := parsePagination(r)
+	items, err := s.backend.ListCompanionWorkspaces(r.Context(), p)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeList(w, items)
+}
+
+func (s *Server) handleCompanionCreateWorkspace(w http.ResponseWriter, r *http.Request) {
+	var req CompanionCreateWorkspaceRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.ProjectSlug) == "" {
+		writeError(w, r, errBadRequest("project_slug is required"))
+		return
+	}
+	if strings.TrimSpace(req.Title) == "" {
+		writeError(w, r, errBadRequest("title is required"))
+		return
+	}
+	ws, err := s.backend.CreateCompanionWorkspace(r.Context(), req)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, ws)
 }
 
 // --- users / identity ---

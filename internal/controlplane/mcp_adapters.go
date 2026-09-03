@@ -10,6 +10,7 @@ import (
 	"github.com/omahab/omahab/internal/events"
 	"github.com/omahab/omahab/internal/knowledge"
 	"github.com/omahab/omahab/internal/mcp"
+	"github.com/omahab/omahab/internal/workspaces"
 )
 
 func (b *Backend) MCPHandler() *mcp.Server { return b.mcpServer }
@@ -25,47 +26,83 @@ func (b *Backend) MCPToken(ctx context.Context) string {
 	return strings.TrimSpace(v)
 }
 
-type mcpWorkspacesStub struct{ backend *Backend }
+type mcpWorkspacesAdapter struct{ backend *Backend }
 
-func (s *mcpWorkspacesStub) List(ctx context.Context) ([]any, error) {
-	if s.backend.workspaces == nil {
+func newMCPWorkspacesAdapter(b *Backend) *mcpWorkspacesAdapter { return &mcpWorkspacesAdapter{backend: b} }
+
+func (a *mcpWorkspacesAdapter) List(ctx context.Context) ([]any, error) {
+	if a.backend.workspaces == nil {
 		return []any{}, nil
 	}
-	list, err := s.backend.workspaces.List(ctx)
+	list, err := a.backend.workspaces.List(ctx)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]any, 0, len(list))
 	for _, w := range list {
-		out = append(out, map[string]any{
-			"id": string(w.ID), "project_id": string(w.ProjectID), "branch": w.Branch, "agent": w.Agent, "status": w.Status, "last_active_at": w.LastActiveAt, "created_at": w.CreatedAt,
-		})
+		out = append(out, *w)
 	}
 	return out, nil
 }
-func (s *mcpWorkspacesStub) Create(ctx context.Context, projectSlug, taskTitle, instructions string) (any, error) {
-	return nil, fmt.Errorf("workspace creation not yet implemented (Step 5)")
-}
-func (s *mcpWorkspacesStub) Get(ctx context.Context, id string) (any, error) {
-	if s.backend.workspaces == nil {
+func (a *mcpWorkspacesAdapter) Create(ctx context.Context, projectSlug, taskTitle, instructions string) (any, error) {
+	if a.backend.workspaces == nil {
 		return nil, fmt.Errorf("workspaces not configured")
 	}
-	w, err := s.backend.workspaces.Get(ctx, id)
+	if a.backend.projects == nil {
+		return nil, fmt.Errorf("projects not configured")
+	}
+	slug := strings.TrimSpace(projectSlug)
+	if slug == "" {
+		return nil, fmt.Errorf("project_slug is required")
+	}
+	title := strings.TrimSpace(taskTitle)
+	if title == "" {
+		return nil, fmt.Errorf("task_title is required")
+	}
+	proj, err := a.backend.projects.GetBySlug(ctx, slug)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"id": string(w.ID), "project_id": string(w.ProjectID), "branch": w.Branch, "agent": w.Agent, "status": w.Status, "last_active_at": w.LastActiveAt, "created_at": w.CreatedAt}, nil
+	ws, err := a.backend.workspaces.Create(ctx, workspaces.CreateInput{
+		ProjectID: proj.ID,
+		Title:     title,
+		Instructions: instructions,
+		Agent:     "omp",
+		DevcontainerSource: "default",
+	})
+	if err != nil {
+		return nil, err
+	}
+	return *ws, nil
 }
-func (s *mcpWorkspacesStub) Send(ctx context.Context, id, message string) error {
-	return fmt.Errorf("workspace_send not yet implemented (Step 5)")
+
+
+func (a *mcpWorkspacesAdapter) Get(ctx context.Context, id string) (any, error) {
+	if a.backend.workspaces == nil {
+		return nil, fmt.Errorf("workspaces not configured")
+	}
+	w, err := a.backend.workspaces.Get(ctx, strings.TrimSpace(id))
+	if err != nil {
+		return nil, err
+	}
+	return *w, nil
 }
-func (s *mcpWorkspacesStub) Stop(ctx context.Context, id string) error {
-	if s.backend.workspaces == nil {
+
+func (a *mcpWorkspacesAdapter) Send(ctx context.Context, id, message string) error {
+	if a.backend.workspaces == nil {
 		return fmt.Errorf("workspaces not configured")
 	}
-	return s.backend.workspaces.Stop(ctx, id)
+	return a.backend.workspaces.Send(ctx, strings.TrimSpace(id), message)
 }
-var _ mcp.WorkspacesProvider = (*mcpWorkspacesStub)(nil)
+
+func (a *mcpWorkspacesAdapter) Stop(ctx context.Context, id string) error {
+	if a.backend.workspaces == nil {
+		return fmt.Errorf("workspaces not configured")
+	}
+	return a.backend.workspaces.Stop(ctx, strings.TrimSpace(id))
+}
+
+var _ mcp.WorkspacesProvider = (*mcpWorkspacesAdapter)(nil)
 
 type mcpForgejoAdapter struct{ backend *Backend }
 func newMCPForgejoAdapter(b *Backend) *mcpForgejoAdapter { return &mcpForgejoAdapter{backend: b} }

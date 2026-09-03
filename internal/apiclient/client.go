@@ -622,9 +622,12 @@ func (c *Client) DeleteSyncFolder(ctx context.Context, id string) error {
 // --- workspaces / runners (aliases) ---
 
 type CreateWorkspaceRequest struct {
-	ProjectID string `json:"project_id"`
-	Branch    string `json:"branch,omitempty"`
-	Agent     string `json:"agent,omitempty"`
+	ProjectID          string `json:"project_id"`
+	Title              string `json:"title,omitempty"`
+	Instructions       string `json:"instructions,omitempty"`
+	Branch             string `json:"branch,omitempty"`
+	Agent              string `json:"agent,omitempty"`
+	DevcontainerSource string `json:"devcontainer_source,omitempty"`
 }
 
 func (c *Client) ListWorkspaces(ctx context.Context) ([]domain.Workspace, error) {
@@ -678,6 +681,14 @@ func (c *Client) StopWorkspace(ctx context.Context, id string) error {
 
 func (c *Client) DeleteWorkspace(ctx context.Context, id string) error {
 	return c.del(ctx, "/workspaces/"+url.PathEscape(id), nil)
+}
+
+func (c *Client) SendWorkspace(ctx context.Context, id, message string) error {
+	return c.post(ctx, "/workspaces/"+url.PathEscape(id)+"/send", map[string]string{"message": message}, nil)
+}
+
+func (c *Client) AttachWorkspace(ctx context.Context, id string) error {
+	return c.post(ctx, "/workspaces/"+url.PathEscape(id)+"/attach", map[string]any{}, nil)
 }
 
 // --- identity recovery ---

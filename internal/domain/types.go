@@ -126,12 +126,15 @@ type Workspace struct {
 	ID           ID         `json:"id"`
 	ProjectID    ID         `json:"project_id"`
 	Branch       string     `json:"branch"`
+	Title        string     `json:"title,omitempty"`
+	Instructions string     `json:"instructions,omitempty"`
 	Agent        string     `json:"agent"`
 	Status       string     `json:"status"`
 	Capability   string     `json:"-"`
 	LastActiveAt time.Time  `json:"last_active_at"`
 	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
 	CreatedAt    time.Time  `json:"created_at"`
+	GatewayKeyID *ID        `json:"gateway_key_id,omitempty"`
 }
 
 type EmailMessage struct {

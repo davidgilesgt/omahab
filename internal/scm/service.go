@@ -1547,3 +1547,11 @@ func limitClause(limit int) string {
 	}
 	return ""
 }
+
+// ForgejoClient returns the underlying Forgejo client (may be nil if not configured).
+func (s *Service) ForgejoClient() ForgejoClient {
+	if s == nil {
+		return nil
+	}
+	return s.forgejo
+}

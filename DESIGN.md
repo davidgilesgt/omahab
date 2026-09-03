@@ -677,12 +677,18 @@ Do not synthesize Electron `safeStorage` records or copy cookies. If automatic c
 
 The Omarchy companion can create an isolated remote runner for a project:
 
-1. request workspace creation from `omahabd`;
-2. clone the project and selected branch;
-3. apply `.devcontainer/devcontainer.json` or an Omahab default;
-4. install the selected coding agent, such as OMP or Codex;
-5. create a resumable terminal session;
-6. open the local terminal over Tailscale;
+1. Title → slug (`[a-z0-9-]`, ≤40) → branch `ws/<slug>-<id>` (4 hex, retry once on exists) and container name `ws-<slug>-<id>`; stored as `branch`, `title`, `instructions` (migration `workspaces-003`).
+2. `BranchCreator` creates the branch from `project.DefaultBranch`; on `ErrAlreadyExists`/`ErrConflict` retry once with new id.
+3. Per-workspace LiteLLM virtual key (`workspace-<id>`, scopes `omahab/fast`, `omahab/balanced`, `omahab/reasoning`, `omahab/embedding`, owner `harness:<id>`) – stored `gateway_key_id` for revocation on `Delete`/`ExpireIdle` (45m `INACTIVITY_TIMEOUT` via `omahab-devpod-init` docker provider).
+4. Per-workspace Forgejo token (`ws-<id>`, `read:repository`+`write:repository`, `Repositories:[{owner,name}]`) – written to `~/.git-credentials` via `devpod ssh <id> --command 'printf ... > ~/.git-credentials && chmod 600 ...'` (token via credential helper, never in clone URL), revoked on `Delete`/`ExpireIdle`.
+5. `DevPodRunner.Up` clones `https://<forgejo>/<owner>/<repo>.git@<branch>` with `--workspace-env` (`OPENAI_BASE_URL=https://models.<domain>/v1`, `OPENAI_API_KEY=<virtualKey>`, `ANTHROPIC_BASE_URL=https://models.<domain>`, `ANTHROPIC_API_KEY=<same>`, `OMAHAB_WORKSPACE_ID=<id>`, `GIT_AUTHOR_NAME=omahab`/`EMAIL`, `GIT_COMMITTER_*`) and devcontainer (`{"name":"omahab-<name>","image":"mcr.microsoft.com/devcontainers/base:ubuntu","features":{"ghcr.io/devcontainers/features/node:1":{}},"postCreateCommand":"npm install -g @oh-my-pi/pi-coding-agent && git config --global credential.helper store"}` or repo `.devcontainer/devcontainer.json` when `DevcontainerSource=="devcontainer"` and present via `GetFile`).
+6. If `Instructions` non-empty, writes `/workspaces/<repo>/.omahab/TASK.md` (`mkdir -p $(ls -d /workspaces/*|head -1)/.omahab && echo <base64> | base64 -d > ...`); always `tmux new-session -d -s omp "omp"` and, when TASK present, `tmux send-keys -t omp "$(cat $(ls -d /workspaces/*|head -1)/.omahab/TASK.md)" Enter`. User and Hermes share the same `omp` tmux session.
+7. `workspace_send` (`POST /api/v1/workspaces/{id}/send {message}`, `MCP workspace_send`) → `DevPodRunner.Send` = `devpod ssh <id> --command "tmux send-keys -t omp '<shell-quoted message>' Enter"`. `RunPrint(id,prompt)` for Step 6 (`devpod ssh <id> --command 'cd $(ls -d /workspaces/*|head -1) && omp -p --mode json "<prompt>"'`).
+8. Attach: `ssh -t omahab@<tailscale-ip> sudo omahab runner attach <id>` re-execs via `sudo` if not root (`security.sudo.extraRules` `omahab NOPASSWD omahab runner attach *`, `DEVPOD_HOME=/var/lib/omahab/devpod` in `omahabd` unit and `DevPodRunner` `withDevPodEnv`), then `POST /api/v1/workspaces/{id}/attach` → `DevPodRunner.Attach` (`tmux new-session -A -s omahab-<id> devpod ssh <id> --tty`). `omahabd` runs devpod as root with `DEVPOD_HOME`.
+
+Companion: `workspace.create {project_slug, title}` → `POST /api/v1/companion/workspaces` (deviceAuth) → on `running` `Launcher.OpenTerminalCommand(["ssh","-t","omahab@"+ip,"sudo","omahab","runner","attach",id])` (`alacritty -e`, `kitty`, `gnome-terminal --`, `xterm -e` search); `runner.attach {id}` → same ssh; `runner.list` → `GET /api/v1/companion/workspaces`; `project.list` → existing. `Clientd.qml` `workspace.*` methods on newline-JSON socket; `Panel.qml` "New workspace…" picker (projects from `project.list`, title field) and live list (name, project, idle minutes) with Attach/Stop.
+
+Automation (Step 6) uses `SkipBranchCreate` to reuse PR head branch and `RunPrint` for non-interactive review.
 ### 15.1 Paperless-ngx
 
 Paperless-ngx is the authoritative document-management application. Use its REST API for retrieval and document operations. For the Hermes assistant, the Paperless tools are served via the MCP server described in §13.2 (`docs_search`, `doc_get`, `docs_tags`, `docs_correspondents`, `docs_types`, `doc_add_tag`, `doc_upload`), each returning source IDs and deep links. Hermes retrieves relevant material instead of injecting the full archive into every conversation.
@@ -931,13 +937,13 @@ omahab project clone
 omahab project open
 omahab runner create
 omahab runner attach
+omahab runner send
 omahab runner stop
 omahab sync add
 omahab hermes open
 ```
 
 Interactive `install`, `status`, and `doctor` views use the same domain operations as normal CLI and JSON output; business logic does not live in Bubble Tea models. Full-screen behavior is optional and enabled only on a suitable TTY.
-
 ### 21.3 Omarchy shell plugin
 
 A user-owned Quickshell plugin such as `omahab.status` displays:
@@ -946,16 +952,18 @@ A user-owned Quickshell plugin such as `omahab.status` displays:
 - active runners;
 - waiting agent turns;
 - Syncthing conflicts;
-- unread Omahab events.
+- unread Omahab events;
+- workspaces (live list: name, project, idle minutes).
 
 Actions:
 
 - Open AI;
-- New project;
-- Clone project;
-- Start or resume remote runner;
+- New workspace… (picker over projects from `project.list`, text field for title);
 - Open Omahab;
+- Sync tool variables;
 - Diagnose connection.
+
+Workspace list: each running workspace shows name, project, idle minutes with Attach (opens `ssh -t omahab@<ip> sudo omahab runner attach <id>` via `Launcher.OpenTerminalCommand` with terminal search `alacritty -e`, `kitty`, `gnome-terminal --`) and Stop. `Clientd.qml` implements `workspace.create` → `POST /api/v1/companion/workspaces` (deviceAuth) → on `running` attach, `workspace.attach` → same ssh, `workspace.list` → `GET /api/v1/companion/workspaces`, `project.list` → existing.
 
 The QML plugin talks only to `omahab-clientd` and stores no server or provider secrets.
 

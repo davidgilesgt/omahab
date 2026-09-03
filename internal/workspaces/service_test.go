@@ -280,7 +280,7 @@ func TestDevPodRunner_Up_NoDockerSocket_NoSecrets_Explicit(t *testing.T) {
 	fe := &fakeExec{}
 	tmp := t.TempDir()
 	r := NewDevPodRunner(DevPodRunnerConfig{WorkspacesDir: tmp, Executor: fe})
-	_ = r.Up(context.Background(), "ws-sec", domain.ID("proj-x"), "main", "codex", RunnerOpts{DevcontainerSource: "default"})
+	_ = r.Up(context.Background(), "ws-sec", domain.ID("proj-x"), "main", "omp", RunnerOpts{DevcontainerSource: "default"})
 	for _, c := range fe.all() {
 		joined := strings.Join(append([]string{c.Name}, c.Args...), " ")
 		if strings.Contains(joined, "/var/run/docker.sock") {

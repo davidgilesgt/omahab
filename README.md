@@ -101,12 +101,22 @@ Tool surface (36 wire names, no destructive tools):
 - Forgejo: `repos_list`, `repo_get`, `repo_archive`/`repo_unarchive` (archive is reversible), `branches_list`, `branch_create`, `file_get`/`file_put`, `issues_list`/`issue_get`/`issue_create`/`issue_comment`, `prs_list`/`pr_get`/`pr_diff`/`pr_create`/`pr_comment`
 - Paperless: `docs_search`, `doc_get`, `docs_tags`, `docs_correspondents`, `docs_types`, `doc_add_tag`, `doc_upload` (Paperless-ngx is §15.1; see DESIGN §13.2 for the canonical list)
 - Projects / CI: `projects_list`, `project_get`, `releases_list`, `ci_runs`, `ci_run_logs`
-- Workspaces: `workspaces_list`, `workspace_create`, `workspace_get`, `workspace_send`, `workspace_stop` (via `WorkspacesProvider` stub until Step 5; no `workspace_delete`)
+- Workspaces: `workspaces_list`, `workspace_create`, `workspace_get`, `workspace_send`, `workspace_stop` (via `WorkspacesProvider`; no `workspace_delete`)
 - Control plane: `events_recent`, `backup_status`
 
 Rules enforced by the tool surface: archive, never delete; never merge a PR; never force-push or delete a branch. `repo_delete`, `doc_delete`, `pr_merge`, and `workspace_delete` do not exist. Forgejo access for Hermes uses a dedicated `platform-app/hermes_forgejo_token` (`read:repository`, `write:repository`, `read:issue`, `write:issue`).
 
-Docker Compose remains only for user project deploys and CI job containers.
+## Workspaces
+
+`omahab` workspaces are isolated DevPod containers on the server, each on a branch `ws/<slug>-<id>` with `omp` preinstalled and a per-workspace LiteLLM virtual key.
+
+```sh
+omahab runner create --project demo --title "add readme badge"  # branch ws/add-readme-badge-XXXX
+omahab runner attach <id>                                      # ssh -t omahab@<ip> sudo omahab runner attach <id> (tmux omp)
+omahab runner send <id> "continue"                             # tmux send-keys -t omp
+```
+Flow: Title → slug (`[a-z0-9-]`, ≤40) → branch `ws/<slug>-<id>` (4 hex, retry once on exists); per-workspace Forgejo token (`ws-<id>`, `read:repository`+`write:repository`, `Repositories:[{owner,name}]`) via `~/.git-credentials`; per-workspace LiteLLM key (`workspace-<id>`, scopes `omahab/fast`, `omahab/balanced`, `omahab/reasoning`, `omahab/embedding`); devcontainer default (`omahab-<name>`, `mcr.microsoft.com/devcontainers/base:ubuntu`, `ghcr.io/devcontainers/features/node:1`, `npm install -g @oh-my-pi/pi-coding-agent && git config --global credential.helper store`) or repo `.devcontainer/devcontainer.json`; `TASK.md` + `tmux new-session -d -s omp "omp"`; Omarchy plugin "New workspace…" (project picker + title) and live list (Attach/Stop) via `POST /api/v1/companion/workspaces` (deviceAuth) and `Launcher.OpenTerminalCommand` (`alacritty -e`, `kitty`, `gnome-terminal --`); `DEVPOD_HOME=/var/lib/omahab/devpod` (`omahab-devpod-init` docker provider, `INACTIVITY_TIMEOUT=45m`), `sudo omahab runner attach *` NOPASSWD.
+
 ## The three-tier model
 
 1. **NixOS closure (immutable)** — packages, systemd units, nftables, sshd, docker/podman, and every platform app service. `services.omahab.enable = true` is the only knob; a `.nix` file never contains a secret or per-household value.

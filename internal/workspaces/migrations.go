@@ -40,5 +40,14 @@ CREATE INDEX IF NOT EXISTS idx_workspace_capabilities_workspace_id ON workspace_
 CREATE INDEX IF NOT EXISTS idx_workspace_capabilities_token_hash ON workspace_capabilities(token_hash);
 `,
 		},
+		{
+			Name: "workspaces-003-title-instructions-gateway",
+			SQL: `
+ALTER TABLE workspaces ADD COLUMN title TEXT NOT NULL DEFAULT '';
+ALTER TABLE workspaces ADD COLUMN instructions TEXT NOT NULL DEFAULT '';
+ALTER TABLE workspaces ADD COLUMN gateway_key_id TEXT;
+ALTER TABLE workspaces ADD COLUMN forgejo_token_name TEXT;
+`,
+		},
 	}
 }

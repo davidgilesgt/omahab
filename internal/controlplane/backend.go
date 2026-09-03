@@ -458,6 +458,32 @@ func (b *Backend) initServices(ctx context.Context) error {
 		})
 		b.gateway = providers.NoopGateway{}
 	}
+	// Wire workspaces dependencies (BranchCreator, Forgejo, Providers, resolvers)
+	if b.workspaces != nil {
+		if b.scm != nil {
+			if fc := b.scm.ForgejoClient(); fc != nil {
+				b.workspaces.SetForgejo(fc)
+				b.workspaces.SetBranchCreator(fc)
+			}
+		}
+		if b.providers != nil {
+			b.workspaces.SetProviders(b.providers)
+		}
+		b.workspaces.SetProjectResolver(func(ctx context.Context, id domain.ID) (*domain.Project, error) {
+			p, err := b.projects.Get(ctx, id)
+			if err != nil {
+				return nil, err
+			}
+			return &p.Project, nil
+		})
+		b.workspaces.SetDomainResolver(func(ctx context.Context) (string, error) {
+			inst, err := b.store.Instance(ctx)
+			if err != nil {
+				return "", err
+			}
+			return strings.TrimSpace(inst.Domain), nil
+		})
+	}
 	// environments — companion enrollment + tool-environment sync
 	if envSvc, err := environments.New(b.db); err == nil {
 		envSvc.SetSecrets(b.secrets)
@@ -471,13 +497,13 @@ func (b *Backend) initServices(ctx context.Context) error {
 		})
 	}
 	// mcp — streamable HTTP server for Hermes (stateless, JSONResponse)
-	// Wire providers via adapters; workspaces stub until Step 5.
+	// Wire providers via adapters; workspaces now backed by real Service.
 	b.mcpServer = mcp.New(mcp.Deps{
 		Forgejo:    newMCPForgejoAdapter(b),
 		Docs:       newMCPDocsAdapter(b),
 		Projects:   newMCPProjectsAdapter(b),
 		SCM:        newMCPSCMAdapter(b),
-		Workspaces: &mcpWorkspacesStub{backend: b},
+		Workspaces: newMCPWorkspacesAdapter(b),
 		Events:     newMCPEventsAdapter(b),
 		Backups:    newMCPBackupsAdapter(b),
 	})
@@ -1643,10 +1669,21 @@ func (b *Backend) GetWorkspace(ctx context.Context, id domain.ID) (domain.Worksp
 }
 
 func (b *Backend) CreateWorkspace(ctx context.Context, req api.CreateWorkspaceRequest) (domain.Workspace, error) {
+	projectID := req.ProjectID
+	if b.projects != nil {
+		if _, err := b.projects.Get(ctx, projectID); err != nil {
+			if proj, err2 := b.projects.GetBySlug(ctx, string(projectID)); err2 == nil {
+				projectID = proj.ID
+			}
+		}
+	}
 	w, err := b.workspaces.Create(ctx, workspaces.CreateInput{
-		ProjectID: req.ProjectID,
-		Branch:    req.Branch,
-		Agent:     req.Agent,
+		ProjectID:          projectID,
+		Title:              req.Title,
+		Instructions:       req.Instructions,
+		Agent:              req.Agent,
+		DevcontainerSource: req.DevcontainerSource,
+		Branch:             req.Branch,
 	})
 	if err != nil {
 		return domain.Workspace{}, translateError(err)
@@ -1662,16 +1699,53 @@ func (b *Backend) StopWorkspace(ctx context.Context, id domain.ID) (domain.Works
 }
 
 func (b *Backend) DeleteWorkspace(ctx context.Context, id domain.ID) error {
-	// workspaces has no delete; use direct SQL
-	res, err := b.db.ExecContext(ctx, `DELETE FROM workspaces WHERE id = ?`, string(id))
-	if err != nil {
+	if err := b.workspaces.Delete(ctx, string(id)); err != nil {
 		return translateError(err)
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return translateError(fmt.Errorf("%w: workspace %q not found", store.ErrNotFound, id))
+	return nil
+}
+
+func (b *Backend) SendWorkspace(ctx context.Context, id domain.ID, message string) error {
+	if err := b.workspaces.Send(ctx, string(id), message); err != nil {
+		return translateError(err)
 	}
 	return nil
+}
+
+func (b *Backend) AttachWorkspace(ctx context.Context, id domain.ID) error {
+	if err := b.workspaces.Attach(ctx, string(id)); err != nil {
+		return translateError(err)
+	}
+	return nil
+}
+
+func (b *Backend) ListCompanionWorkspaces(ctx context.Context, p api.Pagination) ([]domain.Workspace, error) {
+	return b.ListWorkspaces(ctx, p)
+}
+
+func (b *Backend) CreateCompanionWorkspace(ctx context.Context, req api.CompanionCreateWorkspaceRequest) (domain.Workspace, error) {
+	slug := strings.TrimSpace(req.ProjectSlug)
+	if slug == "" {
+		return domain.Workspace{}, translateError(fmt.Errorf("%w: project_slug is required", store.ErrValidation))
+	}
+	title := strings.TrimSpace(req.Title)
+	if title == "" {
+		return domain.Workspace{}, translateError(fmt.Errorf("%w: title is required", store.ErrValidation))
+	}
+	proj, err := b.projects.GetBySlug(ctx, slug)
+	if err != nil {
+		return domain.Workspace{}, translateError(err)
+	}
+	w, err := b.workspaces.Create(ctx, workspaces.CreateInput{
+		ProjectID:    proj.ID,
+		Title:        title,
+		Instructions: req.Instructions,
+		Agent:        "omp",
+	})
+	if err != nil {
+		return domain.Workspace{}, translateError(err)
+	}
+	return *w, nil
 }
 
 // Users (glue)

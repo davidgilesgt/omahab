@@ -388,6 +388,48 @@ func (c *RemoteClient) GetCompanionProjects(ctx context.Context) ([]domain.Proje
 	return []domain.Project{}, nil
 }
 
+// GetCompanionWorkspaces fetches workspaces via device endpoint.
+func (c *RemoteClient) GetCompanionWorkspaces(ctx context.Context) ([]domain.Workspace, error) {
+	auth, err := c.deviceAuthHeader()
+	if err != nil {
+		return nil, err
+	}
+	if auth == "" {
+		return nil, ErrNotAuthenticated
+	}
+	var out struct {
+		Items []domain.Workspace `json:"items"`
+	}
+	if err := c.doWithAuth(ctx, http.MethodGet, "/api/v1/companion/workspaces", auth, nil, &out); err != nil {
+		return nil, err
+	}
+	if out.Items != nil {
+		return out.Items, nil
+	}
+	return []domain.Workspace{}, nil
+}
+
+// CreateCompanionWorkspace creates a workspace via device endpoint.
+func (c *RemoteClient) CreateCompanionWorkspace(ctx context.Context, projectSlug, title, instructions string) (*domain.Workspace, error) {
+	auth, err := c.deviceAuthHeader()
+	if err != nil {
+		return nil, err
+	}
+	if auth == "" {
+		return nil, ErrNotAuthenticated
+	}
+	body := map[string]string{
+		"project_slug": projectSlug,
+		"title":        title,
+		"instructions": instructions,
+	}
+	b, _ := json.Marshal(body)
+	var out domain.Workspace
+	if err := c.doWithAuth(ctx, http.MethodPost, "/api/v1/companion/workspaces", auth, strings.NewReader(string(b)), &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
 // GetCompanionEnvironment fetches the tool-environment bundle via device endpoint.
 // It returns a map of name->value and ETag for caching (If-None-Match -> 304).
 func (c *RemoteClient) GetCompanionEnvironment(ctx context.Context) (map[string]string, string, error) {
