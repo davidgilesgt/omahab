@@ -1,7 +1,7 @@
 // Package apps implements the curated platform application lifecycle
-// (DESIGN.md §6.1): a validated bundle catalog pinned by digest, desired and
-// observed state persisted in SQLite, Docker Compose deployment through an
-// explicit Runner interface, current/previous release retention for
+// (DESIGN.md §6.1): a validated bundle catalog of native systemd services,
+// desired and observed state persisted in SQLite, deployment through a
+// SystemdRunner, current/previous release retention for
 // rollback, health observation, and normalized event emission.
 //
 // State machine (desired -> observed):
@@ -26,8 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"runtime"
-	"sort"
+		"sort"
 	"strings"
 	"sync"
 	"time"
@@ -56,7 +55,7 @@ type EnvSource func(ctx context.Context, app domain.Application) ([]string, erro
 // are optional. Now exists so transitions are deterministically testable.
 type Options struct {
 	Catalog *Catalog
-	Runner  Runner
+	Runner  *SystemdRunner
 	Events  EventSink
 	Env     EnvSource
 	Now     func() time.Time
@@ -67,14 +66,11 @@ type Service struct {
 	db      *sql.DB
 	catalog *Catalog
 	catMu   sync.RWMutex
-	runner  Runner
+	runner  *SystemdRunner
 	events  EventSink
 	env     EnvSource
 	now     func() time.Time
 	locks   keyedLocks
-
-	updateMu      sync.Mutex
-	updateEmitted map[string]string
 }
 
 // NewService validates options and returns the service.
@@ -97,13 +93,12 @@ func NewService(db *sql.DB, opt Options) (*Service, error) {
 		now = time.Now
 	}
 	return &Service{
-		db:            db,
-		catalog:       opt.Catalog,
-		runner:        opt.Runner,
-		events:        events,
-		env:           opt.Env,
-		now:           now,
-		updateEmitted: make(map[string]string),
+		db:      db,
+		catalog: opt.Catalog,
+		runner:  opt.Runner,
+		events:  events,
+		env:     opt.Env,
+		now:     now,
 	}, nil
 }
 
@@ -146,10 +141,7 @@ func (s *Service) Install(ctx context.Context, req InstallRequest) (Status, erro
 	if !ok {
 		return Status{}, invalid("unknown bundle %q", req.BundleID)
 	}
-	if !supportedArchitectures[runtime.GOARCH] || !containsString(bundle.Architectures, runtime.GOARCH) {
-		return Status{}, fmt.Errorf("%w: bundle %q needs one of %s, host is %s",
-			ErrUnsupportedArch, bundle.ID, strings.Join(bundle.Architectures, ", "), runtime.GOARCH)
-	}
+
 	name := req.Name
 	if name == "" {
 		name = bundle.ID
@@ -174,11 +166,6 @@ func (s *Service) Install(ctx context.Context, req InstallRequest) (Status, erro
 	if hostname != "" && !hostnameRe.MatchString(hostname) {
 		return Status{}, invalid("hostname %q is not a valid lowercase hostname", hostname)
 	}
-	compose, err := renderCompose(bundle, bundle.Digest)
-	if err != nil {
-		return Status{}, err
-	}
-
 	unlock := s.locks.acquire("name:" + name)
 	defer unlock()
 	if _, err := getAppByName(ctx, s.db, name); err == nil {
@@ -192,8 +179,8 @@ func (s *Service) Install(ctx context.Context, req InstallRequest) (Status, erro
 		ID:               domain.ID(newID("app")),
 		Name:             name,
 		BundleID:         bundle.ID,
-		Image:            bundle.Image,
-		Digest:           bundle.Digest,
+		Image:            "",
+		Digest:           "",
 		Hostname:         hostname,
 		Exposure:         exposure,
 		Health:           domain.HealthUnknown,
@@ -203,12 +190,12 @@ func (s *Service) Install(ctx context.Context, req InstallRequest) (Status, erro
 		InstalledAt:      &ts,
 		UpdatedAt:        ts,
 	}
-	rel := releaseRecord{ID: rec.CurrentReleaseID, AppID: rec.ID, Digest: bundle.Digest, Compose: compose, CreatedAt: ts}
+	rel := releaseRecord{ID: rec.CurrentReleaseID, AppID: rec.ID, Digest: "", Compose: "", CreatedAt: ts}
 	if err := createAppWithRelease(ctx, s.db, rec, rel); err != nil {
 		return Status{}, err
 	}
 
-	spec := DeploySpec{Compose: compose, Digest: bundle.Digest, Health: bundle.HealthCheck}
+	spec := DeploySpec{Health: bundle.HealthCheck}
 	env, envErr := s.envFor(ctx, rec)
 	spec.Env = env
 	deployErr := envErr
@@ -222,7 +209,7 @@ func (s *Service) Install(ctx context.Context, req InstallRequest) (Status, erro
 			return Status{}, err
 		}
 		s.emit(ctx, EventInstallFailed, SeverityError, rec.ID, "install of "+name+" failed",
-			map[string]any{"bundle_id": bundle.ID, "digest": bundle.Digest, "error": msg})
+			map[string]any{"bundle_id": bundle.ID, "error": msg})
 		return Status{}, fmt.Errorf("%w: %s", ErrRunner, msg)
 	}
 
@@ -231,7 +218,7 @@ func (s *Service) Install(ctx context.Context, req InstallRequest) (Status, erro
 		return Status{}, err
 	}
 	s.emit(ctx, EventInstalled, SeverityInfo, rec.ID, name+" installed", map[string]any{
-		"bundle_id": bundle.ID, "digest": bundle.Digest, "exposure": string(exposure),
+		"bundle_id": bundle.ID, "exposure": string(exposure),
 	})
 	return s.Status(ctx, rec.ID)
 }
@@ -318,12 +305,8 @@ func (s *Service) Stop(ctx context.Context, id domain.ID) (Status, error) {
 	return s.Status(ctx, id)
 }
 
-// Update deploys a new pinned digest and/or catalog compose for the app's
-// bundle. Mutable tags are rejected. Same digest with a changed compose is a
-// valid new release. The current release pointer only moves after a successful
-// deploy; on failure the previous version is restored and the app records
-// the failure without changing its release history. When digest and rendered
-// compose both match the active release, Update returns the current status.
+// Update is retained for API compatibility but native bundles are updated
+// via the system image (nixpkgs pin), not per-bundle digests.
 func (s *Service) Update(ctx context.Context, id domain.ID, digest string) (Status, error) {
 	rec, unlock, err := s.lockedApp(ctx, id)
 	if err != nil {
@@ -333,84 +316,13 @@ func (s *Service) Update(ctx context.Context, id domain.ID, digest string) (Stat
 	if rec.ObservedState == ObservedProvisioning {
 		return Status{}, fmt.Errorf("%w: app %s is provisioning", ErrConflict, id)
 	}
-	if !ValidDigest(digest) {
-		return Status{}, invalid("digest %q must be a pinned sha256 digest; mutable tags are not accepted", digest)
-	}
 	s.catMu.RLock()
 	bundle, ok := s.catalog.Get(rec.BundleID)
 	s.catMu.RUnlock()
 	if !ok {
 		return Status{}, fmt.Errorf("%w: bundle %q missing from catalog", ErrConflict, rec.BundleID)
 	}
-	if bundle.Runtime == RuntimeSystemd {
-		return Status{}, invalid("bundle %q is a native system service managed by the system image; updates come from the nixpkgs pin", rec.BundleID)
-	}
-	compose, err := renderCompose(bundle, digest)
-	if err != nil {
-		return Status{}, err
-	}
-	if rec.CurrentReleaseID != "" {
-		current, err := getRelease(ctx, s.db, rec.CurrentReleaseID)
-		if err != nil {
-			return Status{}, err
-		}
-		if digest == rec.Digest && compose == current.Compose {
-			return s.Status(ctx, id)
-		}
-	}
-
-	rel := releaseRecord{ID: domain.ID(newID("rel")), AppID: rec.ID, Digest: digest, Compose: compose, CreatedAt: s.now().UTC()}
-	if err := insertRelease(ctx, s.db, rel); err != nil {
-		return Status{}, err
-	}
-	if err := setObserved(ctx, s.db, rec.ID, ObservedProvisioning, domain.HealthUnknown, "", s.now()); err != nil {
-		return Status{}, err
-	}
-
-	spec := DeploySpec{Compose: compose, Digest: digest, Health: bundle.HealthCheck}
-	env, envErr := s.envFor(ctx, rec)
-	spec.Env = env
-	deployErr := envErr
-	if deployErr == nil {
-		deployErr = s.runner.Deploy(ctx, rec.application(), spec)
-	}
-	if deployErr != nil {
-		msg := redact(deployErr.Error(), env)
-		s.dropRelease(ctx, rel.ID)
-		data := map[string]any{"digest": digest, "current_digest": rec.Digest, "error": msg}
-		if restoreErr := s.redeployCurrent(ctx, rec); restoreErr != nil {
-			combined := msg + "; restoring current release also failed: " + redact(restoreErr.Error(), env)
-			if err := setObserved(ctx, s.db, rec.ID, ObservedFailed, domain.HealthUnknown, combined, s.now()); err != nil {
-				return Status{}, err
-			}
-			data["error"] = combined
-			data["restored"] = false
-			s.emit(ctx, EventUpdateFailed, SeverityError, id, "update of "+rec.Name+" failed and rollback to current failed", data)
-			return Status{}, fmt.Errorf("%w: %s", ErrRunner, combined)
-		}
-		observed := ObservedRunning
-		if rec.DesiredState == DesiredStopped {
-			observed = ObservedStopped
-		}
-		if err := setObserved(ctx, s.db, rec.ID, observed, domain.HealthUnknown, msg, s.now()); err != nil {
-			return Status{}, err
-		}
-		data["restored"] = true
-		s.emit(ctx, EventUpdateFailed, SeverityError, id, "update of "+rec.Name+" failed; current release restored", data)
-		return Status{}, fmt.Errorf("%w: %s", ErrRunner, msg)
-	}
-
-	observed, err := s.reconcileStoppedDesired(ctx, rec, spec)
-	if err != nil {
-		return Status{}, err
-	}
-	if err := activateRelease(ctx, s.db, rec.ID, rel.ID, domain.ID(rec.CurrentReleaseID), digest, observed, domain.HealthUnknown, "", s.now()); err != nil {
-		return Status{}, err
-	}
-	s.emit(ctx, EventUpdated, SeverityInfo, id, rec.Name+" updated", map[string]any{
-		"digest": digest, "previous_digest": rec.Digest,
-	})
-	return s.Status(ctx, id)
+	return Status{}, invalid("bundle %q is a native system service managed by the system image; updates come from the nixpkgs pin", bundle.ID)
 }
 
 // Rollback redeploys the retained previous release and swaps the pointers,
@@ -432,7 +344,7 @@ func (s *Service) Rollback(ctx context.Context, id domain.ID) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
-	spec := DeploySpec{Compose: prev.Compose, Digest: prev.Digest, Health: s.healthCheckFor(rec.BundleID)}
+	spec := DeploySpec{Health: s.healthCheckFor(rec.BundleID)}
 	if err := setObserved(ctx, s.db, rec.ID, ObservedProvisioning, domain.HealthUnknown, "", s.now()); err != nil {
 		return Status{}, err
 	}
@@ -487,9 +399,9 @@ func (s *Service) Uninstall(ctx context.Context, id domain.ID) error {
 	}
 	defer unlock()
 	s.catMu.RLock()
-	bundle, ok := s.catalog.Get(rec.BundleID)
+	_, ok := s.catalog.Get(rec.BundleID)
 	s.catMu.RUnlock()
-	if ok && bundle.Runtime == RuntimeSystemd {
+	if ok {
 		return invalid("bundle %q is a native system service defined by the system closure; it cannot be uninstalled", rec.BundleID)
 	}
 	spec, err := s.specFor(ctx, rec)
@@ -595,11 +507,7 @@ func (s *Service) view(ctx context.Context, rec appRecord) (Status, error) {
 // specFor rebuilds the deploy spec for the current release, including a
 // fresh secret projection and the bundle's health check.
 func (s *Service) specFor(ctx context.Context, rec appRecord) (DeploySpec, error) {
-	rel, err := getRelease(ctx, s.db, domain.ID(rec.CurrentReleaseID))
-	if err != nil {
-		return DeploySpec{}, err
-	}
-	spec := DeploySpec{Compose: rel.Compose, Digest: rel.Digest, Health: s.healthCheckFor(rec.BundleID)}
+	spec := DeploySpec{Health: s.healthCheckFor(rec.BundleID)}
 	env, err := s.envFor(ctx, rec)
 	if err != nil {
 		return DeploySpec{}, err
@@ -702,85 +610,11 @@ func (s *Service) emit(ctx context.Context, typ, severity string, id domain.ID, 
 	}
 }
 
-// SetCatalog replaces the curated catalog atomically. It is used when a new
-// signed catalog is applied and allows CheckForUpdates to detect new digests
-// without restarting the service.
-func (s *Service) SetCatalog(c *Catalog) error {
-	if c == nil {
-		return invalid("catalog is required")
-	}
-	s.catMu.Lock()
-	s.catalog = c
-	s.catMu.Unlock()
-	return nil
-}
-
 // Catalog returns the current catalog snapshot.
 func (s *Service) CatalogSnapshot() *Catalog {
 	s.catMu.RLock()
 	defer s.catMu.RUnlock()
 	return s.catalog
-}
-
-// CheckForUpdates compares each installed app's digest with its bundle's
-// catalog digest and emits service.update_available on transitions to an
-// update-available state. It emits exactly once per distinct new digest and
-// is idempotent on re-observation of the same digest.
-func (s *Service) CheckForUpdates(ctx context.Context) ([]Status, error) {
-	recs, err := listApps(ctx, s.db)
-	if err != nil {
-		return nil, err
-	}
-	var withUpdates []Status
-	s.catMu.RLock()
-	cat := s.catalog
-	s.catMu.RUnlock()
-	if cat == nil {
-		return nil, nil
-	}
-	for _, rec := range recs {
-		bundle, ok := cat.Get(rec.BundleID)
-		if !ok {
-			continue
-		}
-		if bundle.Runtime == RuntimeSystemd {
-			continue // versions track the nixpkgs pin, not the catalog
-		}
-		if bundle.Digest == "" || rec.Digest == bundle.Digest {
-			continue
-		}
-		st, err := s.view(ctx, rec)
-		if err != nil {
-			continue
-		}
-		withUpdates = append(withUpdates, st)
-		key := string(rec.ID)
-		s.updateMu.Lock()
-		last := s.updateEmitted[key]
-		if last == bundle.Digest {
-			s.updateMu.Unlock()
-			continue
-		}
-		s.updateEmitted[key] = bundle.Digest
-		s.updateMu.Unlock()
-		s.emit(ctx, EventUpdateAvailable, SeverityInfo, rec.ID,
-			rec.Name+" update available",
-			map[string]any{
-				"bundle_id":  rec.BundleID,
-				"old_digest": rec.Digest,
-				"new_digest": bundle.Digest,
-			})
-	}
-	return withUpdates, nil
-}
-
-// ResetUpdateAvailableDedup clears the in-memory dedup state for
-// service.update_available. It is exposed for tests and for catalog
-// rollback scenarios.
-func (s *Service) ResetUpdateAvailableDedup() {
-	s.updateMu.Lock()
-	s.updateEmitted = make(map[string]string)
-	s.updateMu.Unlock()
 }
 
 func (s *Service) lockedApp(ctx context.Context, id domain.ID) (appRecord, func(), error) {

@@ -12,7 +12,7 @@ func TestLoadProducesCompleteConfig(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("OMAHAB_STATE_DIR", filepath.Join(root, "state"))
 	t.Setenv("OMAHAB_DATA_DIR", filepath.Join(root, "data"))
-	t.Setenv("OMAHAB_CATALOG", filepath.Join(root, "apps-catalog.json"))
+	t.Setenv("OMAHAB_CATALOG", filepath.Join(root, "catalog.json"))
 	t.Setenv("OMAHAB_LISTEN", "127.0.0.1:8484")
 
 	cfg, err := Load()
@@ -28,7 +28,7 @@ func TestLoadProducesCompleteConfig(t *testing.T) {
 	if cfg.APITokenPath != filepath.Join(root, "state", "api.token") {
 		t.Errorf("api token path = %q", cfg.APITokenPath)
 	}
-	if cfg.CatalogPath != filepath.Join(root, "apps-catalog.json") {
+	if cfg.CatalogPath != filepath.Join(root, "catalog.json") {
 		t.Errorf("catalog path = %q", cfg.CatalogPath)
 	}
 	if err := cfg.Validate(); err != nil {
@@ -51,7 +51,7 @@ func TestLoadWithoutListenEnvUsesLoopbackDefault(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("OMAHAB_STATE_DIR", filepath.Join(root, "state"))
 	t.Setenv("OMAHAB_DATA_DIR", filepath.Join(root, "data"))
-	t.Setenv("OMAHAB_CATALOG", filepath.Join(root, "apps-catalog.json"))
+	t.Setenv("OMAHAB_CATALOG", filepath.Join(root, "catalog.json"))
 	// Ensure OMAHAB_LISTEN is not set so Load falls back to DefaultListen.
 	t.Setenv("OMAHAB_LISTEN", "")
 	cfg, err := Load()
@@ -70,7 +70,7 @@ func TestLoadAcceptsPackagedWildcardWhenExplicitlySet(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("OMAHAB_STATE_DIR", filepath.Join(root, "state"))
 	t.Setenv("OMAHAB_DATA_DIR", filepath.Join(root, "data"))
-	t.Setenv("OMAHAB_CATALOG", filepath.Join(root, "apps-catalog.json"))
+	t.Setenv("OMAHAB_CATALOG", filepath.Join(root, "catalog.json"))
 	t.Setenv("OMAHAB_LISTEN", "0.0.0.0:8484")
 	cfg, err := Load()
 	if err != nil {

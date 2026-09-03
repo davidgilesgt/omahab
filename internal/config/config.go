@@ -15,7 +15,7 @@ const (
 	DefaultStateDir    = "/var/lib/omahab"
 	DefaultDataDir     = "/srv/omahab"
 	DefaultListen      = "127.0.0.1:8484"
-	DefaultCatalogPath = "/usr/share/omahab/catalog/apps-catalog.json"
+	DefaultCatalogPath = "/usr/share/omahab/catalog/catalog.json"
 )
 
 type Config struct {

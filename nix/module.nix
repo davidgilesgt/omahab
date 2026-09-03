@@ -75,7 +75,7 @@ in
       type = types.package;
       default = omahabCatalogPkg;
       defaultText = literalExpression "flake package or pkgs.omahab-catalog";
-      description = "Pinned application catalog (apps-catalog.json).";
+      description = "Pinned application catalog (catalog.json).";
     };
 
     embeddingWorkerPackage = mkOption {
@@ -137,7 +137,7 @@ in
     users.groups.cloudflared = { };
 
     # ------------------------------------------------------------------
-    # tmpfiles — from packaging/tmpfiles.d/omahab.conf, minus /etc/omahab
+    # tmpfiles — state and data directories
     # (runtime state now lives under /var/lib/omahab; see nix/apps.nix for
     # the caddy/cloudflared dirs).
     # ------------------------------------------------------------------
@@ -235,7 +235,7 @@ in
         OMAHAB_STATE_DIR = stateDir;
         OMAHAB_DATA_DIR = dataDir;
         OMAHAB_LISTEN = cfg.listen;
-        OMAHAB_CATALOG = "${cfg.catalogPackage}/apps-catalog.json";
+        OMAHAB_CATALOG = "${cfg.catalogPackage}/catalog.json";
         OMAHAB_WEB_DIR = "${cfg.webPackage}";
         # First-boot LAN wizard listener; inert once bootstrap-done exists.
         OMAHAB_BOOTSTRAP_LISTEN = "0.0.0.0:8485";

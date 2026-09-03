@@ -163,7 +163,7 @@ Recommended storage layout:
 
 ### 4.2 Implementation stack
 
-Omahab-owned host software uses Go as its primary language. The signed installer, `omahab`, `omahabd`, `omahab-clientd`, and the installation, application, deployment, Cloudflare, backup, synchronization, workspace, event, email-processing, and health controllers are Go binaries. Use the current stable Go release pinned by each Omahab release.
+Omahab-owned host software uses Go as its primary language. `omahab`, `omahabd`, `omahab-clientd`, and the installation, application, deployment, Cloudflare, backup, synchronization, workspace, event, email-processing, and health controllers are Go binaries. Use the current stable Go release pinned by each Omahab release.
 
 The authenticated control API uses HTTP/JSON with an OpenAPI contract. Use the Go standard library with Chi for routing, Cobra for CLI commands, and generated Go and TypeScript API types. Use ordinary HTTP for commands and queries, Server-Sent Events for control-plane event streams, and WebSockets only where bidirectional behavior requires them, including Hermes's existing JSON-RPC transport. Do not add gRPC initially.
 
@@ -173,7 +173,7 @@ Browser applications use TypeScript, React, and Vite, with React Router, TanStac
 
 The Omarchy shell plugin remains a thin QML/JavaScript presentation layer over `omahab-clientd`. The Cloudflare Email Worker remains a minimal native TypeScript edge adapter. Local embedding inference remains an isolated Python worker because its model, tokenizer, and ONNX ecosystem are materially stronger there.
 
-Language consolidation must not collapse failure domains. Embedding inference and other resource-heavy or native-library workloads remain outside `omahabd`, even when controlled through its API. Omahab orchestrates Caddy, `cloudflared`, Tailscale, Docker Compose, restic, Syncthing, DevPod, `hass-cli`, Hermes, and the model gateway as upstream components rather than reimplementing them.
+Language consolidation must not collapse failure domains. Embedding inference and other resource-heavy or native-library workloads remain outside `omahabd`, even when controlled through its API. Omahab orchestrates Caddy, `cloudflared`, Tailscale, restic, Syncthing, DevPod, `hass-cli`, Hermes, and the model gateway as upstream components rather than reimplementing them.
 
 ## 5. Host OS and installation
 
@@ -249,11 +249,11 @@ Omahab deliberately uses different runtime designs for different workload classe
 
 ### 6.1 Platform applications
 
-Platform applications are **native NixOS systemd services** managed by `omahabd` — Caddy, Pocket ID, Forgejo, Woodpecker (server + agent), Immich, Paperless-ngx, Karakeep, Syncthing, LiteLLM, the embedding worker, and ntfy — except Hermes, which stays a container (Omahab-owned image, digest-pinned) until a native package exists.
+Platform applications are **native NixOS systemd services** managed by `omahabd` — Caddy, Pocket ID, Forgejo, Woodpecker (server + agent), Immich, Paperless-ngx, Karakeep, Syncthing, LiteLLM, the embedding worker, ntfy, and Hermes (which runs as an `oci-containers` unit).
 
 A platform bundle entry in the curated catalog declares:
 
-- runtime placement (`systemd` with its unit set, or `compose`);
+- systemd units;
 - health checks (HTTP probes against the loopback port map);
 - resource guidance;
 - persistent-data locations (host paths under `/srv/omahab` and `/var/lib/<svc>`);
@@ -288,7 +288,7 @@ A project that requires PostgreSQL, Redis, multiple workers, or several independ
 
 Omahab is not a supersized ONCE fork. ONCE's current assumptions include one container and volume per app, Docker labels as state, and application secrets in Docker-managed configuration. Those assumptions do not fit users, projects, external services, synchronization, identity, or the Omahab secrets model.
 
-Maintain a narrow fork, such as `omahab-once`, for project deployment. Keep its patch set suitable for upstreaming:
+Maintain a narrow fork `third_party/once` in this repository (patch list in `third_party/once/PATCHES.md`) for project deployment. Keep its patch set suitable for upstreaming:
 
 1. configurable proxy bind address, including loopback;
 2. external TLS mode;
@@ -1037,7 +1037,7 @@ Applications not selected for the initial default:
 
 ### 23.1 Architectural spikes
 
-1. Narrow ONCE fork: loopback binding, JSON status, secret files, lifecycle hooks.
+1. Narrow ONCE fork in `third_party/once`: loopback binding, JSON status, secret files, lifecycle hooks.
 2. Cloudflare public-DNS-to-Tailscale routing and Caddy DNS-01 certificates.
 3. Official Hermes Desktop remote provisioning without a fork.
 4. Desktop-quality Hermes React surface in a browser.

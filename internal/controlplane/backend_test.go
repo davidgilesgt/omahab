@@ -53,10 +53,7 @@ func TestCreateBackupDoesNotPersistFakePendingRun(t *testing.T) {
 }
 
 const catalogFixture = `{"bundles":[{
-	"id": "demo", "name": "demo", "image": "docker.io/example/demo",
-	"digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-	"architectures": ["amd64", "arm64"],
-	"compose": "services:\n  demo:\n    image: {{.Image}}@{{.Digest}}\n",
+	"id": "demo", "name": "demo", "units": ["demo.service"],
 	"max_exposure": "shared",
 	"health_check": {"kind": "none"},
 	"resources": {"memory_mb": 128}
@@ -88,7 +85,7 @@ func TestCatalogLoadsFromFileAndInstallFailsClosed(t *testing.T) {
 	var catalogPath string
 	backend := newTestBackend(t, func(c *config.Config) {
 		dir := t.TempDir()
-		catalogPath = filepath.Join(dir, "apps-catalog.json")
+		catalogPath = filepath.Join(dir, "catalog.json")
 		if err := os.WriteFile(catalogPath, []byte(catalogFixture), 0o644); err != nil {
 			t.Fatal(err)
 		}

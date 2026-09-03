@@ -1,14 +1,12 @@
 package apps
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"regexp"
 	"strings"
-	"text/template"
 	"time"
 
 	"github.com/omahab/omahab/internal/domain"
@@ -23,35 +21,12 @@ const (
 	CheckCommand CheckKind = "command"
 )
 
-// Runtime values selecting how a bundle is placed: compose (Docker
-// Compose, digest-pinned) or systemd (native NixOS service).
-const (
-	RuntimeCompose = "compose"
-	RuntimeSystemd = "systemd"
-)
-
-// supportedArchitectures mirrors the supported Debian 13 / Ubuntu 26.04 hosts (amd64 and
-// arm64, DESIGN.md §5.1). Bundles must declare a subset.
-var supportedArchitectures = map[string]bool{
-	"amd64": true,
-	"arm64": true,
-}
-
 var (
-	slugRe        = regexp.MustCompile(`^[a-z]([a-z0-9-]*[a-z0-9])?$`)
-	hostnameRe    = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
-	imageRe       = regexp.MustCompile(`^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)*$`)
-	digestRe      = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
-	pinnedImageRe = regexp.MustCompile(`^[^@]+@sha256:[a-f0-9]{64}$`)
-	volumeName    = regexp.MustCompile(`^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$`)
-	imageLineRe   = regexp.MustCompile(`(?m)^[ \t-]*image:[ \t]*(\S+)`)
-	routeRe       = regexp.MustCompile(`^[a-z0-9-]*$`)
+	slugRe     = regexp.MustCompile(`^[a-z]([a-z0-9-]*[a-z0-9])?$`)
+	hostnameRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
+	volumeName = regexp.MustCompile(`^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$`)
+	routeRe    = regexp.MustCompile(`^[a-z0-9-]*$`)
 )
-
-// ValidDigest reports whether d is a canonical pinned sha256 digest.
-// Mutable tags (":latest", ":v1.2", floating aliases) are never accepted
-// anywhere in this package.
-func ValidDigest(d string) bool { return digestRe.MatchString(d) }
 
 // DataVolume declares one piece of persistent application data. Names map to
 // the Compose volume, Path to the mount point inside the service.
@@ -106,18 +81,11 @@ func parseDurationOrDefault(s string, def time.Duration) time.Duration {
 }
 
 // Bundle is one curated platform application entry (DESIGN.md §6.1): a
-// pinned digest, a Compose definition template, supported architectures,
-// health and exposure capability, persistent-data declarations, and backup
-// hooks. Compose is a text/template whose available fields are Image,
-// Digest, and Name; the rendered definition must reference every image by
-// digest and must pin the bundle's own image to the requested digest.
+// declarative bundle of native NixOS service units, health and exposure
+// capability, persistent-data declarations, and backup hooks.
 type Bundle struct {
 	ID              string           `json:"id"`
 	Name            string           `json:"name"`
-	Image           string           `json:"image"`
-	Digest          string           `json:"digest"`
-	Architectures   []string         `json:"architectures"`
-	Compose         string           `json:"compose"`
 	Port            int              `json:"port,omitempty"`
 	DefaultExposure domain.Exposure  `json:"default_exposure,omitempty"`
 	MaxExposure     domain.Exposure  `json:"max_exposure,omitempty"`
@@ -131,14 +99,7 @@ type Bundle struct {
 	Dependencies    []string         `json:"dependencies,omitempty"`
 	SecretSources   []string         `json:"secret_sources,omitempty"`
 	PipelineImage   string           `json:"pipeline_image,omitempty"`
-
-	// Runtime selects the runner: "systemd" (native NixOS service,
-	// versions owned by the nixpkgs pin) or "compose" (Docker Compose;
-	// digest pinning applies). Empty defaults to compose.
-	Runtime string `json:"runtime,omitempty"`
-	// Units lists the systemd units to control for runtime=systemd
-	// bundles (e.g. ["forgejo.service"]).
-	Units []string `json:"units,omitempty"`
+	Units           []string         `json:"units,omitempty"`
 }
 
 // exposureRank orders exposure so requests can be checked against a bundle's
@@ -165,11 +126,6 @@ func validSlug(s string) bool {
 func (b Bundle) validate() (Bundle, error) {
 	var problems []string
 
-	// runtime=systemd bundles are native NixOS services: their versions
-	// are owned by the nixpkgs pin, so image/digest/compose pinning does
-	// not apply to them.
-	native := b.Runtime == RuntimeSystemd
-
 	if !validSlug(b.ID) || len(b.ID) < 2 {
 		problems = append(problems, fmt.Sprintf("id %q must be 2-63 chars of [a-z0-9-], starting with a letter and ending alphanumeric", b.ID))
 	}
@@ -177,32 +133,8 @@ func (b Bundle) validate() (Bundle, error) {
 	if b.Name == "" {
 		problems = append(problems, "name is required")
 	}
-	if !native {
-		if b.Image == "" || strings.Contains(b.Image, "@") || !imageRe.MatchString(b.Image) {
-			problems = append(problems, fmt.Sprintf("image %q must be a tagless lowercase repository reference (digests belong in the digest field)", b.Image))
-		} else if idx := strings.LastIndexByte(b.Image, '/'); idx >= 0 && strings.ContainsRune(b.Image[idx:], ':') {
-			problems = append(problems, fmt.Sprintf("image %q carries a mutable tag", b.Image))
-		}
-		if !ValidDigest(b.Digest) {
-			problems = append(problems, fmt.Sprintf("digest %q must be a pinned sha256:<64 lowercase hex> digest", b.Digest))
-		}
-	}
 	if b.Port < 0 || b.Port > 65535 {
 		problems = append(problems, fmt.Sprintf("port %d out of range", b.Port))
-	}
-
-	if len(b.Architectures) == 0 {
-		problems = append(problems, "architectures must list at least one of amd64, arm64")
-	}
-	seenArch := map[string]bool{}
-	for _, a := range b.Architectures {
-		if !supportedArchitectures[a] {
-			problems = append(problems, fmt.Sprintf("architecture %q is not supported (want amd64 and/or arm64)", a))
-		}
-		if seenArch[a] {
-			problems = append(problems, fmt.Sprintf("architecture %q listed twice", a))
-		}
-		seenArch[a] = true
 	}
 
 	if b.DefaultExposure == "" {
@@ -279,20 +211,12 @@ func (b Bundle) validate() (Bundle, error) {
 		seenSecret[src] = true
 	}
 	if strings.TrimSpace(b.PipelineImage) != "" {
-		if !pinnedImageRe.MatchString(strings.TrimSpace(b.PipelineImage)) {
+		if !regexp.MustCompile(`^[^@]+@sha256:[a-f0-9]{64}$`).MatchString(strings.TrimSpace(b.PipelineImage)) {
 			problems = append(problems, fmt.Sprintf("pipeline_image %q must be repository@sha256:<64 lowercase hex>", b.PipelineImage))
 		}
 	}
-	// Runtime normalization + units contract.
-	switch b.Runtime {
-	case "", RuntimeCompose:
-		b.Runtime = RuntimeCompose
-	case RuntimeSystemd:
-		if len(b.Units) == 0 {
-			problems = append(problems, "runtime=systemd requires at least one unit")
-		}
-	default:
-		problems = append(problems, fmt.Sprintf("runtime %q must be systemd or compose", b.Runtime))
+	if len(b.Units) == 0 {
+		problems = append(problems, "units is required for every bundle")
 	}
 	seenUnit := map[string]bool{}
 	for _, u := range b.Units {
@@ -348,58 +272,6 @@ func validateHealthCheck(h HealthCheck, bundlePort int) (HealthCheck, []string) 
 	return h, problems
 }
 
-// renderCompose renders the bundle's Compose template for a specific pinned
-// digest and verifies that every image reference is digest-pinned and that
-// the bundle's own image is pinned to exactly that digest.
-func renderCompose(b Bundle, digest string) (string, error) {
-	if !ValidDigest(digest) {
-		return "", invalid("digest %q must be a pinned sha256 digest; mutable tags are not accepted", digest)
-	}
-	tmpl, err := template.New("compose").Parse(b.Compose)
-	if err != nil {
-		return "", invalid("bundle %q compose template: %v", b.ID, err)
-	}
-	var buf bytes.Buffer
-	data := struct {
-		Image  string
-		Digest string
-		Name   string
-	}{b.Image, digest, b.Name}
-	if err := tmpl.Execute(&buf, data); err != nil {
-		return "", invalid("bundle %q compose render: %v", b.ID, err)
-	}
-	rendered := buf.String()
-	refs, err := imageRefs(rendered)
-	if err != nil {
-		return "", fmt.Errorf("bundle %q: %w", b.ID, err)
-	}
-	want := b.Image + "@" + digest
-	for _, ref := range refs {
-		if ref == want {
-			return rendered, nil
-		}
-	}
-	return "", invalid("bundle %q compose does not pin %s to digest %s", b.ID, b.Image, digest)
-}
-
-// imageRefs extracts the image references from a rendered Compose document
-// and rejects any that are not digest-pinned.
-func imageRefs(compose string) ([]string, error) {
-	var refs []string
-	for _, m := range imageLineRe.FindAllStringSubmatch(compose, -1) {
-		ref := strings.Trim(m[1], `"'`)
-		at := strings.IndexByte(ref, '@')
-		if at < 0 || !digestRe.MatchString(ref[at+1:]) {
-			return nil, invalid("image %q is not pinned by sha256 digest; mutable tags are not accepted", ref)
-		}
-		refs = append(refs, ref)
-	}
-	if len(refs) == 0 {
-		return nil, invalid("compose defines no image references")
-	}
-	return refs, nil
-}
-
 // Catalog is the validated set of curated bundles. It is immutable once
 // constructed; a new catalog is built when a curated file changes.
 type Catalog struct {
@@ -417,11 +289,6 @@ func NewCatalog(bundles ...Bundle) (*Catalog, error) {
 		}
 		if _, dup := c.byID[nb.ID]; dup {
 			return nil, invalid("duplicate bundle id %q", nb.ID)
-		}
-		if nb.Runtime != RuntimeSystemd {
-			if _, err := renderCompose(nb, nb.Digest); err != nil {
-				return nil, fmt.Errorf("bundle %q: %w", nb.ID, err)
-			}
 		}
 		c.byID[nb.ID] = nb
 		c.order = append(c.order, nb.ID)

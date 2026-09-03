@@ -34,7 +34,7 @@ func TestBundleUpstreamNativeUsesLoopbackPort(t *testing.T) {
 	t.Parallel()
 	// Native bundles map to the loopback port map regardless of the
 	// catalog's internal port (e.g. karakeep 3000 -> 3010).
-	got, err := bundleUpstream(apps.Bundle{ID: "karakeep", Port: 3000, Runtime: apps.RuntimeSystemd})
+	got, err := bundleUpstream(apps.Bundle{ID: "karakeep", Port: 3000})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +402,7 @@ func TestRunSetupReconcilerExposureErrorSuppressesCompletion(t *testing.T) {
 func TestEnsureExposureRecordUpdatesReconciledPort(t *testing.T) {
 	ctx := context.Background()
 	b, _ := newSetupBackend(t, nil)
-	if err := b.store.Migrate(ctx, exposureMigrations()...); err != nil {
+	if err := b.store.Migrate(ctx, exposure.Migrations()...); err != nil {
 		t.Fatal(err)
 	}
 	edge := &memEdge{routes: map[string]exposure.Route{}}

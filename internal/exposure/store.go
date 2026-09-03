@@ -13,12 +13,13 @@ import (
 )
 
 // Migrations returns the schema migrations owned by the exposure controller.
-func (s *Service) Migrations() []store.Migration {
+// Package-level helper so AllMigrations can assemble without an instance.
+func Migrations() []store.Migration {
 	return []store.Migration{
 		{
 			Name: "0001_exposure_services_and_acks",
 			SQL: `
-CREATE TABLE exposure_services (
+CREATE TABLE IF NOT EXISTS exposure_services (
     id            TEXT PRIMARY KEY,
     hostname      TEXT NOT NULL UNIQUE,
     home_anchor   TEXT NOT NULL,
@@ -30,7 +31,7 @@ CREATE TABLE exposure_services (
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL
 );
-CREATE TABLE exposure_public_acks (
+CREATE TABLE IF NOT EXISTS exposure_public_acks (
     service_id TEXT PRIMARY KEY,
     ack_id     TEXT NOT NULL,
     revision   INTEGER NOT NULL,
@@ -41,7 +42,7 @@ CREATE TABLE exposure_public_acks (
 		{
 			Name: "0002_exposure_plans",
 			SQL: `
-CREATE TABLE exposure_plans (
+CREATE TABLE IF NOT EXISTS exposure_plans (
     id               TEXT PRIMARY KEY,
     service_id       TEXT NOT NULL,
     service_revision INTEGER NOT NULL,
@@ -58,13 +59,13 @@ CREATE TABLE exposure_plans (
     created_at       TEXT NOT NULL,
     applied_at       TEXT
 );
-CREATE INDEX exposure_plans_by_service ON exposure_plans (service_id, created_at);
+CREATE INDEX IF NOT EXISTS exposure_plans_by_service ON exposure_plans (service_id, created_at);
 `,
 		},
 		{
 			Name: "0003_exposure_observations",
 			SQL: `
-CREATE TABLE exposure_observations (
+CREATE TABLE IF NOT EXISTS exposure_observations (
     service_id     TEXT PRIMARY KEY,
     observed_at    TEXT NOT NULL,
     vanity_dns     TEXT NOT NULL,
@@ -80,6 +81,10 @@ CREATE TABLE exposure_observations (
 `,
 		},
 	}
+}
+
+func (s *Service) Migrations() []store.Migration {
+	return Migrations()
 }
 
 const serviceColumns = `id, hostname, home_anchor, upstream, tunnel_origin, exposure, app_auth, revision, created_at, updated_at`

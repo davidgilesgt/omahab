@@ -26,16 +26,13 @@ type Runner interface {
 	Check(ctx context.Context, app domain.Application, spec DeploySpec) (domain.Health, error)
 }
 
-// DeploySpec carries everything a Runner needs to act: the exact rendered
-// Compose definition (byte-identical to the persisted release), its pinned
-// digest, the bundle health check, and the secret environment projection.
-// Env values exist only in memory on their way to the runner process; they
-// are never persisted, logged, or included in JSON or events.
+// DeploySpec carries everything a Runner needs to act: the bundle health
+// check and the secret environment projection. Env values exist only in
+// memory on their way to the runner process; they are never persisted,
+// logged, or included in JSON or events.
 type DeploySpec struct {
-	Compose string
-	Digest  string
-	Env     []string
-	Health  HealthCheck
+	Env    []string
+	Health HealthCheck
 }
 
 // Invoker runs one external command with an augmented environment. It is

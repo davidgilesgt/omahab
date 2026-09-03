@@ -1326,15 +1326,9 @@ func (b *Backend) ensureDefaultApp(ctx context.Context, bundle apps.Bundle, doma
 	}
 	switch existing.ObservedState {
 	case apps.ObservedRunning:
-		st, err := b.apps.Update(ctx, existing.ID, bundle.Digest)
+		st, err := b.apps.CheckHealth(ctx, existing.ID)
 		if err != nil {
 			return err
-		}
-		if st.ObservedState == apps.ObservedRunning && st.Health != domain.HealthHealthy {
-			st, err = b.apps.CheckHealth(ctx, existing.ID)
-			if err != nil {
-				return err
-			}
 		}
 		if err := requireRunningHealthy(st); err == nil {
 			return nil
@@ -1408,12 +1402,8 @@ func ensureDockerNetwork(ctx context.Context) error {
 
 func bundleUpstream(bundle apps.Bundle) (string, error) {
 	port := bundle.Port
-	if bundle.Runtime == apps.RuntimeSystemd {
-		// Native services are reachable on loopback at their mapped port
-		// (compose-internal DNS names no longer resolve).
-		if p, ok := apps.NativePort(bundle.ID); ok {
-			port = p
-		}
+	if p, ok := apps.NativePort(bundle.ID); ok {
+		port = p
 	}
 	if port <= 0 {
 		return "", fmt.Errorf("%w: %s", errMissingBundlePort, bundle.ID)
@@ -2030,18 +2020,6 @@ func (b *Backend) redeployBundle(ctx context.Context, bundleID string) error {
 	if app == nil {
 		return nil
 	}
-	var digest string
-	for _, bd := range b.apps.CatalogBundles() {
-		if bd.ID == bundleID {
-			digest = bd.Digest
-			break
-		}
-	}
-	if digest != "" {
-		if _, err := b.apps.Update(ctx, app.ID, digest); err != nil {
-			return err
-		}
-	}
 	if _, err := b.apps.Stop(ctx, app.ID); err != nil {
 		return err
 	}
@@ -2187,19 +2165,6 @@ func (b *Backend) reconcileCaddySpec(ctx context.Context) error {
 	}
 	if caddyApp == nil {
 		return nil
-	}
-	var catalogDigest string
-	for _, bd := range b.apps.CatalogBundles() {
-		if bd.ID == "caddy" {
-			catalogDigest = bd.Digest
-			break
-		}
-	}
-	if catalogDigest == "" {
-		return nil
-	}
-	if _, err := b.apps.Update(ctx, caddyApp.ID, catalogDigest); err != nil {
-		return fmt.Errorf("caddy spec: %w", err)
 	}
 	return nil
 }

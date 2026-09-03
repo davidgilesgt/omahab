@@ -6,6 +6,7 @@ import (
 	"github.com/omahab/omahab/internal/emailing"
 	"github.com/omahab/omahab/internal/environments"
 	"github.com/omahab/omahab/internal/events"
+	"github.com/omahab/omahab/internal/exposure"
 	"github.com/omahab/omahab/internal/health"
 	"github.com/omahab/omahab/internal/hermes"
 	"github.com/omahab/omahab/internal/identity"
@@ -30,8 +31,8 @@ func AllMigrations() []store.Migration {
 	out = append(out, apps.Migrations()...)
 	// projects
 	out = append(out, projects.Migrations()...)
-	// exposure (static copy of store.go migrations - Service.Migrations requires instance)
-	out = append(out, exposureMigrations()...)
+	// exposure
+	out = append(out, exposure.Migrations()...)
 	// secrets
 	out = append(out, secrets.Migrations()...)
 	// identity
@@ -60,102 +61,9 @@ func AllMigrations() []store.Migration {
 	out = append(out, emailing.Migrations()...)
 	// environments (companion devices + enrollments + env meta)
 	out = append(out, environments.Migrations()...)
-	// installer journal (legacy Debian installer schema; tables kept so
-	// restored databases remain compatible — no code reads them anymore)
-	out = append(out, store.Migration{
-		Name: "installer_journal",
-		SQL: `
-CREATE TABLE IF NOT EXISTS installer_journal (
-    id            TEXT PRIMARY KEY,
-    step          TEXT NOT NULL,
-    status        TEXT NOT NULL DEFAULT 'pending',
-    attempt       INTEGER NOT NULL DEFAULT 0,
-    started_at    TEXT,
-    finished_at    TEXT,
-    error         TEXT NOT NULL DEFAULT '',
-    rollback_data TEXT NOT NULL DEFAULT ''
-);
-CREATE INDEX IF NOT EXISTS idx_installer_journal_step ON installer_journal(step);
-CREATE INDEX IF NOT EXISTS idx_installer_journal_status ON installer_journal(status);
-
-CREATE TABLE IF NOT EXISTS installer_state (
-    key   TEXT PRIMARY KEY,
-    value TEXT NOT NULL DEFAULT ''
-);
-`,
-	})
 	// controlplane glue (users, release tokens)
 	out = append(out, glueMigrations()...)
 	return out
-}
-
-func exposureMigrations() []store.Migration {
-	return []store.Migration{
-		{
-			Name: "0001_exposure_services_and_acks",
-			SQL: `
-CREATE TABLE IF NOT EXISTS exposure_services (
-    id            TEXT PRIMARY KEY,
-    hostname      TEXT NOT NULL UNIQUE,
-    home_anchor   TEXT NOT NULL,
-    upstream      TEXT NOT NULL,
-    tunnel_origin TEXT NOT NULL,
-    exposure      TEXT NOT NULL,
-    app_auth      TEXT NOT NULL,
-    revision      INTEGER NOT NULL,
-    created_at    TEXT NOT NULL,
-    updated_at    TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS exposure_public_acks (
-    service_id TEXT PRIMARY KEY,
-    ack_id     TEXT NOT NULL,
-    revision   INTEGER NOT NULL,
-    created_at TEXT NOT NULL
-);
-`,
-		},
-		{
-			Name: "0002_exposure_plans",
-			SQL: `
-CREATE TABLE IF NOT EXISTS exposure_plans (
-    id               TEXT PRIMARY KEY,
-    service_id       TEXT NOT NULL,
-    service_revision INTEGER NOT NULL,
-    kind             TEXT NOT NULL,
-    hostname         TEXT NOT NULL,
-    from_exposure    TEXT NOT NULL,
-    to_exposure      TEXT NOT NULL,
-    steps            TEXT NOT NULL,
-    warnings         TEXT NOT NULL,
-    requires_ack     INTEGER NOT NULL,
-    status           TEXT NOT NULL,
-    results          TEXT NOT NULL,
-    last_error       TEXT NOT NULL,
-    created_at       TEXT NOT NULL,
-    applied_at       TEXT
-);
-CREATE INDEX IF NOT EXISTS exposure_plans_by_service ON exposure_plans (service_id, created_at);
-`,
-		},
-		{
-			Name: "0003_exposure_observations",
-			SQL: `
-CREATE TABLE IF NOT EXISTS exposure_observations (
-    service_id     TEXT PRIMARY KEY,
-    observed_at    TEXT NOT NULL,
-    vanity_dns     TEXT NOT NULL,
-    anchor_dns     TEXT NOT NULL,
-    tunnel_ingress TEXT NOT NULL,
-    access_app     TEXT NOT NULL,
-    edge_route     TEXT NOT NULL,
-    reconciled     INTEGER NOT NULL,
-    drift          TEXT NOT NULL,
-    last_error     TEXT NOT NULL,
-    plan_id        TEXT NOT NULL
-);
-`,
-		},
-	}
 }
 
 func glueMigrations() []store.Migration {

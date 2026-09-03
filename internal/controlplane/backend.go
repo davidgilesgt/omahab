@@ -228,8 +228,6 @@ func (b *Backend) initServices(ctx context.Context) error {
 			return fmt.Errorf("apps catalog %s: %w", b.cfg.CatalogPath, err)
 		}
 	}
-	composeRunner := apps.NewComposeRunner(nil, b.cfg.DataDir+"/apps")
-	// Units for systemd-runtime bundles come from the catalog.
 	systemdRunner := apps.NewSystemdRunner(nil, "", func(bundleID string) []string {
 		bundle, ok := catalog.Get(bundleID)
 		if !ok {
@@ -237,8 +235,6 @@ func (b *Backend) initServices(ctx context.Context) error {
 		}
 		return bundle.Units
 	})
-	appRunner, routerErr := apps.NewRuntimeRouter(catalog, systemdRunner, composeRunner)
-	// EnvSource for DOMAIN and other instance vars needed by compose templates (e.g. PUBLIC_APP_URL https://id.${DOMAIN}/)
 	domainEnv := func(ctx context.Context, app domain.Application) ([]string, error) {
 		inst, err := b.store.Instance(ctx)
 		if err != nil {
@@ -267,11 +263,8 @@ func (b *Backend) initServices(ctx context.Context) error {
 		}
 		return env, nil
 	}
-	if routerErr != nil {
-		return fmt.Errorf("apps runner: %w", routerErr)
-	}
 	appSvc, err := apps.NewService(b.db, apps.Options{
-		Catalog: catalog, Runner: appRunner,
+		Catalog: catalog, Runner: systemdRunner,
 		Events:  newAppsSink(b.events),
 		Env:     domainEnv,
 	})
@@ -983,13 +976,10 @@ func (b *Backend) ListCatalog(ctx context.Context) ([]api.CatalogBundle, error) 
 		out = append(out, api.CatalogBundle{
 			ID:              bundle.ID,
 			Name:            bundle.Name,
-			Image:           bundle.Image,
-			Architectures:   bundle.Architectures,
 			DefaultExposure: exposure,
 			MaxExposure:     maxExposure,
 			MemoryMB:        bundle.Resources.MemoryMB,
 			Installed:       installed[bundle.ID],
-			Runtime:         bundle.Runtime,
 		})
 	}
 	return out, nil
@@ -3409,17 +3399,6 @@ func (b *Backend) StartIdleExpirer(ctx context.Context, every time.Duration) {
 	if b.workspaces != nil {
 		b.workspaces.StartIdleExpirer(ctx, every)
 	}
-}
-
-func (b *Backend) CheckForUpdates(ctx context.Context) ([]apps.Status, error) {
-	if b.apps == nil {
-		return nil, translateError(fmt.Errorf("%w: apps not configured", ErrNotConfigured))
-	}
-	list, err := b.apps.CheckForUpdates(ctx)
-	if err != nil {
-		return nil, translateError(err)
-	}
-	return list, nil
 }
 
 func (b *Backend) PollSyncthing(ctx context.Context) error {

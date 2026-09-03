@@ -25,41 +25,29 @@ func (f fakeAppLister) List(_ context.Context) ([]apps.Status, error) {
 func (f fakeAppLister) CatalogBundles() []apps.Bundle { return f.bundles }
 
 func bundlesForTest() []apps.Bundle {
-	// Minimal valid bundles; compose is minimal template that passes validation.
-	composeTmpl := "services:\n  db:\n    image: {{.Image}}@{{.Digest}}\n"
-	digest := "sha256:" + strings.Repeat("a", 64)
 	b1 := apps.Bundle{
-		ID:            "forgejo",
-		Name:          "Forgejo",
-		Image:         "codeberg.org/forgejo/forgejo",
-		Digest:        digest,
-		Architectures: []string{"amd64", "arm64"},
-		Compose:       composeTmpl,
+		ID:   "forgejo",
+		Name: "Forgejo",
+		Units: []string{"forgejo.service"},
 		Backup: apps.BackupHooks{
 			PreBackup:   []string{"/bin/sh", "-c", "pg_dump -Fc forgejo -f /tmp/forgejo.pgdump"},
 			PostRestore: []string{"/bin/sh", "-c", "pg_restore --clean --if-exists /tmp/forgejo.pgdump"},
 		},
 	}
 	b2 := apps.Bundle{
-		ID:            "immich",
-		Name:          "Immich",
-		Image:         "ghcr.io/immich-app/immich-server",
-		Digest:        digest,
-		Architectures: []string{"amd64", "arm64"},
-		Compose:       composeTmpl,
+		ID:   "immich",
+		Name: "Immich",
+		Units: []string{"immich.service"},
 		Backup: apps.BackupHooks{
 			PreBackup:   []string{"/bin/sh", "-c", "pg_dump -Fc immich -f /tmp/immich.pgdump"},
 			PostRestore: []string{"/bin/sh", "-c", "pg_restore --clean --if-exists /tmp/immich.pgdump && restart"},
 		},
 	}
 	b3 := apps.Bundle{
-		ID:            "syncthing",
-		Name:          "Syncthing",
-		Image:         "docker.io/syncthing/syncthing",
-		Digest:        digest,
-		Architectures: []string{"amd64", "arm64"},
-		Compose:       composeTmpl,
-		Backup:        apps.BackupHooks{},
+		ID:    "syncthing",
+		Name:  "Syncthing",
+		Units: []string{"syncthing.service"},
+		Backup: apps.BackupHooks{},
 	}
 	// Validate through NewCatalog to ensure fields satisfy rules.
 	cat, err := apps.NewCatalog(b1, b2, b3)
@@ -286,15 +274,10 @@ func TestAppHookSourcePostRestoreHooksExecuteOnRestore(t *testing.T) {
 }
 
 func TestAppHookSourcePostRestoreHookFailureAbortsRestore(t *testing.T) {
-	composeTmpl := "services:\n  db:\n    image: {{.Image}}@{{.Digest}}\n"
-	digest := "sha256:" + strings.Repeat("a", 64)
 	b := apps.Bundle{
-		ID:            "immich",
-		Name:          "Immich",
-		Image:         "ghcr.io/immich-app/immich-server",
-		Digest:        digest,
-		Architectures: []string{"amd64", "arm64"},
-		Compose:       composeTmpl,
+		ID:   "immich",
+		Name: "Immich",
+		Units: []string{"immich.service"},
 		Backup: apps.BackupHooks{
 			PostRestore: []string{"/bin/sh", "-c", "pg_restore --clean --if-exists /tmp/immich.pgdump"},
 		},

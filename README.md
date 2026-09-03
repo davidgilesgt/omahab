@@ -155,18 +155,14 @@ Repository layout:
 | `cmd/omahabd` | The daemon (control plane) |
 | `cmd/omahab-clientd` | Companion daemon for Omarchy workstations |
 | `internal/` | apps, controlplane, api, backups, secrets, providers, … |
-| `deploy/catalog/` | Curated bundle catalog (+ the one compose file, hermes) |
+| `deploy/catalog/` | Curated bundle catalog |
 | `web/` | Dashboard (Vite, React 19) |
 | `workers/` | Embedding worker (Python) and email worker (Cloudflare, TypeScript) |
 | `companion/omarchy/` | Omarchy shell plugin |
+| `third_party/once` | ONCE fork for project deploys (patch list in `PATCHES.md`) |
 | `api/openapi.yaml` | API specification |
-| `scripts/` | `build.sh` (nix wrapper), `check.sh`, `gen-catalog.sh` |
+| `scripts/` | `build.sh` (nix wrapper), `check.sh` |
 
-Regenerating the runtime catalog (digest pinning for the hermes image):
-
-```sh
-bash scripts/gen-catalog.sh   # needs skopeo or docker buildx; run on a linux host
-```
 
 ## Building images
 

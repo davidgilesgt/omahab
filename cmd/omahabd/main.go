@@ -65,22 +65,8 @@ func run() error {
 	sigCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Background schedulers: workspaces idle expiry, app update checks, syncthing poll
+	// Background schedulers: workspaces idle expiry, syncthing poll
 	go backend.StartIdleExpirer(sigCtx, time.Minute)
-	go func() {
-		ticker := time.NewTicker(time.Hour)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-sigCtx.Done():
-				return
-			case <-ticker.C:
-				if _, err := backend.CheckForUpdates(sigCtx); err != nil {
-					logger.Error("check for updates failed", "error", err)
-				}
-			}
-		}
-	}()
 	go func() {
 		ticker := time.NewTicker(5 * time.Minute)
 		defer ticker.Stop()
