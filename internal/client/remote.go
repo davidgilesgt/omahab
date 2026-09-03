@@ -298,7 +298,7 @@ func (c *RemoteClient) CheckPocketID(ctx context.Context) error {
 
 // EnrollCompanion claims a single-use enrollment code and returns a device token (oma_dev_...).
 // It is unauthenticated (no bearer) and must be called with the code from POST /api/v1/companion-enrollments.
-// On success it also returns per-device machine-backup credentials when the server provides them.
+// On success it also returns per-device machine-backup credentials and per-device Forgejo token when the server provides them.
 type EnrollResult struct {
 	Token          string `json:"token"`
 	TokenPrefix    string `json:"token_prefix"`
@@ -306,6 +306,20 @@ type EnrollResult struct {
 	ResticPassword string `json:"restic_password"`
 	RestUser       string `json:"rest_user"`
 	RestPassword   string `json:"rest_password"`
+	ForgejoToken   string `json:"forgejo_token"`
+	ForgejoHost    string `json:"forgejo_host"`
+}
+
+// DeviceHeartbeatInfo is the payload for PUT /api/v1/companion/devices/me (C4).
+type DeviceHeartbeatInfo struct {
+	Hostname           string     `json:"hostname,omitempty"`
+	Platform           string     `json:"platform,omitempty"`
+	Arch               string     `json:"arch,omitempty"`
+	ClientVersion      string     `json:"clientd_version,omitempty"`
+	Shell              string     `json:"shell,omitempty"`
+	EnvRevision        *int       `json:"env_revision,omitempty"`
+	EnvVariableCount   *int       `json:"env_variable_count,omitempty"`
+	BackupLastSnapshot *time.Time `json:"backup_last_snapshot,omitempty"`
 }
 
 func (c *RemoteClient) EnrollCompanion(ctx context.Context, code string) (*EnrollResult, error) {
@@ -337,7 +351,20 @@ func (c *RemoteClient) EnrollCompanionToken(ctx context.Context, code string) (s
 	return res.Token, nil
 }
 
-// GetCompanionStatus fetches status via device-authenticated endpoint.
+// UpdateDeviceInfo reports device identity fields via PUT /api/v1/companion/devices/me (device auth).
+func (c *RemoteClient) UpdateDeviceInfo(ctx context.Context, info DeviceHeartbeatInfo) error {
+	auth, err := c.deviceAuthHeader()
+	if err != nil {
+		return err
+	}
+	if auth == "" {
+		return ErrNotAuthenticated
+	}
+	body, _ := json.Marshal(info)
+	var out map[string]any
+	return c.doWithAuth(ctx, http.MethodPut, "/api/v1/companion/devices/me", auth, bytes.NewReader(body), &out)
+}
+
 func (c *RemoteClient) GetCompanionStatus(ctx context.Context) (*domain.Status, error) {
 	auth, err := c.deviceAuthHeader()
 	if err != nil {

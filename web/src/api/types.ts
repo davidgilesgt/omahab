@@ -263,13 +263,26 @@ export interface ToolVariableMeta {
 export interface CompanionDevice {
   id: ID;
   name: string;
+  hostname?: string | null;
+  platform?: string | null;
+  arch?: string | null;
+  client_version?: string | null;
+  shell?: string | null;
+  env_revision: number;
+  env_variable_count: number;
+  backup_last_snapshot?: string | null;
   device_token_prefix?: string | null;
   allow_provider_oauth: boolean;
   granted?: boolean;
   last_sync_at?: string | null;
+  last_seen_at?: string | null;
   revoked_at?: string | null;
   created_at: string;
   updated_at: string;
+}
+export interface NtfyConfig {
+  enabled: boolean;
+  topic?: string | null;
 }
 
 export interface CompanionEnrollment {

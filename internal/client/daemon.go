@@ -260,6 +260,12 @@ func (d *Daemon) Start() error {
 	d.wg.Add(1)
 	go d.backupLoop()
 
+	d.wg.Add(1)
+	go func() {
+		defer d.wg.Done()
+		d.StartHeartbeatLoop(d.ctx)
+	}()
+
 	d.log.Info("clientd started", "socket", d.socketPath, "server", redactServerURL(d.cfg.ServerURL))
 	return nil
 }
@@ -1025,21 +1031,28 @@ func (d *Daemon) handleCompanionEvent(ev domain.Event) {
 		_ = d.envSyncOnce()
 		d.syncOnce()
 		d.syncWebApps()
+		_ = d.DaemonNotifyEvent(ev)
 		d.broadcastStatus()
 	case "apps.changed", "application.created", "application.updated", "application.deleted", "exposure.changed":
 		d.syncWebApps()
 		d.syncOnce()
+		_ = d.DaemonNotifyEvent(ev)
 		d.broadcastStatus()
 	case "companion.revoked":
 		d.mu.Lock()
 		d.lastErr = "device revoked"
 		d.mu.Unlock()
 		d.removeWebApps()
+		_ = d.DaemonNotifyEvent(ev)
 		d.broadcastStatus()
 	default:
 		// For workspace.*, agent.awaiting_approval, etc.
 		if strings.HasPrefix(ev.Type, "application.") || strings.HasPrefix(ev.Type, "exposure.") || ev.Type == "apps.changed" {
 			d.syncWebApps()
+		}
+		// C3: desktop notifications for the events that matter
+		if ShouldNotifyType(ev.Type) {
+			_ = d.DaemonNotifyEvent(ev)
 		}
 		d.syncOnce()
 		d.broadcastStatus()

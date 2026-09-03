@@ -356,6 +356,10 @@ func (s *Server) buildRouter() chi.Router {
 		r.Delete("/api/v1/companion/devices/{id}", s.handleRevokeCompanionDevice)
 		r.Put("/api/v1/companion/devices/{id}/allow-oauth", s.withBodyLimit(defaultBodyLimit, s.handleSetDeviceAllowOAuth))
 
+		// Phone notifications (ntfy) — admin
+		r.Get("/api/v1/ntfy", s.handleGetNtfyConfig)
+		r.Put("/api/v1/ntfy", s.withBodyLimit(defaultBodyLimit, s.handleSetNtfyConfig))
+
 		// Tool environment (server authoritative singleton agent-tools) — admin
 		r.Get("/api/v1/tool-environment", s.handleListToolEnv)
 		r.Put("/api/v1/tool-environment/{NAME}", s.withBodyLimit(defaultBodyLimit, s.handlePutToolEnv))
@@ -372,6 +376,7 @@ func (s *Server) buildRouter() chi.Router {
 	// rejects admin bearer with 403, and rejects missing/invalid device token with 401.
 	r.Group(func(r chi.Router) {
 		r.Use(s.deviceAuth)
+		r.Put("/api/v1/companion/devices/me", s.withBodyLimit(defaultBodyLimit, s.handleUpdateCompanionDeviceMe))
 		r.Get("/api/v1/companion/status", s.handleCompanionStatus)
 		r.Get("/api/v1/companion/events", s.handleCompanionEvents)
 		r.Get("/api/v1/companion/events/stream", s.handleCompanionStreamEvents)

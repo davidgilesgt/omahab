@@ -357,6 +357,7 @@ export function EventsPage() {
   const queryClient = useQueryClient();
   const toast = useToast();
   const query = useQuery({ queryKey: ["events"], queryFn: client.events });
+  const ntfyQuery = useQuery({ queryKey: ["ntfy"], queryFn: client.ntfyConfig });
   const read = useMutation({
     mutationFn: client.markEventRead,
     onSuccess: () => {
@@ -365,10 +366,51 @@ export function EventsPage() {
     },
     onError: (err) => toast.error(err instanceof Error ? err.message : "Could not mark read"),
   });
+  const toggleNtfy = useMutation({
+    mutationFn: (enabled: boolean) => client.setNtfyEnabled(enabled),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["ntfy"] });
+      toast.success("Phone notifications updated");
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Could not update ntfy"),
+  });
   const grouped = useMemo(() => query.data?.slice().sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at)), [query.data]);
+  const ntfy = ntfyQuery.data;
+  const topic = ntfy?.topic ?? "";
+  const ntfyUrl = topic ? `http://${typeof window !== "undefined" ? window.location.hostname : "omahab"}:2586/${topic}` : "";
+  const qrSrc = topic ? `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(ntfyUrl)}` : "";
   return (
     <div className="page">
       <PageHeader eyebrow="Operational inbox" title="Events" description="A live, durable record of health changes and actions across your server." />
+      <Section title="Phone notifications" description="Forward warning and error events to ntfy (mako/ntfy) on 127.0.0.1:2586 when enabled. Topic is random 24 chars, stored platform-app/ntfy_topic. Default off (DESIGN §20:919).">
+        {ntfyQuery.isLoading ? <LoadingState label="Loading ntfy" /> : ntfyQuery.isError ? <ErrorState error={ntfyQuery.error} retry={() => void ntfyQuery.refetch()} /> : (
+          <div style={{ display: "flex", gap: "1rem", alignItems: "flex-start", flexWrap: "wrap" }}>
+            <div style={{ flex: 1, minWidth: "260px" }}>
+              <label className="check-row" style={{ gap: "0.5rem", display: "flex", alignItems: "center" }}>
+                <input type="checkbox" checked={!!ntfy?.enabled} disabled={toggleNtfy.isPending} onChange={(e) => toggleNtfy.mutate(e.target.checked)} />
+                <span>Enable phone notifications (warning+ to ntfy)</span>
+              </label>
+              {ntfy?.enabled && topic ? (
+                <div style={{ marginTop: "0.75rem" }}>
+                  <p style={{ margin: 0 }}>Topic: <code className="mono">{topic}</code> <CopyButton text={topic} label="Copy topic" /></p>
+                  <p className="muted" style={{ fontSize: "0.85rem", margin: "0.25rem 0" }}>Server posts to <code className="mono">http://127.0.0.1:2586/{topic}</code> for severities <code>warning|error</code>. Add this topic in the ntfy app (server URL <code>http://{typeof window !== "undefined" ? window.location.hostname : "host"}:2586</code>).</p>
+                  <p className="muted" style={{ fontSize: "0.85rem" }}>QR encodes the ntfy URL for quick phone pairing.</p>
+                  {topic && <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", marginTop: "0.5rem" }}><CopyButton text={ntfyUrl} label="Copy ntfy URL" /><a href={ntfyUrl} target="_blank" rel="noreferrer" className="button secondary">Open ntfy</a></div>}
+                </div>
+              ) : (
+                <p className="muted" style={{ fontSize: "0.85rem", marginTop: "0.5rem" }}>Phone notifications are off. Enable to generate a random 24-char topic and start posting warnings/errors to the local ntfy.</p>
+              )}
+              {toggleNtfy.error ? <p className="inline-error" role="alert">{toggleNtfy.error instanceof Error ? toggleNtfy.error.message : "Update failed"}</p> : null}
+            </div>
+            {ntfy?.enabled && topic && qrSrc && (
+              <div style={{ border: "1px solid var(--border)", borderRadius: "0.5rem", padding: "0.5rem", background: "white" }}>
+                <img src={qrSrc} width={180} height={180} alt={`QR for ntfy topic ${topic}`} style={{ display: "block" }} />
+                <small className="muted" style={{ display: "block", textAlign: "center", marginTop: "0.25rem" }}>Scan to subscribe</small>
+              </div>
+            )}
+          </div>
+        )}
+      </Section>
       {query.isLoading ? <LoadingState label="Loading events" /> : query.isError ? <ErrorState error={query.error} retry={() => void query.refetch()} /> : !grouped?.length ? <EmptyState title="Inbox is clear" description="New operational events will appear here as they happen." /> : (
         <ol className="event-list">{grouped.map((event) => <li key={event.id} className={event.read_at ? "read" : "unread"}><span className="event-dot" aria-hidden="true" /><div><div className="resource-title"><StatusPill value={event.severity} /><strong>{event.message}</strong></div><p>{event.type.replaceAll(".", " · ")}</p><small>{formatDate(event.created_at)}</small></div>{!event.read_at && <button className="button ghost" type="button" disabled={read.isPending} onClick={() => read.mutate(event.id)}>Mark read</button>}</li>)}</ol>
       )}

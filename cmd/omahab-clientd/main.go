@@ -244,8 +244,15 @@ func runEnroll() error {
 		_ = ks.Set(client.CredentialService, client.CredentialBackupRestPassword, strings.TrimSpace(res.RestPassword))
 		fmt.Fprintln(os.Stderr, "Machine backup credentials stored (backup-repo, backup-password, backup-rest-*).")
 	}
+	// Store per-device Forgejo token for git clone/push (C4) — same path as workspace ws-<id> tokens.
+	if strings.TrimSpace(res.ForgejoToken) != "" {
+		_ = ks.Set(client.CredentialService, client.CredentialForgejoToken, strings.TrimSpace(res.ForgejoToken))
+		if h := strings.TrimSpace(res.ForgejoHost); h != "" {
+			_ = ks.Set(client.CredentialService, client.CredentialForgejoHost, h)
+		}
+		fmt.Fprintln(os.Stderr, "Forgejo git token stored (forgejo-token).")
+	}
 	fmt.Fprintln(os.Stderr, "Enrolled successfully. Device token stored in keyring (service \"omahab\", account \"device-token\").")
-	// Clear code from memory best-effort.
 	for i := range []byte(code) {
 		_ = i
 	}

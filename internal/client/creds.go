@@ -27,7 +27,12 @@ const (
 	CredentialBackupRestUser     = "backup-rest-user"
 	CredentialBackupRestPassword = "backup-rest-password"
 )
-// ErrCredentialNotFound is returned when no credential exists.
+
+// Forgejo accounts for per-device git tokens (C4).
+const (
+	CredentialForgejoToken = "forgejo-token"
+	CredentialForgejoHost  = "forgejo-host"
+)
 var ErrCredentialNotFound = fmt.Errorf("credential not found")
 
 // MemoryCredentialStore is an in-memory CredentialStore for tests and

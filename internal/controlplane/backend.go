@@ -190,6 +190,16 @@ func (b *Backend) initServices(ctx context.Context) error {
 	}
 	b.secrets = secSvc
 
+	// ntfy phone notifications — forward warning|error events to 127.0.0.1:2586 when enabled (C3).
+	// Runs as background forwarder; best-effort, never fails startup.
+	{
+		ntfySink := events.NewNtfySink(secSvc)
+		fwd := events.NewForwarder(b.events, ntfySink)
+		go func() {
+			_ = fwd.Run(context.Background())
+		}()
+	}
+
 	// helper to reveal platform-app scoped secrets; returns "" on not-found
 	secret := func(name string) string {
 		v, err := secSvc.RevealByName(ctx, "platform-app", name)

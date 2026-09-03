@@ -117,18 +117,26 @@ type ForwardProviderOAuthCallbackRequest struct {
 	CallbackPath string `json:"callback_path"`
 }
 
-// CompanionDevice is a placeholder for Phase 6 enrollment (device record).
-// TODO Phase 6: implement full companion device lifecycle.
+// CompanionDevice is a first-class device identity (C4).
 type CompanionDevice struct {
-	ID                 domain.ID `json:"id"`
-	Name               string    `json:"name"`
-	AllowProviderOAuth bool      `json:"allow_provider_oauth"`
-	CreatedAt          time.Time `json:"created_at"`
-	UpdatedAt          time.Time `json:"updated_at"`
+	ID                 domain.ID  `json:"id"`
+	Name               string     `json:"name"`
+	Hostname           string     `json:"hostname,omitempty"`
+	Platform           string     `json:"platform,omitempty"`
+	Arch               string     `json:"arch,omitempty"`
+	ClientVersion      string     `json:"client_version,omitempty"`
+	Shell              string     `json:"shell,omitempty"`
+	EnvRevision        int        `json:"env_revision"`
+	EnvVariableCount   int        `json:"env_variable_count"`
+	BackupLastSnapshot *time.Time `json:"backup_last_snapshot,omitempty"`
+	AllowProviderOAuth bool       `json:"allow_provider_oauth"`
+	LastSeenAt         *time.Time `json:"last_seen_at,omitempty"`
+	RevokedAt          *time.Time `json:"revoked_at,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
 }
 
-// CompanionEnrollment is a placeholder for Phase 6 single-use enrollment codes.
-// TODO Phase 6: implement hashing, expiry, and consumption.
+// CompanionEnrollment is a single-use enrollment code record.
 type CompanionEnrollment struct {
 	ID        domain.ID `json:"id"`
 	ExpiresAt time.Time `json:"expires_at"`
@@ -136,7 +144,7 @@ type CompanionEnrollment struct {
 }
 
 // EnrollCompanionResponse is the one-time response for POST /api/v1/companion/enroll.
-// It returns the device token and, when machine backups are enabled, per-device restic REST credentials.
+// It returns the device token, per-device restic credentials when present, and per-device Forgejo token for git access.
 type EnrollCompanionResponse struct {
 	Token          string `json:"token"`
 	TokenPrefix    string `json:"token_prefix"`
@@ -144,6 +152,31 @@ type EnrollCompanionResponse struct {
 	ResticPassword string `json:"restic_password,omitempty"`
 	RestUser       string `json:"rest_user,omitempty"`
 	RestPassword   string `json:"rest_password,omitempty"`
+	ForgejoToken   string `json:"forgejo_token,omitempty"`
+	ForgejoHost    string `json:"forgejo_host,omitempty"`
+}
+
+// UpdateCompanionDeviceRequest is the body for PUT /api/v1/companion/devices/me
+type UpdateCompanionDeviceRequest struct {
+	Hostname           string     `json:"hostname,omitempty"`
+	Platform           string     `json:"platform,omitempty"`
+	Arch               string     `json:"arch,omitempty"`
+	ClientVersion      string     `json:"clientd_version,omitempty"`
+	Shell              string     `json:"shell,omitempty"`
+	EnvRevision        *int       `json:"env_revision,omitempty"`
+	EnvVariableCount   *int       `json:"env_variable_count,omitempty"`
+	BackupLastSnapshot *time.Time `json:"backup_last_snapshot,omitempty"`
+}
+
+// NtfyConfig holds phone notification (ntfy) topic config (admin only).
+type NtfyConfig struct {
+	Enabled bool   `json:"enabled"`
+	Topic   string `json:"topic,omitempty"`
+}
+
+// SetNtfyRequest is the body for PUT /api/v1/ntfy
+type SetNtfyRequest struct {
+	Enabled bool `json:"enabled"`
 }
 
 // ToolEnvEntry is metadata for a tool-environment variable (no value).

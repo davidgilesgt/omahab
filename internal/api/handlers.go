@@ -13,6 +13,8 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/omahab/omahab/internal/apitypes"
+	"github.com/omahab/omahab/internal/companion"
 	"github.com/omahab/omahab/internal/domain"
 	"github.com/omahab/omahab/internal/emailing"
 	"github.com/omahab/omahab/internal/store"
@@ -1227,6 +1229,60 @@ func (s *Server) handleSetDeviceAllowOAuth(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, dev)
 }
 
+// handleUpdateCompanionDeviceMe handles PUT /api/v1/companion/devices/me
+// Auth: deviceAuth (oma_dev_...). Body carries hostname, platform, arch, clientd_version, shell, env_revision, etc.
+func (s *Server) handleUpdateCompanionDeviceMe(w http.ResponseWriter, r *http.Request) {
+	// Extract device ID from context set by deviceAuth.
+	var devID string
+	if v := r.Context().Value(companion.DeviceIDKey); v != nil {
+		if s, ok := v.(string); ok {
+			devID = s
+		}
+	}
+	if strings.TrimSpace(devID) == "" {
+		if d, ok := r.Context().Value(companion.DeviceKey).(*companion.Device); ok && d != nil {
+			devID = d.ID
+		}
+	}
+	if strings.TrimSpace(devID) == "" {
+		writeError(w, r, errUnauthorized("device not authenticated"))
+		return
+	}
+	var req apitypes.UpdateCompanionDeviceRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	updated, err := s.backend.UpdateCompanionDeviceInfo(r.Context(), domain.ID(devID), req)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
+}
+
+// handleGetNtfyConfig handles GET /api/v1/ntfy (admin)
+func (s *Server) handleGetNtfyConfig(w http.ResponseWriter, r *http.Request) {
+	cfg, err := s.backend.GetNtfyConfig(r.Context())
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, cfg)
+}
+
+// handleSetNtfyConfig handles PUT /api/v1/ntfy {enabled}
+func (s *Server) handleSetNtfyConfig(w http.ResponseWriter, r *http.Request) {
+	var req apitypes.SetNtfyRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	cfg, err := s.backend.SetNtfyEnabled(r.Context(), req.Enabled)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, cfg)
+}
 func (s *Server) handleCompanionStatus(w http.ResponseWriter, r *http.Request) {
 	st, err := s.backend.GetStatus(r.Context())
 	if err != nil {

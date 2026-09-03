@@ -42,10 +42,31 @@ type Device struct {
 	TokenHash          string
 	TokenPrefix        string
 	AllowProviderOAuth bool
+	Hostname           string
+	Platform           string
+	Arch               string
+	ClientVersion      string
+	Shell              string
+	EnvRevision        int
+	EnvVariableCount   int
+	BackupLastSnapshot *time.Time
+	ForgejoTokenName   string
 	LastSeenAt         *time.Time
 	RevokedAt          *time.Time
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
+}
+
+// DeviceInfo carries the fields reported by the device via PUT /devices/me.
+type DeviceInfo struct {
+	Hostname           string
+	Platform           string
+	Arch               string
+	ClientVersion      string
+	Shell              string
+	EnvRevision        int
+	EnvVariableCount   int
+	BackupLastSnapshot *time.Time
 }
 
 // Enrollment represents a single-use enrollment code record (metadata only; plain code returned once).
@@ -543,13 +564,24 @@ func (s *Service) ValidateDeviceToken(ctx context.Context, token string) (*Devic
 		return nil, fmt.Errorf("%w: token contains invalid character", ErrValidation)
 	}
 	tokenHashHex := hashSHA256Hex(trimmed)
-	// Query by hash
+	// Query by hash — select new identity columns when present.
 	var id, name, storedHash, tokenPrefix string
 	var allowInt int
+	var hostname, platform, arch, clientVersion, shell, forgejoTokenName string
+	var envRevision, envVarCount int
+	var backupLastSnapshotStr sql.NullString
 	var lastSeenStr sql.NullString
 	var revokedAtStr sql.NullString
 	var createdAtStr, updatedAtStr string
-	err := s.db.QueryRowContext(ctx, `SELECT id, name, token_hash, token_prefix, allow_provider_oauth, last_seen_at, revoked_at, created_at, updated_at FROM companion_devices WHERE token_hash = ?`, tokenHashHex).Scan(&id, &name, &storedHash, &tokenPrefix, &allowInt, &lastSeenStr, &revokedAtStr, &createdAtStr, &updatedAtStr)
+	// Try new schema first; fall back to old if columns missing (pre-migration DB).
+	err := s.db.QueryRowContext(ctx, `SELECT id, name, token_hash, token_prefix, allow_provider_oauth, hostname, platform, arch, clientd_version, shell, env_revision, env_variable_count, backup_last_snapshot, forgejo_token_name, last_seen_at, revoked_at, created_at, updated_at FROM companion_devices WHERE token_hash = ?`, tokenHashHex).Scan(&id, &name, &storedHash, &tokenPrefix, &allowInt, &hostname, &platform, &arch, &clientVersion, &shell, &envRevision, &envVarCount, &backupLastSnapshotStr, &forgejoTokenName, &lastSeenStr, &revokedAtStr, &createdAtStr, &updatedAtStr)
+	if err != nil && strings.Contains(strings.ToLower(err.Error()), "no such column") {
+		err = s.db.QueryRowContext(ctx, `SELECT id, name, token_hash, token_prefix, allow_provider_oauth, last_seen_at, revoked_at, created_at, updated_at FROM companion_devices WHERE token_hash = ?`, tokenHashHex).Scan(&id, &name, &storedHash, &tokenPrefix, &allowInt, &lastSeenStr, &revokedAtStr, &createdAtStr, &updatedAtStr)
+		hostname, platform, arch, clientVersion, shell = "", "", "", "", ""
+		envRevision, envVarCount = 0, 0
+		forgejoTokenName = ""
+		backupLastSnapshotStr = sql.NullString{}
+	}
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			dummy := hashSHA256Hex("dummy-device-not-found")
@@ -586,9 +618,19 @@ func (s *Service) ValidateDeviceToken(ctx context.Context, token string) (*Devic
 			revokedAt = &t
 		}
 	}
+	var backupLastSnapshot *time.Time
+	if backupLastSnapshotStr.Valid && strings.TrimSpace(backupLastSnapshotStr.String) != "" {
+		if t, err := store.ParseTime(backupLastSnapshotStr.String); err == nil {
+			backupLastSnapshot = &t
+		}
+	}
 	dev := &Device{
 		ID: id, Name: name, TokenHash: storedHash, TokenPrefix: tokenPrefix,
-		AllowProviderOAuth: allowInt != 0, LastSeenAt: lastSeen, RevokedAt: revokedAt,
+		AllowProviderOAuth: allowInt != 0,
+		Hostname: hostname, Platform: platform, Arch: arch, ClientVersion: clientVersion, Shell: shell,
+		EnvRevision: envRevision, EnvVariableCount: envVarCount,
+		BackupLastSnapshot: backupLastSnapshot, ForgejoTokenName: forgejoTokenName,
+		LastSeenAt: lastSeen, RevokedAt: revokedAt,
 		CreatedAt: createdAt, UpdatedAt: updatedAt,
 	}
 	// Update last_seen_at best-effort
@@ -598,7 +640,6 @@ func (s *Service) ValidateDeviceToken(ctx context.Context, token string) (*Devic
 	dev.UpdatedAt = now
 	return dev, nil
 }
-
 // GetDevice returns device by ID.
 func (s *Service) GetDevice(ctx context.Context, id string) (*Device, error) {
 	trimmed := strings.TrimSpace(id)
@@ -607,9 +648,19 @@ func (s *Service) GetDevice(ctx context.Context, id string) (*Device, error) {
 	}
 	var name, tokenHash, tokenPrefix string
 	var allowInt int
+	var hostname, platform, arch, clientVersion, shell, forgejoTokenName string
+	var envRevision, envVarCount int
+	var backupLastSnapshotStr sql.NullString
 	var lastSeenStr, revokedAtStr sql.NullString
 	var createdAtStr, updatedAtStr string
-	err := s.db.QueryRowContext(ctx, `SELECT name, token_hash, token_prefix, allow_provider_oauth, last_seen_at, revoked_at, created_at, updated_at FROM companion_devices WHERE id = ?`, trimmed).Scan(&name, &tokenHash, &tokenPrefix, &allowInt, &lastSeenStr, &revokedAtStr, &createdAtStr, &updatedAtStr)
+	err := s.db.QueryRowContext(ctx, `SELECT name, token_hash, token_prefix, allow_provider_oauth, hostname, platform, arch, clientd_version, shell, env_revision, env_variable_count, backup_last_snapshot, forgejo_token_name, last_seen_at, revoked_at, created_at, updated_at FROM companion_devices WHERE id = ?`, trimmed).Scan(&name, &tokenHash, &tokenPrefix, &allowInt, &hostname, &platform, &arch, &clientVersion, &shell, &envRevision, &envVarCount, &backupLastSnapshotStr, &forgejoTokenName, &lastSeenStr, &revokedAtStr, &createdAtStr, &updatedAtStr)
+	if err != nil && strings.Contains(strings.ToLower(err.Error()), "no such column") {
+		err = s.db.QueryRowContext(ctx, `SELECT name, token_hash, token_prefix, allow_provider_oauth, last_seen_at, revoked_at, created_at, updated_at FROM companion_devices WHERE id = ?`, trimmed).Scan(&name, &tokenHash, &tokenPrefix, &allowInt, &lastSeenStr, &revokedAtStr, &createdAtStr, &updatedAtStr)
+		hostname, platform, arch, clientVersion, shell = "", "", "", "", ""
+		envRevision, envVarCount = 0, 0
+		forgejoTokenName = ""
+		backupLastSnapshotStr = sql.NullString{}
+	}
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("%w: device %q not found", ErrNotFound, trimmed)
@@ -628,11 +679,63 @@ func (s *Service) GetDevice(ctx context.Context, id string) (*Device, error) {
 		t, _ := store.ParseTime(revokedAtStr.String)
 		revokedAt = &t
 	}
-	return &Device{ID: trimmed, Name: name, TokenHash: tokenHash, TokenPrefix: tokenPrefix, AllowProviderOAuth: allowInt != 0, LastSeenAt: lastSeen, RevokedAt: revokedAt, CreatedAt: createdAt, UpdatedAt: updatedAt}, nil
+	var backupLastSnapshot *time.Time
+	if backupLastSnapshotStr.Valid && strings.TrimSpace(backupLastSnapshotStr.String) != "" {
+		if t, err := store.ParseTime(backupLastSnapshotStr.String); err == nil {
+			backupLastSnapshot = &t
+		}
+	}
+	return &Device{ID: trimmed, Name: name, TokenHash: tokenHash, TokenPrefix: tokenPrefix, AllowProviderOAuth: allowInt != 0, Hostname: hostname, Platform: platform, Arch: arch, ClientVersion: clientVersion, Shell: shell, EnvRevision: envRevision, EnvVariableCount: envVarCount, BackupLastSnapshot: backupLastSnapshot, ForgejoTokenName: forgejoTokenName, LastSeenAt: lastSeen, RevokedAt: revokedAt, CreatedAt: createdAt, UpdatedAt: updatedAt}, nil
 }
 
 // ListDevices returns all devices ordered by created_at.
 func (s *Service) ListDevices(ctx context.Context) ([]*Device, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, token_hash, token_prefix, allow_provider_oauth, hostname, platform, arch, clientd_version, shell, env_revision, env_variable_count, backup_last_snapshot, forgejo_token_name, last_seen_at, revoked_at, created_at, updated_at FROM companion_devices ORDER BY created_at ASC`)
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "no such column") {
+			return s.listDevicesFallback(ctx)
+		}
+		return nil, fmt.Errorf("list devices: %w", err)
+	}
+	defer rows.Close()
+	var out []*Device
+	for rows.Next() {
+		var id, name, tokenHash, tokenPrefix, createdAtStr, updatedAtStr string
+		var allowInt int
+		var hostname, platform, arch, clientVersion, shell, forgejoTokenName string
+		var envRevision, envVarCount int
+		var backupLastSnapshotStr sql.NullString
+		var lastSeenStr, revokedAtStr sql.NullString
+		if err := rows.Scan(&id, &name, &tokenHash, &tokenPrefix, &allowInt, &hostname, &platform, &arch, &clientVersion, &shell, &envRevision, &envVarCount, &backupLastSnapshotStr, &forgejoTokenName, &lastSeenStr, &revokedAtStr, &createdAtStr, &updatedAtStr); err != nil {
+			if strings.Contains(strings.ToLower(err.Error()), "no such column") {
+				return s.listDevicesFallback(ctx)
+			}
+			return nil, fmt.Errorf("scan device: %w", err)
+		}
+		createdAt, _ := store.ParseTime(createdAtStr)
+		updatedAt, _ := store.ParseTime(updatedAtStr)
+		var lastSeen *time.Time
+		if lastSeenStr.Valid && lastSeenStr.String != "" {
+			t, _ := store.ParseTime(lastSeenStr.String)
+			lastSeen = &t
+		}
+		var revokedAt *time.Time
+		if revokedAtStr.Valid && revokedAtStr.String != "" {
+			t, _ := store.ParseTime(revokedAtStr.String)
+			revokedAt = &t
+		}
+		var backupLastSnapshot *time.Time
+		if backupLastSnapshotStr.Valid && strings.TrimSpace(backupLastSnapshotStr.String) != "" {
+			if t, err := store.ParseTime(backupLastSnapshotStr.String); err == nil {
+				backupLastSnapshot = &t
+			}
+		}
+		out = append(out, &Device{ID: id, Name: name, TokenHash: tokenHash, TokenPrefix: tokenPrefix, AllowProviderOAuth: allowInt != 0, Hostname: hostname, Platform: platform, Arch: arch, ClientVersion: clientVersion, Shell: shell, EnvRevision: envRevision, EnvVariableCount: envVarCount, BackupLastSnapshot: backupLastSnapshot, ForgejoTokenName: forgejoTokenName, LastSeenAt: lastSeen, RevokedAt: revokedAt, CreatedAt: createdAt, UpdatedAt: updatedAt})
+	}
+	return out, rows.Err()
+}
+
+func (s *Service) listDevicesFallback(ctx context.Context) ([]*Device, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, name, token_hash, token_prefix, allow_provider_oauth, last_seen_at, revoked_at, created_at, updated_at FROM companion_devices ORDER BY created_at ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("list devices: %w", err)
@@ -662,6 +765,7 @@ func (s *Service) ListDevices(ctx context.Context) ([]*Device, error) {
 	}
 	return out, rows.Err()
 }
+
 
 // RevokeDevice marks device revoked and returns the device.
 // Caller should revoke associated LiteLLM keys (owner_kind=device, owner_id=deviceID) separately via providers service / gateway.
@@ -719,6 +823,104 @@ func (s *Service) UpdateLastSeen(ctx context.Context, id string) error {
 	now := s.nowUTC()
 	_, err := s.db.ExecContext(ctx, `UPDATE companion_devices SET last_seen_at = ?, updated_at = ? WHERE id = ?`, store.FormatTime(now), store.FormatTime(now), strings.TrimSpace(id))
 	return err
+}
+
+// UpdateDeviceInfo updates the reported device identity fields.
+func (s *Service) UpdateDeviceInfo(ctx context.Context, id string, info DeviceInfo) (*Device, error) {
+	trimmed := strings.TrimSpace(id)
+	if trimmed == "" {
+		return nil, fmt.Errorf("%w: id is required", ErrValidation)
+	}
+	if strings.Contains(info.Hostname, "\x00") || strings.Contains(info.Hostname, "\n") || strings.Contains(info.Hostname, "\r") {
+		return nil, fmt.Errorf("%w: hostname contains invalid character", ErrValidation)
+	}
+	if strings.Contains(info.Platform, "\x00") || strings.Contains(info.Platform, "\n") || strings.Contains(info.Platform, "\r") {
+		return nil, fmt.Errorf("%w: platform contains invalid character", ErrValidation)
+	}
+	if strings.Contains(info.Arch, "\x00") || strings.Contains(info.Arch, "\n") || strings.Contains(info.Arch, "\r") {
+		return nil, fmt.Errorf("%w: arch contains invalid character", ErrValidation)
+	}
+	if strings.Contains(info.ClientVersion, "\x00") || strings.Contains(info.ClientVersion, "\n") || strings.Contains(info.ClientVersion, "\r") {
+		return nil, fmt.Errorf("%w: client version contains invalid character", ErrValidation)
+	}
+	if strings.Contains(info.Shell, "\x00") || strings.Contains(info.Shell, "\n") || strings.Contains(info.Shell, "\r") {
+		return nil, fmt.Errorf("%w: shell contains invalid character", ErrValidation)
+	}
+	// Trim and cap lengths.
+	hostname := strings.TrimSpace(info.Hostname)
+	if len(hostname) > 253 {
+		hostname = hostname[:253]
+	}
+	platform := strings.TrimSpace(info.Platform)
+	if len(platform) > 64 {
+		platform = platform[:64]
+	}
+	arch := strings.TrimSpace(info.Arch)
+	if len(arch) > 32 {
+		arch = arch[:32]
+	}
+	clientVersion := strings.TrimSpace(info.ClientVersion)
+	if len(clientVersion) > 64 {
+		clientVersion = clientVersion[:64]
+	}
+	shell := strings.TrimSpace(info.Shell)
+	if len(shell) > 256 {
+		shell = shell[:256]
+	}
+	envRev := info.EnvRevision
+	if envRev < 0 {
+		envRev = 0
+	}
+	envCount := info.EnvVariableCount
+	if envCount < 0 {
+		envCount = 0
+	}
+	var backupStr sql.NullString
+	if info.BackupLastSnapshot != nil {
+		backupStr = sql.NullString{String: store.FormatTime(*info.BackupLastSnapshot), Valid: true}
+	}
+	now := s.nowUTC()
+	// Try new schema; fallback to just last_seen if columns missing.
+	_, err := s.db.ExecContext(ctx, `UPDATE companion_devices SET hostname = ?, platform = ?, arch = ?, clientd_version = ?, shell = ?, env_revision = ?, env_variable_count = ?, backup_last_snapshot = ?, last_seen_at = ?, updated_at = ? WHERE id = ?`,
+		hostname, platform, arch, clientVersion, shell, envRev, envCount, nullableStringPtr(backupStr), store.FormatTime(now), store.FormatTime(now), trimmed)
+	if err != nil && strings.Contains(strings.ToLower(err.Error()), "no such column") {
+		_, err = s.db.ExecContext(ctx, `UPDATE companion_devices SET last_seen_at = ?, updated_at = ? WHERE id = ?`, store.FormatTime(now), store.FormatTime(now), trimmed)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("update device info: %w", err)
+	}
+	return s.GetDevice(ctx, trimmed)
+}
+
+func nullableStringPtr(ns sql.NullString) interface{} {
+	if ns.Valid {
+		return ns.String
+	}
+	return nil
+}
+
+// SetForgejoTokenName stores the per-device Forgejo token name (device-<id>) for revocation.
+func (s *Service) SetForgejoTokenName(ctx context.Context, id, tokenName string) error {
+	trimmed := strings.TrimSpace(id)
+	if trimmed == "" {
+		return fmt.Errorf("%w: id is required", ErrValidation)
+	}
+	tn := strings.TrimSpace(tokenName)
+	now := s.nowUTC()
+	_, err := s.db.ExecContext(ctx, `UPDATE companion_devices SET forgejo_token_name = ?, updated_at = ? WHERE id = ?`, tn, store.FormatTime(now), trimmed)
+	if err != nil && strings.Contains(strings.ToLower(err.Error()), "no such column") {
+		return nil
+	}
+	return err
+}
+
+// GetForgejoTokenName returns the stored token name for a device, if any.
+func (s *Service) GetForgejoTokenName(ctx context.Context, id string) (string, error) {
+	dev, err := s.GetDevice(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	return dev.ForgejoTokenName, nil
 }
 
 // GetRevision returns current environment revision.

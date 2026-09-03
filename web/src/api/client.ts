@@ -17,6 +17,7 @@ import type {
   ModelAliasName,
   ModelInfo,
   ModelKey,
+  NtfyConfig,
   OAuthSession,
   Project,
   ProviderCredential,
@@ -30,7 +31,6 @@ import type {
   User,
   Workspace,
 } from "./types";
-
 const API_ROOT = "/api/v1";
 
 export class ApiError extends Error {
@@ -201,6 +201,10 @@ export class ApiClient {
   toolEnvironmentDevices = () => this.list<CompanionDevice>("/tool-environment/devices");
   setToolEnvironmentGrant = (deviceId: string, granted: boolean) =>
     this.request<void>(`/tool-environment/grants/${encodeURIComponent(deviceId)}`, { method: granted ? "PUT" : "DELETE", body: JSON.stringify({}) });
+
+  // Phone notifications (ntfy) — admin
+  ntfyConfig = () => this.request<NtfyConfig>("/ntfy");
+  setNtfyEnabled = (enabled: boolean) => this.request<NtfyConfig>("/ntfy", { method: "PUT", body: JSON.stringify({ enabled }) });
 
   knowledgeIndexSetupOptions = () => this.list<IndexSetupOption>("/knowledge/index-setup-options");
 
