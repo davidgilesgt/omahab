@@ -207,12 +207,12 @@ type VerifyCloudflareTokenResult struct {
 	Detail string `json:"detail,omitempty"`
 }
 
-// RecoveryKeyMaterial is the one-time response of recovery key generation.
-// PrivateKey is never persisted server-side.
+// RecoveryKeyMaterial is the one-time response of recovery phrase generation.
+// The phrase is shown once and never persisted; fingerprint identifies the
+// recovery kit (first 8 hex of SHA-256(seed)).
 type RecoveryKeyMaterial struct {
-	PublicKey  string `json:"public_key"`
-	PrivateKey string `json:"private_key"`
-	Kit        string `json:"kit"`
+	Phrase      []string `json:"phrase"`
+	Fingerprint string   `json:"fingerprint"`
 }
 
 // Disk is one candidate storage filesystem.
@@ -399,7 +399,7 @@ type Backend interface {
 	// First-run wizard surfaces.
 	VerifyCloudflareToken(ctx context.Context, token string) (VerifyCloudflareTokenResult, error)
 	GenerateRecoveryKey(ctx context.Context) (RecoveryKeyMaterial, error)
-	ConfirmRecoveryKey(ctx context.Context, publicKey string) error
+	ConfirmRecoveryKey(ctx context.Context, fingerprint string, challenge map[int]string) error
 	ListDisks(ctx context.Context) ([]Disk, error)
 	ConfigureStorage(ctx context.Context, req ConfigureStorageRequest) error
 	ListBackupRepositories(ctx context.Context) ([]backups.Repository, error)

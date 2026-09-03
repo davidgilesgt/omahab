@@ -105,6 +105,7 @@ Use --server to target a different control plane (env OMAHAB_SERVER, then ~/.con
 	root.AddCommand(newSystemCmd())
 	root.AddCommand(newWorkspaceCmd()) // alias
 	root.AddCommand(newIdentityCmd())
+	root.AddCommand(newRecoveryCmd())
 	root.AddCommand(newHermesCmd())
 	root.AddCommand(newSecretsCmd())
 	root.AddCommand(newProviderCmd())

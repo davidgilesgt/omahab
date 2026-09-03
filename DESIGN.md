@@ -465,7 +465,7 @@ Recovery layers:
 2. second passkey;
 3. standard SSH key over Tailscale or LAN;
 4. local console and `sudo omahab identity recover`;
-5. encrypted Omahab recovery kit for complete restoration.
+5. recovery phrase (24 words) + kit for complete restoration.
 
 The recovery kit decrypts restored state. It is not a web login token.
 
@@ -489,10 +489,9 @@ Key model:
 - generate a random Omahab master key;
 - seal it with TPM2 when available;
 - use a root-only local fallback otherwise;
-- encrypt a recovery copy to a user-held `age` recovery key;
-- require recovery-key export during setup;
+- encrypt a recovery copy of the master key and the restic password under a key derived from a 24-word recovery phrase;
+- require the phrase to be saved during setup;
 - recommend LUKS on bare metal and encrypted Proxmox storage for VMs.
-
 Omahab does not claim to protect secrets from root on a running compromised host. Encryption protects backups and offline storage.
 
 ## 10. Model providers and subscriptions

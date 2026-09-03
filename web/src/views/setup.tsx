@@ -166,8 +166,11 @@ export function SetupPage() {
     onError: (err) => toast.error(err instanceof Error ? err.message : "Enrollment failed"),
   });
 
-  const [recovery, setRecovery] = useState<{ public_key: string; private_key: string; kit: string } | null>(null);
-  const [recoverySaved, setRecoverySaved] = useState(false);
+  const [recovery, setRecovery] = useState<{ phrase: string[]; fingerprint: string } | null>(null);
+  const [recoveryChallengeIndices, setRecoveryChallengeIndices] = useState<number[] | null>(null);
+  const [recoveryChallengeInput, setRecoveryChallengeInput] = useState<Record<number, string>>({});
+  const [recoveryConfirmed, setRecoveryConfirmed] = useState(false);
+  const [recoverySavedAck, setRecoverySavedAck] = useState(false);
   const [repoLabel, setRepoLabel] = useState("");
   const [repoLocation, setRepoLocation] = useState("");
   const [repoPassword, setRepoPassword] = useState("");
@@ -198,21 +201,29 @@ export function SetupPage() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error?.message ?? `HTTP ${res.status}`);
-      return data as { public_key: string; private_key: string; kit: string };
+      return data as { phrase: string[]; fingerprint: string };
     },
     onSuccess: (data) => {
       setRecovery(data);
-      setRecoverySaved(false);
+      setRecoveryChallengeIndices(null);
+      setRecoveryChallengeInput({});
+      setRecoveryConfirmed(false);
+      setRecoverySavedAck(false);
     },
     onError: (err) => toast.error(err instanceof Error ? err.message : "Generation failed"),
   });
 
   const recoveryConfirmMutation = useMutation({
     mutationFn: async () => {
+      if (!recovery || !recoveryChallengeIndices) throw new Error("No challenge");
+      const challenge: Record<string, string> = {};
+      for (const idx of recoveryChallengeIndices) {
+        challenge[String(idx)] = (recoveryChallengeInput[idx] ?? "").trim();
+      }
       const res = await fetch("/api/v1/recovery/confirm", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...authHeaders() },
-        body: JSON.stringify({ public_key: recovery?.public_key }),
+        body: JSON.stringify({ fingerprint: recovery.fingerprint, challenge }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
@@ -220,12 +231,13 @@ export function SetupPage() {
       }
     },
     onSuccess: () => {
-      setRecoverySaved(true);
+      setRecoveryConfirmed(true);
       toast.success("Recovery kit saved to the server");
       void queryClient.invalidateQueries({ queryKey: ["setup"] });
     },
     onError: (err) => toast.error(err instanceof Error ? err.message : "Confirm failed"),
   });
+
 
   const repoMutation = useMutation({
     mutationFn: async () => {
@@ -468,58 +480,103 @@ export function SetupPage() {
         </div>
       </Section>
 
-      <Section title="Recovery key" description="Generate an age key pair; the private key and kit are shown once and never stored server-side.">
+      <Section title="Recovery phrase" description="This phrase unlocks your backups and this server if everything else is lost. Store it offline (Bitwarden, 1Password, paper). Omahab cannot show it again.">
         {!recovery ? (
           <div className="form-stack">
-            <p>Generate a recovery key pair now — you must save both the private key and the recovery kit offline.</p>
+            <p>Generate a 24-word recovery phrase — it will be shown exactly once.</p>
             <button className="button primary" type="button" onClick={() => void recoveryGenerateMutation.mutate()} disabled={recoveryGenerateMutation.isPending}>
-              {recoveryGenerateMutation.isPending ? "Generating…" : "Generate recovery key"}
+              {recoveryGenerateMutation.isPending ? "Generating…" : "Generate recovery phrase"}
             </button>
             {recoveryGenerateMutation.isError && (
               <p className="inline-error" role="alert">{recoveryGenerateMutation.error instanceof Error ? recoveryGenerateMutation.error.message : "Generation failed"}</p>
             )}
           </div>
+        ) : recoveryConfirmed ? (
+          <div className="form-stack">
+            <p style={{ color: "var(--success, #15803d)" }}>Recovery phrase confirmed and kit stored on the server (fingerprint {recovery.fingerprint}).</p>
+            <p>Keep the 24 words offline — you will need them to restore from backup on a new machine.</p>
+            <button className="button secondary" type="button" onClick={() => { setRecovery(null); setRecoveryChallengeIndices(null); setRecoveryChallengeInput({}); setRecoveryConfirmed(false); setRecoverySavedAck(false); }}>
+              Generate a new phrase
+            </button>
+          </div>
+        ) : !recoveryChallengeIndices ? (
+          <div className="form-stack">
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, background: "var(--surface-muted, #f6f6f6)", padding: 12, borderRadius: 6 }}>
+              {recovery.phrase.map((w, i) => (
+                <div key={i} style={{ display: "flex", gap: 6, alignItems: "center", fontFamily: "monospace", fontSize: "0.9em" }}>
+                  <span style={{ opacity: 0.6, minWidth: 20 }}>{i + 1}.</span>
+                  <span>{w}</span>
+                </div>
+              ))}
+            </div>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <CopyButton text={recovery.phrase.join(" ")} label="Copy phrase" />
+              <span style={{ opacity: 0.7, fontSize: "0.85em" }}>Fingerprint: {recovery.fingerprint}</span>
+            </div>
+            <p style={{ opacity: 0.9 }}>This phrase unlocks your backups and this server if everything else is lost. Store it offline (Bitwarden, 1Password, paper). Omahab cannot show it again.</p>
+            <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input type="checkbox" checked={recoverySavedAck} onChange={(e) => setRecoverySavedAck(e.target.checked)} />
+              I saved this in my password manager
+            </label>
+            <button
+              className="button primary"
+              type="button"
+              disabled={!recoverySavedAck}
+              onClick={() => {
+                const indices: number[] = [];
+                while (indices.length < 3) {
+                  const n = Math.floor(Math.random() * 24);
+                  if (!indices.includes(n)) indices.push(n);
+                }
+                indices.sort((a, b) => a - b);
+                setRecoveryChallengeIndices(indices);
+                const next: Record<number, string> = {};
+                for (const idx of indices) next[idx] = "";
+                setRecoveryChallengeInput(next);
+              }}
+            >
+              Continue to verification
+            </button>
+          </div>
         ) : (
           <div className="form-stack">
-            <div>
-              <strong>Private key (save this offline — shown once):</strong>
-              <div style={{ display: "flex", gap: 8, alignItems: "center", background: "var(--surface-muted, #f6f6f6)", padding: 8, borderRadius: 6, marginTop: 4 }}>
-                <code style={{ flex: 1, wordBreak: "break-all" }} className="mono">{recovery.private_key}</code>
-                <CopyButton text={recovery.private_key} label="Copy" />
-              </div>
+            <p>Confirm three words from your phrase:</p>
+            <div style={{ display: "grid", gap: 8 }}>
+              {recoveryChallengeIndices.map((idx) => (
+                <label key={idx} className="field">
+                  <span>Word #{idx + 1}</span>
+                  <input
+                    value={recoveryChallengeInput[idx] ?? ""}
+                    onChange={(e) => setRecoveryChallengeInput((prev) => ({ ...prev, [idx]: e.target.value }))}
+                    placeholder={`word ${idx + 1}`}
+                    autoComplete="off"
+                  />
+                </label>
+              ))}
             </div>
-            <div>
-              <strong>Recovery kit (armored):</strong>
-              <div style={{ display: "flex", gap: 8, background: "var(--surface-muted, #f6f6f6)", padding: 8, borderRadius: 6, marginTop: 4 }}>
-                <pre style={{ flex: 1, whiteSpace: "pre-wrap", wordBreak: "break-all", margin: 0, fontSize: "0.8em" }} className="mono">{recovery.kit}</pre>
-                <CopyButton text={recovery.kit} label="Copy" />
-              </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className="button secondary" type="button" onClick={() => { setRecoveryChallengeIndices(null); setRecoveryChallengeInput({}); setRecoverySavedAck(false); }}>
+                Back
+              </button>
+              <button
+                className="button primary"
+                type="button"
+                onClick={() => void recoveryConfirmMutation.mutate()}
+                disabled={recoveryConfirmMutation.isPending || recoveryChallengeIndices.some((idx) => !recoveryChallengeInput[idx]?.trim())}
+              >
+                {recoveryConfirmMutation.isPending ? "Confirming…" : "Confirm and store kit"}
+              </button>
             </div>
-            <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              <input type="checkbox" checked={recoverySaved} onChange={(e) => setRecoverySaved(e.target.checked)} />
-              I saved both the private key and the recovery kit
-            </label>
-            <button className="button primary" type="button" onClick={() => void recoveryConfirmMutation.mutate()} disabled={!recoverySaved || recoveryConfirmMutation.isPending}>
-              {recoveryConfirmMutation.isPending ? "Confirming…" : "Confirm and store kit"}
-            </button>
             {recoveryConfirmMutation.isError && (
               <p className="inline-error" role="alert">{recoveryConfirmMutation.error instanceof Error ? recoveryConfirmMutation.error.message : "Confirm failed"}</p>
             )}
           </div>
         )}
-
-        <p style={{ marginTop: 12 }}>Recovery drill (run as root while you have access):</p>
-        <div style={{ display: "flex", gap: 8, alignItems: "center", background: "var(--surface-muted, #f6f6f6)", padding: 8, borderRadius: 6 }}>
-          <code style={{ flex: 1, wordBreak: "break-all" }}>ssh {sshHost} sudo omahab identity recover {recoveryEmail}</code>
-          <CopyButton text={`ssh ${sshHost} sudo omahab identity recover ${recoveryEmail}`} label="Copy" />
-        </div>
-        <p style={{ marginTop: 8 }}>
-          Status:{" "}
-          {setup.checks.find((c) => c.id === "recovery_tested")?.status === "ok" ? (
-            <StatusPill value="ok" />
-          ) : (
-            <StatusPill value={setup.checks.find((c) => c.id === "recovery_tested")?.status ?? "pending"} />
-          )}
+        <p style={{ marginTop: 12, opacity: 0.8, fontSize: "0.9em" }}>
+          Status: <StatusPill value={setup.checks.find((c) => c.id === "recovery_key")?.status ?? "pending"} /> {setup.checks.find((c) => c.id === "recovery_key")?.detail ?? ""}
+        </p>
+        <p style={{ opacity: 0.8, fontSize: "0.9em" }}>
+          Restore verification: <StatusPill value={setup.checks.find((c) => c.id === "recovery_tested")?.status ?? "pending"} /> {setup.checks.find((c) => c.id === "recovery_tested")?.detail ?? ""}
         </p>
       </Section>
 

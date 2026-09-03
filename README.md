@@ -64,8 +64,7 @@ It walks Tailscale enrollment and Cloudflare domain/token entry in the terminal,
 
 After the handoff, complete enrollment at `http://<tailscale-ip>:8484`:
 
-- **Domain + Cloudflare** — apex domain and scoped API tokens (Token A DNS is required; live token verification runs server-side before save).
-- **Recovery key** — generate an age key pair; the private key and armored kit are shown exactly once. Confirming stores the kit at `/var/lib/omahab/recovery.age`.
+- **Recovery phrase** — 24 words shown once; confirm three of them. The phrase wraps the master key into `/var/lib/omahab/recovery.kit` (fingerprint `recovery_fingerprint`).
 - **Storage placement** *(optional)* — dedicate a disk to media (photos) or data; the `omahab-storage` unit mounts it before the app services start.
 - **AI providers** — provider credentials/OAuth and model aliases.
 - **Backups** — add a restic repository; the daily backup and weekly verify timers enable automatically.
@@ -133,16 +132,17 @@ omahab project rollback demo
 ## The three-tier model
 
 1. **NixOS closure (immutable)** — packages, systemd units, nftables, sshd, docker/podman, and every platform app service. `services.omahab.enable = true` is the only knob; a `.nix` file never contains a secret or per-household value.
-2. **Enrollment (one-time, guided)** — SSH keys, Tailscale, Cloudflare domain+tokens, passkeys, recovery key.
+2. **Enrollment (one-time, guided)** — SSH keys, Tailscale, Cloudflare domain+tokens, passkeys, recovery phrase (24 words).
 3. **Runtime state (omahabd-owned, mutable)** — `/var/lib/omahab` (control.db, secrets, rendered configs, `appenv/` per-bundle env files) and `/srv/omahab` (app data). Backups cover both.
 
 ## Paths on the machine
 
 | Path | Content |
-| --- | --- |
-| `/var/lib/omahab` | State: `control.db`, `secrets/`, `appenv/`, `caddy/`, `cloudflared/`, `dumps/`, `recovery.age` |
+| `/var/lib/omahab` | State: `control.db`, `secrets/`, `appenv/`, `caddy/`, `cloudflared/`, `dumps/`, `master.key`, `recovery.kit`, `backup.env` |
 | `/var/lib/omahab/appenv/<bundle>.env` | Per-bundle env file; its existence gates the domain-dependent systemd units |
-| `/srv/omahab` | Application data (`apps`, `projects`, `sync`, `backups`, `workspaces`) |
+| `/var/lib/omahab/master.key` | Master key (0600, sealed with TPM2 when available) |
+| `/var/lib/omahab/recovery.kit` | Recovery kit JSON `{version:1,fingerprint,master_wrapped base64,created_at}` (0600) |
+| `/var/lib/omahab/backup.env` | Backup env (if restic SFTP/REST credentials needed) |
 | `/run/omahab/bootstrap-code` | First-boot one-time claim code (tmpfs, 0600) |
 | `~omahab/.config/omahab/token` | Administrator CLI token (provisioned by omahabd, 0600) |
 | `/etc/omahab-release` | Pinned flake ref for `omahab system upgrade` |

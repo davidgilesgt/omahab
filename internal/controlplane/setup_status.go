@@ -319,12 +319,12 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (api.SetupStatus, error) {
 	// --- recovery_tested check ---
 	recovCheck := api.SetupCheck{ID: "recovery_tested"}
 	var recovCount int
-	err = b.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM identity_recoveries`).Scan(&recovCount)
+	err = b.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM backup_verifications WHERE status='passed'`).Scan(&recovCount)
 	if err != nil {
 		// Table may not exist yet before migration
 		if strings.Contains(err.Error(), "no such table") {
 			recovCheck.Status = "pending"
-			recovCheck.Detail = "no recovery table"
+			recovCheck.Detail = "no verification yet"
 		} else {
 			recovCheck.Status = "failed"
 			recovCheck.Detail = "query failed: " + err.Error()
@@ -332,22 +332,22 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (api.SetupStatus, error) {
 	} else {
 		if recovCount > 0 {
 			recovCheck.Status = "ok"
-			recovCheck.Detail = "recovery tested"
+			recovCheck.Detail = "restore verified"
 		} else {
 			recovCheck.Status = "pending"
-			recovCheck.Detail = "recovery not tested"
+			recovCheck.Detail = "verify a restore"
 		}
 	}
 	checks = append(checks, recovCheck)
 
-	// --- recovery_key check (kit exported + recipient stored) ---
+	// --- recovery_key check (kit exported + fingerprint stored) ---
 	recovKeyCheck := api.SetupCheck{ID: "recovery_key"}
-	if _, err := os.Stat(filepath.Join(b.cfg.StateDir, "recovery.age")); err == nil {
+	if _, err := os.Stat(filepath.Join(b.cfg.StateDir, "recovery.kit")); err == nil {
 		recovKeyCheck.Status = "ok"
 		recovKeyCheck.Detail = "recovery kit exported"
 	} else {
 		recovKeyCheck.Status = "pending"
-		recovKeyCheck.Detail = "generate and confirm a recovery key"
+		recovKeyCheck.Detail = "generate and confirm a recovery phrase"
 	}
 	checks = append(checks, recovKeyCheck)
 
@@ -519,17 +519,17 @@ func applySetupCheckMeta(c api.SetupCheck) api.SetupCheck {
 		c.Owner = "operator"
 		c.Action = "Create the admin below and register two passkeys."
 	case "recovery_key":
-		c.Label = "Save a recovery key"
+		c.Label = "Save a recovery phrase"
 		c.Owner = "operator"
-		c.Action = "Generate an age key pair and confirm you saved it."
+		c.Action = "Generate a 24-word phrase and confirm three words."
 	case "storage_configured":
 		c.Label = "Storage placement"
 		c.Owner = "operator"
 		c.Action = "Optional: dedicate a disk to media or data."
 	case "recovery_tested":
-		c.Label = "Test identity recovery"
+		c.Label = "Verify a restore"
 		c.Owner = "operator"
-		c.Action = "Complete one recovery drill."
+		c.Action = "Run a backup and verify a restore."
 	case "backups_configured":
 		c.Label = "Configure backups"
 		c.Owner = "operator"

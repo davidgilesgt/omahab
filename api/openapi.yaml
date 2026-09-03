@@ -158,8 +158,8 @@ paths:
 
   /api/v1/recovery/generate:
     post:
-      summary: Generate a recovery key pair (one-time)
-      description: Creates an age key pair and an armored recovery kit. The private key is returned exactly once and never persisted; nothing is stored until /api/v1/recovery/confirm.
+      summary: Generate a recovery phrase (one-time)
+      description: Creates a 24-word BIP39 recovery phrase. The phrase is shown exactly once and never persisted; the seed is held in memory keyed by fingerprint for 15 minutes until /api/v1/recovery/confirm verifies a 3-word challenge and persists recovery.kit.
       operationId: generateRecoveryKey
       responses:
         '200':
@@ -168,16 +168,15 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [public_key, private_key, kit]
+                required: [phrase, fingerprint]
                 properties:
-                  public_key: { type: string }
-                  private_key: { type: string }
-                  kit: { type: string }
+                  phrase: { type: array, items: { type: string }, minItems: 24, maxItems: 24, description: "24 BIP39 words" }
+                  fingerprint: { type: string, description: "first 8 hex of SHA-256(seed)", example: "a1b2c3d4" }
 
   /api/v1/recovery/confirm:
     post:
-      summary: Confirm the saved recovery key
-      description: Re-exports the kit to the confirmed public key, persists it at /var/lib/omahab/recovery.age, stores the recovery_age_recipient secret, and marks the recovery_key setup check.
+      summary: Confirm the saved recovery phrase
+      description: Verifies 3 words from the generated phrase (map of 0-based index to word), wraps the master key with the derived recovery key, persists it at /var/lib/omahab/recovery.kit (0600) as {version:1,fingerprint,master_wrapped base64,created_at RFC3339}, and stores platform-app/recovery_fingerprint.
       operationId: confirmRecoveryKey
       requestBody:
         required: true
@@ -185,9 +184,10 @@ paths:
           application/json:
             schema:
               type: object
-              required: [public_key]
+              required: [fingerprint, challenge]
               properties:
-                public_key: { type: string, example: age1... }
+                fingerprint: { type: string, example: "a1b2c3d4" }
+                challenge: { type: object, additionalProperties: { type: string }, description: "3 entries: index (0-23) -> word", minProperties: 3, maxProperties: 3 }
       responses:
         '200':
           description: Kit stored
@@ -198,7 +198,6 @@ paths:
                 properties:
                   confirmed: { type: boolean }
         '400': { $ref: '#/components/responses/Error' }
-
   /api/v1/system/disks:
     get:
       summary: List candidate storage disks

@@ -13,8 +13,6 @@ import (
 	"regexp"
 	"strings"
 	"time"
-
-	"filippo.io/age"
 )
 
 var (
@@ -87,31 +85,6 @@ func ValidateCloudflareToken(raw string) error {
 	}
 	return nil
 }
-
-// ValidateRecoveryKey validates an age recipient public key.
-func ValidateRecoveryKey(raw string) error {
-	s := strings.TrimSpace(raw)
-	if s == "" {
-		return fmt.Errorf("recovery key is empty")
-	}
-	if strings.Contains(s, " ") {
-		return fmt.Errorf("recovery key must not contain spaces")
-	}
-	switch {
-	case strings.HasPrefix(s, "age1pq1"):
-		if _, err := age.ParseHybridRecipient(s); err != nil {
-			return fmt.Errorf("invalid age recipient: %w", err)
-		}
-	case strings.HasPrefix(s, "age1"):
-		if _, err := age.ParseX25519Recipient(s); err != nil {
-			return fmt.Errorf("invalid age recipient: %w", err)
-		}
-	default:
-		return fmt.Errorf("age public key must start with age1")
-	}
-	return nil
-}
-
 // VerifyCloudflareTokenLive checks a token against Cloudflare's verify
 // endpoint. Never logs the token.
 func VerifyCloudflareTokenLive(ctx context.Context, token string) (ok bool, status string, detail string) {

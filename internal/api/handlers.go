@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -14,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/omahab/omahab/internal/domain"
 	"github.com/omahab/omahab/internal/emailing"
+	"github.com/omahab/omahab/internal/store"
 )
 
 // list envelope used by dashboard. Matches web/src/api/types.ts ListEnvelope<T> {items}
@@ -1906,7 +1908,7 @@ func (s *Server) handleVerifyCloudflareToken(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, res)
 }
 
-// handleGenerateRecoveryKey creates a one-time age key pair + kit.
+// handleGenerateRecoveryKey creates a one-time 24-word phrase.
 func (s *Server) handleGenerateRecoveryKey(w http.ResponseWriter, r *http.Request) {
 	mat, err := s.backend.GenerateRecoveryKey(r.Context())
 	if err != nil {
@@ -1916,15 +1918,25 @@ func (s *Server) handleGenerateRecoveryKey(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, mat)
 }
 
-// handleConfirmRecoveryKey persists the confirmed kit.
+// handleConfirmRecoveryKey verifies the 3-word challenge and persists the kit.
 func (s *Server) handleConfirmRecoveryKey(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		PublicKey string `json:"public_key"`
+		Fingerprint string            `json:"fingerprint"`
+		Challenge   map[string]string `json:"challenge"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if err := s.backend.ConfirmRecoveryKey(r.Context(), req.PublicKey); err != nil {
+	chal := make(map[int]string, len(req.Challenge))
+	for k, v := range req.Challenge {
+		var idx int
+		if _, err := fmt.Sscanf(k, "%d", &idx); err != nil {
+			writeError(w, r, fmt.Errorf("%w: invalid challenge key %q", store.ErrValidation, k))
+			return
+		}
+		chal[idx] = v
+	}
+	if err := s.backend.ConfirmRecoveryKey(r.Context(), req.Fingerprint, chal); err != nil {
 		writeError(w, r, err)
 		return
 	}

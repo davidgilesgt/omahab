@@ -2,16 +2,20 @@ package controlplane
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/omahab/omahab/internal/api"
 	"github.com/omahab/omahab/internal/backups"
-	"github.com/omahab/omahab/internal/domain"
 	"github.com/omahab/omahab/internal/events"
 	"github.com/omahab/omahab/internal/secrets"
 	"github.com/omahab/omahab/internal/setupguide"
@@ -37,65 +41,117 @@ func (b *Backend) VerifyCloudflareToken(ctx context.Context, token string) (api.
 }
 
 // ---------------------------------------------------------------------------
-// Recovery key (DESIGN §9): server-side generate + confirm.
+// Recovery key (DESIGN §9): 24-word BIP39 phrase + recovery.kit.
 // ---------------------------------------------------------------------------
 
-// GenerateRecoveryKey creates a fresh age key pair, returns public key,
-// private key (shown once), and the armored recovery kit. Nothing is
-// persisted until ConfirmRecoveryKey.
+var (
+	recoveryMu   sync.Mutex
+	recoveryPend = map[string]recoveryPending{}
+)
+
+type recoveryPending struct {
+	phrase  []string
+	seed    [32]byte
+	expires time.Time
+}
+
+// GenerateRecoveryKey creates a fresh 24-word phrase and holds the seed in
+// memory keyed by fingerprint (first 8 hex of SHA-256(seed)) for 15 minutes.
+// The phrase is shown once and never persisted until ConfirmRecoveryKey.
 func (b *Backend) GenerateRecoveryKey(ctx context.Context) (api.RecoveryKeyMaterial, error) {
-	pub, priv, err := secrets.GenerateAgeKeyPair()
+	words, seed, err := secrets.GenerateRecoveryPhrase()
 	if err != nil {
-		return api.RecoveryKeyMaterial{}, fmt.Errorf("generate age key pair: %w", err)
+		return api.RecoveryKeyMaterial{}, fmt.Errorf("generate phrase: %w", err)
 	}
-	kit, err := b.secrets.ExportRecoveryCopy(ctx, pub)
-	if err != nil {
-		return api.RecoveryKeyMaterial{}, fmt.Errorf("export recovery copy: %w", err)
+	sum := sha256.Sum256(seed[:])
+	fingerprint := hex.EncodeToString(sum[:4])
+	now := time.Now()
+	recoveryMu.Lock()
+	// purge expired
+	for k, v := range recoveryPend {
+		if now.After(v.expires) {
+			delete(recoveryPend, k)
+		}
 	}
+	phraseCopy := make([]string, len(words))
+	copy(phraseCopy, words)
+	recoveryPend[fingerprint] = recoveryPending{phrase: phraseCopy, seed: seed, expires: now.Add(15 * time.Minute)}
+	recoveryMu.Unlock()
 	return api.RecoveryKeyMaterial{
-		PublicKey:  pub,
-		PrivateKey: priv,
-		Kit:        kit,
+		Phrase:      phraseCopy,
+		Fingerprint: fingerprint,
 	}, nil
 }
 
-// ConfirmRecoveryKey re-exports the kit to the user-confirmed public key,
-// persists the armored kit at <StateDir>/recovery.age, stores the
-// platform-app/recovery_age_recipient secret, and marks the recovery_key
-// setup check ok (identity_recoveries row inserted by recovery drill).
-func (b *Backend) ConfirmRecoveryKey(ctx context.Context, publicKey string) error {
-	if err := setupguide.ValidateRecoveryKey(publicKey); err != nil {
-		return fmt.Errorf("%w: %v", store.ErrValidation, err)
+// ConfirmRecoveryKey verifies the 3-word challenge, wraps the master key with
+// the derived recovery key, and persists recovery.kit (0600) plus the
+// platform-app/recovery_fingerprint secret.
+func (b *Backend) ConfirmRecoveryKey(ctx context.Context, fingerprint string, challenge map[int]string) error {
+	fingerprint = strings.TrimSpace(strings.ToLower(fingerprint))
+	if fingerprint == "" {
+		return fmt.Errorf("%w: fingerprint is required", store.ErrValidation)
 	}
-	kit, err := b.secrets.ExportRecoveryCopy(ctx, publicKey)
+	if len(challenge) != 3 {
+		return fmt.Errorf("%w: challenge must have exactly 3 entries", store.ErrValidation)
+	}
+	recoveryMu.Lock()
+	pend, ok := recoveryPend[fingerprint]
+	if ok && time.Now().After(pend.expires) {
+		delete(recoveryPend, fingerprint)
+		ok = false
+	}
+	recoveryMu.Unlock()
+	if !ok {
+		return fmt.Errorf("%w: recovery phrase expired or not found; generate again", store.ErrValidation)
+	}
+	for idx, word := range challenge {
+		if idx < 0 || idx >= 24 {
+			return fmt.Errorf("%w: challenge index %d out of range (0-23)", store.ErrValidation, idx)
+		}
+		expected := pend.phrase[idx]
+		if strings.TrimSpace(strings.ToLower(word)) != strings.TrimSpace(strings.ToLower(expected)) {
+			return fmt.Errorf("%w: challenge word mismatch at position %d", store.ErrValidation, idx)
+		}
+	}
+	recoveryKey := secrets.DeriveRecoveryKey(pend.seed)
+	wrapped := secrets.WrapMasterKey(b.masterKey, recoveryKey)
+	kit := struct {
+		Version       int    `json:"version"`
+		Fingerprint   string `json:"fingerprint"`
+		MasterWrapped string `json:"master_wrapped"`
+		CreatedAt     string `json:"created_at"`
+	}{
+		Version:       1,
+		Fingerprint:   fingerprint,
+		MasterWrapped: base64.StdEncoding.EncodeToString(wrapped),
+		CreatedAt:     time.Now().UTC().Format(time.RFC3339),
+	}
+	data, err := json.MarshalIndent(kit, "", "  ")
 	if err != nil {
-		return fmt.Errorf("export recovery copy: %w", err)
+		return fmt.Errorf("marshal recovery.kit: %w", err)
 	}
 	if err := os.MkdirAll(b.cfg.StateDir, 0o700); err != nil {
 		return err
 	}
-	path := filepath.Join(b.cfg.StateDir, "recovery.age")
-	if err := os.WriteFile(path, []byte(kit), 0o600); err != nil {
-		return fmt.Errorf("write recovery.age: %w", err)
+	path := filepath.Join(b.cfg.StateDir, "recovery.kit")
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return fmt.Errorf("write recovery.kit: %w", err)
 	}
-	if err := upsertSecret(ctx, b.secrets, "platform-app", "recovery_age_recipient", publicKey); err != nil {
-		return fmt.Errorf("store recovery recipient: %w", err)
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("persist recovery.kit: %w", err)
 	}
-	// Record a recovery-key completion row so the recovery_tested check
-	// flips to ok (the actual drill remains recommended).
-	if _, err := b.db.ExecContext(ctx,
-		`INSERT INTO identity_recoveries (id, user_id, method, status, performed_at)
-		 VALUES (?, 'system', 'recovery-key-export', 'ok', CURRENT_TIMESTAMP)`,
-		domain.ID(newSetupID())); err != nil {
-		// Non-fatal: check stays pending until a real drill.
-		_ = err
+	_ = os.Chmod(path, 0o600)
+	if err := upsertSecret(ctx, b.secrets, "platform-app", "recovery_fingerprint", fingerprint); err != nil {
+		return fmt.Errorf("store recovery fingerprint: %w", err)
 	}
+	recoveryMu.Lock()
+	delete(recoveryPend, fingerprint)
+	recoveryMu.Unlock()
 	return nil
 }
 
-func newSetupID() string {
-	return fmt.Sprintf("rec_%d", os.Getpid())
-}
 
 // ---------------------------------------------------------------------------
 // Storage placement: candidate disks + media/data placement.
