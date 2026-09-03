@@ -204,17 +204,15 @@ in
     # :latest / dated v2026.* tags. Pinned by digest of latest at time of
     # implementation (sha256:a7e2ed27163b31f30f0e9858018df36eed22dd14b4db4a9d574646f1dd3a9a21).
     # Resolved via `docker pull nousresearch/hermes-agent:latest` on
-    # 2026-09-02; refresh via `skopeo inspect docker://nousresearch/hermes-agent:0.21.0`
-    # when the tag exists, then `nix hash` the pull. sha256 below is the nix
-    # SRI hash placeholder — run `nix-prefetch-docker` or `nix build` to fill
-    # the real hash (intentionally fake until builder runs; go build unaffected).
+    # 2026-09-02; refreshed via `nix-prefetch-docker` on 2026-09-03
+    # (prefetch output hash used directly as the SRI hash).
     virtualisation.oci-containers.backend = "docker";
     virtualisation.oci-containers.containers.hermes = {
       image = "nousresearch/hermes-agent:0.21.0";
       imageFile = pkgs.dockerTools.pullImage {
         imageName = "nousresearch/hermes-agent";
         imageDigest = "sha256:a7e2ed27163b31f30f0e9858018df36eed22dd14b4db4a9d574646f1dd3a9a21";
-        sha256 = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        sha256 = "sha256-/mgAE2YWuo1jN2hfEz0MgcCcYLoAbKr7/B4Pp81Fic0=";
         finalImageName = "nousresearch/hermes-agent";
         finalImageTag = "0.21.0";
       };
