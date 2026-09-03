@@ -165,7 +165,7 @@ Recommended storage layout:
 
 Omahab-owned host software uses Go as its primary language. `omahab`, `omahabd`, `omahab-clientd`, and the installation, application, deployment, Cloudflare, backup, synchronization, workspace, event, email-processing, and health controllers are Go binaries. Use the current stable Go release pinned by each Omahab release.
 
-The authenticated control API uses HTTP/JSON with an OpenAPI contract. Use the Go standard library with Chi for routing, Cobra for CLI commands, and generated Go and TypeScript API types. Use ordinary HTTP for commands and queries, Server-Sent Events for control-plane event streams, and WebSockets only where bidirectional behavior requires them, including Hermes's existing JSON-RPC transport. Do not add gRPC initially.
+The authenticated control API uses HTTP/JSON with an OpenAPI contract. Use the Go standard library with Chi for routing, Cobra for CLI commands, and hand-written request/response types in `internal/api/types.go` mirrored in `web/src/api/types.ts`; OpenAPI is descriptive. Use ordinary HTTP for commands and queries, Server-Sent Events for control-plane event streams, and WebSockets only where bidirectional behavior requires them, including Hermes's existing JSON-RPC transport. Do not add gRPC initially.
 
 Use `database/sql` with `modernc.org/sqlite` so SQLite does not require a C toolchain, `sqlc` for typed queries, and explicit schema migrations. Durable jobs, desired and observed state, releases, and normalized events remain SQLite-backed state machines. Do not add Redis, a message broker, or an external workflow engine for the initial single-node product.
 

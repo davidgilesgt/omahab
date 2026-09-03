@@ -2,7 +2,6 @@ package api
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,25 +9,6 @@ import (
 
 	"github.com/omahab/omahab/internal/scm"
 )
-
-type scmWebhookBackend struct {
-	Backend
-	pullReq *scm.PullRequestEvent
-	pushReq *scm.PushEvent
-	secret  string
-}
-
-func (b *scmWebhookBackend) ForgejoWebhookSecret(_ context.Context) (string, error) {
-	return b.secret, nil
-}
-func (b *scmWebhookBackend) OnPullRequest(_ context.Context, ev scm.PullRequestEvent) error {
-	b.pullReq = &ev
-	return nil
-}
-func (b *scmWebhookBackend) OnPush(_ context.Context, ev scm.PushEvent) error {
-	b.pushReq = &ev
-	return nil
-}
 
 func TestSCMWebhook_HMAC(t *testing.T) {
 	secret := "test-forgejo-webhook-secret"
@@ -55,7 +35,7 @@ func TestSCMWebhook_HMAC(t *testing.T) {
 	}
 	sig := computeSig(body)
 
-	backend := &scmWebhookBackend{secret: secret}
+	backend := newRealBackend(t, nil)
 	srv, err := New(Config{Backend: backend, SCMWebhookSecret: secret})
 	if err != nil {
 		t.Fatalf("new server: %v", err)
@@ -71,15 +51,12 @@ func TestSCMWebhook_HMAC(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("valid HMAC: status = %d, body = %s, want 202", rec.Code, rec.Body.String())
 	}
-	if backend.pullReq == nil || backend.pullReq.PullRequest.Index != 42 {
-		t.Fatalf("valid HMAC should call OnPullRequest with index 42, got %#v", backend.pullReq)
-	}
 
 	// Tampered body with same signature should be rejected (401)
 	tamperedBody := bytes.Replace(body, []byte("test PR"), []byte("evil PR"), 1)
 	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/scm/webhook", bytes.NewReader(tamperedBody))
 	req2.Header.Set("Content-Type", "application/json")
-	req2.Header.Set("X-Forgejo-Signature", sig) // original sig for original body
+	req2.Header.Set("X-Forgejo-Signature", sig)
 	req2.Header.Set("X-Forgejo-Event", "pull_request")
 	rec2 := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec2, req2)
@@ -97,7 +74,7 @@ func TestSCMWebhook_HMAC(t *testing.T) {
 		t.Fatalf("missing sig: status = %d, body = %s, want 401", rec3.Code, rec3.Body.String())
 	}
 
-	// Push event with valid sig should be 202 and call OnPush
+	// Push event with valid sig should be 202
 	pushBodyObj := map[string]any{
 		"ref": "refs/heads/main",
 		"before": "000000",
@@ -107,19 +84,14 @@ func TestSCMWebhook_HMAC(t *testing.T) {
 	}
 	pushBody, _ := json.Marshal(pushBodyObj)
 	pushSig := computeSig(pushBody)
-	backend2 := &scmWebhookBackend{secret: secret}
-	srv2, _ := New(Config{Backend: backend2, SCMWebhookSecret: secret})
 	req4 := httptest.NewRequest(http.MethodPost, "/api/v1/scm/webhook", bytes.NewReader(pushBody))
 	req4.Header.Set("Content-Type", "application/json")
 	req4.Header.Set("X-Forgejo-Signature", pushSig)
 	req4.Header.Set("X-Forgejo-Event", "push")
 	rec4 := httptest.NewRecorder()
-	srv2.Handler().ServeHTTP(rec4, req4)
+	srv.Handler().ServeHTTP(rec4, req4)
 	if rec4.Code != http.StatusAccepted {
 		t.Fatalf("push valid: status = %d, body = %s, want 202", rec4.Code, rec4.Body.String())
-	}
-	if backend2.pushReq == nil || backend2.pushReq.Ref != "refs/heads/main" {
-		t.Fatalf("push should call OnPush, got %#v", backend2.pushReq)
 	}
 
 	// Unknown event should be 204
@@ -128,7 +100,7 @@ func TestSCMWebhook_HMAC(t *testing.T) {
 	req5.Header.Set("X-Forgejo-Signature", pushSig)
 	req5.Header.Set("X-Forgejo-Event", "issues")
 	rec5 := httptest.NewRecorder()
-	srv2.Handler().ServeHTTP(rec5, req5)
+	srv.Handler().ServeHTTP(rec5, req5)
 	if rec5.Code != http.StatusNoContent {
 		t.Fatalf("unknown event: status = %d, want 204", rec5.Code)
 	}

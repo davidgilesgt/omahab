@@ -1,10 +1,9 @@
-package api
+package apitypes
 
 import (
 	"context"
 	"time"
 
-	"github.com/omahab/omahab/internal/backups"
 	"github.com/omahab/omahab/internal/domain"
 	"github.com/omahab/omahab/internal/health"
 	"github.com/omahab/omahab/internal/identity"
@@ -146,6 +145,7 @@ type EnrollCompanionResponse struct {
 	RestUser       string `json:"rest_user,omitempty"`
 	RestPassword   string `json:"rest_password,omitempty"`
 }
+
 // ToolEnvEntry is metadata for a tool-environment variable (no value).
 type ToolEnvEntry struct {
 	Name      string    `json:"name"`
@@ -247,19 +247,18 @@ type ConfigureStorageRequest struct {
 //   - Hetzner Storage Box (recommended): {kind:"hetzner_storagebox", username, host, sub_account_password}
 //   - Generic/Advanced: {location, password}
 type CreateBackupRepositoryRequest struct {
-	Kind                string            `json:"kind,omitempty"`
-	Username            string            `json:"username,omitempty"`
-	Host                string            `json:"host,omitempty"`
-	SubAccountPassword  string            `json:"sub_account_password,omitempty"`
-	Label               string            `json:"label"`
-	Location            string            `json:"location"`
-	Password            string            `json:"password"`
-	Env                 map[string]string `json:"env,omitempty"`
+	Kind               string            `json:"kind,omitempty"`
+	Username           string            `json:"username,omitempty"`
+	Host               string            `json:"host,omitempty"`
+	SubAccountPassword string            `json:"sub_account_password,omitempty"`
+	Label              string            `json:"label"`
+	Location           string            `json:"location"`
+	Password           string            `json:"password"`
+	Env                map[string]string `json:"env,omitempty"`
 	// Phrase allows deriving the restic password from the recovery phrase
 	// when configuring Hetzner without a stored seed; optional.
-	Phrase              string            `json:"phrase,omitempty"`
+	Phrase string `json:"phrase,omitempty"`
 }
-
 
 // CatalogBundle is the installable view of one curated bundle. Compose
 // templates and digest pinning stay server-side.
@@ -404,186 +403,6 @@ type KnowledgeUploadRequest struct {
 	Principal string   `json:"principal,omitempty"`
 }
 
-// Backend is the explicit control-plane interface consumed by the HTTP layer.
-// Every dashboard operation has a corresponding method; implementations remain
-type Backend interface {
-	// Status / instance / doctor
-	GetStatus(ctx context.Context) (domain.Status, error)
-	GetInstance(ctx context.Context) (domain.Instance, error)
-	UpdateInstance(ctx context.Context, domain string, assistantName string) (domain.Instance, error)
-	GetDoctor(ctx context.Context) (*health.Report, error)
-	// Applications
-	ListApplications(ctx context.Context, p Pagination) ([]domain.Application, error)
-	InstallApplication(ctx context.Context, req InstallApplicationRequest) (domain.Application, error)
-	ListCatalog(ctx context.Context) ([]CatalogBundle, error)
-
-	// First-run wizard surfaces.
-	VerifyCloudflareToken(ctx context.Context, token string) (VerifyCloudflareTokenResult, error)
-	GenerateRecoveryKey(ctx context.Context) (RecoveryKeyMaterial, error)
-	ConfirmRecoveryKey(ctx context.Context, fingerprint string, challenge map[int]string) error
-	ListDisks(ctx context.Context) ([]Disk, error)
-	ConfigureStorage(ctx context.Context, req ConfigureStorageRequest) error
-	ListBackupRepositories(ctx context.Context) ([]backups.Repository, error)
-	CreateBackupRepository(ctx context.Context, req CreateBackupRepositoryRequest) (backups.Repository, error)
-	DeleteBackupRepository(ctx context.Context, id string) error
-	GetApplication(ctx context.Context, id domain.ID) (domain.Application, error)
-	UpdateApplication(ctx context.Context, id domain.ID, req UpdateApplicationRequest) (domain.Application, error)
-	DoApplicationAction(ctx context.Context, id domain.ID, action string) (domain.Application, error)
-
-	// Exposure (inspectable / reversible)
-	GetExposure(ctx context.Context, resourceType string, id domain.ID) (ExposureState, error)
-	ListExposure(ctx context.Context) ([]ExposureState, error)
-	UpdateExposure(ctx context.Context, resourceType string, id domain.ID, exposure domain.Exposure) (ExposureState, error)
-
-	// Projects
-	ListProjects(ctx context.Context, p Pagination) ([]domain.Project, error)
-	GetProject(ctx context.Context, id domain.ID) (domain.Project, error)
-	CreateProject(ctx context.Context, req CreateProjectRequest) (domain.Project, error)
-	UpdateProject(ctx context.Context, id domain.ID, req UpdateProjectRequest) (domain.Project, error)
-	DeleteProject(ctx context.Context, id domain.ID) error
-
-	// Releases
-	ListReleases(ctx context.Context, projectID domain.ID, p Pagination) ([]domain.Release, error)
-	GetRelease(ctx context.Context, projectID domain.ID, releaseID domain.ID) (domain.Release, error)
-	CreateRelease(ctx context.Context, projectID domain.ID, req CreateReleaseRequest) (domain.Release, error)
-	RollbackRelease(ctx context.Context, projectID domain.ID, releaseID domain.ID) (domain.Release, error)
-
-	// Secrets (metadata only on reads)
-	ListSecrets(ctx context.Context, scope string, p Pagination) ([]domain.Secret, error)
-	GetSecret(ctx context.Context, id domain.ID) (domain.Secret, error)
-	CreateSecret(ctx context.Context, req CreateSecretRequest) (domain.Secret, error)
-	UpdateSecret(ctx context.Context, id domain.ID, req UpdateSecretRequest) (domain.Secret, error)
-	DeleteSecret(ctx context.Context, id domain.ID) error
-
-	// Backups
-	ListBackups(ctx context.Context, p Pagination) ([]domain.Backup, error)
-	GetBackup(ctx context.Context, id domain.ID) (domain.Backup, error)
-	CreateBackup(ctx context.Context, req CreateBackupRequest) (domain.Backup, error)
-	RestoreBackup(ctx context.Context, id domain.ID) (domain.Backup, error)
-	VerifyBackup(ctx context.Context, id domain.ID) (domain.Backup, error)
-
-	// Events
-	ListEvents(ctx context.Context, p Pagination, filter EventFilter) ([]domain.Event, error)
-	GetEvent(ctx context.Context, id domain.ID) (domain.Event, error)
-	MarkEventRead(ctx context.Context, id domain.ID) (domain.Event, error)
-	MarkAllEventsRead(ctx context.Context) error
-	StreamEvents(ctx context.Context, since domain.ID, out chan<- domain.Event) error
-
-	// Sync folders
-	ListSyncFolders(ctx context.Context, p Pagination) ([]domain.SyncFolder, error)
-	GetSyncFolder(ctx context.Context, id domain.ID) (domain.SyncFolder, error)
-	CreateSyncFolder(ctx context.Context, req CreateSyncFolderRequest) (domain.SyncFolder, error)
-	UpdateSyncFolder(ctx context.Context, id domain.ID, req UpdateSyncFolderRequest) (domain.SyncFolder, error)
-	DeleteSyncFolder(ctx context.Context, id domain.ID) error
-
-	// Workspaces
-	ListWorkspaces(ctx context.Context, p Pagination) ([]domain.Workspace, error)
-	GetWorkspace(ctx context.Context, id domain.ID) (domain.Workspace, error)
-	CreateWorkspace(ctx context.Context, req CreateWorkspaceRequest) (domain.Workspace, error)
-	StopWorkspace(ctx context.Context, id domain.ID) (domain.Workspace, error)
-	DeleteWorkspace(ctx context.Context, id domain.ID) error
-	SendWorkspace(ctx context.Context, id domain.ID, message string) error
-	AttachWorkspace(ctx context.Context, id domain.ID) error
-	ListCompanionWorkspaces(ctx context.Context, p Pagination) ([]domain.Workspace, error)
-	CreateCompanionWorkspace(ctx context.Context, req CompanionCreateWorkspaceRequest) (domain.Workspace, error)
-	// Users / identity
-	ListUsers(ctx context.Context, p Pagination) ([]domain.User, error)
-	GetUser(ctx context.Context, id domain.ID) (domain.User, error)
-	CreateUser(ctx context.Context, req CreateUserRequest) (domain.User, error)
-	UpdateUser(ctx context.Context, id domain.ID, req UpdateUserRequest) (domain.User, error)
-	DeleteUser(ctx context.Context, id domain.ID) error
-	CreateRecoverySession(ctx context.Context, email string) (RecoverySession, error)
-	CreateUserRecoverySession(ctx context.Context, userID domain.ID) (RecoverySession, error)
-	IssueUserEnrollment(ctx context.Context, id domain.ID) (domain.User, error)
-
-	// Provider credentials (metadata only)
-	ListProviderCredentials(ctx context.Context, p Pagination) ([]ProviderCredential, error)
-	GetProviderCredential(ctx context.Context, id domain.ID) (ProviderCredential, error)
-	CreateProviderCredential(ctx context.Context, req CreateProviderCredentialRequest) (ProviderCredential, error)
-	DeleteProviderCredential(ctx context.Context, id domain.ID) error
-
-	// Model gateway (LiteLLM) — provider/alias/virtual-key wiring
-	ListModelAliases(ctx context.Context) ([]ModelAlias, error)
-	SetModelAlias(ctx context.Context, name string, req SetModelAliasRequest) (ModelAlias, error)
-	ListModelKeys(ctx context.Context, p Pagination) ([]ModelKey, error)
-	// CreateModelKey returns the created key metadata plus plaintext token once.
-	// The plaintext token is returned in the `key` field of the response envelope and never persisted.
-	CreateModelKey(ctx context.Context, req CreateModelKeyRequest) (ModelKey, string, error)
-	DeleteModelKey(ctx context.Context, id domain.ID) error
-
-	// Provider OAuth (subscription) — safe session, no secrets
-	StartProviderOAuth(ctx context.Context, provider string, req StartProviderOAuthRequest) (OAuthSession, error)
-	PollProviderOAuth(ctx context.Context, provider, sessionID string) (OAuthSession, error)
-	// ForwardProviderOAuthCallback forwards only the /callback?<query> path to LiteLLM's fixed loopback 127.0.0.1:56121.
-	// Only device-authenticated companions with allow_provider_oauth=true may call; admin bearer is rejected.
-	ForwardProviderOAuthCallback(ctx context.Context, provider, sessionID string, req ForwardProviderOAuthCallbackRequest) (OAuthSession, error)
-
-	// Companion / enrollment (Phase 6 stubs) — TODO: implement full lifecycle
-	ListCompanionDevices(ctx context.Context, p Pagination) ([]CompanionDevice, error)
-	CreateCompanionEnrollment(ctx context.Context) (CompanionEnrollment, string, error)
-	EnrollCompanion(ctx context.Context, code string) (EnrollCompanionResponse, error)
-	RevokeCompanionDevice(ctx context.Context, id domain.ID) error
-	SetDeviceAllowOAuth(ctx context.Context, id domain.ID, allow bool) (CompanionDevice, error)
-	// GetCompanionEnvironment is device-authenticated and returns raw values with ETag; admin bearer rejected.
-	GetCompanionEnvironment(ctx context.Context, deviceToken string) (map[string]string, string, error)
-
-	ListToolEnvironments(ctx context.Context) ([]ToolEnvEntry, error)
-	PutToolEnvironment(ctx context.Context, name, value string) (ToolEnvEntry, error)
-	DeleteToolEnvironment(ctx context.Context, name string) error
-	// Email ingestion
-	IngestEmail(ctx context.Context, req EmailIngestRequest) (domain.EmailMessage, error)
-	ListEmailMessages(ctx context.Context, p Pagination) ([]domain.EmailMessage, error)
-	GetEmailMessage(ctx context.Context, id domain.ID) (domain.EmailMessage, error)
-
-	// Release tokens (admin only; never exposed to Forgejo)
-	IssueReleaseToken(ctx context.Context, projectID domain.ID) (ReleaseTokenResponse, error)
-	RotateReleaseToken(ctx context.Context, projectID domain.ID) (ReleaseTokenResponse, error)
-	ReleaseWithToken(ctx context.Context, projectID domain.ID, token, commit, digest string) (domain.Release, error)
-
-	// Push mirror (repo-scoped credential, force-push warning, LFS)
-	GetPushMirror(ctx context.Context, projectID domain.ID) (MirrorResponse, error)
-	ConfigurePushMirror(ctx context.Context, projectID domain.ID, req ConfigureMirrorRequest) (MirrorResponse, error)
-	RemovePushMirror(ctx context.Context, projectID domain.ID) error
-
-	// Workspace capabilities (short-lived one-time token)
-	IssueWorkspaceCapability(ctx context.Context, workspaceID string) (WorkspaceCapabilityResponse, error)
-	ValidateWorkspaceCapability(ctx context.Context, workspaceID, token string) error
-
-	// Knowledge assistant tools (with Paperless permission checks)
-	KnowledgeSearch(ctx context.Context, principal, query string, limit int) ([]knowledge.Citation, error)
-	KnowledgeGetMetadata(ctx context.Context, principal, docID string) (*knowledge.PaperlessMetadata, error)
-	KnowledgeGetText(ctx context.Context, principal, docID string) (string, error)
-	KnowledgeListCorrespondents(ctx context.Context, principal string) ([]string, error)
-	KnowledgeListDocumentTypes(ctx context.Context, principal string) ([]string, error)
-	KnowledgeListTags(ctx context.Context, principal string) ([]string, error)
-	KnowledgeUpload(ctx context.Context, principal, filename string, content []byte, tags []string) (string, error)
-	KnowledgeAddTag(ctx context.Context, principal, docID, tag string) error
-	KnowledgeListSources(ctx context.Context) ([]*knowledge.Source, error)
-	KnowledgeIndexSetupOptions(ctx context.Context) ([]knowledge.IndexSetupOption, error)
-	KnowledgePinnedModels(ctx context.Context) ([]knowledge.ModelInfo, error)
-	KnowledgeGetSummarizationConsent(ctx context.Context, principal, provider string) (bool, error)
-	KnowledgeSetSummarizationConsent(ctx context.Context, principal, provider string, granted bool) error
-
-	// Identity extended (enrollment, app access, groups)
-	GetEnrollmentState(ctx context.Context, userID string) (identity.EnrollmentState, error)
-	ListApplicationAccess(ctx context.Context, userID string) ([]identity.AppAccess, error)
-	GetUserGroups(ctx context.Context, userID string) ([]identity.Group, error)
-	SetUserGroups(ctx context.Context, userID string, groupIDs []string) error
-
-	// Setup aggregates first-run provisioning state.
-	GetSetupStatus(ctx context.Context) (SetupStatus, error)
-	TriggerSetupReconcile(ctx context.Context) (bool, error)
-	SetupWoodpecker(ctx context.Context, req SetupWoodpeckerRequest) error
-
-	// Email routing gated on verification
-	EnsureEmailRoute(ctx context.Context, recipient string) error
-
-	// SCM webhooks (Forgejo pull_request/push, HMAC-verified)
-	OnPullRequest(ctx context.Context, ev scm.PullRequestEvent) error
-	OnPush(ctx context.Context, ev scm.PushEvent) error
-	ForgejoWebhookSecret(ctx context.Context) (string, error)
-}
-
 // SetupWoodpeckerRequest is the body for PUT /api/v1/setup/woodpecker.
 // Token is never returned and must not be logged.
 type SetupWoodpeckerRequest struct {
@@ -610,10 +429,82 @@ type SetupCheck struct {
 	PasskeyCount *int             `json:"passkey_count,omitempty"`
 	Target       *int             `json:"target,omitempty"`
 }
-
 // SetupAppStatus tracks one default bundle in the core_apps check.
 type SetupAppStatus struct {
 	BundleID string `json:"bundle_id"`
 	Status   string `json:"status"`
 	Detail   string `json:"detail,omitempty"`
 }
+
+// BootstrapGate is the control-plane side of first-boot bootstrap.
+type BootstrapGate interface {
+	// Claim validates the one-time code; success consumes it.
+	Claim(code, sourceIP string) error
+	// SSHKeys installs keys for the admin user.
+	SSHKeys(githubUser string, pastedKeys []string) (int, error)
+	// TailscaleUp starts enrollment, returning the auth URL.
+	TailscaleUp() (string, error)
+	// TailscaleStatus polls enrollment state.
+	TailscaleStatus() (running bool, ip string, state string, err error)
+	// Complete writes bootstrap-done and closes the listener.
+	Complete() error
+	// Active reports whether bootstrap is still pending.
+	Active() bool
+	// RestoreConnect verifies Hetzner/generic repo + phrase, uploads SSH key,
+	// and lists snapshots. Returns up to 10 latest.
+	RestoreConnect(ctx context.Context, req BootstrapRestoreConnectRequest) ([]BootstrapRestoreSnapshot, error)
+	// RestoreRun starts the restore of snapshotID in background.
+	RestoreRun(ctx context.Context, snapshotID string) error
+	// RestoreEvents streams progress events for the running restore.
+	RestoreEvents(ctx context.Context) <-chan BootstrapRestoreEvent
+}
+
+// BootstrapRestoreConnectRequest is the body for POST /api/bootstrap/restore/connect.
+type BootstrapRestoreConnectRequest struct {
+	Kind               string `json:"kind,omitempty"`
+	Username           string `json:"username,omitempty"`
+	Host               string `json:"host,omitempty"`
+	SubAccountPassword string `json:"sub_account_password,omitempty"`
+	Location           string `json:"location,omitempty"`
+	Phrase             string `json:"phrase,omitempty"`
+	PhraseWords        []string `json:"phrase_words,omitempty"`
+}
+
+// BootstrapRestoreSnapshot is one snapshot returned by restore/connect.
+type BootstrapRestoreSnapshot struct {
+	ID       string `json:"id"`
+	Time     string `json:"time"`
+	Hostname string `json:"hostname"`
+}
+
+// BootstrapRestoreRunRequest is the body for POST /api/bootstrap/restore/run.
+type BootstrapRestoreRunRequest struct {
+	SnapshotID string `json:"snapshot_id"`
+}
+
+// BootstrapRestoreEvent is one SSE event during restore.
+type BootstrapRestoreEvent struct {
+	Stage   string `json:"stage"`
+	Message string `json:"message"`
+	Done    bool   `json:"done"`
+	Error   string `json:"error,omitempty"`
+}
+
+// HealthReport aliases for convenience.
+type HealthReport = health.Report
+
+// Identity types aliases to avoid direct imports in handlers.
+type EnrollmentState = identity.EnrollmentState
+type AppAccess = identity.AppAccess
+type Group = identity.Group
+
+// Knowledge aliases
+type Citation = knowledge.Citation
+type PaperlessMetadata = knowledge.PaperlessMetadata
+type Source = knowledge.Source
+type IndexSetupOption = knowledge.IndexSetupOption
+type ModelInfo = knowledge.ModelInfo
+
+// SCM aliases
+type PullRequestEvent = scm.PullRequestEvent
+type PushEvent = scm.PushEvent

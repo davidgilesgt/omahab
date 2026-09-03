@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/omahab/omahab/internal/api"
+	"github.com/omahab/omahab/internal/apitypes"
 	"github.com/omahab/omahab/internal/backups"
 	"github.com/omahab/omahab/internal/secrets"
 )
@@ -23,12 +23,12 @@ var (
 	restoreRepo     *backups.Repository
 	restoreCreds    *backups.Credentials
 	restorePhrase   string
-	restoreEventsCh chan api.BootstrapRestoreEvent
+	restoreEventsCh chan apitypes.BootstrapRestoreEvent
 )
 
-// RestoreConnect implements api.BootstrapGate.RestoreConnect.
+// RestoreConnect implements apitypes.BootstrapGate.RestoreConnect.
 // It verifies repo credentials, uploads Hetzner SSH key if needed, and lists snapshots.
-func (b *Backend) RestoreConnect(ctx context.Context, req api.BootstrapRestoreConnectRequest) ([]api.BootstrapRestoreSnapshot, error) {
+func (b *Backend) RestoreConnect(ctx context.Context, req apitypes.BootstrapRestoreConnectRequest) ([]apitypes.BootstrapRestoreSnapshot, error) {
 	kind := strings.TrimSpace(strings.ToLower(req.Kind))
 	if kind == "" {
 		if req.Username != "" && req.Host != "" {
@@ -104,7 +104,7 @@ func (b *Backend) RestoreConnect(ctx context.Context, req api.BootstrapRestoreCo
 		now := time.Now().UTC().Format(time.RFC3339)
 		// If Hetzner, try to list SFTP directory for instance subfolders via sftp client
 		// For now just return one fake snapshot
-		stub := []api.BootstrapRestoreSnapshot{
+		stub := []apitypes.BootstrapRestoreSnapshot{
 			{ID: "fake-snap-" + phraseStr[:4], Time: now, Hostname: "omahab-host"},
 		}
 		// Cache for run
@@ -117,13 +117,13 @@ func (b *Backend) RestoreConnect(ctx context.Context, req api.BootstrapRestoreCo
 		return stub, nil
 	}
 	// Map to API
-	out := make([]api.BootstrapRestoreSnapshot, 0, len(snapshots))
+	out := make([]apitypes.BootstrapRestoreSnapshot, 0, len(snapshots))
 	for _, s := range snapshots {
 		t := s.Time
 		if t == "" {
 			t = time.Now().UTC().Format(time.RFC3339)
 		}
-		out = append(out, api.BootstrapRestoreSnapshot{
+		out = append(out, apitypes.BootstrapRestoreSnapshot{
 			ID:       s.ID,
 			Time:     t,
 			Hostname: s.Hostname,
@@ -151,7 +151,7 @@ func (b *Backend) RestoreRun(ctx context.Context, snapshotID string) error {
 		return fmt.Errorf("no restore context: call /restore/connect first")
 	}
 	// Prepare event channel
-	ch := make(chan api.BootstrapRestoreEvent, 32)
+	ch := make(chan apitypes.BootstrapRestoreEvent, 32)
 	restoreEventsCh = ch
 	restoreMu.Unlock()
 
@@ -160,22 +160,22 @@ func (b *Backend) RestoreRun(ctx context.Context, snapshotID string) error {
 }
 
 // RestoreEvents returns the channel for SSE.
-func (b *Backend) RestoreEvents(ctx context.Context) <-chan api.BootstrapRestoreEvent {
+func (b *Backend) RestoreEvents(ctx context.Context) <-chan apitypes.BootstrapRestoreEvent {
 	restoreMu.Lock()
 	ch := restoreEventsCh
 	restoreMu.Unlock()
 	if ch == nil {
-		empty := make(chan api.BootstrapRestoreEvent)
+		empty := make(chan apitypes.BootstrapRestoreEvent)
 		close(empty)
 		return empty
 	}
 	return ch
 }
 
-func (b *Backend) runRestore(ctx context.Context, ch chan api.BootstrapRestoreEvent, repo backups.Repository, creds backups.Credentials, phrase, snapshotID string) {
+func (b *Backend) runRestore(ctx context.Context, ch chan apitypes.BootstrapRestoreEvent, repo backups.Repository, creds backups.Credentials, phrase, snapshotID string) {
 	defer close(ch)
 	send := func(stage, msg string, done bool, errStr string) {
-		ev := api.BootstrapRestoreEvent{Stage: stage, Message: msg, Done: done, Error: errStr}
+		ev := apitypes.BootstrapRestoreEvent{Stage: stage, Message: msg, Done: done, Error: errStr}
 		select {
 		case ch <- ev:
 		case <-ctx.Done():

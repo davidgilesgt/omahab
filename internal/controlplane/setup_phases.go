@@ -4,9 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
-	"database/sql"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -27,12 +25,8 @@ import (
 	"github.com/omahab/omahab/internal/domain"
 	"github.com/omahab/omahab/internal/edge"
 	"github.com/omahab/omahab/internal/events"
-	"github.com/omahab/omahab/internal/exposure"
 	"github.com/omahab/omahab/internal/health"
-	"github.com/omahab/omahab/internal/providers"
-	"github.com/omahab/omahab/internal/secrets"
 	"github.com/omahab/omahab/internal/store"
-	"gopkg.in/yaml.v3"
 )
 
 var (
@@ -120,6 +114,7 @@ func (b *Backend) ensureTailscaleIP(ctx context.Context) error {
 }
 
 // caddyConfigPath resolves the Caddy JSON render target from config.
+
 func (b *Backend) caddyConfigPath() string {
 	if p := strings.TrimSpace(b.cfg.CaddyConfigPath); p != "" {
 		return p
@@ -162,6 +157,7 @@ func (b *Backend) writeBootstrapCaddyJSON(ctx context.Context, dnsToken string) 
 }
 
 // IsSetupRunning reports whether the setup reconciler is currently running.
+
 func (b *Backend) IsSetupRunning() bool {
 	b.setupMu.Lock()
 	defer b.setupMu.Unlock()
@@ -170,6 +166,7 @@ func (b *Backend) IsSetupRunning() bool {
 
 // TriggerSetupReconcile triggers the setup reconciler in the background.
 // Returns true if already running (caller should map to 202), false otherwise.
+
 func (b *Backend) TriggerSetupReconcile(ctx context.Context) (bool, error) {
 	if !b.reserveSetup() {
 		return true, nil
@@ -181,6 +178,7 @@ func (b *Backend) TriggerSetupReconcile(ctx context.Context) (bool, error) {
 }
 
 // RunSetupReconciler executes the first-run setup reconciliation with single-flight.
+
 func (b *Backend) RunSetupReconciler(ctx context.Context) error {
 	if !b.reserveSetup() {
 		return fmt.Errorf("setup already running")
@@ -295,6 +293,7 @@ func (b *Backend) emitSetupFailed(ctx context.Context, phase string, err error) 
 }
 
 // Phase 1: Preconditions
+
 func (b *Backend) setupPhasePreconditions(ctx context.Context) error {
 	if err := b.ensureTailscaleIP(ctx); err != nil {
 		return err
@@ -323,6 +322,7 @@ func (b *Backend) setupPhasePreconditions(ctx context.Context) error {
 }
 
 // Phase 2: Tunnel
+
 func (b *Backend) setupPhaseTunnel(ctx context.Context) error {
 	if err := b.ensureTailscaleIP(ctx); err != nil {
 		log.Printf("setup tunnel: ensureTailscaleIP failed: %v", err)
@@ -570,6 +570,7 @@ func reuseStoredOIDCSecret(ctx context.Context, svc storeService, name, current 
 }
 
 // Secrets materialization
+
 func (b *Backend) setupPhaseSecrets(ctx context.Context) error {
 	// Always ensure platform-app/pocketid_api_key exists for Pocket ID loopback API, even if catalog is empty.
 	if b.secrets != nil {
@@ -771,6 +772,7 @@ func (b *Backend) setupPhaseSecrets(ctx context.Context) error {
 // with value. It writes to a temporary file in the same directory and renames,
 // ensuring the bind-mounted secret is never observed half-written. Mode 0644 is
 // enforced so the container's PUID 1000 can read it.
+
 func atomicReplaceSecretFile(dir, name, value string) error {
 	dir = strings.TrimSpace(dir)
 	name = strings.TrimSpace(name)
@@ -793,6 +795,7 @@ func atomicReplaceSecretFile(dir, name, value string) error {
 
 // appEnvDir returns the directory holding per-bundle env files consumed
 // by the nix-defined systemd units (EnvironmentFile + gating condition).
+
 func (b *Backend) appEnvDir() string {
 	return filepath.Join(b.cfg.StateDir, "appenv")
 }
@@ -800,6 +803,7 @@ func (b *Backend) appEnvDir() string {
 // writeAppEnv atomically writes /var/lib/omahab/appenv/<bundle>.env from
 // kv (sorted, KEY=VALUE lines). mode is 0640 with an owning user (native
 // services run as their own users), 0600 when root-only.
+
 func (b *Backend) writeAppEnv(bundleID string, kv map[string]string, ownerUser string) error {
 	dir := b.appEnvDir()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -871,6 +875,7 @@ func generateRandomBase64URL(nBytes int) string {
 }
 
 // Phase 4: Core apps
+
 func (b *Backend) setupPhaseCoreApps(ctx context.Context) error {
 	if b.apps == nil {
 		return fmt.Errorf("apps not configured")
@@ -948,6 +953,7 @@ func (b *Backend) setupPhaseCoreApps(ctx context.Context) error {
 // renderNativeAppEnv writes the env files that gate the nix-defined
 // systemd units for native bundles. Values come from materialized secrets
 // (setupPhaseSecrets) and instance state.
+
 func (b *Backend) renderNativeAppEnv(ctx context.Context, dnsToken, domainName string) error {
 	if b.secrets == nil {
 		return nil
@@ -1010,6 +1016,7 @@ func (b *Backend) renderNativeAppEnv(ctx context.Context, dnsToken, domainName s
 }
 
 // Phase 5b: Dependent apps — Woodpecker after OIDC
+
 func (b *Backend) setupPhaseDependentApps(ctx context.Context) error {
 	if b.apps == nil {
 		return fmt.Errorf("apps not configured")
@@ -1129,279 +1136,6 @@ func (b *Backend) setupPhaseDependentApps(ctx context.Context) error {
 // (scopes omahab/fast|balanced|reasoning), caches the token under the
 // platform-app/hermes_litellm_key secret, and renders it into the hermes
 // appenv. Order: litellm healthy -> key -> hermes start.
-func (b *Backend) ensureHermesLiteLLMKey(ctx context.Context) error {
-	if b.providers == nil || b.secrets == nil {
-		log.Printf("setup dependent_apps: providers/secrets not configured; skipping hermes key")
-		return nil
-	}
-	secretName := "hermes_litellm_key"
-	var vkID string
-	var expiresAt, revokedAt sql.NullString
-	nowStr := store.FormatTime(time.Now().UTC())
-	err := b.db.QueryRowContext(ctx, `SELECT id, expires_at, revoked_at FROM provider_virtual_keys WHERE owner_kind = 'hermes' AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?) ORDER BY created_at DESC LIMIT 1`, nowStr).Scan(&vkID, &expiresAt, &revokedAt)
-	if err == nil {
-		if v, rerr := b.secrets.RevealByName(ctx, "platform-app", secretName); rerr == nil && strings.TrimSpace(v) != "" {
-			tok := strings.TrimSpace(v)
-			if err := b.renderHermesKeyEnv(ctx, tok); err != nil {
-				return err
-			}
-			if inst, err := b.store.Instance(ctx); err == nil {
-				if d := strings.TrimSpace(inst.Domain); d != "" && d != "example.com" && d != "not-configured.invalid" {
-					_ = b.renderHermesConfig(ctx, d)
-				}
-			}
-			return nil
-		}
-		_ = b.providers.RevokeVirtualKey(ctx, domain.ID(vkID))
-	}
-	kind := providers.OwnerKindHermes
-	ownerID := "hermes"
-	res, err := b.providers.IssueVirtualKey(ctx, providers.IssueVirtualKeyInput{
-		Name:      "hermes",
-		Scopes:    []string{"omahab/fast", "omahab/balanced", "omahab/reasoning"},
-		OwnerKind: &kind,
-		OwnerID:   &ownerID,
-	})
-	if err != nil {
-		return fmt.Errorf("issue hermes virtual key: %w", err)
-	}
-	if _, err := b.secrets.Put(ctx, "platform-app", secretName, res.Token); err != nil {
-		if errors.Is(err, store.ErrConflict) || errors.Is(err, secrets.ErrConflict) {
-			_, _ = b.secrets.RotateByName(ctx, "platform-app", secretName, res.Token)
-		}
-	}
-	if err := b.renderHermesKeyEnv(ctx, res.Token); err != nil {
-		return err
-	}
-	if inst, err := b.store.Instance(ctx); err == nil {
-		if d := strings.TrimSpace(inst.Domain); d != "" && d != "example.com" && d != "not-configured.invalid" {
-			if err := b.renderHermesConfig(ctx, d); err != nil {
-				log.Printf("render hermes config: %v", err)
-			}
-		}
-	}
-	return nil
-}
-
-// renderHermesKeyEnv writes the hermes appenv with the exact keys required by the stock image.
-// It never writes HERMES_MODEL_GATEWAY_URL/KEY, HERMES_OIDC_*, or HERMES_PUBLIC_URL.
-func (b *Backend) renderHermesKeyEnv(ctx context.Context, token string) error {
-	token = strings.TrimSpace(token)
-	if token == "" {
-		return fmt.Errorf("hermes token is required")
-	}
-	inst, _ := b.store.Instance(ctx)
-	domainName := strings.TrimSpace(inst.Domain)
-	var apiServerKey string
-	var mcpToken string
-	var oidcClientID string
-	if b.secrets != nil {
-		if v, err := b.secrets.RevealByName(ctx, "platform-app", "hermes_api_server_key"); err == nil {
-			apiServerKey = strings.TrimSpace(v)
-		}
-		if apiServerKey == "" {
-			apiServerKey = generateRandomBase64URL(32)
-			_ = upsertSecret(ctx, b.secrets, "platform-app", "hermes_api_server_key", apiServerKey)
-		}
-		if v, err := b.secrets.RevealByName(ctx, "platform-app", "hermes_mcp_token"); err == nil {
-			mcpToken = strings.TrimSpace(v)
-		}
-		if mcpToken == "" {
-			mcpToken = generateRandomBase64URL(32)
-			_ = upsertSecret(ctx, b.secrets, "platform-app", "hermes_mcp_token", mcpToken)
-		}
-		if v, err := b.secrets.RevealByName(ctx, "platform-app", "hermes_oidc_client_id"); err == nil {
-			oidcClientID = strings.TrimSpace(v)
-		}
-	}
-	kv := map[string]string{
-		"HERMES_UID":              "10000",
-		"HERMES_GID":              "10000",
-		"HERMES_DASHBOARD":        "1",
-		"HERMES_DASHBOARD_HOST":   "0.0.0.0",
-		"HERMES_DASHBOARD_PORT":   "9119",
-		"API_SERVER_ENABLED":      "true",
-		"API_SERVER_HOST":         "0.0.0.0",
-		"API_SERVER_PORT":         "8642",
-		"API_SERVER_KEY":          apiServerKey,
-		"OPENAI_BASE_URL":         "http://host.docker.internal:4000/v1",
-		"OPENAI_API_KEY":          token,
-		"ANTHROPIC_BASE_URL":      "http://host.docker.internal:4000",
-		"ANTHROPIC_API_KEY":       token,
-		"OMAHAB_MCP_TOKEN":        mcpToken,
-	}
-	if domainName != "" && domainName != "example.com" && domainName != "not-configured.invalid" {
-		kv["HERMES_DASHBOARD_PUBLIC_URL"] = "https://ai." + domainName
-		kv["HERMES_DASHBOARD_OIDC_ISSUER"] = "https://id." + domainName
-		if oidcClientID != "" {
-			kv["HERMES_DASHBOARD_OIDC_CLIENT_ID"] = oidcClientID
-		}
-	} else if oidcClientID != "" {
-		kv["HERMES_DASHBOARD_OIDC_CLIENT_ID"] = oidcClientID
-	}
-	if err := b.writeAppEnv("hermes", kv, ""); err != nil {
-		return fmt.Errorf("write hermes appenv: %w", err)
-	}
-	log.Printf("setup dependent_apps: hermes env rendered")
-	return nil
-}
-
-const omahabServerSkillBody = `# Omahab Server MCP Tools
-
-This skill describes the Omahab MCP server at `+"`http://host.docker.internal:8484/mcp`"+` (auth: `+"`Authorization: Bearer ${OMAHAB_MCP_TOKEN}`"+`). All tools return JSON text content.
-
-## Repository tools
-
-- `+"`repos_list()`"+` — list Forgejo repos you can access
-- `+"`repo_get(owner, name)`"+` — get repo metadata and branch
-- `+"`repo_archive(owner, name)`"+` / `+"`repo_unarchive(owner, name)`"+` — archive is reversible; never delete
-- `+"`branches_list(owner, name)`"+` — list branches
-- `+"`branch_create(owner, name, new_branch, from_ref)`"+` — create via Forgejo `+"`POST /repos/{o}/{r}/branches`"+`
-- `+"`file_get(owner, name, path, ref)`"+` / `+"`file_put(owner, name, path, content, message, branch)`"+` — read/write files
-- `+"`issues_list/issue_get/issue_create/issue_comment`"+` — issue lifecycle
-- `+"`prs_list/pr_get/pr_diff/pr_create/pr_comment`"+` — pull requests
-
-Rules: archive, never delete; never force-push, never delete a branch, never merge a PR. `+"`repo_delete`"+`, branch delete, and PR merge tools do not exist and must not be emulated.
-
-## Document tools
-
-- `+"`docs_search(query, limit)`"+` / `+"`doc_get(id)`"+` — search Paperless and retrieve text
-- `+"`docs_tags/docs_correspondents/docs_types`"+` — list facets
-- `+"`doc_add_tag(id, tag)`"+` / `+"`doc_upload(filename, base64, tags)`"+` — tag and upload
-
-Never delete documents; no delete tool exists.
-
-## Project, CI, workspace, and status tools
-
-- `+"`projects_list/project_get(slug)`"+` / `+"`releases_list(slug)`"+` / `+"`ci_runs(slug, limit)`"+` / `+"`ci_run_logs(slug, number)`"+` — project and pipeline state
-- `+"`workspaces_list()`"+` / `+"`workspace_create(project_slug, task_title, instructions)`"+` / `+"`workspace_get(id)`"+` / `+"`workspace_send(id, message)`"+` / `+"`workspace_stop(id)`"+` — devcontainer workspaces
-- `+"`events_recent(limit)`"+` / `+"`backup_status()`"+` — read-only control-plane status
-
-## Branch / workspace conventions
-
-Workspace creation always creates a branch `+"`ws/<slug>-<shortID>`"+` where `+"`slug`"+` is the slugified task title (lowercase, [a-z0-9-], ≤40) plus 4 hex chars, and workspace name is the branch with `+"`/`"+` → `+"`-`"+`. Example: title "add readme badge" → branch `+"`ws/add-readme-badge-a1b2`"+`. `+"`workspace_send`"+` injects into the tmux `+"`omp`"+` session. Never delete a workspace; use stop.
-
-Always prefer archive and stop over delete.
-`
-
-func (b *Backend) renderHermesConfig(ctx context.Context, domainName string) error {
-	domainName = strings.TrimSpace(domainName)
-	if domainName == "" || domainName == "example.com" || domainName == "not-configured.invalid" {
-		return nil
-	}
-	var oidcClientID string
-	if b.secrets != nil {
-		if v, err := b.secrets.RevealByName(ctx, "platform-app", "hermes_oidc_client_id"); err == nil {
-			oidcClientID = strings.TrimSpace(v)
-		}
-	}
-	stateDir := strings.TrimSpace(b.cfg.StateDir)
-	if stateDir == "" {
-		stateDir = "/var/lib/omahab"
-	}
-	hermesDir := filepath.Join(stateDir, "hermes")
-	if err := os.MkdirAll(hermesDir, 0o700); err != nil {
-		return fmt.Errorf("mkdir hermes: %w", err)
-	}
-	configPath := filepath.Join(hermesDir, "config.yaml")
-	desired := map[string]any{
-		"model": map[string]any{
-			"provider": "custom",
-			"default":  "omahab/balanced",
-			"base_url": "http://host.docker.internal:4000/v1",
-		},
-		"dashboard": map[string]any{
-			"public_url":     "https://ai." + domainName,
-			"trusted_proxies": []string{"172.17.0.1"},
-			"oauth": map[string]any{
-				"provider": "self-hosted",
-				"self_hosted": map[string]any{
-					"issuer":    "https://id." + domainName,
-					"client_id": oidcClientID,
-				},
-			},
-		},
-		"approvals": map[string]any{
-			"mode": "smart",
-			"deny": []string{"rm -rf /*", "git push --force*", "git push -f*", "*--no-verify*"},
-		},
-		"mcp_servers": map[string]any{
-			"omahab": map[string]any{
-				"url": "http://host.docker.internal:8484/mcp",
-				"headers": map[string]any{
-					"Authorization": "Bearer ${OMAHAB_MCP_TOKEN}",
-				},
-			},
-		},
-	}
-	merged := desired
-	if data, err := os.ReadFile(configPath); err == nil && len(data) > 0 {
-		var existing map[string]any
-		if err := yaml.Unmarshal(data, &existing); err == nil && existing != nil {
-			for k, v := range desired {
-				if ev, ok := existing[k]; ok {
-					if em, ok := ev.(map[string]any); ok {
-						if dm, ok := v.(map[string]any); ok {
-							for dk, dv := range dm {
-								if edv, ok := em[dk]; ok {
-									if emNested, ok := edv.(map[string]any); ok {
-										if dvNested, ok := dv.(map[string]any); ok {
-											for ndk, ndv := range dvNested {
-												emNested[ndk] = ndv
-											}
-											em[dk] = emNested
-											continue
-										}
-									}
-								}
-								em[dk] = dv
-							}
-							existing[k] = em
-							continue
-						}
-					}
-				}
-				existing[k] = v
-			}
-			merged = existing
-		}
-	}
-	out, err := yaml.Marshal(merged)
-	if err != nil {
-		return fmt.Errorf("marshal hermes config: %w", err)
-	}
-	tmp := configPath + ".tmp"
-	if err := os.WriteFile(tmp, out, 0o600); err != nil {
-		return fmt.Errorf("write hermes config tmp: %w", err)
-	}
-	_ = os.Chown(tmp, 10000, 10000)
-	if err := os.Rename(tmp, configPath); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("replace hermes config: %w", err)
-	}
-	_ = os.Chmod(configPath, 0o600)
-	skillsDir := filepath.Join(hermesDir, "skills", "omahab-server")
-	if err := os.MkdirAll(skillsDir, 0o755); err == nil {
-		skillPath := filepath.Join(skillsDir, "SKILL.md")
-		skillContent := "---\nname: omahab-server\ndescription: Omahab server MCP tools and conventions\nversion: 1.0.0\n---\n" + omahabServerSkillBody
-		tmp2 := skillPath + ".tmp"
-		_ = os.WriteFile(tmp2, []byte(skillContent), 0o644)
-		_ = os.Rename(tmp2, skillPath)
-	}
-	ctx2, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx2, "systemctl", "restart", "docker-hermes.service")
-	_ = cmd.Run()
-	return nil
-}
-
-func isDockerNotAvailable(err error) bool {
-	if err == nil {
-		return false
-	}
-	s := strings.ToLower(err.Error())
-	return strings.Contains(s, "executable file not found") || strings.Contains(s, "no such file or directory") || strings.Contains(s, "command not found") || strings.Contains(s, "not found")
-}
 
 func (b *Backend) waitWoodpeckerContainersHealthy(ctx context.Context, timeout time.Duration) error {
 	if timeout <= 0 {
@@ -1803,619 +1537,3 @@ func topoSortBundles(bundles []apps.Bundle) ([]apps.Bundle, error) {
 }
 
 // Phase 5: OIDC prerequisites
-func (b *Backend) setupPhaseOIDC(ctx context.Context) error {
-	bindErr := b.bindPocketID(ctx)
-	if bindErr != nil {
-		if b.apps != nil {
-			if list, lerr := b.apps.List(ctx); lerr == nil {
-				for _, st := range list {
-					if st.BundleID == "pocket-id" {
-						return fmt.Errorf("pocket-id admin API not configured: %w", bindErr)
-					}
-				}
-			}
-		}
-		log.Printf("setup oidc: skipped (pocket-id not configured)")
-		return nil
-	}
-	if b.pocketClient == nil {
-		if b.apps != nil {
-			if list, err := b.apps.List(ctx); err == nil {
-				for _, st := range list {
-					if st.BundleID == "pocket-id" {
-						return fmt.Errorf("pocket-id admin API not configured")
-					}
-				}
-			}
-		}
-		log.Printf("setup oidc: skipped (pocket-id not configured)")
-		return nil
-	}
-	if err := b.pocketClient.HealthCheck(ctx); err != nil {
-		return fmt.Errorf("pocket-id health: %w", err)
-	}
-	if err := b.pocketClient.ConfigureDefaults(ctx); err != nil {
-		return fmt.Errorf("pocket-id configure defaults: %w", err)
-	}
-	if err := b.pocketClient.SeedDefaultGroups(ctx); err != nil {
-		return fmt.Errorf("pocket-id seed groups: %w", err)
-	}
-
-	var installed []apps.Status
-	if b.apps != nil {
-		list, err := b.apps.List(ctx)
-		if err != nil {
-			return fmt.Errorf("list apps: %w", err)
-		}
-		installed = list
-	}
-	bundleRunning := func(id string) bool {
-		for _, st := range installed {
-			if st.BundleID == id && st.ObservedState == apps.ObservedRunning {
-				return true
-			}
-		}
-		return false
-	}
-	needImmich := bundleRunning("immich")
-	needHermes := bundleRunning("hermes")
-	needForgejo := bundleRunning("forgejo")
-	needPaperless := bundleRunning("paperless-ngx")
-	needKarakeep := bundleRunning("karakeep")
-	if !needImmich && !needHermes && !needForgejo && !needPaperless && !needKarakeep {
-		return nil
-	}
-
-	inst, err := b.store.Instance(ctx)
-	if err != nil {
-		return fmt.Errorf("load instance: %w", err)
-	}
-	domainName := strings.TrimSpace(inst.Domain)
-	if domainName == "" || domainName == "example.com" || domainName == "not-configured.invalid" {
-		return fmt.Errorf("domain not configured for OIDC")
-	}
-
-	if needImmich {
-		if err := b.ensureImmichOIDC(ctx, domainName); err != nil {
-			return err
-		}
-	}
-	if needPaperless {
-		if err := b.ensurePaperlessOIDC(ctx, domainName); err != nil {
-			return err
-		}
-	}
-	if needKarakeep {
-		if err := b.ensureKarakeepOIDC(ctx, domainName); err != nil {
-			return err
-		}
-	}
-	if needHermes {
-		callback := fmt.Sprintf("https://ai.%s/auth/callback", domainName)
-		clientID, err := b.pocketClient.EnsureOIDCPublicClient(ctx, "hermes", []string{callback})
-		if err != nil {
-			return fmt.Errorf("ensure oidc public client hermes: %w", err)
-		}
-		if strings.TrimSpace(clientID) == "" {
-			return fmt.Errorf("oidc client hermes returned empty clientID")
-		}
-		if err := upsertSecret(ctx, b.secrets, "platform-app", "hermes_oidc_client_id", clientID); err != nil {
-			return fmt.Errorf("store hermes_oidc_client_id: %w", err)
-		}
-		log.Printf("setup oidc: hermes public client ensured")
-	}
-	if needForgejo {
-		// Forgejo OIDC client via PocketID
-		forgejoCallback := fmt.Sprintf("https://git.%s/user/oauth2/PocketID/callback", domainName)
-		fClientID, fClientSecret, err := b.pocketClient.EnsureOIDCClient(ctx, "Forgejo", []string{forgejoCallback})
-		if err != nil {
-			return fmt.Errorf("ensure oidc client forgejo: %w", err)
-		}
-		if strings.TrimSpace(fClientID) == "" {
-			return fmt.Errorf("oidc client forgejo returned empty clientID")
-		}
-		fClientSecret, err = reuseStoredOIDCSecret(ctx, b.secrets, "forgejo_oidc_client_secret", fClientSecret)
-		if err != nil {
-			fClientSecret, err = b.pocketClient.CreateOIDCClientSecret(ctx, fClientID)
-			if err != nil {
-				return fmt.Errorf("forgejo oidc client secret: %w", err)
-			}
-		}
-		if err := upsertSecret(ctx, b.secrets, "platform-app", "forgejo_oidc_client_id", fClientID); err != nil {
-			return fmt.Errorf("store forgejo_oidc_client_id: %w", err)
-		}
-		if err := upsertSecret(ctx, b.secrets, "platform-app", "forgejo_oidc_client_secret", fClientSecret); err != nil {
-			return fmt.Errorf("store forgejo_oidc_client_secret: %w", err)
-		}
-		// Project to secret files atomically (for audit and potential file-based consumers)
-		secretsDir := filepath.Join(b.cfg.StateDir, "secrets")
-		if strings.TrimSpace(b.cfg.StateDir) == "" {
-			secretsDir = "/var/lib/omahab/secrets"
-		}
-		_ = os.MkdirAll(secretsDir, 0o700)
-		if err := atomicReplaceSecretFile(secretsDir, "forgejo_oidc_client_id", fClientID); err != nil {
-			log.Printf("setup oidc: warn replace forgejo_oidc_client_id file: %s", health.RedactDetail(err.Error()))
-		}
-		if err := atomicReplaceSecretFile(secretsDir, "forgejo_oidc_client_secret", fClientSecret); err != nil {
-			log.Printf("setup oidc: warn replace forgejo_oidc_client_secret file: %s", health.RedactDetail(err.Error()))
-		}
-		// Enforce group access: only admins and members
-		if err := b.pocketClient.EnsureOIDCClientGroupAccess(ctx, fClientID, []string{"admins", "members"}); err != nil {
-			return fmt.Errorf("ensure forgejo group access: %w", err)
-		}
-		// Bootstrap omahab-bot
-		if err := b.ensureOmahabBot(ctx, domainName); err != nil {
-			return fmt.Errorf("ensure omahab-bot: %w", err)
-		}
-		if err := b.ensureHermesForgejoToken(ctx, domainName); err != nil {
-			log.Printf("setup oidc: warn ensure hermes forgejo token: %s", health.RedactDetail(err.Error()))
-		}
-		// Resolve forgejo token and base
-		forgejoToken, err := b.secrets.RevealByName(ctx, "platform-app", "forgejo_token")
-		if err != nil || strings.TrimSpace(forgejoToken) == "" {
-			return fmt.Errorf("forgejo token not available after bot ensure")
-		}
-		forgejoToken = strings.TrimSpace(forgejoToken)
-		forgejoBase := b.forgejoBaseURL(ctx, domainName)
-		// Ensure org and teams
-		if err := b.ensureForgejoOrgTeams(ctx, forgejoBase, forgejoToken); err != nil {
-			return fmt.Errorf("ensure forgejo org teams: %w", err)
-		}
-		// Ensure auth source PocketID
-		if err := b.ensureForgejoAuthSource(ctx, domainName, fClientID, fClientSecret); err != nil {
-			return fmt.Errorf("ensure forgejo auth source: %w", err)
-		}
-		// Ensure Woodpecker OAuth app
-		wClientID, wClientSecret, err := b.ensureWoodpeckerOAuthApp(ctx, forgejoBase, forgejoToken, domainName)
-		if err != nil {
-			return fmt.Errorf("ensure woodpecker oauth: %w", err)
-		}
-		if err := upsertSecret(ctx, b.secrets, "platform-app", "woodpecker_forgejo_client_id", wClientID); err != nil {
-			return fmt.Errorf("store woodpecker_forgejo_client_id: %w", err)
-		}
-		if err := upsertSecret(ctx, b.secrets, "platform-app", "woodpecker_forgejo_client_secret", wClientSecret); err != nil {
-			return fmt.Errorf("store woodpecker_forgejo_client_secret: %w", err)
-		}
-		if err := atomicReplaceSecretFile(secretsDir, "woodpecker_forgejo_client_id", wClientID); err != nil {
-			return fmt.Errorf("replace woodpecker_forgejo_client_id: %w", err)
-		}
-		if err := atomicReplaceSecretFile(secretsDir, "woodpecker_forgejo_client_secret", wClientSecret); err != nil {
-			return fmt.Errorf("replace woodpecker_forgejo_client_secret: %w", err)
-		}
-		// Also ensure canonical path when StateDir is custom (tests use temp, but compose expects /var/lib/omahab/secrets)
-		if secretsDir != "/var/lib/omahab/secrets" {
-			_ = os.MkdirAll("/var/lib/omahab/secrets", 0o700)
-			_ = atomicReplaceSecretFile("/var/lib/omahab/secrets", "woodpecker_forgejo_client_id", wClientID)
-			_ = atomicReplaceSecretFile("/var/lib/omahab/secrets", "woodpecker_forgejo_client_secret", wClientSecret)
-		}
-		// Native placement: render the woodpecker appenv (server + agent
-		// units consume it; the file's existence gates the units).
-		grpcSecret := ""
-		agentSecret := ""
-		dbURL := ""
-		if v, verr := b.secrets.RevealByName(ctx, "platform-app", "woodpecker_grpc_secret"); verr == nil {
-			grpcSecret = strings.TrimSpace(v)
-		}
-		if v, verr := b.secrets.RevealByName(ctx, "platform-app", "woodpecker_agent_secret"); verr == nil {
-			agentSecret = strings.TrimSpace(v)
-		}
-		if v, verr := b.secrets.RevealByName(ctx, "platform-app", "woodpecker_db_url"); verr == nil {
-			dbURL = strings.TrimSpace(v)
-		}
-		woodpeckerEnv := map[string]string{
-			"WOODPECKER_HOST":                "https://ci." + domainName,
-			"WOODPECKER_FORGEJO":             "true",
-			"WOODPECKER_FORGEJO_URL":         "https://git." + domainName,
-			"WOODPECKER_FORGEJO_CLIENT":      wClientID,
-			"WOODPECKER_FORGEJO_SECRET":      wClientSecret,
-			"WOODPECKER_OPEN":                "true",
-			"WOODPECKER_ADMIN":               "omahab-bot",
-			"WOODPECKER_DATABASE_DATASOURCE": dbURL,
-		}
-		if grpcSecret != "" {
-			woodpeckerEnv["WOODPECKER_GRPC_SECRET"] = grpcSecret
-		}
-		if agentSecret != "" {
-			woodpeckerEnv["WOODPECKER_AGENT_SECRET"] = agentSecret
-		}
-		if err := b.writeAppEnv("woodpecker", woodpeckerEnv, "woodpecker"); err != nil {
-			log.Printf("setup oidc: warn write woodpecker appenv: %s", health.RedactDetail(err.Error()))
-		}
-		log.Printf("setup oidc: forgejo client ensured")
-	}
-	return nil
-}
-
-// paperlessOIDCEnv renders PAPERLESS_SOCIALACCOUNT_PROVIDERS JSON for
-// allauth's openid_connect provider backed by Pocket ID.
-func paperlessOIDCEnv(domainName, clientID, clientSecret string) string {
-	providers := map[string]any{
-		"openid_connect": map[string]any{
-			"APPS": []map[string]any{
-				{
-					"provider_id": "pocket-id",
-					"name":        "Pocket ID",
-					"client_id":   clientID,
-					"secret":      clientSecret,
-					"settings": map[string]any{
-						"server_url": "https://id." + domainName + "/.well-known/openid-configuration",
-					},
-				},
-			},
-			"OAUTH_PKCE_ENABLED": true,
-		},
-	}
-	raw, _ := json.Marshal(providers)
-	return string(raw)
-}
-
-func (b *Backend) ensurePaperlessOIDC(ctx context.Context, domainName string) error {
-	callback := fmt.Sprintf("https://docs.%s/accounts/oidc/pocket-id/login/callback/", domainName)
-	clientID, clientSecret, err := b.pocketClient.EnsureOIDCClient(ctx, "paperless", []string{callback})
-	if err != nil {
-		return fmt.Errorf("ensure oidc client paperless: %w", err)
-	}
-	if strings.TrimSpace(clientID) == "" {
-		return fmt.Errorf("oidc client paperless returned empty clientID")
-	}
-	clientSecret, err = reuseStoredOIDCSecret(ctx, b.secrets, "paperless_oidc_client_secret", clientSecret)
-	if err != nil {
-		clientSecret, err = b.pocketClient.CreateOIDCClientSecret(ctx, clientID)
-		if err != nil {
-			return fmt.Errorf("paperless oidc client: %w", err)
-		}
-	}
-	if err := upsertSecret(ctx, b.secrets, "platform-app", "paperless_oidc_client_id", clientID); err != nil {
-		return fmt.Errorf("store paperless_oidc_client_id: %w", err)
-	}
-	if err := upsertSecret(ctx, b.secrets, "platform-app", "paperless_oidc_client_secret", clientSecret); err != nil {
-		return fmt.Errorf("store paperless_oidc_client_secret: %w", err)
-	}
-	if err := b.writeAppEnv("paperless-ngx", map[string]string{
-		"PAPERLESS_URL":                     "https://docs." + domainName,
-		"PAPERLESS_APPS":                    "allauth.socialaccount.providers.openid_connect",
-		"PAPERLESS_SOCIALACCOUNT_PROVIDERS": paperlessOIDCEnv(domainName, clientID, clientSecret),
-	}, "paperless"); err != nil {
-		return fmt.Errorf("write paperless appenv: %w", err)
-	}
-	if err := b.redeployBundle(ctx, "paperless-ngx"); err != nil {
-		return fmt.Errorf("reload paperless config: %w", err)
-	}
-	log.Printf("setup oidc: paperless client ensured")
-	return nil
-}
-
-func (b *Backend) ensureKarakeepOIDC(ctx context.Context, domainName string) error {
-	// NextAuth custom-provider callback path (Karakeep docs).
-	callback := fmt.Sprintf("https://save.%s/api/auth/callback/custom", domainName)
-	clientID, clientSecret, err := b.pocketClient.EnsureOIDCClient(ctx, "karakeep", []string{callback})
-	if err != nil {
-		return fmt.Errorf("ensure oidc client karakeep: %w", err)
-	}
-	if strings.TrimSpace(clientID) == "" {
-		return fmt.Errorf("oidc client karakeep returned empty clientID")
-	}
-	clientSecret, err = reuseStoredOIDCSecret(ctx, b.secrets, "karakeep_oidc_client_secret", clientSecret)
-	if err != nil {
-		clientSecret, err = b.pocketClient.CreateOIDCClientSecret(ctx, clientID)
-		if err != nil {
-			return fmt.Errorf("karakeep oidc client: %w", err)
-		}
-	}
-	if err := upsertSecret(ctx, b.secrets, "platform-app", "karakeep_oidc_client_id", clientID); err != nil {
-		return fmt.Errorf("store karakeep_oidc_client_id: %w", err)
-	}
-	if err := upsertSecret(ctx, b.secrets, "platform-app", "karakeep_oidc_client_secret", clientSecret); err != nil {
-		return fmt.Errorf("store karakeep_oidc_client_secret: %w", err)
-	}
-	if err := b.writeAppEnv("karakeep", map[string]string{
-		"NEXTAUTH_URL":        "https://save." + domainName,
-		"OAUTH_PROVIDER_NAME": "Pocket ID",
-		"OAUTH_CLIENT_ID":     clientID,
-		"OAUTH_CLIENT_SECRET": clientSecret,
-		"OAUTH_WELLKNOWN_URL": "https://id." + domainName + "/.well-known/openid-configuration",
-		"OAUTH_SCOPE":         "openid email profile",
-		"OAUTH_ALLOW_DANGEROUS_EMAIL_ACCOUNT_LINKING": "true",
-	}, "karakeep"); err != nil {
-		return fmt.Errorf("write karakeep appenv: %w", err)
-	}
-	if err := b.redeployBundle(ctx, "karakeep"); err != nil {
-		return fmt.Errorf("reload karakeep config: %w", err)
-	}
-	log.Printf("setup oidc: karakeep client ensured")
-	return nil
-}
-
-func immichConfigPath(dataDir string) string {
-	if strings.TrimSpace(dataDir) == "" {
-		dataDir = "/srv/omahab"
-	}
-	return filepath.Join(dataDir, "apps", "immich", "immich.json")
-}
-
-func ensureImmichConfigStub(path string) error {
-	if _, err := os.Stat(path); err == nil {
-		return nil
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return err
-	}
-	stub := []byte("{\n  \"oauth\": {\n    \"enabled\": false\n  }\n}\n")
-	return os.WriteFile(path, stub, 0o600)
-}
-
-func immichOIDCCallbacks(domainName string) []string {
-	base := "https://photos." + domainName
-	return []string{
-		base + "/auth/login",
-		base + "/user-settings",
-		base + "/api/oauth/mobile-redirect",
-		"app.immich:///oauth-callback",
-	}
-}
-
-func writeImmichOAuthConfig(path, domainName, clientID, clientSecret string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return err
-	}
-	cfg := map[string]any{
-		"oauth": map[string]any{
-			"enabled":                 true,
-			"autoRegister":            true,
-			"autoLaunch":              false,
-			"buttonText":              "Login with Pocket ID",
-			"clientId":                clientID,
-			"clientSecret":            clientSecret,
-			"issuerUrl":               "https://id." + domainName,
-			"scope":                   "openid email profile",
-			"signingAlgorithm":        "RS256",
-			"tokenEndpointAuthMethod": "client_secret_post",
-			"mobileOverrideEnabled":   true,
-			"mobileRedirectUri":       "https://photos." + domainName + "/api/oauth/mobile-redirect",
-			"accountManagementUrl":    "https://id." + domainName + "/settings/account",
-		},
-		"passwordLogin": map[string]any{"enabled": false},
-		"server":        map[string]any{"externalDomain": "https://photos." + domainName},
-	}
-	raw, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
-	}
-	raw = append(raw, '\n')
-	return os.WriteFile(path, raw, 0o600)
-}
-
-func (b *Backend) ensureImmichOIDC(ctx context.Context, domainName string) error {
-	callbacks := immichOIDCCallbacks(domainName)
-	clientID, clientSecret, err := b.pocketClient.EnsureOIDCClient(ctx, "immich", callbacks)
-	if err != nil {
-		httpsOnly := callbacks[:len(callbacks)-1]
-		clientID, clientSecret, err = b.pocketClient.EnsureOIDCClient(ctx, "immich", httpsOnly)
-		if err != nil {
-			return fmt.Errorf("ensure oidc client immich: %w", err)
-		}
-	}
-	if strings.TrimSpace(clientID) == "" {
-		return fmt.Errorf("oidc client immich returned empty clientID")
-	}
-	clientSecret, err = reuseStoredOIDCSecret(ctx, b.secrets, "immich_oidc_client_secret", clientSecret)
-	if err != nil {
-		clientSecret, err = b.pocketClient.CreateOIDCClientSecret(ctx, clientID)
-		if err != nil {
-			return fmt.Errorf("immich oidc client: %w", err)
-		}
-	}
-	if err := upsertSecret(ctx, b.secrets, "platform-app", "immich_oidc_client_id", clientID); err != nil {
-		return fmt.Errorf("store immich_oidc_client_id: %w", err)
-	}
-	if err := upsertSecret(ctx, b.secrets, "platform-app", "immich_oidc_client_secret", clientSecret); err != nil {
-		return fmt.Errorf("store immich_oidc_client_secret: %w", err)
-	}
-	path := immichConfigPath(b.cfg.DataDir)
-	if err := writeImmichOAuthConfig(path, domainName, clientID, clientSecret); err != nil {
-		return fmt.Errorf("write immich config: %w", err)
-	}
-	if err := b.redeployBundle(ctx, "immich"); err != nil {
-		return fmt.Errorf("reload immich config: %w", err)
-	}
-	log.Printf("setup oidc: immich client ensured")
-	return nil
-}
-
-func (b *Backend) redeployBundle(ctx context.Context, bundleID string) error {
-	if b.apps == nil {
-		return nil
-	}
-	list, err := b.apps.List(ctx)
-	if err != nil {
-		return err
-	}
-	var app *apps.Status
-	for i := range list {
-		if list[i].BundleID == bundleID {
-			st := list[i]
-			app = &st
-			break
-		}
-	}
-	if app == nil {
-		return nil
-	}
-	if _, err := b.apps.Stop(ctx, app.ID); err != nil {
-		return err
-	}
-	if _, err := b.apps.Start(ctx, app.ID); err != nil {
-		return err
-	}
-	return b.waitAppHealthy(ctx, app.ID, 90*time.Second)
-}
-
-func (b *Backend) waitAppHealthy(ctx context.Context, appID domain.ID, timeout time.Duration) error {
-	if b.apps == nil {
-		return nil
-	}
-	deadline := time.Now().Add(timeout)
-	var last apps.Status
-	for {
-		st, err := b.apps.CheckHealth(ctx, appID)
-		if err != nil {
-			return err
-		}
-		last = st
-		if st.ObservedState == apps.ObservedRunning && st.Health == domain.HealthHealthy {
-			return nil
-		}
-		if time.Now().After(deadline) {
-			return requireRunningHealthy(last)
-		}
-		timer := time.NewTimer(2 * time.Second)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
-		}
-	}
-}
-
-// Phase 6: Exposure records + DNS
-func (b *Backend) setupPhaseExposure(ctx context.Context) error {
-	dnsToken := ""
-	if b.secrets != nil {
-		if v, err := b.secrets.RevealByName(ctx, "platform-app", "cloudflare_dns"); err == nil {
-			dnsToken = strings.TrimSpace(v)
-		}
-		if dnsToken == "" {
-			if v, err := b.secrets.RevealByName(ctx, "platform-app", "cloudflare_token_dns"); err == nil {
-				dnsToken = strings.TrimSpace(v)
-			}
-		}
-	}
-	if dnsToken == "" {
-		dnsToken = strings.TrimSpace(os.Getenv("OMAHAB_CF_TOKEN_DNS"))
-	}
-	if dnsToken == "" {
-		dnsToken = strings.TrimSpace(os.Getenv("OMAHAB_CF_API_TOKEN"))
-	}
-	_ = b.writeBootstrapCaddyJSON(ctx, dnsToken)
-	expSvc := b.getExposure()
-	if expSvc == nil {
-		return fmt.Errorf("exposure not configured")
-	}
-	inst, err := b.store.Instance(ctx)
-	if err != nil {
-		return fmt.Errorf("load instance: %w", err)
-	}
-	domainName := strings.TrimSpace(inst.Domain)
-	if domainName == "" || domainName == "example.com" || domainName == "not-configured.invalid" {
-		return fmt.Errorf("domain not configured")
-	}
-	bundles := []apps.Bundle{}
-	if b.apps != nil {
-		for _, bd := range b.apps.CatalogBundles() {
-			if bd.Default && strings.TrimSpace(bd.Route) != "" {
-				bundles = append(bundles, bd)
-			}
-		}
-	}
-	installed := map[string]bool{}
-	if b.apps != nil {
-		if list, err := b.apps.List(ctx); err == nil {
-			for _, st := range list {
-				installed[st.BundleID] = true
-			}
-		}
-	}
-	hostnames := make([]string, 0, len(bundles)+1)
-	for _, bd := range bundles {
-		if !installed[bd.ID] {
-			continue
-		}
-		hostname := bd.Route + "." + domainName
-		upstream, err := bundleUpstream(bd)
-		if err != nil {
-			return fmt.Errorf("%s: %w", hostname, err)
-		}
-		if err := b.ensureExposureRecord(ctx, expSvc, hostname, upstream); err != nil {
-			return fmt.Errorf("%s: %w", hostname, err)
-		}
-		hostnames = append(hostnames, hostname)
-	}
-	dashHost := "omahab." + domainName
-	dashUpstream := "http://host.docker.internal:8484"
-	if err := b.ensureExposureRecord(ctx, expSvc, dashHost, dashUpstream); err != nil {
-		return fmt.Errorf("%s: %w", dashHost, err)
-	}
-	hostnames = append(hostnames, dashHost)
-	if err := b.reconcileCaddySpec(ctx); err != nil {
-		return err
-	}
-	probe := b.httpsProbe
-	if probe == nil {
-		probe = probeHTTPSRoute
-	}
-	wait := b.httpsWait
-	if wait <= 0 {
-		wait = 90 * time.Second
-	}
-	interval := b.httpsInterval
-	if interval <= 0 {
-		interval = 2 * time.Second
-	}
-	if err := waitForHTTPSRoutes(ctx, hostnames, probe, wait, interval); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (b *Backend) reconcileCaddySpec(ctx context.Context) error {
-	if b.apps == nil {
-		return nil
-	}
-	list, err := b.apps.List(ctx)
-	if err != nil {
-		return fmt.Errorf("list apps: %w", err)
-	}
-	var caddyApp *apps.Status
-	for i := range list {
-		if list[i].BundleID == "caddy" {
-			c := list[i]
-			caddyApp = &c
-			break
-		}
-	}
-	if caddyApp == nil {
-		return nil
-	}
-	return nil
-}
-
-func (b *Backend) ensureExposureRecord(ctx context.Context, expSvc *exposure.Service, hostname, upstream string) error {
-	hostname = strings.ToLower(strings.TrimSpace(hostname))
-	upstream = strings.TrimSpace(upstream)
-	if hostname == "" || upstream == "" {
-		return fmt.Errorf("hostname/upstream required")
-	}
-	rec, err := expSvc.UpsertService(ctx, exposure.UpsertInput{
-		Hostname: hostname,
-		Upstream: upstream,
-		Exposure: domain.ExposurePrivate,
-	})
-	if err != nil {
-		return fmt.Errorf("upsert %s: %w", hostname, err)
-	}
-	plan, err := expSvc.Plan(ctx, rec.ID)
-	if err != nil {
-		return fmt.Errorf("plan %s: %w", hostname, err)
-	}
-	if len(plan.Steps) == 0 {
-		return nil
-	}
-	_, err = expSvc.Apply(ctx, plan.ID)
-	if err != nil {
-		return fmt.Errorf("apply %s: %w", hostname, err)
-	}
-	return nil
-}

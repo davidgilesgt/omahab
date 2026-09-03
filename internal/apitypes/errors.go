@@ -1,38 +1,36 @@
-package api
+package apitypes
 
 import (
 	"errors"
 	"net/http"
-
-	"github.com/omahab/omahab/internal/apitypes"
 )
 
 const (
-	CodeBadRequest         = apitypes.CodeBadRequest
-	CodeUnauthorized       = apitypes.CodeUnauthorized
-	CodeForbidden          = apitypes.CodeForbidden
-	CodeNotFound           = apitypes.CodeNotFound
-	CodeConflict           = apitypes.CodeConflict
-	CodeUnprocessable      = apitypes.CodeUnprocessable
-	CodeTooManyRequests    = apitypes.CodeTooManyRequests
-	CodeInternal           = apitypes.CodeInternal
-	CodeInvalidJSON        = apitypes.CodeInvalidJSON
-	CodeUnknownField       = apitypes.CodeUnknownField
-	CodeConfirmation       = apitypes.CodeConfirmation
-	CodePayloadTooLarge    = apitypes.CodePayloadTooLarge
-	CodeUnsupportedMedia   = apitypes.CodeUnsupportedMedia
-	CodeServiceUnavailable = apitypes.CodeServiceUnavailable
+	CodeBadRequest         = "bad_request"
+	CodeUnauthorized       = "unauthorized"
+	CodeForbidden          = "forbidden"
+	CodeNotFound           = "not_found"
+	CodeConflict           = "conflict"
+	CodeUnprocessable      = "unprocessable_entity"
+	CodeTooManyRequests    = "too_many_requests"
+	CodeInternal           = "internal_error"
+	CodeInvalidJSON        = "invalid_json"
+	CodeUnknownField       = "unknown_field"
+	CodeConfirmation       = "confirmation_required"
+	CodePayloadTooLarge    = "payload_too_large"
+	CodeUnsupportedMedia   = "unsupported_media_type"
+	CodeServiceUnavailable = "service_unavailable"
 )
 
 // Sentinel domain errors that backends may wrap with %w.
 var (
-	ErrNotFound           = apitypes.ErrNotFound
-	ErrAlreadyExists      = apitypes.ErrAlreadyExists
-	ErrValidation         = apitypes.ErrValidation
-	ErrUnauthorized       = apitypes.ErrUnauthorized
-	ErrForbidden          = apitypes.ErrForbidden
-	ErrConflict           = apitypes.ErrConflict
-	ErrServiceUnavailable = apitypes.ErrServiceUnavailable
+	ErrNotFound           = errors.New("not found")
+	ErrAlreadyExists      = errors.New("already exists")
+	ErrValidation         = errors.New("validation failed")
+	ErrUnauthorized       = errors.New("unauthorized")
+	ErrForbidden          = errors.New("forbidden")
+	ErrConflict           = errors.New("conflict")
+	ErrServiceUnavailable = errors.New("service unavailable")
 )
 
 type apiError struct {
@@ -105,10 +103,6 @@ func errorMessage(err error) string {
 	var ae *apiError
 	if errors.As(err, &ae) {
 		return ae.Message
-	}
-	// Never leak internal details for 500; otherwise expose message.
-	if httpStatus(err) == http.StatusInternalServerError {
-		return "internal error"
 	}
 	return err.Error()
 }

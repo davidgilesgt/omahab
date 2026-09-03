@@ -19,11 +19,12 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/omahab/omahab/internal/companion"
+	"github.com/omahab/omahab/internal/controlplane"
 )
 
 // Server is the Chi HTTP server for omahabd.
 type Server struct {
-	backend      Backend
+	backend      *controlplane.Backend
 	environments *companion.Service
 	tokenHash    []byte // SHA256 of bearer token, nil means auth disabled (tests only)
 	mcpTokenHash []byte // SHA256 of hermes_mcp_token, nil means MCP auth disabled
@@ -44,7 +45,7 @@ type Server struct {
 	mcpHandler http.Handler
 }
 type Config struct {
-	Backend      Backend
+	Backend      *controlplane.Backend
 	Environments *companion.Service
 	Version      string
 	BearerToken  string // raw token; hashed with SHA256 and compared constant-time
@@ -60,6 +61,7 @@ type Config struct {
 	// Bootstrap enables the first-boot route group. Nil disables it.
 	Bootstrap BootstrapGate
 }
+
 
 const (
 	defaultBodyLimit    int64 = 1 << 20 // 1 MiB

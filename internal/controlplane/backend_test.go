@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/omahab/omahab/internal/api"
+	"github.com/omahab/omahab/internal/apitypes"
 	"github.com/omahab/omahab/internal/config"
 	"github.com/omahab/omahab/internal/store"
 )
@@ -18,7 +18,7 @@ func testConfig(root string) config.Config {
 		Listen:        "127.0.0.1:8484",
 		DatabasePath:  filepath.Join(root, "state", "control.db"),
 		MasterKeyPath: filepath.Join(root, "state", "master.key"),
-		APITokenPath:  filepath.Join(root, "state", "api.token"),
+		APITokenPath:  filepath.Join(root, "state", "apitypes.token"),
 	}
 }
 
@@ -39,7 +39,7 @@ func TestCreateBackupDoesNotPersistFakePendingRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new backend: %v", err)
 	}
-	if _, err := backend.CreateBackup(context.Background(), api.CreateBackupRequest{}); err == nil {
+	if _, err := backend.CreateBackup(context.Background(), apitypes.CreateBackupRequest{}); err == nil {
 		t.Fatal("CreateBackup succeeded without a configured repository")
 	}
 
@@ -101,7 +101,7 @@ func TestCatalogLoadsFromFileAndInstallFailsClosed(t *testing.T) {
 	}
 
 	// Unknown bundles must fail closed, never silently provision state.
-	if _, err := backend.InstallApplication(context.Background(), api.InstallApplicationRequest{BundleID: "missing"}); err == nil {
+	if _, err := backend.InstallApplication(context.Background(), apitypes.InstallApplicationRequest{BundleID: "missing"}); err == nil {
 		t.Fatal("install of unknown bundle succeeded")
 	}
 	var count int

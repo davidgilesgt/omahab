@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/omahab/omahab/internal/api"
+	"github.com/omahab/omahab/internal/apitypes"
 	"github.com/omahab/omahab/internal/apps"
 	"github.com/omahab/omahab/internal/cloudflare"
 	"github.com/omahab/omahab/internal/domain"
@@ -45,7 +45,7 @@ func TestBundleUpstreamNativeUsesLoopbackPort(t *testing.T) {
 
 func TestBundleUpstreamMissingPort(t *testing.T) {
 	t.Parallel()
-	_, err := bundleUpstream(apps.Bundle{ID: "pocket-id"})
+	_, err := bundleUpstream(apps.Bundle{ID: "unknown-bundle-no-port"})
 	if !errors.Is(err, errMissingBundlePort) {
 		t.Fatalf("err = %v", err)
 	}
@@ -161,8 +161,8 @@ func TestSetupStatusMetadataAndTailscaleAction(t *testing.T) {
 		"cloudflare_dns":           {"Connect Cloudflare DNS", "operator"},
 		"tailscale":                {"Connect Tailscale", "operator"},
 		"admin_passkeys":           {"Create the admin account and passkeys", "operator"},
-		"recovery_key":             {"Save a recovery key", "operator"},
-		"recovery_tested":          {"Test identity recovery", "operator"},
+		"recovery_key":             {"Save a recovery phrase", "operator"},
+		"recovery_tested":          {"Verify a restore", "operator"},
 		"storage_configured":       {"Storage placement", "operator"},
 		"backups_configured":       {"Configure backups", "operator"},
 		"tunnel":                   {"Provision Cloudflare Tunnel", "system"},
@@ -183,7 +183,7 @@ func TestSetupStatusMetadataAndTailscaleAction(t *testing.T) {
 			t.Fatalf("%s label/owner = %q/%q want %q/%q", c.ID, c.Label, c.Owner, meta.label, meta.owner)
 		}
 	}
-	var tail api.SetupCheck
+	var tail apitypes.SetupCheck
 	for _, c := range st.Checks {
 		if c.ID == "tailscale" {
 			tail = c
@@ -474,7 +474,7 @@ func TestEmitCloudflareDNSFailureOwner(t *testing.T) {
 	}
 }
 
-func checkByID(t *testing.T, checks []api.SetupCheck, id string) api.SetupCheck {
+func checkByID(t *testing.T, checks []apitypes.SetupCheck, id string) apitypes.SetupCheck {
 	t.Helper()
 	for _, c := range checks {
 		if c.ID == id {
@@ -482,7 +482,7 @@ func checkByID(t *testing.T, checks []api.SetupCheck, id string) api.SetupCheck 
 		}
 	}
 	t.Fatalf("missing check %s", id)
-	return api.SetupCheck{}
+	return apitypes.SetupCheck{}
 }
 
 type memDNS struct {

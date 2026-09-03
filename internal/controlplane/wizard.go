@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/omahab/omahab/internal/api"
+	"github.com/omahab/omahab/internal/apitypes"
 	"github.com/omahab/omahab/internal/backups"
 	"github.com/omahab/omahab/internal/events"
 	"github.com/omahab/omahab/internal/secrets"
@@ -29,12 +29,12 @@ import (
 
 // VerifyCloudflareToken runs the live token check server-side (the browser
 // cannot call the CF API cross-origin).
-func (b *Backend) VerifyCloudflareToken(ctx context.Context, token string) (api.VerifyCloudflareTokenResult, error) {
+func (b *Backend) VerifyCloudflareToken(ctx context.Context, token string) (apitypes.VerifyCloudflareTokenResult, error) {
 	if err := setupguide.ValidateCloudflareToken(token); err != nil {
-		return api.VerifyCloudflareTokenResult{}, fmt.Errorf("%w: %v", store.ErrValidation, err)
+		return apitypes.VerifyCloudflareTokenResult{}, fmt.Errorf("%w: %v", store.ErrValidation, err)
 	}
 	ok, status, detail := setupguide.VerifyCloudflareTokenLive(ctx, token)
-	return api.VerifyCloudflareTokenResult{
+	return apitypes.VerifyCloudflareTokenResult{
 		OK:     ok,
 		Status: status,
 		Detail: detail,
@@ -64,10 +64,10 @@ type recoveryPending struct {
 // GenerateRecoveryKey creates a fresh 24-word phrase and holds the seed in
 // memory keyed by fingerprint (first 8 hex of SHA-256(seed)) for 15 minutes.
 // The phrase is shown once and never persisted until ConfirmRecoveryKey.
-func (b *Backend) GenerateRecoveryKey(ctx context.Context) (api.RecoveryKeyMaterial, error) {
+func (b *Backend) GenerateRecoveryKey(ctx context.Context) (apitypes.RecoveryKeyMaterial, error) {
 	words, seed, err := secrets.GenerateRecoveryPhrase()
 	if err != nil {
-		return api.RecoveryKeyMaterial{}, fmt.Errorf("generate phrase: %w", err)
+		return apitypes.RecoveryKeyMaterial{}, fmt.Errorf("generate phrase: %w", err)
 	}
 	sum := sha256.Sum256(seed[:])
 	fingerprint := hex.EncodeToString(sum[:4])
@@ -83,7 +83,7 @@ func (b *Backend) GenerateRecoveryKey(ctx context.Context) (api.RecoveryKeyMater
 	copy(phraseCopy, words)
 	recoveryPend[fingerprint] = recoveryPending{phrase: phraseCopy, seed: seed, expires: now.Add(15 * time.Minute)}
 	recoveryMu.Unlock()
-	return api.RecoveryKeyMaterial{
+	return apitypes.RecoveryKeyMaterial{
 		Phrase:      phraseCopy,
 		Fingerprint: fingerprint,
 	}, nil
@@ -170,7 +170,7 @@ func (b *Backend) ConfirmRecoveryKey(ctx context.Context, fingerprint string, ch
 
 // ListDisks parses lsblk -J and returns candidate filesystems (excluding
 // root/boot/tailscale devices).
-func (b *Backend) ListDisks(ctx context.Context) ([]api.Disk, error) {
+func (b *Backend) ListDisks(ctx context.Context) ([]apitypes.Disk, error) {
 	out, err := exec.CommandContext(ctx, "lsblk", "-J", "-o", "NAME,SIZE,TYPE,FSTYPE,UUID,MOUNTPOINT").Output()
 	if err != nil {
 		return nil, fmt.Errorf("lsblk: %w", err)
@@ -179,7 +179,7 @@ func (b *Backend) ListDisks(ctx context.Context) ([]api.Disk, error) {
 	if err != nil {
 		return nil, err
 	}
-	var out2 []api.Disk
+	var out2 []apitypes.Disk
 	for _, d := range disks {
 		if d.FSType == "" {
 			continue // unformatted candidates still listed below
@@ -191,7 +191,7 @@ func (b *Backend) ListDisks(ctx context.Context) ([]api.Disk, error) {
 
 // ConfigureStorage appends a volume placement to <StateDir>/storage.json.
 // The omahab-storage oneshot unit consumes it at boot.
-func (b *Backend) ConfigureStorage(ctx context.Context, req api.ConfigureStorageRequest) error {
+func (b *Backend) ConfigureStorage(ctx context.Context, req apitypes.ConfigureStorageRequest) error {
 	volume := strings.TrimSpace(req.Volume)
 	uuid := strings.TrimSpace(req.FSUUID)
 	if volume != "media" && volume != "data" {
@@ -259,7 +259,7 @@ func (b *Backend) ListBackupRepositories(ctx context.Context) ([]backups.Reposit
 // For Hetzner it generates an ed25519 key, uploads the pubkey via SFTP (port 23, password auth),
 // records the host key, derives the restic password from the recovery phrase seed, and sets
 // location = sftp://<user>@<host>:23/./omahab/<instanceID>.
-func (b *Backend) CreateBackupRepository(ctx context.Context, req api.CreateBackupRepositoryRequest) (backups.Repository, error) {
+func (b *Backend) CreateBackupRepository(ctx context.Context, req apitypes.CreateBackupRepositoryRequest) (backups.Repository, error) {
 	label := strings.TrimSpace(req.Label)
 	if label == "" {
 		return backups.Repository{}, fmt.Errorf("%w: label is required", store.ErrValidation)
@@ -474,12 +474,12 @@ type lsblkDevice struct {
 
 // parseLSBlock flattens lsblk JSON into candidate disks, excluding the
 // root/boot filesystems and tailscale devices.
-func parseLSBlock(raw []byte) ([]api.Disk, error) {
+func parseLSBlock(raw []byte) ([]apitypes.Disk, error) {
 	var out lsblkOutput
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, fmt.Errorf("parse lsblk: %w", err)
 	}
-	var disks []api.Disk
+	var disks []apitypes.Disk
 	var walk func(ds []lsblkDevice)
 	walk = func(ds []lsblkDevice) {
 		for _, d := range ds {
@@ -489,7 +489,7 @@ func parseLSBlock(raw []byte) ([]api.Disk, error) {
 					if mp == "/" || mp == "/boot" || mp == "/nix" || mp == "/tmp" || strings.HasPrefix(d.Name, "ts") {
 						// skip system volumes
 					} else {
-						disks = append(disks, api.Disk{
+						disks = append(disks, apitypes.Disk{
 							Name:       d.Name,
 							Size:       d.Size,
 							Type:       d.Type,

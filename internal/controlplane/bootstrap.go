@@ -104,7 +104,7 @@ func EnsureAPIToken(path string) (string, error) {
 		return "", fmt.Errorf("create token dir: %w", err)
 	}
 	// atomic write via temp file
-	tmp, err := os.CreateTemp(dir, ".api.token.*")
+	tmp, err := os.CreateTemp(dir, ".apitypes.token.*")
 	if err != nil {
 		return "", fmt.Errorf("create temp token: %w", err)
 	}

@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/omahab/omahab/internal/api"
+	"github.com/omahab/omahab/internal/apitypes"
 	"github.com/omahab/omahab/internal/apps"
 	"github.com/omahab/omahab/internal/domain"
 	"github.com/omahab/omahab/internal/health"
@@ -18,8 +18,8 @@ import (
 // GetSetupStatus derives the first-run setup checklist live from instance,
 // secrets, exposure observations, apps, identity, and backups.
 // It persists nothing new — all derivable — per plan step 6.
-func (b *Backend) GetSetupStatus(ctx context.Context) (api.SetupStatus, error) {
-	checks := make([]api.SetupCheck, 0, 12)
+func (b *Backend) GetSetupStatus(ctx context.Context) (apitypes.SetupStatus, error) {
+	checks := make([]apitypes.SetupCheck, 0, 12)
 	// --- domain check ---
 	inst, instErr := b.store.Instance(ctx)
 	domain := ""
@@ -27,7 +27,7 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (api.SetupStatus, error) {
 		domain = strings.TrimSpace(inst.Domain)
 	}
 	domainSentinel := domain == "" || domain == "example.com" || domain == "not-configured.invalid"
-	domainCheck := api.SetupCheck{ID: "domain"}
+	domainCheck := apitypes.SetupCheck{ID: "domain"}
 	if instErr != nil {
 		domainCheck.Status = "failed"
 		domainCheck.Detail = "instance load failed: " + instErr.Error()
@@ -45,7 +45,7 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (api.SetupStatus, error) {
 	checks = append(checks, domainCheck)
 
 	// --- cloudflare_dns secret ---
-	cfDNSCheck := api.SetupCheck{ID: "cloudflare_dns"}
+	cfDNSCheck := apitypes.SetupCheck{ID: "cloudflare_dns"}
 	cfDNSPresent := false
 	if b.secrets != nil {
 		if v, err := b.secrets.RevealByName(ctx, "platform-app", "cloudflare_dns"); err == nil && strings.TrimSpace(v) != "" {
@@ -67,7 +67,7 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (api.SetupStatus, error) {
 	checks = append(checks, cfDNSCheck)
 
 	// --- tunnel check (cloudflare_tunnel_id) ---
-	tunnelCheck := api.SetupCheck{ID: "tunnel"}
+	tunnelCheck := apitypes.SetupCheck{ID: "tunnel"}
 	tunnelPresent := false
 	if b.secrets != nil {
 		if v, err := b.secrets.RevealByName(ctx, "platform-app", "cloudflare_tunnel_id"); err == nil && strings.TrimSpace(v) != "" {
@@ -106,7 +106,7 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (api.SetupStatus, error) {
 	}
 	checks = append(checks, tunnelCheck)
 	// --- dashboard_dns check (exposure observation reconciled) ---
-	dashCheck := api.SetupCheck{ID: "dashboard_dns"}
+	dashCheck := apitypes.SetupCheck{ID: "dashboard_dns"}
 	if domainSentinel || domain == "" {
 		dashCheck.Status = "pending"
 		dashCheck.Detail = "domain not configured"
@@ -159,7 +159,7 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (api.SetupStatus, error) {
 	checks = append(checks, dashCheck)
 
 	// --- core_apps check ---
-	coreCheck := api.SetupCheck{ID: "core_apps"}
+	coreCheck := apitypes.SetupCheck{ID: "core_apps"}
 	var defaultBundles []apps.Bundle
 	if b.apps != nil {
 		for _, bnd := range b.apps.CatalogBundles() {
@@ -197,12 +197,12 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (api.SetupStatus, error) {
 			coreCheck.Status = "failed"
 			coreCheck.Detail = "list apps failed: " + listErr.Error()
 		} else {
-			appStatuses := make([]api.SetupAppStatus, 0, len(defaultBundles))
+			appStatuses := make([]apitypes.SetupAppStatus, 0, len(defaultBundles))
 			anyFailed := false
 			anyPending := false
 			for _, bnd := range defaultBundles {
 				st, ok := installed[bnd.ID]
-				as := api.SetupAppStatus{BundleID: bnd.ID}
+				as := apitypes.SetupAppStatus{BundleID: bnd.ID}
 				if !ok {
 					as.Status = "pending"
 					as.Detail = "not installed"
@@ -238,7 +238,7 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (api.SetupStatus, error) {
 	checks = append(checks, coreCheck)
 
 	// --- admin_passkeys check ---
-	passCheck := api.SetupCheck{ID: "admin_passkeys"}
+	passCheck := apitypes.SetupCheck{ID: "admin_passkeys"}
 	target := 2
 	passCheck.Target = &target
 	// Find first admin user: ordered by created_at ASC limit 1; use pocket_user_id for Pocket ID queries
@@ -317,7 +317,7 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (api.SetupStatus, error) {
 	checks = append(checks, passCheck)
 
 	// --- recovery_tested check ---
-	recovCheck := api.SetupCheck{ID: "recovery_tested"}
+	recovCheck := apitypes.SetupCheck{ID: "recovery_tested"}
 	var recovCount int
 	err = b.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM backup_verifications WHERE status='passed'`).Scan(&recovCount)
 	if err != nil {
@@ -341,7 +341,7 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (api.SetupStatus, error) {
 	checks = append(checks, recovCheck)
 
 	// --- recovery_key check (kit exported + fingerprint stored) ---
-	recovKeyCheck := api.SetupCheck{ID: "recovery_key"}
+	recovKeyCheck := apitypes.SetupCheck{ID: "recovery_key"}
 	if _, err := os.Stat(filepath.Join(b.cfg.StateDir, "recovery.kit")); err == nil {
 		recovKeyCheck.Status = "ok"
 		recovKeyCheck.Detail = "recovery kit exported"
@@ -352,7 +352,7 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (api.SetupStatus, error) {
 	checks = append(checks, recovKeyCheck)
 
 	// --- storage_configured check (optional; skipped when unset) ---
-	storageCheck := api.SetupCheck{ID: "storage_configured"}
+	storageCheck := apitypes.SetupCheck{ID: "storage_configured"}
 	if _, err := os.Stat(filepath.Join(b.cfg.StateDir, "storage.json")); err == nil {
 		storageCheck.Status = "ok"
 		storageCheck.Detail = "volume placement configured"
@@ -363,7 +363,7 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (api.SetupStatus, error) {
 	checks = append(checks, storageCheck)
 
 	// --- backups_configured check ---
-	backupCheck := api.SetupCheck{ID: "backups_configured"}
+	backupCheck := apitypes.SetupCheck{ID: "backups_configured"}
 	var backupCount int
 	err = b.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM backup_repositories`).Scan(&backupCount)
 	if err != nil {
@@ -385,7 +385,7 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (api.SetupStatus, error) {
 	}
 	checks = append(checks, backupCheck)
 
-	tailCheck := api.SetupCheck{ID: "tailscale"}
+	tailCheck := apitypes.SetupCheck{ID: "tailscale"}
 	tsIP := ""
 	if instErr == nil {
 		tsIP = strings.TrimSpace(inst.TailscaleIP)
@@ -425,10 +425,10 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (api.SetupStatus, error) {
 		state = "reconciling"
 	}
 
-	return api.SetupStatus{State: state, Checks: checks}, nil
+	return apitypes.SetupStatus{State: state, Checks: checks}, nil
 }
 
-func deriveSetupState(checks []api.SetupCheck, domainSentinel bool, cfDNSPresent bool) string {
+func deriveSetupState(checks []apitypes.SetupCheck, domainSentinel bool, cfDNSPresent bool) string {
 	if domainSentinel || !cfDNSPresent {
 		return "waiting_for_cloudflare"
 	}
@@ -461,8 +461,8 @@ func deriveSetupState(checks []api.SetupCheck, domainSentinel bool, cfDNSPresent
 	return "complete"
 }
 
-func classifyCoreApp(st apps.Status) api.SetupAppStatus {
-	as := api.SetupAppStatus{BundleID: st.BundleID}
+func classifyCoreApp(st apps.Status) apitypes.SetupAppStatus {
+	as := apitypes.SetupAppStatus{BundleID: st.BundleID}
 	switch st.ObservedState {
 	case apps.ObservedRunning:
 		switch st.Health {
@@ -500,7 +500,7 @@ func classifyCoreApp(st apps.Status) api.SetupAppStatus {
 	return as
 }
 
-func applySetupCheckMeta(c api.SetupCheck) api.SetupCheck {
+func applySetupCheckMeta(c apitypes.SetupCheck) apitypes.SetupCheck {
 	switch c.ID {
 	case "domain":
 		c.Label = "Choose your domain"
@@ -556,13 +556,13 @@ func applySetupCheckMeta(c api.SetupCheck) api.SetupCheck {
 	}
 	return c
 }
-func orderSetupChecks(checks []api.SetupCheck) []api.SetupCheck {
+func orderSetupChecks(checks []apitypes.SetupCheck) []apitypes.SetupCheck {
 	order := []string{"domain", "cloudflare_dns", "tailscale", "recovery_key", "backups_configured", "admin_passkeys", "storage_configured", "tunnel", "dashboard_dns", "core_apps", "woodpecker_connection", "automatic_reconciliation", "recovery_tested"}
-	byID := make(map[string]api.SetupCheck, len(checks))
+	byID := make(map[string]apitypes.SetupCheck, len(checks))
 	for _, c := range checks {
 		byID[c.ID] = c
 	}
-	out := make([]api.SetupCheck, 0, len(order))
+	out := make([]apitypes.SetupCheck, 0, len(order))
 	for _, id := range order {
 		if c, ok := byID[id]; ok {
 			out = append(out, c)
@@ -571,8 +571,8 @@ func orderSetupChecks(checks []api.SetupCheck) []api.SetupCheck {
 	return out
 }
 
-func (b *Backend) automaticReconciliationCheck(ctx context.Context) api.SetupCheck {
-	c := api.SetupCheck{ID: "automatic_reconciliation"}
+func (b *Backend) automaticReconciliationCheck(ctx context.Context) apitypes.SetupCheck {
+	c := apitypes.SetupCheck{ID: "automatic_reconciliation"}
 	if b.IsSetupRunning() {
 		c.Status = "pending"
 		c.Detail = "Applying DNS, certificates, and service routes"
@@ -619,7 +619,7 @@ func (b *Backend) unreadCloudflareDNSFailure(ctx context.Context) (string, bool)
 	return "Cloudflare DNS token was rejected or lacks DNS permissions", true
 }
 
-// Ensure GetSetupStatus satisfies api.Backend at compile time.
-// This is verified via var _ api.Backend = (*Backend)(nil) in backend.go.
+// Ensure GetSetupStatus satisfies apitypes.Backend at compile time.
+// This is verified via var _ apitypes.Backend = (*Backend)(nil) in backend.go.
 
 var _ = store.ErrNotFound // avoid unused import if needed

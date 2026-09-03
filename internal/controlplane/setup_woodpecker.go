@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/omahab/omahab/internal/api"
+	"github.com/omahab/omahab/internal/apitypes"
 	"github.com/omahab/omahab/internal/health"
 	"github.com/omahab/omahab/internal/store"
 )
@@ -61,8 +61,8 @@ func (b *Backend) woodpeckerBaseURLForCheck(ctx context.Context, domain string) 
 // It remains pending until PAT validates, user is admin, podman socket answers _ping,
 // and Woodpecker reports a connected local agent.
 // Failed probes return failed with redacted detail, never exposing the token.
-func (b *Backend) woodpeckerConnectionCheck(ctx context.Context) api.SetupCheck {
-	c := api.SetupCheck{ID: "woodpecker_connection"}
+func (b *Backend) woodpeckerConnectionCheck(ctx context.Context) apitypes.SetupCheck {
+	c := apitypes.SetupCheck{ID: "woodpecker_connection"}
 
 	if b.store == nil {
 		c.Status = "pending"
@@ -318,20 +318,20 @@ func (b *Backend) pingPodmanEndpoint(ctx context.Context, socketPath, url string
 }
 
 var _ = store.ErrNotFound
-func (b *Backend) SetupWoodpecker(ctx context.Context, req api.SetupWoodpeckerRequest) error {
+func (b *Backend) SetupWoodpecker(ctx context.Context, req apitypes.SetupWoodpeckerRequest) error {
 	username := strings.TrimSpace(req.Username)
 	token := strings.TrimSpace(req.Token)
 	if username == "" || token == "" {
-		return fmt.Errorf("%w: username and token are required", api.ErrValidation)
+		return fmt.Errorf("%w: username and token are required", apitypes.ErrValidation)
 	}
 	if len(username) < 1 || len(username) > 255 {
-		return fmt.Errorf("%w: username must be 1-255 characters", api.ErrValidation)
+		return fmt.Errorf("%w: username must be 1-255 characters", apitypes.ErrValidation)
 	}
 	if len(token) < 1 || len(token) > 4096 {
-		return fmt.Errorf("%w: token must be 1-4096 characters", api.ErrValidation)
+		return fmt.Errorf("%w: token must be 1-4096 characters", apitypes.ErrValidation)
 	}
 	if b.secrets == nil || b.store == nil {
-		return fmt.Errorf("%w: secrets or store not configured", api.ErrValidation)
+		return fmt.Errorf("%w: secrets or store not configured", apitypes.ErrValidation)
 	}
 	inst, _ := b.store.Instance(ctx)
 	domain := ""
@@ -340,16 +340,16 @@ func (b *Backend) SetupWoodpecker(ctx context.Context, req api.SetupWoodpeckerRe
 	}
 	baseURL := b.woodpeckerBaseURLForCheck(ctx, domain)
 	if baseURL == "" {
-		return fmt.Errorf("%w: woodpecker url not configured; domain missing", api.ErrValidation)
+		return fmt.Errorf("%w: woodpecker url not configured; domain missing", apitypes.ErrValidation)
 	}
 	// Initial validation: token must be valid and login must match username. Do not check admin yet;
 	// admin is granted via WOODPECKER_ADMIN_USERNAME after redeploy.
 	login, _, err := b.probeWoodpeckerUser(ctx, baseURL, token)
 	if err != nil {
-		return fmt.Errorf("%w: %s", api.ErrValidation, health.RedactDetail(err.Error()))
+		return fmt.Errorf("%w: %s", apitypes.ErrValidation, health.RedactDetail(err.Error()))
 	}
 	if login != username {
-		return fmt.Errorf("%w: woodpecker username mismatch: token belongs to different user", api.ErrValidation)
+		return fmt.Errorf("%w: woodpecker username mismatch: token belongs to different user", apitypes.ErrValidation)
 	}
 	// Persist encrypted secrets. Never log token.
 	if err := upsertSecret(ctx, b.secrets, "platform-app", "woodpecker_token", token); err != nil {
@@ -361,7 +361,7 @@ func (b *Backend) SetupWoodpecker(ctx context.Context, req api.SetupWoodpeckerRe
 	// Redeploy Woodpecker so WOODPECKER_ADMIN_USERNAME takes effect.
 	if b.apps != nil {
 		if err := b.redeployBundle(ctx, "woodpecker"); err != nil {
-			return fmt.Errorf("%w: woodpecker redeploy failed: %s", api.ErrValidation, health.RedactDetail(err.Error()))
+			return fmt.Errorf("%w: woodpecker redeploy failed: %s", apitypes.ErrValidation, health.RedactDetail(err.Error()))
 		}
 	}
 	// Revalidate that the user is now admin, with brief retry for container restart.
@@ -408,10 +408,10 @@ func (b *Backend) SetupWoodpecker(ctx context.Context, req api.SetupWoodpeckerRe
 		}
 	}
 	if finalErr != nil {
-		return fmt.Errorf("%w: %s", api.ErrValidation, health.RedactDetail(finalErr.Error()))
+		return fmt.Errorf("%w: %s", apitypes.ErrValidation, health.RedactDetail(finalErr.Error()))
 	}
 	if finalLogin != username || !finalAdmin {
-		return fmt.Errorf("%w: woodpecker admin verification failed", api.ErrValidation)
+		return fmt.Errorf("%w: woodpecker admin verification failed", apitypes.ErrValidation)
 	}
 	if err := b.bindSCM(ctx); err != nil {
 		return fmt.Errorf("bind scm after woodpecker setup: %w", err)

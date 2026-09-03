@@ -4,67 +4,18 @@ package api
 // (/api/bootstrap/*) served on the LAN listener (:8485). The listener and
 // routes exist only while /var/lib/omahab/bootstrap-done is absent.
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
+
+	"github.com/omahab/omahab/internal/apitypes"
 )
 
-
-// BootstrapGate is the control-plane side of first-boot bootstrap.
-type BootstrapGate interface {
-	// Claim validates the one-time code; success consumes it.
-	Claim(code, sourceIP string) error
-	// SSHKeys installs keys for the admin user.
-	SSHKeys(githubUser string, pastedKeys []string) (int, error)
-	// TailscaleUp starts enrollment, returning the auth URL.
-	TailscaleUp() (string, error)
-	// TailscaleStatus polls enrollment state.
-	TailscaleStatus() (running bool, ip string, state string, err error)
-	// Complete writes bootstrap-done and closes the listener.
-	Complete() error
-	// Active reports whether bootstrap is still pending.
-	Active() bool
-	// RestoreConnect verifies Hetzner/generic repo + phrase, uploads SSH key,
-	// and lists snapshots. Returns up to 10 latest.
-	RestoreConnect(ctx context.Context, req BootstrapRestoreConnectRequest) ([]BootstrapRestoreSnapshot, error)
-	// RestoreRun starts the restore of snapshotID in background.
-	RestoreRun(ctx context.Context, snapshotID string) error
-	// RestoreEvents streams progress events for the running restore.
-	RestoreEvents(ctx context.Context) <-chan BootstrapRestoreEvent
-}
-
-// BootstrapRestoreConnectRequest is the body for POST /api/bootstrap/restore/connect.
-type BootstrapRestoreConnectRequest struct {
-	Kind               string `json:"kind,omitempty"`
-	Username           string `json:"username,omitempty"`
-	Host               string `json:"host,omitempty"`
-	SubAccountPassword string `json:"sub_account_password,omitempty"`
-	Location           string `json:"location,omitempty"`
-	Phrase             string `json:"phrase,omitempty"`
-	PhraseWords        []string `json:"phrase_words,omitempty"`
-}
-
-// BootstrapRestoreSnapshot is one snapshot returned by restore/connect.
-type BootstrapRestoreSnapshot struct {
-	ID       string `json:"id"`
-	Time     string `json:"time"`
-	Hostname string `json:"hostname"`
-}
-
-// BootstrapRestoreRunRequest is the body for POST /api/bootstrap/restore/run.
-type BootstrapRestoreRunRequest struct {
-	SnapshotID string `json:"snapshot_id"`
-}
-
-// BootstrapRestoreEvent is one SSE event during restore.
-type BootstrapRestoreEvent struct {
-	Stage   string `json:"stage"`
-	Message string `json:"message"`
-	Done    bool   `json:"done"`
-	Error   string `json:"error,omitempty"`
-}
-
+type BootstrapGate = apitypes.BootstrapGate
+type BootstrapRestoreConnectRequest = apitypes.BootstrapRestoreConnectRequest
+type BootstrapRestoreSnapshot = apitypes.BootstrapRestoreSnapshot
+type BootstrapRestoreRunRequest = apitypes.BootstrapRestoreRunRequest
+type BootstrapRestoreEvent = apitypes.BootstrapRestoreEvent
 
 // handleBootstrapClaim exchanges the one-time code for the admin token.
 func (s *Server) handleBootstrapClaim(w http.ResponseWriter, r *http.Request) {
