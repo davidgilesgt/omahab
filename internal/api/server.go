@@ -305,18 +305,6 @@ func (s *Server) buildRouter() chi.Router {
 		r.Post("/api/v1/provider-oauth/{provider}/start", s.withBodyLimit(defaultBodyLimit, s.handleStartProviderOAuth))
 		r.Get("/api/v1/provider-oauth/{provider}/poll/{session_id}", s.handlePollProviderOAuth)
 
-		// Hermes Nous Portal tool gateway proxy — admin, forwards with Hermes JWT, does not switch inference gateway.
-		r.Get("/api/v1/hermes/providers/oauth", s.handleListHermesProvidersOAuth)
-		r.Get("/api/providers/oauth", s.handleListHermesProvidersOAuth)
-		r.Post("/api/v1/hermes/providers/oauth/nous/start", s.withBodyLimit(defaultBodyLimit, s.handleStartHermesNousOAuth))
-		r.Post("/api/providers/oauth/nous/start", s.withBodyLimit(defaultBodyLimit, s.handleStartHermesNousOAuth))
-		r.Get("/api/v1/hermes/providers/oauth/nous/poll/{session_id}", s.handlePollHermesNousOAuth)
-		r.Get("/api/providers/oauth/nous/poll/{session_id}", s.handlePollHermesNousOAuth)
-		r.Get("/api/v1/hermes/tools/toolsets", s.handleListHermesToolsets)
-		r.Get("/api/tools/toolsets", s.handleListHermesToolsets)
-		r.Put("/api/v1/hermes/tools/toolsets/{name}/provider", s.withBodyLimit(defaultBodyLimit, s.handleSetHermesToolsetProvider))
-		r.Put("/api/tools/toolsets/{name}/provider", s.withBodyLimit(defaultBodyLimit, s.handleSetHermesToolsetProvider))
-
 		// Companion — admin (enrollment codes, device lifecycle)
 		r.Post("/api/v1/companion-enrollments", s.handleCreateCompanionEnrollment)
 		r.Get("/api/v1/companion/devices", s.handleListCompanionDevices)

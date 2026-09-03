@@ -62,7 +62,7 @@ func DefaultExclusions(folderName string) []string {
 
 // KnowledgeRegistrar registers a server path as a default-assistant knowledge source.
 // Implementations must scope registration to the default Hermes profile only;
-// project bots must never receive synced-folder sources.
+// projects must never receive synced-folder sources.
 type KnowledgeRegistrar interface {
 	Register(ctx context.Context, sourceID string, serverPath string) error
 	Unregister(ctx context.Context, sourceID string) error

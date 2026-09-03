@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -898,7 +899,6 @@ func newProjectCmd() *cobra.Command {
 			fmt.Printf("repo:      %s\n", p.RepositoryURL)
 			fmt.Printf("hostname:  %s\n", p.Hostname)
 			fmt.Printf("exposure:  %s\n", p.Exposure)
-			fmt.Printf("bot:       %s\n", p.BotProfileID)
 			fmt.Printf("created:   %s\n", p.CreatedAt.Format(time.RFC3339))
 			return nil
 		},
@@ -1996,14 +1996,27 @@ func newHermesCmd() *cobra.Command {
 			// Resolve URL: flag, then server-derived, then status instance?
 			targetURL := strings.TrimSpace(urlFlag)
 			if targetURL == "" {
-				// Try to derive from status hostname? Use server as fallback
 				c, err := resolveClient()
-				if err == nil {
-					st, _ := c.Status(ctx)
-					if st != nil {
-						// Not ideal but use server host as placeholder
-						targetURL = c.BaseURL
-						_ = st
+				if err == nil && strings.TrimSpace(c.BaseURL) != "" {
+					if u, perr := url.Parse(c.BaseURL); perr == nil && u.Host != "" {
+						host := u.Host
+						if strings.Contains(host, ":") {
+							if h, _, e := net.SplitHostPort(host); e == nil {
+								host = h
+							}
+						}
+						if net.ParseIP(host) == nil && host != "localhost" && host != "127.0.0.1" && !strings.EqualFold(host, "localhost") {
+							parts := strings.Split(host, ".")
+							if len(parts) >= 3 {
+								targetURL = u.Scheme + "://ai." + strings.Join(parts[1:], ".")
+							} else if len(parts) == 2 {
+								targetURL = u.Scheme + "://ai." + host
+							} else {
+								targetURL = "https://ai." + host
+							}
+						} else {
+							targetURL = "https://ai.example.com"
+						}
 					} else {
 						targetURL = c.BaseURL
 					}

@@ -25,10 +25,6 @@ exist; only the web surface is missing:
 - [ ] Render pinned-model metadata (model name, license, download size, expected memory) from `pinned_models.json` via API + UI.
 - [ ] Summarization consent dialog: show provider, require informed choice before remote document summarization (consent table + checks exist; no UI).
 
-### P1-5. Events (§20)
-
-- [ ] Optional default-AI event digest surface (off by default).
-
 ---
 
 ## P2 — Tooling and upstream patches

@@ -64,7 +64,6 @@ type Project struct {
 	Slug          string    `json:"slug"`
 	Name          string    `json:"name"`
 	RepositoryURL string    `json:"repository_url"`
-	BotProfileID  string    `json:"bot_profile_id"`
 	Exposure      Exposure  `json:"exposure"`
 	Hostname      string    `json:"hostname"`
 	CreatedAt     time.Time `json:"created_at"`

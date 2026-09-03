@@ -2,12 +2,11 @@ package api
 
 import (
 	"context"
-	"github.com/omahab/omahab/internal/backups"
 	"time"
 
+	"github.com/omahab/omahab/internal/backups"
 	"github.com/omahab/omahab/internal/domain"
 	"github.com/omahab/omahab/internal/health"
-	"github.com/omahab/omahab/internal/hermes"
 	"github.com/omahab/omahab/internal/identity"
 	"github.com/omahab/omahab/internal/knowledge"
 )
@@ -531,14 +530,6 @@ type Backend interface {
 	ListApplicationAccess(ctx context.Context, userID string) ([]identity.AppAccess, error)
 	GetUserGroups(ctx context.Context, userID string) ([]identity.Group, error)
 	SetUserGroups(ctx context.Context, userID string, groupIDs []string) error
-
-	// Hermes Nous Portal tool gateway proxy — admin only, forwards with Hermes JWT.
-	// Inference remains on LiteLLM (http://litellm:4000); Nous only affects tool providers.
-	ListHermesProvidersOAuth(ctx context.Context) ([]hermes.ProviderOAuth, error)
-	StartHermesNousOAuth(ctx context.Context) (*hermes.NousOAuthSession, error)
-	PollHermesNousOAuth(ctx context.Context, sessionID string) (*hermes.NousOAuthSession, error)
-	SetHermesToolsetProvider(ctx context.Context, toolsetName, provider string) error
-	ListHermesToolsets(ctx context.Context) ([]hermes.Toolset, error)
 
 	// Setup aggregates first-run provisioning state.
 	GetSetupStatus(ctx context.Context) (SetupStatus, error)

@@ -4,7 +4,6 @@ import { AppShell } from "./components/shell";
 import { ApplicationsPage, BackupsPage, EventsPage, OverviewPage, ProjectsPage } from "./views/operations";
 import { PeoplePage, ProvidersPage, SyncFoldersPage, WorkspacesPage } from "./views/administration";
 import { ToolEnvironmentPage } from "./views/tool-environment";
-import { ChatPage } from "./views/chat";
 import { BootstrapPage } from "./views/bootstrap";
 import { SetupPage } from "./views/setup";
 function DashboardRoutes() {
@@ -23,7 +22,6 @@ function DashboardRoutes() {
           <Route path="/people" element={<PeoplePage />} />
           <Route path="/providers" element={<ProvidersPage />} />
           <Route path="/tool-environment" element={<ToolEnvironmentPage />} />
-          <Route path="/ai" element={<ChatPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </AppShell>

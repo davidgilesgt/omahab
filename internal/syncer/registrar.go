@@ -22,7 +22,7 @@ type knowledgeBridge struct {
 
 // NewKnowledgeRegistrar returns a KnowledgeRegistrar that registers Syncthing
 // folders with Share-with-AI enabled as knowledge sources of kind "notes".
-// It scopes registration to the default Hermes profile; project bots never
+// It scopes registration to the default Hermes profile; projects never
 // receive synced-folder sources (enforced by the caller).
 func NewKnowledgeRegistrar(svc KnowledgeService) KnowledgeRegistrar {
 	return &knowledgeBridge{svc: svc}

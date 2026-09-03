@@ -1927,13 +1927,12 @@ components:
 
     Project:
       type: object
-      required: [id, slug, name, repository_url, bot_profile_id, exposure, hostname, created_at, updated_at]
+      required: [id, slug, name, repository_url, exposure, hostname, created_at, updated_at]
       properties:
         id: { type: string }
         slug: { type: string }
         name: { type: string }
         repository_url: { type: string, format: uri }
-        bot_profile_id: { type: string }
         exposure: { $ref: '#/components/schemas/Exposure' }
         hostname: { type: string }
         created_at: { type: string, format: date-time }

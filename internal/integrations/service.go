@@ -20,7 +20,7 @@ var (
 )
 
 // Default scope for Home Assistant credentials. Only the default Hermes profile
-// may receive HASS_SERVER and HASS_TOKEN. Project bots must never receive them.
+// may receive HASS_SERVER and HASS_TOKEN. projects must never receive them.
 const DefaultAssistantScope = "hermes:default"
 
 // hassEnvNames are the only credential names projected for Home Assistant.
@@ -270,8 +270,8 @@ func (s *Service) Validate(ctx context.Context) error {
 	return nil
 }
 
-// ProjectHasAccess reports whether a project bot should receive Home Assistant
-// credentials. It always returns false — project bots must never receive HA
+// ProjectHasAccess reports whether a project should receive Home Assistant
+// credentials. It always returns false — projects must never receive HA
 // credentials per DESIGN §17.
 func (s *Service) ProjectHasAccess(_ string) bool { return false }
 

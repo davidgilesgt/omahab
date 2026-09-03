@@ -43,7 +43,7 @@ func NewHassRunner(opts HassRunnerOptions) HassRunner {
 	}
 	dir := strings.TrimSpace(opts.SkillDir)
 	if dir == "" {
-		dir = "/var/lib/omahab/hermes/skills"
+		dir = "/var/lib/omahab/hermes/skills/omahab-home-assistant/SKILL.md"
 	}
 	r := opts.Runner
 	if r == nil {
@@ -83,9 +83,14 @@ func (r *RealHassRunner) Validate(ctx context.Context, serverURL, token string) 
 	return nil
 }
 
-const hassSkillContent = `# Home Assistant CLI
+const hassSkillContent = `---
+name: omahab-home-assistant
+description: Home Assistant CLI via hass-cli
+version: 1.0.0
+---
+# Home Assistant CLI
 
-Hermes invokes ` + "`hass-cli`" + ` directly; Omahab does not proxy commands. Project bots must never receive Home Assistant credentials — only the default assistant (` + "`hermes:default`" + `) may use ` + "`HASS_SERVER`" + ` and ` + "`HASS_TOKEN`" + `.
+Hermes invokes ` + "`hass-cli`" + ` directly; Omahab does not proxy commands. projects must never receive Home Assistant credentials — only the default assistant (` + "`hermes:default`" + `) may use ` + "`HASS_SERVER`" + ` and ` + "`HASS_TOKEN`" + `.
 
 ## Configuration
 
@@ -129,7 +134,17 @@ func (r *RealHassRunner) InstallSkill(ctx context.Context) error {
 	if strings.TrimSpace(r.skillDir) == "" {
 		return fmt.Errorf("skill dir not configured")
 	}
-	if err := os.MkdirAll(r.skillDir, 0o755); err != nil {
+	skillPath := strings.TrimSpace(r.skillDir)
+	dir := skillPath
+	path := skillPath
+	if strings.HasSuffix(skillPath, "SKILL.md") {
+		dir = filepath.Dir(skillPath)
+		path = skillPath
+	} else {
+		path = filepath.Join(skillPath, "SKILL.md")
+		dir = skillPath
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create skill dir: %w", err)
 	}
 	// Ensure context cancellation is respected
@@ -138,7 +153,7 @@ func (r *RealHassRunner) InstallSkill(ctx context.Context) error {
 		return ctx.Err()
 	default:
 	}
-	path := filepath.Join(r.skillDir, "hass-cli.md")
+
 	// Write atomically via temp file
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, []byte(hassSkillContent), 0o644); err != nil {

@@ -32,7 +32,6 @@ type CreateParams struct {
 	Name          string
 	RepositoryURL string
 	Image         string
-	BotProfileID  string
 	Exposure      domain.Exposure
 	Hostname      string
 	Contract      Contract // zero value means DefaultContract
@@ -133,7 +132,6 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (*Project, error) 
 			Slug:          slug,
 			Name:          name,
 			RepositoryURL: repoURL,
-			BotProfileID:  strings.TrimSpace(p.BotProfileID),
 			Exposure:      exposure,
 			Hostname:      hostname,
 			CreatedAt:     now,
@@ -146,11 +144,11 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (*Project, error) 
 	nowS := formatTime(now)
 	_, err = s.db.ExecContext(ctx, `
 INSERT INTO projects
-  (id, slug, name, repository_url, image_base, bot_profile_id, exposure, hostname,
+  (id, slug, name, repository_url, image_base, exposure, hostname,
    contract_port, contract_health_path, contract_storage_path,
    deploying, deploy_started_ns, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)`, //nolint:execContext
-		string(proj.ID), proj.Slug, proj.Name, proj.RepositoryURL, proj.Image, proj.BotProfileID,
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)`, //nolint:execContext
+		string(proj.ID), proj.Slug, proj.Name, proj.RepositoryURL, proj.Image,
 		string(proj.Exposure), proj.Hostname,
 		proj.Contract.Port, proj.Contract.HealthPath, proj.Contract.StoragePath,
 		nowS, nowS)
@@ -169,7 +167,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)`, //nolint:execContext
 // List returns all projects ordered by slug.
 func (s *Service) List(ctx context.Context) ([]Project, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, slug, name, repository_url, image_base, bot_profile_id, exposure, hostname,
+SELECT id, slug, name, repository_url, image_base, exposure, hostname,
        contract_port, contract_health_path, contract_storage_path,
        deploying, created_at, updated_at
 FROM projects ORDER BY slug`)
@@ -347,7 +345,7 @@ func (s *Service) DeleteProjectRecord(ctx context.Context, id domain.ID) error {
 
 func (s *Service) fetchProject(ctx context.Context, where, arg string) (*Project, error) {
 	row := s.db.QueryRowContext(ctx, fmt.Sprintf(`
-SELECT id, slug, name, repository_url, image_base, bot_profile_id, exposure, hostname,
+SELECT id, slug, name, repository_url, image_base, exposure, hostname,
        contract_port, contract_health_path, contract_storage_path,
        deploying, created_at, updated_at
 FROM projects WHERE %s`, where), arg) //nolint:gosec
@@ -363,12 +361,12 @@ FROM projects WHERE %s`, where), arg) //nolint:gosec
 
 func scanProject(sc interface{ Scan(dest ...any) error }) (*Project, error) {
 	var p Project
-	var idStr, slug, name, repoURL, imageBase, botID, exposureStr, hostname string
+	var idStr, slug, name, repoURL, imageBase, exposureStr, hostname string
 	var contractPort int
 	var contractHealthPath, contractStoragePath string
 	var deploying int
 	var createdAtS, updatedAtS string
-	if err := sc.Scan(&idStr, &slug, &name, &repoURL, &imageBase, &botID, &exposureStr, &hostname,
+	if err := sc.Scan(&idStr, &slug, &name, &repoURL, &imageBase, &exposureStr, &hostname,
 		&contractPort, &contractHealthPath, &contractStoragePath,
 		&deploying, &createdAtS, &updatedAtS); err != nil {
 		return nil, err
@@ -386,7 +384,6 @@ func scanProject(sc interface{ Scan(dest ...any) error }) (*Project, error) {
 	p.Name = name
 	p.RepositoryURL = repoURL
 	p.Image = imageBase
-	p.BotProfileID = botID
 	p.Exposure = domain.Exposure(exposureStr)
 	p.Hostname = hostname
 	p.Contract = Contract{Port: contractPort, HealthPath: contractHealthPath, StoragePath: contractStoragePath}

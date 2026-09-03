@@ -82,7 +82,6 @@ type Backend struct {
 	emailRouter     *cloudflare.EmailClient
 	emailPrimary    string
 	emailAlias      string
-	approvalEmitter *hermes.ApprovalEmitter
 	pocketClient    *identity.PocketIDClient
 
 	// setup reconciler single-flight state
@@ -247,14 +246,7 @@ func (b *Backend) initServices(ctx context.Context) error {
 		if inst.TailscaleIP != "" {
 			env = append(env, "TAILSCALE_IP="+inst.TailscaleIP)
 		}
-		// Hermes OIDC env injected when reconciler has provisioned client.
 		if b.secrets != nil {
-			if v, err := b.secrets.RevealByName(ctx, "platform-app", "hermes_oidc_client_id"); err == nil && strings.TrimSpace(v) != "" {
-				env = append(env, "HERMES_OIDC_CLIENT_ID="+strings.TrimSpace(v))
-			}
-			if v, err := b.secrets.RevealByName(ctx, "platform-app", "hermes_oidc_client_secret"); err == nil && strings.TrimSpace(v) != "" {
-				env = append(env, "HERMES_OIDC_CLIENT_SECRET="+strings.TrimSpace(v))
-			}
 			if app.BundleID == "pocket-id" {
 				if v, err := b.secrets.RevealByName(ctx, "platform-app", "pocketid_api_key"); err == nil && strings.TrimSpace(v) != "" {
 					env = append(env, "STATIC_API_KEY="+strings.TrimSpace(v))
@@ -337,31 +329,7 @@ func (b *Backend) initServices(ctx context.Context) error {
 	})
 	b.backups = backupSvc
 
-	// hermes + approval emitter (exposed for future callers)
-	// Hermes default profile's inference base URL/key remains pointed at LiteLLM
-	// (http://litellm:4000 / https://models.<domain>/v1) regardless of Nous
-	// Portal tool gateway connection. Nous only affects tool providers via the
-	// Hermes dashboard API; HERMES_MODEL_GATEWAY_URL is never switched.
-	hermesJWTSecret := ""
-	if b.secrets != nil {
-		if v, err := b.secrets.RevealByName(ctx, "platform-app", "hermes_jwt_secret"); err == nil {
-			hermesJWTSecret = strings.TrimSpace(v)
-		} else if v := strings.TrimSpace(os.Getenv("HERMES_JWT_SECRET")); v != "" {
-			hermesJWTSecret = v
-		}
-	} else if v := strings.TrimSpace(os.Getenv("HERMES_JWT_SECRET")); v != "" {
-		hermesJWTSecret = v
-	}
-	hermesBaseURL := strings.TrimSpace(os.Getenv("HERMES_BASE_URL"))
-	if hermesBaseURL == "" {
-		hermesBaseURL = "http://hermes:8080"
-	}
-	hermesClient := hermes.NewClient(hermes.ClientConfig{
-		BaseURL:   hermesBaseURL,
-		JWTSecret: hermesJWTSecret,
-	})
-	b.hermes = hermes.New(b.db, hermesClient, newHermesSink(b.events))
-	b.approvalEmitter = hermes.NewApprovalEmitter(newHermesSink(b.events))
+	b.hermes = hermes.New(b.db, newHermesSink(b.events))
 
 	// scm with real Forgejo/Woodpecker clients resolved from secrets
 	forgejoBase := secretOrEnv("forgejo_base_url", "OMAHAB_FORGEJO_URL")
@@ -1215,16 +1183,7 @@ func (b *Backend) CreateProject(ctx context.Context, req api.CreateProjectReques
 	if err != nil {
 		return domain.Project{}, translateError(err)
 	}
-	// hermes bot profile: ensure project profile and persist BotProfileID
-	if b.hermes != nil {
-		if profile, err := b.hermes.EnsureProjectProfile(ctx, string(pr.ID), pr.Name); err == nil && profile != nil {
-			if _, err := b.db.ExecContext(ctx, `UPDATE projects SET bot_profile_id = ? WHERE id = ?`, profile.ID, string(pr.ID)); err == nil {
-				pr.BotProfileID = profile.ID
-			}
-		} else if err != nil {
-			_, _ = b.events.Publish(ctx, events.PublishInput{Type: "service.unhealthy", Severity: "warning", Message: "hermes ensure project profile failed: " + err.Error(), ResourceID: string(pr.ID)})
-		}
-	}
+
 	// scm provision: private repo, actions disabled, woodpecker linked, .woodpecker.yaml seeded
 	if b.scm != nil {
 		inst, _ := b.store.Instance(ctx)
@@ -2903,60 +2862,7 @@ func (b *Backend) DeleteToolEnvironment(ctx context.Context, name string) error 
 	return nil
 }
 
-// Hermes Nous Portal tool gateway proxy — admin only, forwards with Hermes JWT. Inference stays on LiteLLM.
-func (b *Backend) ListHermesProvidersOAuth(ctx context.Context) ([]hermes.ProviderOAuth, error) {
-	if b.hermes == nil {
-		return nil, translateError(fmt.Errorf("%w: hermes not configured", ErrNotConfigured))
-	}
-	list, err := b.hermes.ListProvidersOAuth(ctx)
-	if err != nil {
-		return nil, translateError(err)
-	}
-	return list, nil
-}
 
-func (b *Backend) StartHermesNousOAuth(ctx context.Context) (*hermes.NousOAuthSession, error) {
-	if b.hermes == nil {
-		return nil, translateError(fmt.Errorf("%w: hermes not configured", ErrNotConfigured))
-	}
-	sess, err := b.hermes.StartNousOAuth(ctx)
-	if err != nil {
-		return nil, translateError(err)
-	}
-	return sess, nil
-}
-
-func (b *Backend) PollHermesNousOAuth(ctx context.Context, sessionID string) (*hermes.NousOAuthSession, error) {
-	if b.hermes == nil {
-		return nil, translateError(fmt.Errorf("%w: hermes not configured", ErrNotConfigured))
-	}
-	sess, err := b.hermes.PollNousOAuth(ctx, sessionID)
-	if err != nil {
-		return nil, translateError(err)
-	}
-	return sess, nil
-}
-
-func (b *Backend) SetHermesToolsetProvider(ctx context.Context, toolsetName, provider string) error {
-	if b.hermes == nil {
-		return translateError(fmt.Errorf("%w: hermes not configured", ErrNotConfigured))
-	}
-	if err := b.hermes.SetToolsetProvider(ctx, toolsetName, provider); err != nil {
-		return translateError(err)
-	}
-	return nil
-}
-
-func (b *Backend) ListHermesToolsets(ctx context.Context) ([]hermes.Toolset, error) {
-	if b.hermes == nil {
-		return nil, translateError(fmt.Errorf("%w: hermes not configured", ErrNotConfigured))
-	}
-	list, err := b.hermes.ListToolsets(ctx)
-	if err != nil {
-		return nil, translateError(err)
-	}
-	return list, nil
-}
 
 
 
@@ -3378,20 +3284,7 @@ func (b *Backend) EnsureEmailRoute(ctx context.Context, recipient string) error 
 	return nil
 }
 
-// Hermes approval emitter (exposed for future callers)
-func (b *Backend) RequestHermesApproval(ctx context.Context, profileID, requestID, description string) error {
-	if b.approvalEmitter == nil {
-		return translateError(fmt.Errorf("%w: hermes not configured", ErrNotConfigured))
-	}
-	if err := b.approvalEmitter.RequestApproval(ctx, profileID, requestID, description); err != nil {
-		return translateError(err)
-	}
-	return nil
-}
 
-func (b *Backend) ApprovalEmitter() *hermes.ApprovalEmitter {
-	return b.approvalEmitter
-}
 
 // Scheduler helpers for omahabd
 
@@ -3562,6 +3455,9 @@ func (n *noopPocketID) HealthCheck(ctx context.Context) error {
 }
 func (n *noopPocketID) EnsureOIDCClient(ctx context.Context, name string, callbackURLs []string) (string, string, error) {
 	return "", "", fmt.Errorf("%w: PocketID not configured", ErrNotConfigured)
+}
+func (n *noopPocketID) EnsureOIDCPublicClient(ctx context.Context, name string, callbackURLs []string) (string, error) {
+	return "", fmt.Errorf("%w: PocketID not configured", ErrNotConfigured)
 }
 func (n *noopPocketID) CreateOIDCClientSecret(ctx context.Context, clientID string) (string, error) {
 	return "", fmt.Errorf("%w: PocketID not configured", ErrNotConfigured)

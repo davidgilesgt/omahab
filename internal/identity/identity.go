@@ -60,6 +60,8 @@ type PocketID interface {
 	HealthCheck(ctx context.Context) error
 	// EnsureOIDCClient ensures an OIDC client with name and callback URLs exists, returning client ID and secret.
 	EnsureOIDCClient(ctx context.Context, name string, callbackURLs []string) (clientID string, clientSecret string, err error)
+	// EnsureOIDCPublicClient ensures a public/PKCE OIDC client (no secret) for Hermes dashboard.
+	EnsureOIDCPublicClient(ctx context.Context, name string, callbackURLs []string) (clientID string, err error)
 	// CreateOIDCClientSecret mints a new secret for an existing OIDC client.
 	CreateOIDCClientSecret(ctx context.Context, clientID string) (string, error)
 	// EnsureOIDCClientGroupAccess idempotently ensures that only the named groups have access to the given OIDC client.

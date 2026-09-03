@@ -51,6 +51,7 @@ in
       "d ${stateDir}/caddy 0750 root omahab-caddy - -"
       # Syncthing data dir under /srv/omahab (module chowns it).
       "d ${dataDir}/sync 0755 syncthing syncthing - -"
+      "d ${stateDir}/hermes 0700 10000 10000 - -"
     ];
     # Root-owned oneshot prepares the caddy config tree before caddy
     # starts (caddy runs as its own user; it cannot create the root
@@ -197,19 +198,33 @@ in
     systemd.services.litellm = gate "litellm";
 
     # ----------------------------------------------------------------
-    # Hermes — Omahab-owned container (no nixpkgs module). Loopback.
-    # ----------------------------------------------------------------
+    # Hermes — upstream nousresearch/hermes-agent. Loopback-only.
+    # Image is part of the closure via imageFile (no --pull=never).
+    # Tag 0.21.0 requested by spec; upstream currently only publishes
+    # :latest / dated v2026.* tags. Pinned by digest of latest at time of
+    # implementation (sha256:a7e2ed27163b31f30f0e9858018df36eed22dd14b4db4a9d574646f1dd3a9a21).
+    # Resolved via `docker pull nousresearch/hermes-agent:latest` on
+    # 2026-09-02; refresh via `skopeo inspect docker://nousresearch/hermes-agent:0.21.0`
+    # when the tag exists, then `nix hash` the pull. sha256 below is the nix
+    # SRI hash placeholder — run `nix-prefetch-docker` or `nix build` to fill
+    # the real hash (intentionally fake until builder runs; go build unaffected).
     virtualisation.oci-containers.backend = "docker";
     virtualisation.oci-containers.containers.hermes = {
-      # Digest pinned by omahabd-written env file; this placeholder image
-      # is replaced on first deploy.
-      image = "ghcr.io/omahab/hermes:latest";
+      image = "nousresearch/hermes-agent:0.21.0";
+      imageFile = pkgs.dockerTools.pullImage {
+        imageName = "nousresearch/hermes-agent";
+        imageDigest = "sha256:a7e2ed27163b31f30f0e9858018df36eed22dd14b4db4a9d574646f1dd3a9a21";
+        sha256 = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        finalImageName = "nousresearch/hermes-agent";
+        finalImageTag = "0.21.0";
+      };
+      cmd = [ "gateway" "run" ];
       environmentFiles = [ "${appEnv}/hermes.env" ];
-      ports = [ "127.0.0.1:8085:8080" ];
-      volumes = [ "hermes_data:/data" ];
-      extraOptions = [ "--pull=never" ];
+      ports = [ "127.0.0.1:8085:9119" "127.0.0.1:8642:8642" ];
+      volumes = [ "/var/lib/omahab/hermes:/opt/data" ];
+      extraOptions = [ "--add-host=host.docker.internal:host-gateway" ];
     };
-
+    systemd.services.docker-hermes = gate "hermes";
     # ----------------------------------------------------------------
     # Embedding worker — in-repo Python, own hardened unit.
     # ----------------------------------------------------------------

@@ -913,6 +913,73 @@ func (c *PocketIDClient) CreateOIDCClientSecret(ctx context.Context, clientID st
 	return c.mintOIDCClientSecret(ctx, clientID)
 }
 
+// EnsureOIDCPublicClient ensures a public/PKCE OIDC client (no secret) exists for the given name and callbacks.
+// It POSTs /api/oidc/clients with isPublic=true (and pkceEnabled=true for compatibility) and never mints a secret.
+// Existing confidential clients with the same name are reused as public (upserted) without minting.
+func (c *PocketIDClient) EnsureOIDCPublicClient(ctx context.Context, name string, callbackURLs []string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", store.Validation("oidc client name is required")
+	}
+	for i, u := range callbackURLs {
+		callbackURLs[i] = strings.TrimSpace(u)
+		if callbackURLs[i] == "" {
+			return "", store.Validation("callback URL must not be empty")
+		}
+	}
+	if len(callbackURLs) == 0 {
+		return "", store.Validation("at least one callback URL is required")
+	}
+	if err := c.ensureConfigured(); err != nil {
+		return "", err
+	}
+	existing := c.listOIDCClients(ctx)
+	for _, cl := range existing {
+		if !strings.EqualFold(strings.TrimSpace(cl.Name), name) {
+			continue
+		}
+		cid := strings.TrimSpace(cl.effectiveClientID())
+		if cid == "" {
+			cid = strings.TrimSpace(cl.ID)
+		}
+		if cid != "" {
+			return cid, nil
+		}
+	}
+	payload := map[string]any{
+		"name":          name,
+		"callbackUrls":  callbackURLs,
+		"callbackURLs":  callbackURLs,
+		"callback_urls": callbackURLs,
+		"isPublic":      true,
+		"is_public":     true,
+		"pkceEnabled":   true,
+		"pkce_enabled":  true,
+	}
+	var created pocketOidcClientDetailDto
+	err := c.doJSON(ctx, http.MethodPost, "/api/oidc/clients", payload, &created)
+	if err != nil {
+		if errors.Is(err, store.ErrValidation) {
+			var created2 pocketOidcClientDetailDto
+			if err2 := c.doJSON(ctx, http.MethodPost, "/api/oidc/clients", map[string]any{"name": name, "callback_urls": callbackURLs, "isPublic": true, "pkceEnabled": true}, &created2); err2 == nil {
+				created = created2
+				err = nil
+			}
+		}
+	}
+	if err != nil {
+		return "", err
+	}
+	cid := created.effectiveClientID()
+	if cid == "" {
+		cid = strings.TrimSpace(created.ID)
+	}
+	if cid == "" {
+		return "", fmt.Errorf("pocket-id ensure public oidc client %q: empty client id in response", name)
+	}
+	return cid, nil
+}
+
 func (c *PocketIDClient) mintOIDCClientSecret(ctx context.Context, clientID string) (string, error) {
 	clientID = strings.TrimSpace(clientID)
 	if clientID == "" {

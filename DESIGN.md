@@ -110,10 +110,10 @@ flowchart TD
     Woodpecker --> Registry[Forgejo OCI registry]
     Registry --> ProjectRuntime
 
-    Projects --> ProjectBots[One project equals one Hermes bot]
+    Projects --> Hermes[One project equals one Hermes bot]
     Hermes --> DefaultAI[Default AI assistant]
-    DefaultAI --> ProjectBots
-    ProjectBots --> DefaultAI
+    DefaultAI --> Hermes
+    Hermes --> DefaultAI
 
     Backup --> Hetzner[Hetzner Storage Box]
 ```
@@ -589,7 +589,7 @@ Prefer a monorepo. If an external repository must be included, use a Git submodu
 A project owns:
 
 - one Forgejo repository;
-- one Hermes project bot;
+- one Hermes project;
 - one project secret namespace;
 - one default ONCE deployment;
 - zero or more deployment environments;
@@ -608,70 +608,43 @@ Project synchronization on Omarchy is intentional:
 - explicit pull, commit, and push;
 - no silent commits, merges, or force-pushes.
 
-## 13. Hermes and bots
+## 13. Hermes
 
 ### 13.1 Default assistant
 
-The stable Hermes `default` profile is the primary assistant. Its default display name is `AI`, but the user can rename it during setup. The `default` profile's inference base URL and API key point at the centralized LiteLLM gateway (`https://models.<domain>/v1` with `ANTHROPIC_BASE_URL` at `https://models.<domain>` for `/v1/messages`), using a distinct per-profile LiteLLM virtual key. Connecting a tool gateway (e.g., Nous Portal) must not switch the inference provider.
+The Hermes `default` profile is the primary assistant and the only bot Omahab ships. Omahab renders `/var/lib/omahab/hermes/config.yaml` (0600, uid 10000) as the default profile and restarts `docker-hermes.service` after writes. The file is owned atomically by omahabd and merges existing keys so user customizations survive upgrades:
 
-### 13.2 Project bots
-
-Each project gets one Hermes bot. Under Hermes, a bot is a profile.
-
-A project bot receives only:
-
-- its project repository;
-- project issues and pull requests;
-- project deployment state;
-- project-specific secrets;
-- project files explicitly attached to it;
-- its own memory and session history.
-
-It does not receive:
-
-- default-assistant memory;
-- unrelated Paperless documents;
-- general synced notes;
-- Home Assistant credentials;
-- other repositories;
-- other project bot transcripts.
-
-LLM inference for both the default assistant and project bots goes through the centralized LiteLLM gateway at `https://models.<domain>` via scoped virtual keys (`omahab/fast`, `omahab/balanced`, `omahab/reasoning`, `omahab/embedding`). No bot receives an upstream provider credential or the LiteLLM master key. Tool and application credentials remain isolated. The Nous Portal tool gateway (pay-as-you-use web search/extract, image generation, TTS, cloud browser) is a separate Hermes tool integration and does not change the inference gateway.
-
-### 13.3 Bot authority and communication
-
-```text
-Default AI
-  -> assigns work to project bots
-  -> requests status and summaries
-  -> redirects or cancels delegated work
-
-Project bot
-  -> works only within its project
-  -> reports to the default AI
-  -> asks the default AI bounded questions
+```yaml
+model:
+  provider: custom
+  default: omahab/balanced
+  base_url: http://host.docker.internal:4000/v1
+dashboard:
+  public_url: https://ai.<domain>
+  trusted_proxies: ["172.17.0.1"]
+  oauth: { provider: self-hosted, self_hosted: { issuer: https://id.<domain>, client_id: <id> } }
+approvals:
+  mode: smart
+  deny: ["rm -rf /*", "git push --force*", "git push -f*", "*--no-verify*"]
+mcp_servers:
+  omahab:
+    url: http://host.docker.internal:8484/mcp
+    headers: { Authorization: "Bearer ${OMAHAB_MCP_TOKEN}" }
 ```
 
-A project bot cannot inspect the default assistant's memory. It sends a question through Hermes bot messaging and receives only the response. Project bots do not message one another by default; communication routes through the default assistant unless the user explicitly creates a group.
+Model traffic goes through LiteLLM at `http://host.docker.internal:4000/v1` (`https://models.<domain>/v1` externally) with a per-Hermes virtual key. The dashboard is served by the same `nousresearch/hermes-agent` container on `0.0.0.0:9119` and exposed as `https://ai.<domain>`.
 
-Use Hermes's existing bot chats, `@mentions`, direct bot messages, and group chats. Project bot instructions establish project-only scope and escalation to the default assistant.
+### 13.2 Tools
 
-### 13.4 Desktop-quality web UI
+Hermes tools are provided via a streamable-HTTP MCP server inside omahabd at `http://host.docker.internal:8484/mcp` (Bearer `OMAHAB_MCP_TOKEN`). See Step 3b for the wire tool names (`repos_list`, `repo_archive`, `docs_search`, `projects_list`, `workspaces_list`, etc.) and the rule *archive, never delete; never merge*. Paperless and Forgejo destructive tools are not exposed.
 
-The server should provide a web experience based on Hermes Desktop's React UX rather than relying only on the current administrative dashboard.
+### 13.3 Deleted
 
-Implementation direction:
+Deleted. One `default` profile only; ONCE, SCIM, and workspace isolation are handled without per-project Hermes profiles.
 
-- reuse/extract the Desktop React surface;
-- retain Hermes's shared WebSocket/JSON-RPC transport;
-- replace Electron native operations with authenticated remote gateway capabilities;
-- keep tool execution on the server;
-- authenticate through the configured identity path;
-- upstream reusable browser/renderer separation where possible.
+### 13.4 Web UI
 
-Implement the browser surface as a TypeScript React application built with Vite. It consumes generated OpenAPI types for control-plane operations and the existing Hermes WebSocket/JSON-RPC protocol for chat. Ship static assets; do not add a production Next.js or other Node.js server.
-
-Do not run Electron through VNC as the web product.
+Omahab ships no chat UI. The upstream Hermes dashboard at `https://ai.<domain>` is the web surface, protected by Pocket ID via a public PKCE OIDC client (`hermes` callback `https://ai.<domain>/auth/callback`, `platform-app/hermes_oidc_client_id` only, no secret). `HERMES_DASHBOARD_PUBLIC_URL`, `HERMES_DASHBOARD_OIDC_ISSUER`, and `HERMES_DASHBOARD_OIDC_CLIENT_ID` are rendered into `hermes.env`.
 
 ### 13.5 Official Hermes Desktop client
 
@@ -796,7 +769,7 @@ This action:
 5. indexes supported text files when sharing is enabled;
 6. includes the server copy in normal Omahab backup unless globally excluded.
 
-`Share with AI` means the default assistant can list, search, and read the folder. Project bots cannot access it. Writes use normal Hermes file/command approvals and conflict-safe file updates.
+`Share with AI` means the default assistant can list, search, and read the folder. AI tools cannot access it. Writes use normal Hermes file/command approvals and conflict-safe file updates.
 
 For Obsidian, exclude transient state such as:
 
@@ -832,7 +805,7 @@ Omahab:
 3. installs a concise Hermes skill describing `hass-cli` usage;
 4. validates a read operation.
 
-Do not add an MCP server and do not proxy or wrap `hass-cli` commands through Omahab. Hermes invokes `hass-cli` directly. Project bots do not receive the Home Assistant token.
+Do not add an MCP server and do not proxy or wrap `hass-cli` commands through Omahab. Hermes invokes `hass-cli` directly. AI tools do not receive the Home Assistant token.
 
 Hermes's own command approval system remains responsible for approving state-changing calls.
 
@@ -1018,7 +991,7 @@ Initial core applications and integrations:
 - Forgejo;
 - Woodpecker CI;
 - Hermes backend;
-- desktop-quality Hermes web surface;
+- upstream Hermes dashboard;
 - Pocket ID;
 - model gateway and subscription credential support;
 - Paperless-ngx;
@@ -1041,11 +1014,9 @@ Applications not selected for the initial default:
 
 1. Narrow ONCE fork in `third_party/once`: loopback binding, JSON status, secret files, lifecycle hooks.
 2. Cloudflare public-DNS-to-Tailscale routing and Caddy DNS-01 certificates.
-3. Official Hermes Desktop remote provisioning without a fork.
-4. Desktop-quality Hermes React surface in a browser.
-5. ChatGPT and Grok subscription OAuth with centralized encrypted storage.
-6. HEY DKIM enrollment and PDF routing.
-7. English and worldwide local embedding benchmark.
+3. ChatGPT and Grok subscription OAuth with centralized encrypted storage.
+4. HEY DKIM enrollment and PDF routing.
+5. English and worldwide local embedding benchmark.
 
 ### 23.2 Foundation release
 
@@ -1087,8 +1058,6 @@ Applications not selected for the initial default:
 ### 23.5 Projects and workspaces release
 
 - one repo equals one project;
-- one project equals one isolated Hermes bot;
-- bot coordination through the default AI;
 - project creation and local clone;
 - OCI build and deployment;
 - GitHub mirrors;
@@ -1138,14 +1107,12 @@ Omahab is not complete until these scenarios work end to end.
 6. verify private custom-domain access;
 7. roll back to the previous release.
 
-### AI and project isolation
+### AI tools
 
 1. Name the default assistant.
-2. Create two projects and bots.
-3. Confirm each bot can see only its own repository and state.
-4. Have a project bot ask the default assistant a question.
-5. Have the default assistant assign work and request status.
-6. Confirm neither project bot can inspect unrelated notes or projects.
+2. Ask it to list Forgejo repos, archive one, and search Paperless.
+3. Confirm the archive is reversible and that no delete tool exists.
+4. Create a workspace (`ws/<slug>-<id>`) and observe the `omp` tmux session.
 
 ### Notes and documents
 

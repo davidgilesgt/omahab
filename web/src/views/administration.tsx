@@ -7,7 +7,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../auth";
-import type { CreateModelKeyResponse, HermesNousSession, HermesProviderOAuth, HermesToolset, ModelAlias, ModelAliasName, ModelKey, OAuthSession, ProviderCredential, RecoverySession, User, Workspace } from "../api/types";
+import type { CreateModelKeyResponse, ModelAlias, ModelAliasName, ModelKey, OAuthSession, ProviderCredential, RecoverySession, User, Workspace } from "../api/types";
 import { EmptyState, ErrorState, formatDate, LoadingState, PageHeader, Section, StatusPill } from "../components/ui";
 import { useToast } from "../components/toast";
 import { CopyButton } from "../components/copyButton";
@@ -503,19 +503,8 @@ export function ProvidersPage() {
   const [oauthSessions, setOAuthSessions] = useState<Record<string, OAuthSession | null>>({});
   const [oauthError, setOAuthError] = useState<Record<string, string | null>>({});
   const [polling, setPolling] = useState<Record<string, boolean>>({});
-  // Hermes Nous Portal tool gateway
-  const hermesProvidersQuery = useQuery({ queryKey: ["hermes-providers-oauth"], queryFn: client.hermesProvidersOAuth });
-  const hermesToolsetsQuery = useQuery({ queryKey: ["hermes-toolsets"], queryFn: client.hermesToolsets });
-  const [nousSession, setNousSession] = useState<HermesNousSession | null>(null);
-  const [nousPolling, setNousPolling] = useState(false);
-  const [nousError, setNousError] = useState<string | null>(null);
   const [toolsetPending, setToolsetPending] = useState<Record<string, boolean>>({});
-  const allowedKindsForProvider = (provider: string) => {
-    const entry = SUPPORTED_PROVIDERS.find((p) => p.value === provider);
-    return entry ? [...entry.kinds] : [];
-  };
-
-  useEffect(() => {
+useEffect(() => {
     const allowed = allowedKindsForProvider(selectedProvider);
     if (!allowed.includes(selectedKind as never)) {
       setSelectedKind(allowed[0] ?? "api_key");
@@ -568,80 +557,7 @@ export function ProvidersPage() {
     }, 5000);
     return () => window.clearInterval(interval);
   }, [polling, oauthSessions, client, queryClient, toast]);
-
-  const NOUS_CATEGORIES: { id: string; label: string }[] = [
-    { id: "web_search", label: "Web search / extract" },
-    { id: "image_generation", label: "Image generation" },
-    { id: "tts", label: "TTS" },
-    { id: "cloud_browser", label: "Cloud browser" },
-  ];
-
-  // Nous polling
-  useEffect(() => {
-    if (!nousPolling || !nousSession?.session_id) return;
-    const interval = window.setInterval(async () => {
-      try {
-        const updated = await client.pollHermesNousOAuth(nousSession.session_id);
-        setNousSession(updated);
-        if (["connected", "denied", "expired", "error"].includes(updated.status ?? "")) {
-          setNousPolling(false);
-          if (updated.status === "connected") {
-            toast.success("Nous Portal connected");
-            void hermesProvidersQuery.refetch();
-            void hermesToolsetsQuery.refetch();
-            // Preselect nous only for unconfigured categories; preserve explicit declines.
-            const toolsets = hermesToolsetsQuery.data ?? [];
-            for (const cat of NOUS_CATEGORIES) {
-              const existing = toolsets.find((t) => t.name === cat.id);
-              // Unconfigured means no toolset entry at all; declined means entry exists (even with empty provider) and must be preserved.
-              const isUnconfigured = !existing;
-              if (isUnconfigured) {
-                // Fire-and-forget preselection; individual errors are handled in handleNousToolsetProvider
-                void handleNousToolsetProvider(cat.id, "nous", true);
-              }
-            }
-          } else if (updated.status === "denied") toast.error("Nous authorization denied");
-          else if (updated.status === "expired") toast.error("Nous authorization expired");
-          else if (updated.status === "error") toast.error("Nous authorization error");
-        }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : "Poll failed";
-        setNousError(msg);
-      }
-    }, 3000);
-    return () => window.clearInterval(interval);
-  }, [nousPolling, nousSession, client, toast, hermesProvidersQuery, hermesToolsetsQuery]);
-
-  async function startNousOAuth() {
-    setNousError(null);
-    try {
-      const sess = await client.startHermesNousOAuth();
-      setNousSession(sess);
-      setNousPolling(true);
-      toast.success("Nous Portal authorization started");
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Could not start Nous OAuth";
-      setNousError(msg);
-      toast.error(msg);
-    }
-  }
-
-  async function handleNousToolsetProvider(toolsetName: string, provider: string, silent = false) {
-    setToolsetPending((prev) => ({ ...prev, [toolsetName]: true }));
-    try {
-      await client.setHermesToolsetProvider(toolsetName, provider);
-      void hermesToolsetsQuery.refetch();
-      if (!silent) toast.success(`${toolsetName} → ${provider}`);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Could not update toolset";
-      if (!silent) toast.error(msg);
-      throw err;
-    } finally {
-      setToolsetPending((prev) => ({ ...prev, [toolsetName]: false }));
-    }
-  }
-
-  function submit(event: FormEvent<HTMLFormElement>) {
+function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
@@ -1027,104 +943,6 @@ export function ProvidersPage() {
               </div>
             )}
           </form>
-        </div>
-      </Section>
-
-      <Section title="Connect Nous Portal tools" description="Optional Hermes tool gateway — pay-as-you-use against your Nous Portal account; usage is reported by Nous Portal, not LiteLLM.">
-        <div className="form-stack">
-          <p className="muted" style={{ fontSize: "0.875rem" }}>
-            The Nous Tool Gateway is pay-as-you-use against your Portal account and its usage is reported by Nous Portal, not LiteLLM. Connecting Nous Portal does not switch Hermes inference; the default profile keeps its base URL pointed at LiteLLM (<code>http://litellm:4000</code> / <code>https://models.&lt;domain&gt;/v1</code>). Only tool calls are routed to Nous. Inference stays on LiteLLM regardless of Nous connection.
-          </p>
-          {hermesProvidersQuery.isLoading ? (
-            <LoadingState label="Loading Nous connection" />
-          ) : hermesProvidersQuery.isError ? (
-            <ErrorState error={hermesProvidersQuery.error} retry={() => void hermesProvidersQuery.refetch()} />
-          ) : (() => {
-            const nousProvider = (hermesProvidersQuery.data ?? []).find((p) => p.provider === "nous");
-            const isConnected = !!nousProvider?.connected;
-            return (
-              <div className="form-stack" style={{ gap: "0.5rem" }}>
-                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                  <strong>Nous Portal:</strong> {isConnected ? <StatusPill value="connected" /> : <StatusPill value="not_connected" />}
-                  {nousProvider?.status && <small className="muted">{nousProvider.status}</small>}
-                </div>
-                {!isConnected && (
-                  <div className="form-stack" style={{ gap: "0.5rem" }}>
-                    {!nousSession ? (
-                      <button className="button primary" type="button" disabled={nousPolling} onClick={startNousOAuth}>
-                        {nousPolling ? "Connecting…" : "Connect Nous Portal"}
-                      </button>
-                    ) : (
-                      <div className="form-stack" style={{ border: "1px solid var(--border)", padding: "0.75rem", borderRadius: "8px", gap: "0.5rem" }}>
-                        <div><strong>Status:</strong> <StatusPill value={nousSession.status ?? "pending"} /></div>
-                        <div>
-                          <strong>Verification URL:</strong>{" "}
-                          <a href={nousSession.verification_url} target="_blank" rel="noreferrer">
-                            {nousSession.verification_url}
-                          </a>{" "}
-                          <CopyButton text={nousSession.verification_url} label="Copy" />
-                        </div>
-                        {nousPolling && <small className="muted">Polling every 3s… Open the verification URL to authorize.</small>}
-                        <div style={{ display: "flex", gap: "0.5rem" }}>
-                          <button className="button secondary" type="button" disabled={nousPolling} onClick={startNousOAuth}>
-                            Restart
-                          </button>
-                          <button className="button ghost" type="button" onClick={() => { setNousSession(null); setNousPolling(false); setNousError(null); }}>
-                            Cancel
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                    {nousError && <p className="inline-error" role="alert">{nousError}</p>}
-                    <small className="muted">You will be redirected to Nous Portal to authorize. After authorization, tool selections below will be updated.</small>
-                  </div>
-                )}
-              </div>
-            );
-          })()}
-          <div style={{ borderTop: "1px solid var(--border)", paddingTop: "0.75rem", marginTop: "0.5rem" }}>
-            <h4 style={{ margin: "0 0 0.5rem" }}>Tool categories</h4>
-            <p className="muted" style={{ fontSize: "0.8rem", margin: "0 0 0.5rem" }}>
-              Select which tool categories should use Nous when connected. Only unconfigured categories preselect <code>nous</code>; a decline stays declined (explicit selections are preserved).
-            </p>
-            {hermesToolsetsQuery.isLoading ? (
-              <LoadingState label="Loading toolsets" />
-            ) : hermesToolsetsQuery.isError ? (
-              <ErrorState error={hermesToolsetsQuery.error} retry={() => void hermesToolsetsQuery.refetch()} />
-            ) : (
-              <div className="form-stack" style={{ gap: "0.5rem" }}>
-                {NOUS_CATEGORIES.map((cat) => {
-                  const toolset = (hermesToolsetsQuery.data ?? []).find((t) => t.name === cat.id);
-                  const currentProvider = toolset?.provider ?? "";
-                  const isNous = currentProvider === "nous";
-                  const isPending = !!toolsetPending[cat.id];
-                  return (
-                    <label key={cat.id} className="check-row" style={{ display: "flex", alignItems: "center", gap: "0.5rem", opacity: isPending ? 0.6 : 1 }}>
-                      <input
-                        type="checkbox"
-                        checked={isNous}
-                        disabled={isPending}
-                        onChange={(e) => {
-                          const checked = e.target.checked;
-                          // Preserve explicit declines: only change if user explicitly toggles.
-                          // Unchecked means explicit decline (store as ""), checked means nous.
-                          // On next Nous connect, unconfigured (missing) preselects nous, but declined (explicit "") stays.
-                          const nextProvider = checked ? "nous" : "";
-                          void handleNousToolsetProvider(cat.id, nextProvider);
-                        }}
-                      />
-                      <span>{cat.label}</span>
-                      {currentProvider && currentProvider !== "nous" && <small className="muted">({currentProvider})</small>}
-                      {isNous && <small className="muted">→ nous</small>}
-                    </label>
-                  );
-                })}
-                <small className="muted">
-                  Full Nous Portal OAuth is available in the Hermes integration. Inference remains on LiteLLM.
-                </small>
-              </div>
-            )}
-          </div>
         </div>
       </Section>
 

@@ -15,8 +15,26 @@ const NAVIGATION = [
   ["/people", "People & access", "◎", "Users and access"],
   ["/providers", "Providers", "◐", "External providers"],
   ["/tool-environment", "Tool environment", "⚙", "Agent tool variables and companion grants"],
-  ["/ai", "AI", "✦", "AI assistant"],
 ] as const;
+
+function aiDashboardUrl(): string {
+  if (typeof window === "undefined") return "https://ai.example.com";
+  const host = window.location.hostname;
+  if (!host || host === "localhost" || host === "127.0.0.1") return "https://ai.example.com";
+  const parts = host.split(".");
+  if (parts.length < 2) return "https://" + host;
+  // Replace first label with ai, or prepend ai if host looks like apex
+  if (parts[0] === "ai") return window.location.protocol + "//" + host;
+  // If host starts with www or omahab etc, replace first label with ai
+  // For e.g., omahab.example.com -> ai.example.com ; dashboard.example.com -> ai.example.com
+  // Keep suffix from second label onward if first label is not ai
+  // Common case: <something>.<domain>.<tld> -> ai.<domain>.<tld>
+  if (parts.length >= 3) {
+    return window.location.protocol + "//ai." + parts.slice(1).join(".");
+  }
+  // apex domain like example.com -> ai.example.com
+  return window.location.protocol + "//ai." + host;
+}
 
 export function AppShell({ children }: { children: ReactNode }) {
   const { client, signOut } = useAuth();
@@ -91,6 +109,10 @@ export function AppShell({ children }: { children: ReactNode }) {
               {to === "/events" && unread > 0 && <span className="nav-badge" aria-label={`${unread} unread`}>{unread}</span>}
             </NavLink>
           ))}
+          <a href={aiDashboardUrl()} target="_blank" rel="noreferrer" className="nav-link" title="AI assistant (upstream Hermes dashboard)">
+            <span aria-hidden="true" className="nav-icon" title="AI assistant (upstream Hermes dashboard)">✦</span>
+            <span>AI</span>
+          </a>
         </nav>
         <div className="sidebar-footer">
           <span className="privacy-indicator" aria-live="polite" title={unread > 0 ? `${unread} unread events` : "Private by default"}>
