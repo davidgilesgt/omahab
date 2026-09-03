@@ -123,6 +123,7 @@ EOF
             installPhase = "touch $out";
           });
           integration = pkgs.testers.nixosTest (import ./nix/tests/install.nix { inherit self pkgs; });
+          image = self.nixosConfigurations.omahab-appliance.config.system.build.isoImage;
         };
       }
     ) // {
