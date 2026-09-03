@@ -174,7 +174,7 @@
         "post_restore": [
           "/bin/sh",
           "-c",
-          "pg_restore --clean --if-exists -d woodpecker /var/lib/omahab/dumps/woodpecker.pgdump && systemctl restart woodpecker-server.service woodpecker-agent.service"
+          "pg_restore --clean --if-exists -d woodpecker /var/lib/omahab/dumps/woodpecker.pgdump && systemctl restart woodpecker-server.service woodpecker-agent-docker.service"
         ]
       },
       "oidc": {
@@ -200,7 +200,7 @@
       "pipeline_image": "quay.io/podman/stable@sha256:943585c013eeeb5acc9f4e6d2a81d80c6b0be3069557cbb9a5aa737a8c4aae3e",
       "units": [
         "woodpecker-server.service",
-        "woodpecker-agent.service"
+        "woodpecker-agent-docker.service"
       ]
     },
     {
@@ -481,9 +481,7 @@
       "default_exposure": "private",
       "max_exposure": "private",
       "health_check": {
-        "kind": "http",
-        "path": "/health",
-        "port": 8090
+        "kind": "none"
       },
       "data": [
         {

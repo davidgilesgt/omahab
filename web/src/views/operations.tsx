@@ -200,7 +200,6 @@ export function ApplicationsPage() {
   const queryClient = useQueryClient();
   const toast = useToast();
   const query = useQuery({ queryKey: ["applications"], queryFn: client.applications });
-  const catalogQuery = useQuery({ queryKey: ["catalog"], queryFn: client.catalog });
   const [review, setReview] = useState<Application | null>(null);
   const [pendingAction, setPendingAction] = useState<{ id: string; action: "stop" | "update"; hostname: string; name: string } | null>(null);
   const mutation = useMutation({
@@ -213,42 +212,16 @@ export function ApplicationsPage() {
     },
     onError: (err) => toast.error(err instanceof Error ? err.message : "Application action failed"),
   });
-  const install = useMutation({
-    mutationFn: (bundleId: string) => client.installApplication({ bundle_id: bundleId }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["applications"] });
-      queryClient.invalidateQueries({ queryKey: ["catalog"] });
-      toast.success("Application installed");
-    },
-    onError: (err) => toast.error(err instanceof Error ? err.message : "Install failed"),
-  });
   const applications = query.data ?? [];
-  // Native (systemd-runtime) bundles are adopted automatically by the
-  // setup reconciler; they never show an Install button.
-  const catalog = (catalogQuery.data ?? []).filter((bundle) => !bundle.installed && bundle.runtime !== "systemd");
 
   return (
     <div className="page">
-      <PageHeader eyebrow="Catalog" title="Applications" description="Install curated, digest-pinned bundles and operate them without editing generated runtime definitions." />
-      {catalogQuery.data && catalog.length > 0 && (
-        <div className="resource-list">
-          {catalog.map((bundle) => (
-            <article className="resource-row" key={bundle.id}>
-              <div className="resource-main"><div className="resource-title"><h2>{bundle.name}</h2><StatusPill value={bundle.default_exposure} /></div><p className="mono">{bundle.image} <CopyButton text={bundle.image} label="Copy" /></p><small>{bundle.architectures.join(" / ")}{bundle.memory_mb ? ` · ~${bundle.memory_mb} MiB` : ""} · max exposure {bundle.max_exposure}</small></div>
-              <div className="row-actions">
-                <button className="button primary" type="button" disabled={install.isPending} onClick={() => install.mutate(bundle.id)}>{install.isPending ? "Installing…" : "Install"}</button>
-              </div>
-            </article>
-          ))}
-          <MutationNotice error={install.error} />
-        </div>
-      )}
-      {query.isLoading ? <LoadingState label="Loading applications" /> : query.isError ? <ErrorState error={query.error} retry={() => void query.refetch()} /> : !applications.length ? (
-        <EmptyState title="Nothing installed" description={catalogQuery.data && !catalog.length ? "Every curated bundle is already installed." : "Install a curated bundle above to see it here."} />
+      <PageHeader eyebrow="Platform" title="Services" description="Platform services — health, restarts, and exposure." />
+      {query.isLoading ? <LoadingState label="Loading services" /> : query.isError ? <ErrorState error={query.error} retry={() => void query.refetch()} /> : !applications.length ? (
+        <EmptyState title="No services" description="No platform services are currently reported." />
       ) : (
         <div className="resource-list">
           {applications.map((application) => {
-            const nativeBundle = (catalogQuery.data ?? []).some((b) => b.id === application.bundle_id && b.runtime === "systemd");
             const running = application.observed_state === "running";
             return (
               <article className="resource-row" key={application.id}>
@@ -256,7 +229,6 @@ export function ApplicationsPage() {
                 <div className="row-actions">
                   <button className="button secondary" type="button" disabled={mutation.isPending} onClick={() => mutation.mutate({ id: application.id, action: running ? "restart" : "start" })}>{running ? "Restart" : "Start"}</button>
                   {running && <button className="button ghost" type="button" disabled={mutation.isPending} onClick={() => setPendingAction({ id: application.id, action: "stop", hostname: application.hostname || application.image, name: application.name })}>Stop</button>}
-                  {!nativeBundle && <button className="button ghost" type="button" disabled={mutation.isPending} onClick={() => setPendingAction({ id: application.id, action: "update", hostname: application.hostname || application.image, name: application.name })}>Update</button>}
                   <button className="button secondary" type="button" onClick={() => setReview(application)}>Exposure</button>
                 </div>
               </article>

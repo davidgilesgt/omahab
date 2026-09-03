@@ -19,15 +19,23 @@ type Config struct {
 }
 
 // DefaultSocketPath returns the default Unix socket path for the user daemon.
-// Prefers XDG_RUNTIME_DIR, then falls back to $HOME/.cache, then /tmp.
+// Precedence: OMAHAB_CLIENTD_SOCKET env, $XDG_RUNTIME_DIR, /run/user/<uid>, $HOME/.cache, /tmp.
+// This is the single canonical socket path; apiclient imports it.
 func DefaultSocketPath() string {
+	if p := os.Getenv("OMAHAB_CLIENTD_SOCKET"); p != "" {
+		return p
+	}
 	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" {
 		return filepath.Join(dir, "omahab-clientd.sock")
+	}
+	uid := os.Getuid()
+	candidate := filepath.Join("/run", "user", fmt.Sprint(uid), "omahab-clientd.sock")
+	if _, err := os.Stat(filepath.Dir(candidate)); err == nil {
+		return candidate
 	}
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		return filepath.Join(home, ".cache", "omahab", "clientd.sock")
 	}
-	uid := os.Getuid()
 	return fmt.Sprintf("/tmp/omahab-clientd-%d.sock", uid)
 }
 

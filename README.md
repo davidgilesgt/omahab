@@ -90,6 +90,7 @@ All of these install automatically (no click-to-install) as native NixOS service
 | LiteLLM | Gateway for model providers |
 | Embedding worker | Local semantic index (own hardened unit, UDS) |
 | ntfy | Notifications |
+| Restic REST Server | Machine backups (restic REST, append-only, `backup.<domain>`) |
 
 Cross-app integrations are provisioned automatically: Pocket ID OIDC clients for every supporting service (Forgejo, Woodpecker, Immich, Paperless, Karakeep, Hermes), Forgejo↔Woodpecker OAuth, and a real LiteLLM virtual key for Hermes. Application versions track the nixpkgs pin in `flake.lock` — the flake is the release gate.
 
@@ -112,9 +113,9 @@ Rules enforced by the tool surface: archive, never delete; never merge a PR; nev
 `omahab` workspaces are isolated DevPod containers on the server, each on a branch `ws/<slug>-<id>` with `omp` preinstalled and a per-workspace LiteLLM virtual key.
 
 ```sh
-omahab runner create --project demo --title "add readme badge"  # branch ws/add-readme-badge-XXXX
-omahab runner attach <id>                                      # ssh -t omahab@<ip> sudo omahab runner attach <id> (tmux omp)
-omahab runner send <id> "continue"                             # tmux send-keys -t omp
+omahab workspace create --project demo --title "add readme badge"  # branch ws/add-readme-badge-XXXX
+omahab workspace attach <id>                                      # ssh -t omahab@<ip> sudo omahab workspace attach <id> (tmux omp)
+omahab workspace send <id> "continue"                             # tmux send-keys -t omp
 omahab backup-drive enable                                     # enable nightly machine backups to backup.<domain> (default $HOME)
 omahab backup-drive enable --paths ~/Documents,~/Pictures      # custom paths
 omahab backup-drive run                                        # run now (restic backup + forget keep 14/8/12, no prune)

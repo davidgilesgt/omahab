@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -18,26 +19,13 @@ import (
 	"github.com/omahab/omahab/internal/domain"
 )
 
-// Request is the legacy JSON request over the Unix socket. New code should use SocketRequest.
-type Request struct {
-	Action string         `json:"action"`
-	Params map[string]any `json:"params,omitempty"`
-}
-
-// SocketRequest is the shared request/response contract (newline-JSON) used by the
-// Omarchy shell plugin (Quickshell QML). It is the preferred contract; legacy Request
-// with Action remains supported for backward compatibility.
+// SocketRequest is the shared request/response contract (newline-JSON) used by
+// the Omarchy shell plugin (Quickshell QML) and the CLI. It is the only wire
+// format; see companion/PROTOCOL.md for the canonical method table.
 type SocketRequest struct {
 	ID     string         `json:"id"`
 	Method string         `json:"method"`
 	Params map[string]any `json:"params,omitempty"`
-}
-
-// Response is the legacy JSON response.
-type Response struct {
-	OK    bool   `json:"ok"`
-	Data  any    `json:"data,omitempty"`
-	Error string `json:"error,omitempty"`
 }
 
 // SocketResponse is the shared response for SocketRequest.
@@ -51,6 +39,7 @@ type SocketError struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
 }
+
 
 // DaemonStatus is the payload returned by the "status" action and used by the
 // Omarchy shell plugin (Quickshell QML).
@@ -324,33 +313,21 @@ func (d *Daemon) handleConn(conn net.Conn) {
 	br := bufio.NewReader(conn)
 	data, err := ioReadJSON(br)
 	if err != nil {
-		_ = writeResponse(conn, Response{OK: false, Error: fmt.Sprintf("read request: %v", err)})
+		_ = writeSocketResponse(conn, SocketResponse{Error: &SocketError{Code: "bad_request", Message: fmt.Sprintf("read request: %v", err)}})
 		return
 	}
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
-		_ = writeResponse(conn, Response{OK: false, Error: fmt.Sprintf("invalid json: %v", err)})
+	var sreq SocketRequest
+	if err := json.Unmarshal(data, &sreq); err != nil {
+		_ = writeSocketResponse(conn, SocketResponse{Error: &SocketError{Code: "bad_request", Message: fmt.Sprintf("invalid json: %v", err)}})
 		return
 	}
-	if _, ok := raw["method"]; ok {
-		var sreq SocketRequest
-		if err := json.Unmarshal(data, &sreq); err != nil {
-			_ = writeSocketResponse(conn, SocketResponse{ID: "", Error: &SocketError{Code: "bad_request", Message: fmt.Sprintf("invalid json: %v", err)}})
-			return
-		}
-		sreq.Method = strings.TrimSpace(strings.ToLower(sreq.Method))
-		resp := d.dispatchSocket(sreq)
-		_ = writeSocketResponse(conn, resp)
+	sreq.Method = strings.TrimSpace(strings.ToLower(sreq.Method))
+	if sreq.Method == "" {
+		_ = writeSocketResponse(conn, SocketResponse{ID: sreq.ID, Error: &SocketError{Code: "unknown_method", Message: fmt.Sprintf("unknown method %q", sreq.Method)}})
 		return
 	}
-	var req Request
-	if err := json.Unmarshal(data, &req); err != nil {
-		_ = writeResponse(conn, Response{OK: false, Error: fmt.Sprintf("invalid json: %v", err)})
-		return
-	}
-	req.Action = strings.TrimSpace(strings.ToLower(req.Action))
-	resp := d.dispatch(req)
-	_ = writeResponse(conn, resp)
+	resp := d.dispatchSocket(sreq)
+	_ = writeSocketResponse(conn, resp)
 }
 
 func ioReadJSON(br *bufio.Reader) ([]byte, error) {
@@ -386,258 +363,95 @@ func ioReadJSON(br *bufio.Reader) ([]byte, error) {
 	}
 }
 
-func writeResponse(conn net.Conn, resp Response) error {
-	enc := json.NewEncoder(conn)
-	enc.SetEscapeHTML(false)
-	return enc.Encode(resp)
-}
-
 func writeSocketResponse(conn net.Conn, resp SocketResponse) error {
 	enc := json.NewEncoder(conn)
 	enc.SetEscapeHTML(false)
 	return enc.Encode(resp)
 }
 
-func (d *Daemon) dispatch(req Request) Response {
-	switch req.Action {
-	case "status":
-		return Response{OK: true, Data: d.buildStatus()}
-	case "diagnose", "diagnose-connection", "doctor":
-		report := Diagnose(d.ctx, d.cfg, d.remote, d.checker, d.resolver, d.tlsChecker)
-		return Response{OK: true, Data: report}
-	case "open-ai", "open_ai", "openai", "hermes.open", "hermes_open":
-		if err := d.openAI(); err != nil {
-			return Response{OK: false, Error: err.Error()}
-		}
-		return Response{OK: true, Data: map[string]string{"result": "opened ai"}}
-	case "open-omahab", "open_omahab", "open-omahabd", "omahab.open":
-		if err := d.openOmahab(); err != nil {
-			return Response{OK: false, Error: err.Error()}
-		}
-		return Response{OK: true, Data: map[string]string{"result": "opened omahab"}}
-	case "project.fetch", "project_fetch", "fetch":
-		id, _ := req.Params["id"].(string)
-		if id == "" {
-			id, _ = req.Params["project_id"].(string)
-		}
-		if id == "" {
-			// Fetch all
-			go d.projects.FetchAll(context.Background())
-			return Response{OK: true, Data: map[string]string{"result": "fetch all started"}}
-		}
-		if err := d.projects.Fetch(context.Background(), domain.ID(id)); err != nil {
-			return Response{OK: false, Error: err.Error()}
-		}
-		return Response{OK: true, Data: map[string]string{"result": "fetched " + id}}
-	case "project.list", "projects", "list-projects":
-		return Response{OK: true, Data: d.projects.List()}
-	case "project.new", "project_new", "new-project", "project-new", "project.create", "project.create-request":
-		if err := d.launcher.OpenTerminal(os.Getenv("HOME")); err != nil {
-			return Response{OK: false, Error: err.Error()}
-		}
-		return Response{OK: true, Data: map[string]string{"result": "project new picker launched"}}
-	case "project.clone", "project_clone", "clone":
-		dir, _ := req.Params["dir"].(string)
-		urlStr, _ := req.Params["url"].(string)
-		if urlStr == "" {
-			urlStr, _ = req.Params["repository_url"].(string)
-		}
-		if dir == "" || urlStr == "" {
-			// No-param or partial: launch picker for available projects (clientd-owned, no CLI shell).
-			if err := d.launcher.OpenTerminal(filepath.Join(os.Getenv("HOME"), "Projects")); err != nil {
-				return Response{OK: false, Error: err.Error()}
-			}
-			return Response{OK: true, Data: map[string]string{"result": "clone picker launched"}}
-		}
-		if err := d.launcher.OpenTerminal(dir); err != nil {
-			return Response{OK: false, Error: err.Error()}
-		}
-		return Response{OK: true, Data: map[string]string{"result": "clone terminal opened"}}
-	case "runner.create", "runner_create", "workspace.create", "workspace_create", "runner.start", "runner.resume", "runner.startOrResume", "runner_start_or_resume", "runner.start-or-resume", "runner-start-or-resume":
-		projectSlug, _ := req.Params["project_slug"].(string)
-		if projectSlug == "" {
-			projectSlug, _ = req.Params["slug"].(string)
-		}
-		if projectSlug == "" {
-			projectSlug, _ = req.Params["project_id"].(string)
-		}
-		if projectSlug == "" {
-			projectSlug, _ = req.Params["project"].(string)
-		}
-		title, _ := req.Params["title"].(string)
-		if title == "" {
-			title, _ = req.Params["task_title"].(string)
-		}
-		if title == "" {
-			title, _ = req.Params["name"].(string)
-		}
-		instructions, _ := req.Params["instructions"].(string)
-		if projectSlug == "" || title == "" {
-			if err := d.launcher.OpenTerminal(os.Getenv("HOME")); err != nil {
-				return Response{OK: false, Error: err.Error()}
-			}
-			return Response{OK: true, Data: map[string]string{"result": "runner picker launched"}}
-		}
-		if d.remote == nil {
-			return Response{OK: false, Error: "not connected to server"}
-		}
-		ctx2, cancel := context.WithTimeout(d.ctx, 30*time.Second)
-		ws, err := d.remote.CreateCompanionWorkspace(ctx2, projectSlug, title, instructions)
-		cancel()
-		if err != nil {
-			return Response{OK: false, Error: err.Error()}
-		}
-		if ws.Status == "running" || ws.Status == "pending" {
-			host := d.serverHost()
-			if host == "" {
-				host = "omahab"
-			}
-			sshArgs := []string{"ssh", "-t", "omahab@" + host, "sudo", "omahab", "runner", "attach", string(ws.ID)}
-			if err := d.launcher.OpenTerminalCommand(sshArgs); err != nil {
-				return Response{OK: false, Error: err.Error()}
-			}
-		}
-		return Response{OK: true, Data: ws}
-	case "runner.attach", "runner_attach", "workspace.attach":
-		id, _ := req.Params["id"].(string)
-		if id == "" {
-			id, _ = req.Params["workspace_id"].(string)
-		}
-		if id == "" {
-			id, _ = req.Params["workspaceId"].(string)
-		}
-		if strings.TrimSpace(id) != "" {
-			host := d.serverHost()
-			if host == "" {
-				host = "omahab"
-			}
-			sshArgs := []string{"ssh", "-t", "omahab@" + host, "sudo", "omahab", "runner", "attach", id}
-			if err := d.launcher.OpenTerminalCommand(sshArgs); err != nil {
-				return Response{OK: false, Error: err.Error()}
-			}
-			return Response{OK: true, Data: map[string]string{"workspace_id": id, "result": "terminal opened"}}
-		}
-		dir, _ := req.Params["dir"].(string)
-		if dir == "" {
-			dir, _ = req.Params["local_path"].(string)
-		}
-		target := dir
-		if target == "" {
-			target = "."
-		}
-		if err := d.launcher.OpenTerminal(target); err != nil {
-			return Response{OK: false, Error: err.Error()}
-		}
-		return Response{OK: true, Data: map[string]string{"result": "terminal opened"}}
-	case "runner.list", "runner_list", "workspace.list", "workspace_list", "workspaces", "list-workspaces", "workspace-list":
-		if d.remote == nil {
-			return Response{OK: false, Error: "not connected to server"}
-		}
-		ctx2, cancel := context.WithTimeout(d.ctx, 10*time.Second)
-		list, err := d.remote.GetCompanionWorkspaces(ctx2)
-		cancel()
-		if err != nil {
-			return Response{OK: false, Error: err.Error()}
-		}
-		return Response{OK: true, Data: list}
-	case "sync.add", "sync_add", "sync_add_folder":
-		return Response{OK: false, Error: "sync add: use server API"}
-	case "launch.terminal", "terminal.open":
-		dir, _ := req.Params["dir"].(string)
-		if dir == "" {
-			dir = "."
-		}
-		if err := d.launcher.OpenTerminal(dir); err != nil {
-			return Response{OK: false, Error: err.Error()}
-		}
-		return Response{OK: true, Data: map[string]string{"result": "terminal opened"}}
-	case "launch.hermes", "hermes.launch":
-		u, _ := req.Params["url"].(string)
-		if u == "" {
-			u = d.aiURL()
-		}
-		if err := d.launcher.LaunchHermes(u); err != nil {
-			return Response{OK: false, Error: err.Error()}
-		}
-		return Response{OK: true, Data: map[string]string{"result": "hermes launched"}}
-	case "environment.sync", "environment_sync", "env.sync", "env_sync", "environment-sync", "env-sync":
-		if err := d.envSyncOnce(); err != nil {
-			return Response{OK: false, Error: sanitizeEnvError(err)}
-		}
-		return Response{OK: true, Data: map[string]string{"result": "environment synced", "detail": "Applied to new apps; restart existing apps"}}
-	case "environment.clear", "environment_clear", "env.clear", "env_clear", "environment-clear", "env-clear":
-		if err := d.envClear(); err != nil {
-			return Response{OK: false, Error: sanitizeEnvError(err)}
-		}
-		return Response{OK: true, Data: map[string]string{"result": "environment cleared"}}
-	case "environment.status", "environment_status", "env.status", "env_status":
-		rev, cnt, syncedAt, envErr := d.envManager.Status()
-		return Response{OK: true, Data: map[string]any{"revision": rev, "variable_count": cnt, "synced_at": syncedAt, "error": envErr}}
-	case "backup.run", "backup_run", "backupRun", "backup-run", "machine-backup.run", "backup-drive.run", "backup_drive.run":
-		if err := d.backupRunOnce(); err != nil {
-			return Response{OK: false, Error: err.Error()}
-		}
-		return Response{OK: true, Data: map[string]string{"result": "backup completed"}}
-	case "backup.status", "backup_status", "backupStatus", "backup-status", "machine-backup.status", "backup-drive.status", "backup_drive.status":
-		_ = d.backupStatusOnce()
-		d.mu.RLock()
-		snap := d.backupLastSnapshot
-		bErr := d.backupError
-		d.mu.RUnlock()
-		return Response{OK: true, Data: map[string]any{"last_snapshot": snap, "error": bErr}}
-	case "xai.oauth.connect", "xai_oauth.connect", "xai-oauth.connect", "xai.oauth_connect", "provider.xai.connect", "connect-xai":
-		if !d.buildStatus().HasXaiOAuthSession {
-			return Response{OK: false, Error: "no active xAI OAuth session assigned to this device"}
-		}
-		return Response{OK: true, Data: map[string]string{"result": "xai oauth connect initiated"}}
-	default:
-		return Response{OK: false, Error: fmt.Sprintf("unknown action %q", req.Action)}
-	}
-}
 
 func (d *Daemon) dispatchSocket(req SocketRequest) SocketResponse {
 	switch req.Method {
 	case "status":
 		return SocketResponse{ID: req.ID, Result: d.buildStatus()}
-	case "connection.diagnose", "diagnose", "doctor":
+	case "diagnose":
 		report := Diagnose(d.ctx, d.cfg, d.remote, d.checker, d.resolver, d.tlsChecker)
 		return SocketResponse{ID: req.ID, Result: report}
-	case "hermes.open", "open-ai", "open_ai", "openai":
+	case "ai.open":
 		if err := d.openAI(); err != nil {
 			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: err.Error()}}
 		}
 		return SocketResponse{ID: req.ID, Result: map[string]string{"result": "opened ai"}}
-	case "dashboard.open", "open-omahab", "open_omahab":
+	case "dashboard.open":
 		if err := d.openOmahab(); err != nil {
 			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: err.Error()}}
 		}
 		return SocketResponse{ID: req.ID, Result: map[string]string{"result": "opened omahab"}}
-	case "project.new", "project_new", "new-project", "project-new", "project.create":
-		if err := d.launcher.OpenTerminal(os.Getenv("HOME")); err != nil {
+	case "project.list":
+		return SocketResponse{ID: req.ID, Result: d.projects.List()}
+	case "project.clone":
+		slug, _ := req.Params["slug"].(string)
+		slug = strings.TrimSpace(slug)
+		if slug == "" {
+			if v, ok := req.Params["project_id"].(string); ok {
+				slug = strings.TrimSpace(v)
+			}
+		}
+		if slug == "" {
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "bad_request", Message: "slug required"}}
+		}
+		dir, _ := req.Params["dir"].(string)
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			home, _ := os.UserHomeDir()
+			if home == "" {
+				home = os.Getenv("HOME")
+			}
+			dir = filepath.Join(home, "Projects", slug)
+		}
+		if d.remote == nil {
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: "not connected to server"}}
+		}
+		ctx2, cancel := context.WithTimeout(d.ctx, 30*time.Second)
+		projects, err := d.remote.GetCompanionProjects(ctx2)
+		cancel()
+		if err != nil {
 			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: err.Error()}}
 		}
-		return SocketResponse{ID: req.ID, Result: map[string]string{"result": "project new picker launched"}}
-	case "project.clone", "project_clone", "clone":
-		dir, _ := req.Params["dir"].(string)
-		urlStr, _ := req.Params["url"].(string)
-		if urlStr == "" {
-			urlStr, _ = req.Params["repository_url"].(string)
-		}
-		if slug, ok := req.Params["slug"].(string); ok && urlStr == "" && dir == "" && slug != "" {
-			// parameterized clone via slug
-			dir = filepath.Join(os.Getenv("HOME"), "Projects", slug)
-			urlStr = slug
-		}
-		if dir == "" || urlStr == "" {
-			if err := d.launcher.OpenTerminal(filepath.Join(os.Getenv("HOME"), "Projects")); err != nil {
-				return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: err.Error()}}
+		var proj *domain.Project
+		for i := range projects {
+			if projects[i].Slug == slug || string(projects[i].ID) == slug {
+				proj = &projects[i]
+				break
 			}
-			return SocketResponse{ID: req.ID, Result: map[string]string{"result": "clone picker launched"}}
+		}
+		if proj == nil {
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "not_found", Message: fmt.Sprintf("project %q not found", slug)}}
+		}
+		cloneURL := strings.TrimSpace(proj.RepositoryURL)
+		if cloneURL == "" {
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: "project has no repository_url"}}
+		}
+		if _, err := os.Stat(dir); err == nil {
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "conflict", Message: fmt.Sprintf("destination %q already exists", dir)}}
+		}
+		if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: err.Error()}}
+		}
+		ctx3, cancel3 := context.WithTimeout(d.ctx, 2*time.Minute)
+		cmd := exec.CommandContext(ctx3, "git", "clone", cloneURL, dir)
+		out, err := cmd.CombinedOutput()
+		cancel3()
+		if err != nil {
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: fmt.Sprintf("git clone failed: %v: %s", err, string(out))}}
+		}
+		if d.projects != nil {
+			d.projects.Upsert(*proj, dir)
 		}
 		if err := d.launcher.OpenTerminal(dir); err != nil {
 			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: err.Error()}}
 		}
-		return SocketResponse{ID: req.ID, Result: map[string]string{"result": "clone terminal opened"}}
+		return SocketResponse{ID: req.ID, Result: map[string]string{"project_id": string(proj.ID), "slug": slug, "dir": dir, "clone_url": cloneURL}}
 	case "project.open":
 		slug, _ := req.Params["slug"].(string)
 		if slug == "" {
@@ -654,36 +468,36 @@ func (d *Daemon) dispatchSocket(req SocketRequest) SocketResponse {
 			}
 		}
 		if dir == "" {
-			dir = filepath.Join(os.Getenv("HOME"), "Projects", slug)
+			home, _ := os.UserHomeDir()
+			if home == "" {
+				home = os.Getenv("HOME")
+			}
+			dir = filepath.Join(home, "Projects", slug)
 		}
 		if err := d.launcher.OpenTerminal(dir); err != nil {
 			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: err.Error()}}
 		}
 		return SocketResponse{ID: req.ID, Result: map[string]string{"project_id": slug, "dir": dir}}
-	case "runner.startOrResume", "runner.start-or-resume", "runner.start", "runner.resume", "runner.create", "runner_create", "runner-start-or-resume", "workspace.create", "workspace_create":
+	case "workspace.list":
+		if d.remote == nil {
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: "not connected to server"}}
+		}
+		ctx2, cancel := context.WithTimeout(d.ctx, 10*time.Second)
+		list, err := d.remote.GetCompanionWorkspaces(ctx2)
+		cancel()
+		if err != nil {
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: err.Error()}}
+		}
+		return SocketResponse{ID: req.ID, Result: list}
+	case "workspace.create":
 		projectSlug, _ := req.Params["project_slug"].(string)
 		if projectSlug == "" {
 			projectSlug, _ = req.Params["slug"].(string)
 		}
-		if projectSlug == "" {
-			projectSlug, _ = req.Params["project_id"].(string)
-		}
-		if projectSlug == "" {
-			projectSlug, _ = req.Params["project"].(string)
-		}
 		title, _ := req.Params["title"].(string)
-		if title == "" {
-			title, _ = req.Params["task_title"].(string)
-		}
-		if title == "" {
-			title, _ = req.Params["name"].(string)
-		}
 		instructions, _ := req.Params["instructions"].(string)
 		if projectSlug == "" || title == "" {
-			if err := d.launcher.OpenTerminal(os.Getenv("HOME")); err != nil {
-				return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: err.Error()}}
-			}
-			return SocketResponse{ID: req.ID, Result: map[string]string{"result": "runner picker launched"}}
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "bad_request", Message: "project_slug and title required"}}
 		}
 		if d.remote == nil {
 			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: "not connected to server"}}
@@ -699,26 +513,23 @@ func (d *Daemon) dispatchSocket(req SocketRequest) SocketResponse {
 			if host == "" {
 				host = "omahab"
 			}
-			sshArgs := []string{"ssh", "-t", "omahab@" + host, "sudo", "omahab", "runner", "attach", string(ws.ID)}
+			sshArgs := []string{"ssh", "-t", "omahab@" + host, "sudo", "omahab", "workspace", "attach", string(ws.ID)}
 			if err := d.launcher.OpenTerminalCommand(sshArgs); err != nil {
 				return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: err.Error()}}
 			}
 		}
 		return SocketResponse{ID: req.ID, Result: ws}
-	case "runner.attach", "runner_attach", "workspace.attach":
-		id, _ := req.Params["workspace_id"].(string)
+	case "workspace.attach":
+		id, _ := req.Params["id"].(string)
 		if id == "" {
-			id, _ = req.Params["id"].(string)
-		}
-		if id == "" {
-			id, _ = req.Params["workspaceId"].(string)
+			id, _ = req.Params["workspace_id"].(string)
 		}
 		if strings.TrimSpace(id) != "" {
 			host := d.serverHost()
 			if host == "" {
 				host = "omahab"
 			}
-			sshArgs := []string{"ssh", "-t", "omahab@" + host, "sudo", "omahab", "runner", "attach", id}
+			sshArgs := []string{"ssh", "-t", "omahab@" + host, "sudo", "omahab", "workspace", "attach", id}
 			if err := d.launcher.OpenTerminalCommand(sshArgs); err != nil {
 				return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: err.Error()}}
 			}
@@ -735,60 +546,54 @@ func (d *Daemon) dispatchSocket(req SocketRequest) SocketResponse {
 			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: err.Error()}}
 		}
 		return SocketResponse{ID: req.ID, Result: map[string]string{"workspace_id": id, "result": "terminal opened"}}
-	case "runner.list", "runner_list", "workspace.list", "workspace_list", "workspaces", "list-workspaces", "workspace-list":
+	case "workspace.stop":
+		id, _ := req.Params["id"].(string)
+		if strings.TrimSpace(id) == "" {
+			id, _ = req.Params["workspace_id"].(string)
+		}
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "bad_request", Message: "id required"}}
+		}
 		if d.remote == nil {
 			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: "not connected to server"}}
 		}
-		ctx2, cancel := context.WithTimeout(d.ctx, 10*time.Second)
-		list, err := d.remote.GetCompanionWorkspaces(ctx2)
+		ctx2, cancel := context.WithTimeout(d.ctx, 15*time.Second)
+		err := d.remote.StopCompanionWorkspace(ctx2, id)
 		cancel()
 		if err != nil {
 			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: err.Error()}}
 		}
-		return SocketResponse{ID: req.ID, Result: list}
-	case "sync.add":
-		name, _ := req.Params["name"].(string)
-		if strings.TrimSpace(name) == "" {
-			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "bad_request", Message: "name required"}}
-		}
-		if err := d.launcher.OpenTerminal(os.Getenv("HOME")); err != nil {
-			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: err.Error()}}
-		}
-		return SocketResponse{ID: req.ID, Result: map[string]string{"name": name, "result": "sync picker launched"}}
-	case "environment.sync", "environment_sync", "env.sync", "env_sync", "environment-sync", "env-sync":
+		return SocketResponse{ID: req.ID, Result: map[string]string{"workspace_id": id, "result": "stopped"}}
+	case "environment.sync":
 		if err := d.envSyncOnce(); err != nil {
 			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: sanitizeEnvError(err)}}
 		}
 		return SocketResponse{ID: req.ID, Result: map[string]string{"result": "environment synced", "detail": "Applied to new apps; restart existing apps"}}
-	case "environment.clear", "environment_clear", "env.clear", "env_clear", "environment-clear", "env-clear":
+	case "environment.clear":
 		if err := d.envClear(); err != nil {
 			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: sanitizeEnvError(err)}}
 		}
 		return SocketResponse{ID: req.ID, Result: map[string]string{"result": "environment cleared"}}
-	case "environment.status", "environment_status", "env.status", "env_status":
+	case "environment.status":
 		rev, cnt, syncedAt, envErr := d.envManager.Status()
 		return SocketResponse{ID: req.ID, Result: map[string]any{"revision": rev, "variable_count": cnt, "synced_at": syncedAt, "error": envErr}}
-	case "backup.run", "backup_run", "backupRun", "backup-run", "machine-backup.run", "backup-drive.run", "backup_drive.run":
+	case "backup.run":
 		if err := d.backupRunOnce(); err != nil {
 			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: err.Error()}}
 		}
 		return SocketResponse{ID: req.ID, Result: map[string]string{"result": "backup completed"}}
-	case "backup.status", "backup_status", "backupStatus", "backup-status", "machine-backup.status", "backup-drive.status", "backup_drive.status":
+	case "backup.status":
 		_ = d.backupStatusOnce()
 		d.mu.RLock()
 		snap := d.backupLastSnapshot
 		bErr := d.backupError
 		d.mu.RUnlock()
 		return SocketResponse{ID: req.ID, Result: map[string]any{"last_snapshot": snap, "error": bErr}}
-	case "xai.oauth.connect", "xai_oauth.connect", "xai-oauth.connect", "xai.oauth_connect", "provider.xai.connect", "connect-xai":
-		// xAI loopback OAuth connect — requires companion enrollment with allow_provider_oauth and active session assigned to this device.
-		// No secrets in response; actual relay is via omahab provider login xai or companion port 56121.
-		if !d.buildStatus().HasXaiOAuthSession {
-			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "not_found", Message: "no active xAI OAuth session assigned to this device"}}
-		}
-		return SocketResponse{ID: req.ID, Result: map[string]string{"result": "xai oauth connect initiated"}}
+	case "subscribe":
+		return SocketResponse{ID: req.ID, Result: map[string]string{"result": "subscribed"}}
 	default:
-		return SocketResponse{ID: req.ID, Error: &SocketError{Code: "bad_request", Message: fmt.Sprintf("unknown method %q", req.Method)}}
+		return SocketResponse{ID: req.ID, Error: &SocketError{Code: "unknown_method", Message: fmt.Sprintf("unknown method %q", req.Method)}}
 	}
 }
 

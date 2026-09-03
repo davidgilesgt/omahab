@@ -446,6 +446,23 @@ func (c *RemoteClient) CreateCompanionWorkspace(ctx context.Context, projectSlug
 	}
 	return &out, nil
 }
+
+// StopCompanionWorkspace stops a workspace via device endpoint.
+func (c *RemoteClient) StopCompanionWorkspace(ctx context.Context, id string) error {
+	auth, err := c.deviceAuthHeader()
+	if err != nil {
+		return err
+	}
+	if auth == "" {
+		return ErrNotAuthenticated
+	}
+	if strings.TrimSpace(id) == "" {
+		return fmt.Errorf("workspace id required")
+	}
+	path := "/api/v1/companion/workspaces/" + url.PathEscape(id) + "/stop"
+	return c.doWithAuth(ctx, http.MethodPost, path, auth, strings.NewReader("{}"), nil)
+}
+
 // GetCompanionEnvironment fetches the tool-environment bundle via device endpoint.
 // It returns a map of name->value and ETag for caching (If-None-Match -> 304).
 func (c *RemoteClient) GetCompanionEnvironment(ctx context.Context) (map[string]string, string, error) {

@@ -789,6 +789,16 @@ func (s *Server) handleCompanionCreateWorkspace(w http.ResponseWriter, r *http.R
 	writeJSON(w, http.StatusCreated, ws)
 }
 
+func (s *Server) handleCompanionStopWorkspace(w http.ResponseWriter, r *http.Request) {
+	id := domain.ID(chi.URLParam(r, "id"))
+	ws, err := s.backend.StopWorkspace(r.Context(), id)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, ws)
+}
+
 // --- users / identity ---
 
 func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {

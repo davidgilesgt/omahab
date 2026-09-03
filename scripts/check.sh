@@ -44,7 +44,30 @@ grep -q 'ConditionPathExists = "${appEnv}/${bundle}.env"' nix/apps.nix && pass "
 pat="apps-catalog"; pat+=".json"
 ! grep -rn "$pat" --include="*.go" --include="*.nix" --include="*.sh" --include="*.md" --include="*.json" . 2>/dev/null | grep -q . && pass "no apps-catalog ref" || fail_check "apps-catalog ref present"
 ! grep -q "docker compose" deploy/catalog/catalog.json && pass "catalog no docker compose" || fail_check "catalog contains docker compose"
-# Go vet + build.
+# Catalog ↔ nix/apps.nix drift (A5): every catalog units[] must exist in nix/apps.nix.
+if command -v jq >/dev/null 2>&1; then
+  missing=0
+  while IFS= read -r unit; do
+    case "$unit" in
+      woodpecker-agent-docker.service) pattern="woodpecker-agents.agents.docker" ;;
+      immich-machine-learning.service) pattern="services.immich" ;;
+      paperless-consumer.service|paperless-scheduler.service|paperless-tika.service|paperless-gotenberg.service) pattern="services.paperless" ;;
+      restic-rest-server.service) pattern="services.restic.server" ;;
+      *) pattern="${unit%.service}" ;;
+    esac
+    if ! grep -qF "$pattern" nix/apps.nix; then
+      echo "FAIL: catalog unit $unit (pattern $pattern) missing in nix/apps.nix" >&2
+      missing=1
+    fi
+  done < <(jq -r '.bundles[].units[]' deploy/catalog/catalog.json)
+  if [[ $missing -eq 0 ]]; then
+    pass "catalog units exist in nix/apps.nix"
+  else
+    fail_check "catalog ↔ nix unit drift"
+  fi
+else
+  fail_check "jq not found for catalog unit check"
+fi
 if command -v go >/dev/null 2>&1; then
   go build ./... && pass "go build" || fail_check "go build"
   go vet ./... && pass "go vet" || fail_check "go vet"

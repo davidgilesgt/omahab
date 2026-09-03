@@ -1,48 +1,29 @@
 package apiclient
 
 import (
-	"bytes"
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net"
-	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/omahab/omahab/internal/client"
 )
 
-// ClientdClient talks to omahab-clientd over a Unix domain socket.
+// ClientdClient talks to omahab-clientd over a Unix domain socket via NDJSON.
 // The shell plugin (QML) also talks to this daemon; the CLI delegates
-// desktop actions (hermes open, project clone/open, runner attach) there
-// when available.
+// desktop actions there when available. Wire format is SocketRequest/SocketResponse
+// (newline-delimited JSON) with canonical method names defined in companion/PROTOCOL.md.
 type ClientdClient struct {
 	SocketPath string
-	HTTPClient *http.Client
 }
 
 // DefaultClientdSocketPath returns the Unix socket path.
-// Precedence: OMAHAB_CLIENTD_SOCKET env, $XDG_RUNTIME_DIR, /run/user/<uid>, temp fallback.
+// Single canonical implementation lives in internal/client/config.go.
 func DefaultClientdSocketPath() string {
-	if p := os.Getenv("OMAHAB_CLIENTD_SOCKET"); p != "" {
-		return p
-	}
-	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" {
-		return filepath.Join(dir, "omahab-clientd.sock")
-	}
-	// Try /run/user/<uid>
-	uid := os.Getuid()
-	candidate := filepath.Join("/run", "user", fmt.Sprint(uid), "omahab-clientd.sock")
-	if _, err := os.Stat(filepath.Dir(candidate)); err == nil {
-		return candidate
-	}
-	// Fallback to XDG config runtime dir
-	home, _ := os.UserHomeDir()
-	if home != "" {
-		return filepath.Join(home, ".config", "omahab", "clientd.sock")
-	}
-	return filepath.Join(os.TempDir(), "omahab-clientd.sock")
+	return client.DefaultSocketPath()
 }
 
 // NewClientdClient creates a client bound to socketPath.
@@ -50,24 +31,13 @@ func NewClientdClient(socketPath string) *ClientdClient {
 	if socketPath == "" {
 		socketPath = DefaultClientdSocketPath()
 	}
-	transport := &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			d := net.Dialer{Timeout: 3 * time.Second}
-			return d.DialContext(ctx, "unix", socketPath)
-		},
-	}
-	return &ClientdClient{
-		SocketPath: socketPath,
-		HTTPClient: &http.Client{
-			Transport: transport,
-			Timeout:   15 * time.Second,
-		},
-	}
+	return &ClientdClient{SocketPath: socketPath}
 }
 
 // Available reports whether the socket exists and is dialable.
 func (c *ClientdClient) Available(ctx context.Context) bool {
-	conn, err := (&net.Dialer{Timeout: 2 * time.Second}).DialContext(ctx, "unix", c.SocketPath)
+	d := net.Dialer{Timeout: 2 * time.Second}
+	conn, err := d.DialContext(ctx, "unix", c.SocketPath)
 	if err != nil {
 		return false
 	}
@@ -75,108 +45,96 @@ func (c *ClientdClient) Available(ctx context.Context) bool {
 	return true
 }
 
-func (c *ClientdClient) doJSON(ctx context.Context, method, path string, body any, out any) error {
-	var reqBody []byte
-	var err error
-	if body != nil {
-		reqBody, err = json.Marshal(body)
-		if err != nil {
-			return err
-		}
+// ClientdError is the typed error returned when the daemon replies with {"error":{"code":...}}.
+type ClientdError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+func (e *ClientdError) Error() string {
+	if e.Message != "" {
+		return e.Code + ": " + e.Message
 	}
-	// Use http://unix as dummy host for unix transport.
-	url := "http://unix" + path
-	var req *http.Request
-	if reqBody != nil {
-		req, err = http.NewRequestWithContext(ctx, method, url, bytes.NewReader(reqBody))
-		if err != nil {
-			return err
-		}
-		req.Header.Set("Content-Type", "application/json")
-	} else {
-		req, err = http.NewRequestWithContext(ctx, method, url, nil)
-		if err != nil {
-			return err
-		}
+	return e.Code
+}
+
+// Call performs a typed NDJSON call: {"id":..., "method":..., "params":...} -> {"id":..., "result":..., "error":...}.
+// out may be nil; when non-nil and the daemon returns a result, it is JSON-decoded into out.
+func (c *ClientdClient) Call(ctx context.Context, method string, params map[string]any, out any) error {
+	method = strings.TrimSpace(method)
+	if method == "" {
+		return fmt.Errorf("method required")
 	}
-	resp, err := c.HTTPClient.Do(req)
+	// Generate simple request id.
+	id := fmt.Sprintf("%d", time.Now().UnixNano())
+	req := client.SocketRequest{ID: id, Method: method, Params: params}
+	data, err := json.Marshal(req)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return parseAPIError(resp)
+	d := net.Dialer{}
+	conn, err := d.DialContext(ctx, "unix", c.SocketPath)
+	if err != nil {
+		return err
 	}
-	if out != nil {
-		return json.NewDecoder(resp.Body).Decode(out)
+	defer conn.Close()
+
+	// Context-aware deadlines.
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	} else {
+		_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	}
+
+	if _, err := conn.Write(append(data, '\n')); err != nil {
+		return err
+	}
+
+	br := bufio.NewReader(conn)
+	var buf strings.Builder
+	tmp := make([]byte, 4096)
+	for {
+		// Respect context cancellation while reading.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		n, rerr := br.Read(tmp)
+		if n > 0 {
+			buf.Write(tmp[:n])
+			trimmed := strings.TrimSpace(buf.String())
+			if trimmed != "" && json.Valid([]byte(trimmed)) && br.Buffered() == 0 {
+				break
+			}
+			if buf.Len() > 1<<20 {
+				return fmt.Errorf("response too large")
+			}
+		}
+		if rerr != nil {
+			break
+		}
+	}
+	raw := strings.TrimSpace(buf.String())
+	if raw == "" {
+		return fmt.Errorf("empty response from daemon")
+	}
+	var resp client.SocketResponse
+	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
+		return fmt.Errorf("invalid daemon response: %w: %s", err, raw)
+	}
+	if resp.Error != nil {
+		return &ClientdError{Code: resp.Error.Code, Message: resp.Error.Message}
+	}
+	if out != nil && resp.Result != nil {
+		// Re-marshal Result then unmarshal into out to handle any destination type.
+		b, err := json.Marshal(resp.Result)
+		if err != nil {
+			return err
+		}
+		if err := json.Unmarshal(b, out); err != nil {
+			return err
+		}
 	}
 	return nil
 }
-
-// HermesOpen instructs clientd to open Hermes Desktop/browser at the given URL.
-func (c *ClientdClient) HermesOpen(ctx context.Context, url string) error {
-	return c.doJSON(ctx, http.MethodPost, "/v1/hermes/open", map[string]string{"url": url}, nil)
-}
-
-// ProjectClone instructs clientd to clone a project locally.
-func (c *ClientdClient) ProjectClone(ctx context.Context, projectID, destDir string) error {
-	return c.doJSON(ctx, http.MethodPost, "/v1/projects/clone", map[string]string{
-		"project_id": projectID,
-		"dest_dir":   destDir,
-	}, nil)
-}
-
-// ProjectOpen instructs clientd to open a project in the editor/terminal.
-func (c *ClientdClient) ProjectOpen(ctx context.Context, projectID string) error {
-	return c.doJSON(ctx, http.MethodPost, "/v1/projects/open", map[string]string{
-		"project_id": projectID,
-	}, nil)
-}
-
-// RunnerAttach attaches to a workspace/runner via clientd terminal.
-func (c *ClientdClient) RunnerAttach(ctx context.Context, workspaceID string) error {
-	return c.doJSON(ctx, http.MethodPost, "/v1/workspaces/attach", map[string]string{
-		"workspace_id": workspaceID,
-	}, nil)
-}
-
-// SyncAdd delegates Syncthing folder enrollment to clientd when possible.
-func (c *ClientdClient) SyncAdd(ctx context.Context, name, serverPath string, shareWithAI bool) error {
-	return c.doJSON(ctx, http.MethodPost, "/v1/sync/add", map[string]any{
-		"name":          name,
-		"server_path":   serverPath,
-		"share_with_ai": shareWithAI,
-	}, nil)
-}
-
-// Status returns clientd health/status for diagnostics.
-func (c *ClientdClient) Status(ctx context.Context) (map[string]any, error) {
-	var out map[string]any
-	err := c.doJSON(ctx, http.MethodGet, "/v1/status", nil, &out)
-	return out, err
-}
-
-// ProjectCreate asks clientd to create a new project (or launch picker when name empty).
-func (c *ClientdClient) ProjectCreate(ctx context.Context, name, slug string) error {
-	if strings.TrimSpace(name) == "" && strings.TrimSpace(slug) == "" {
-		return c.doJSON(ctx, http.MethodPost, "/v1/projects/new", map[string]string{}, nil)
-	}
-	return c.doJSON(ctx, http.MethodPost, "/v1/projects/create", map[string]string{"name": name, "slug": slug}, nil)
-}
-
-// ProjectNew launches clientd's no-param project creation picker.
-func (c *ClientdClient) ProjectNew(ctx context.Context) error {
-	return c.doJSON(ctx, http.MethodPost, "/v1/projects/new", map[string]string{}, nil)
-}
-
-// WorkspaceStartOrResume launches clientd's picker to start or resume a runner without params.
-func (c *ClientdClient) WorkspaceStartOrResume(ctx context.Context) error {
-	return c.doJSON(ctx, http.MethodPost, "/v1/workspaces/startOrResume", map[string]string{}, nil)
-}
-
-// DashboardOpen asks clientd to open the dashboard URL after private-route gate.
-func (c *ClientdClient) DashboardOpen(ctx context.Context) error {
-	return c.doJSON(ctx, http.MethodPost, "/v1/dashboard/open", map[string]string{}, nil)
-}
-
-// jsonReader helpers removed; bytes.NewReader used directly.

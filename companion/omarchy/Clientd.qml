@@ -8,7 +8,7 @@ Item {
   property int refreshIntervalSec: 15
 
   readonly property string socketPath: {
-    var configured = String(Quickshell.env("OMAHAB_SOCKET") || "")
+    var configured = String(Quickshell.env("OMAHAB_CLIENTD_SOCKET") || "")
     if (configured !== "") return configured
     var runtimeDir = String(Quickshell.env("XDG_RUNTIME_DIR") || "")
     if (runtimeDir !== "") return runtimeDir + "/omahab-clientd.sock"

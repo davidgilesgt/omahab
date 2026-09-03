@@ -363,6 +363,7 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/api/v1/companion/projects", s.handleCompanionProjects)
 		r.Get("/api/v1/companion/workspaces", s.handleCompanionListWorkspaces)
 		r.Post("/api/v1/companion/workspaces", s.withBodyLimit(defaultBodyLimit, s.handleCompanionCreateWorkspace))
+		r.Post("/api/v1/companion/workspaces/{id}/stop", s.handleCompanionStopWorkspace)
 		r.Get("/api/v1/companion/environment", s.handleGetCompanionEnvironment)
 		r.Post("/api/v1/provider-oauth/{provider}/callback/{session_id}", s.withBodyLimit(defaultBodyLimit, s.handleForwardProviderOAuthCallback))
 	})
@@ -520,7 +521,7 @@ func (s *Server) deviceAuth(next http.Handler) http.Handler {
 		}
 		dev, err := s.environments.ValidateDeviceToken(r.Context(), token)
 		if err != nil {
-		if errors.Is(err, companion.ErrRevoked) {
+			if errors.Is(err, companion.ErrRevoked) {
 				writeError(w, r, errForbidden("device revoked"))
 				return
 			}
@@ -530,6 +531,7 @@ func (s *Server) deviceAuth(next http.Handler) http.Handler {
 		// Set device context for handlers.
 		ctx := context.WithValue(r.Context(), companion.DeviceIDKey, dev.ID)
 		ctx = context.WithValue(ctx, companion.DeviceKey, dev)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 

@@ -6,7 +6,7 @@ import { useEventStream } from "./useEventStream";
 const NAVIGATION = [
   ["/", "Overview", "⌂", "Home overview"],
   ["/setup", "Setup", "✓", "Continue setup"],
-  ["/applications", "Applications", "▦", "Platform apps"],
+  ["/applications", "Services", "▦", "Platform services"],
   ["/projects", "Projects", "⌘", "ONCE projects"],
   ["/backups", "Backups", "↺", "Backup status"],
   ["/events", "Inbox", "●", "Event inbox"],

@@ -65,9 +65,10 @@ var openAICmd = &cobra.Command{
 	Use:   "open-ai",
 	Short: "Open AI (Hermes) via daemon",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return queryDaemon("open-ai", nil)
+		return queryDaemon("ai.open", nil)
 	},
 }
+
 
 var enrollCmd = &cobra.Command{
 	Use:   "enroll",
@@ -245,7 +246,7 @@ func runEnroll() error {
 	return nil
 }
 
-func queryDaemon(action string, params map[string]any) error {
+func queryDaemon(method string, params map[string]any) error {
 	cfg, _, err := loadConfig()
 	if err != nil {
 		return err
@@ -254,7 +255,6 @@ func queryDaemon(action string, params map[string]any) error {
 	if socketPath != "" {
 		sock = socketPath
 	}
-	// Also check default if config missing.
 	if sock == "" {
 		sock = client.DefaultSocketPath()
 	}
@@ -264,13 +264,11 @@ func queryDaemon(action string, params map[string]any) error {
 	}
 	defer conn.Close()
 
-	req := client.Request{Action: action, Params: params}
+	req := client.SocketRequest{ID: "1", Method: method, Params: params}
 	data, _ := json.Marshal(req)
-	// Newline-delimited JSON (NDJSON) — one object per line.
 	if _, err := conn.Write(append(data, '\n')); err != nil {
 		return err
 	}
-	// Read response (single JSON object, newline or EOF).
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	br := bufio.NewReader(conn)
 	var respBuf strings.Builder
@@ -292,20 +290,18 @@ func queryDaemon(action string, params map[string]any) error {
 	if raw == "" {
 		return fmt.Errorf("empty response from daemon")
 	}
-	var resp client.Response
+	var resp client.SocketResponse
 	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
-		// Try to show raw for debugging (no credentials in response).
 		return fmt.Errorf("invalid response: %w: %s", err, raw)
 	}
-	if !resp.OK {
-		return fmt.Errorf("%s failed: %s", action, resp.Error)
+	if resp.Error != nil {
+		return fmt.Errorf("%s failed: %s (%s)", method, resp.Error.Message, resp.Error.Code)
 	}
-	// Pretty-print data.
-	if resp.Data != nil {
+	if resp.Result != nil {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetEscapeHTML(false)
 		enc.SetIndent("", "  ")
-		_ = enc.Encode(resp.Data)
+		_ = enc.Encode(resp.Result)
 	} else {
 		fmt.Fprintln(os.Stdout, raw)
 	}

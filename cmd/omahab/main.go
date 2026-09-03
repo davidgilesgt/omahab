@@ -1063,9 +1063,9 @@ func newProjectCmd() *cobra.Command {
 					home, _ := os.UserHomeDir()
 					dest = filepath.Join(home, "projects", p.Slug)
 				}
-				if err := cd.ProjectClone(ctx, string(p.ID), dest); err != nil {
+				if err := cd.Call(ctx, "project.clone", map[string]any{"slug": p.Slug, "dir": dest}, nil); err != nil {
 					return handleFailure(err)
-}
+				}
 				if flagJSON {
 					return printJSON(map[string]string{"cloned": string(p.ID), "path": dest})
 				}
@@ -1101,9 +1101,9 @@ func newProjectCmd() *cobra.Command {
 		}
 			cd := clientd()
 			if cd.Available(ctx) {
-				if err := cd.ProjectOpen(ctx, string(p.ID)); err != nil {
+				if err := cd.Call(ctx, "project.open", map[string]any{"slug": p.Slug}, nil); err != nil {
 					return handleFailure(err)
-}
+				}
 				if flagJSON {
 					return printJSON(map[string]string{"opened": string(p.ID)})
 				}
@@ -1709,12 +1709,7 @@ func newSyncCmd() *cobra.Command {
 			// Try server first
 			f, err := c.CreateSyncFolder(ctx, apiclient.CreateSyncFolderRequest{Name: addName, ServerPath: addPath, ShareWithAI: addShare})
 			if err != nil {
-			return handleFailure(err)
-		}
-			// Best-effort clientd enrollment
-			cd := clientd()
-			if cd.Available(ctx) {
-				_ = cd.SyncAdd(ctx, addName, addPath, addShare)
+				return handleFailure(err)
 			}
 			if flagJSON {
 				return printJSON(f)
@@ -1769,10 +1764,10 @@ func newSyncCmd() *cobra.Command {
 
 func newRunnerCmd() *cobra.Command {
 	runner := &cobra.Command{
-		Use:     "runner",
-		Short:   "Manage remote runners (workspaces)",
-		Long:    "Remote Dev Container workspaces for projects. Alias: workspace.",
-		Aliases: []string{"runners"},
+		Use:     "workspace",
+		Short:   "Manage workspaces",
+		Long:    "Remote Dev Container workspaces for projects.",
+		Aliases: []string{"workspaces", "ws"},
 	}
 	runner.AddCommand(&cobra.Command{
 		Use:     "list",
@@ -1898,7 +1893,7 @@ func newRunnerCmd() *cobra.Command {
 			defer cancel()
 			cd := clientd()
 			if cd.Available(ctx) {
-				if err := cd.RunnerAttach(ctx, args[0]); err != nil {
+				if err := cd.Call(ctx, "workspace.attach", map[string]any{"id": args[0]}, nil); err != nil {
 					return handleFailure(err)
 				}
 				if flagJSON {
@@ -2008,8 +2003,8 @@ func newRunnerCmd() *cobra.Command {
 			if !cd.Available(ctx) {
 				err := errors.New("clientd not available")
 				return handleFailure(err)
-}
-			return cd.RunnerAttach(ctx, args[0])
+			}
+			return cd.Call(ctx, "workspace.attach", map[string]any{"id": args[0]}, nil)
 		},
 	})
 
@@ -2017,11 +2012,13 @@ func newRunnerCmd() *cobra.Command {
 }
 
 func newWorkspaceCmd() *cobra.Command {
-	// Alias to runner with Use workspace
+	// Hidden alias for backward compatibility: runner -> workspace
 	ws := newRunnerCmd()
-	ws.Use = "workspace"
-	ws.Aliases = []string{"workspaces", "ws"}
-	ws.Short = "Manage workspaces (alias for runner)"
+	ws.Use = "runner"
+	ws.Aliases = []string{"runners"}
+	ws.Short = "Manage remote runners (workspaces) (hidden alias for workspace)"
+	ws.Long = "Hidden alias for workspace. Use workspace instead."
+	ws.Hidden = true
 	return ws
 }
 
@@ -2171,9 +2168,9 @@ func newHermesCmd() *cobra.Command {
 			}
 			cd := clientd()
 			if cd.Available(ctx) {
-				if err := cd.HermesOpen(ctx, targetURL); err != nil {
+				if err := cd.Call(ctx, "ai.open", map[string]any{"url": targetURL}, nil); err != nil {
 					return handleFailure(err)
-}
+				}
 				if flagJSON {
 					return printJSON(map[string]string{"opened": targetURL})
 				}

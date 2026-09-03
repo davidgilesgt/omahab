@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"os"
 	"strings"
 	"time"
@@ -193,115 +192,33 @@ func newEnvClearCmd() *cobra.Command {
 
 // fetchClientdStatus dials clientd socket and returns status map (including env fields).
 func fetchClientdStatus() (map[string]any, error) {
-	sock := apiclient.DefaultClientdSocketPath()
-	// Also try client config override.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c := apiclient.NewClientdClient("")
 	if cfg, _, err := loadClientConfigForEnv(); err == nil && cfg != nil {
 		if p := cfg.EffectiveSocketPath(); p != "" {
-			sock = p
+			c.SocketPath = p
 		}
 	}
-	conn, err := net.DialTimeout("unix", sock, 3*time.Second)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-	req := client.SocketRequest{ID: "1", Method: "status", Params: map[string]any{}}
-	data, _ := json.Marshal(req)
-	if _, err := conn.Write(append(data, '\n')); err != nil {
-		return nil, err
-	}
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	br := bufio.NewReader(conn)
-	var buf strings.Builder
-	tmp := make([]byte, 4096)
-	for {
-		n, rerr := br.Read(tmp)
-		if n > 0 {
-			buf.Write(tmp[:n])
-			trimmed := strings.TrimSpace(buf.String())
-			if trimmed != "" && json.Valid([]byte(trimmed)) && br.Buffered() == 0 {
-				break
-			}
-		}
-		if rerr != nil {
-			break
-		}
-	}
-	raw := strings.TrimSpace(buf.String())
-	if raw == "" {
-		return nil, fmt.Errorf("empty response")
-	}
-	var resp client.SocketResponse
-	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
-		return nil, err
-	}
-	if resp.Error != nil {
-		return nil, fmt.Errorf("%s", resp.Error.Message)
-	}
-	b, _ := json.Marshal(resp.Result)
 	var out map[string]any
-	if err := json.Unmarshal(b, &out); err != nil {
+	if err := c.Call(ctx, "status", nil, &out); err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
 func envViaClientdSocket(method string) error {
-	sock := apiclient.DefaultClientdSocketPath()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	c := apiclient.NewClientdClient("")
 	if cfg, _, err := loadClientConfigForEnv(); err == nil && cfg != nil {
 		if p := cfg.EffectiveSocketPath(); p != "" {
-			sock = p
+			c.SocketPath = p
 		}
 	}
-	conn, err := net.DialTimeout("unix", sock, 3*time.Second)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	req := client.SocketRequest{ID: "1", Method: method, Params: map[string]any{}}
-	data, _ := json.Marshal(req)
-	if _, err := conn.Write(append(data, '\n')); err != nil {
-		return err
-	}
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	br := bufio.NewReader(conn)
-	var buf strings.Builder
-	tmp := make([]byte, 4096)
-	for {
-		n, rerr := br.Read(tmp)
-		if n > 0 {
-			buf.Write(tmp[:n])
-			trimmed := strings.TrimSpace(buf.String())
-			if trimmed != "" && json.Valid([]byte(trimmed)) && br.Buffered() == 0 {
-				break
-			}
-		}
-		if rerr != nil {
-			break
-		}
-	}
-	raw := strings.TrimSpace(buf.String())
-	if raw == "" {
-		return fmt.Errorf("empty response")
-	}
-	// Try SocketResponse first.
-	var sresp client.SocketResponse
-	if err := json.Unmarshal([]byte(raw), &sresp); err == nil {
-		if sresp.Error != nil {
-			return fmt.Errorf("%s", sresp.Error.Message)
-		}
-		return nil
-	}
-	// Fallback to legacy Response.
-	var resp client.Response
-	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
-		return err
-	}
-	if !resp.OK {
-		return fmt.Errorf("%s", resp.Error)
-	}
-	return nil
+	return c.Call(ctx, method, nil, nil)
 }
+
 
 func loadClientConfigForEnv() (*client.Config, string, error) {
 	path := client.DefaultConfigPath()
