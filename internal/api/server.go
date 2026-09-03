@@ -184,8 +184,12 @@ func (s *Server) buildRouter() chi.Router {
 			r.Post("/api/bootstrap/tailscale/up", s.handleBootstrapTailscaleUp)
 			r.Get("/api/bootstrap/tailscale/status", s.handleBootstrapTailscaleStatus)
 			r.Post("/api/bootstrap/complete", s.handleBootstrapComplete)
+			r.Post("/api/bootstrap/restore/connect", s.withBodyLimit(defaultBodyLimit, s.handleBootstrapRestoreConnect))
+			r.Post("/api/bootstrap/restore/run", s.withBodyLimit(defaultBodyLimit, s.handleBootstrapRestoreRun))
+			r.Get("/api/bootstrap/restore/events", s.handleBootstrapRestoreEvents)
 		})
 	})
+
 
 	// Authenticated API group.
 	r.Group(func(r chi.Router) {

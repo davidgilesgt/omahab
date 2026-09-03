@@ -171,7 +171,11 @@ export function SetupPage() {
   const [recoveryChallengeInput, setRecoveryChallengeInput] = useState<Record<number, string>>({});
   const [recoveryConfirmed, setRecoveryConfirmed] = useState(false);
   const [recoverySavedAck, setRecoverySavedAck] = useState(false);
-  const [repoLabel, setRepoLabel] = useState("");
+  const [repoKind, setRepoKind] = useState<"hetzner_storagebox" | "generic">("hetzner_storagebox");
+  const [repoLabel, setRepoLabel] = useState("primary");
+  const [repoUsername, setRepoUsername] = useState("");
+  const [repoHost, setRepoHost] = useState("");
+  const [repoSubPass, setRepoSubPass] = useState("");
   const [repoLocation, setRepoLocation] = useState("");
   const [repoPassword, setRepoPassword] = useState("");
 
@@ -238,24 +242,30 @@ export function SetupPage() {
     onError: (err) => toast.error(err instanceof Error ? err.message : "Confirm failed"),
   });
 
-
   const repoMutation = useMutation({
     mutationFn: async () => {
+      const payload: Record<string, string> = { label: repoLabel.trim() };
+      if (repoKind === "hetzner_storagebox") {
+        payload.kind = "hetzner_storagebox";
+        payload.username = repoUsername.trim();
+        payload.host = repoHost.trim();
+        payload.sub_account_password = repoSubPass;
+      } else {
+        payload.location = repoLocation.trim();
+        payload.password = repoPassword;
+      }
       const res = await fetch("/api/v1/backup-repositories", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...authHeaders() },
-        body: JSON.stringify({
-          label: repoLabel.trim(),
-          location: repoLocation.trim(),
-          password: repoPassword,
-        }),
+        body: JSON.stringify(payload),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error?.message ?? `HTTP ${res.status}`);
       return data;
     },
     onSuccess: () => {
-      toast.success("Backup repository configured; daily backup timer enabled");
+      toast.success("Backup repository configured; daily backup timer enabled. First backup and verify running in background.");
+      setRepoSubPass("");
       setRepoPassword("");
       void queryClient.invalidateQueries({ queryKey: ["setup"] });
     },
@@ -589,28 +599,66 @@ export function SetupPage() {
         <p style={{ marginTop: 8 }}><small>GET /api/v1/system/disks lists filesystems; PUT /api/v1/system/storage assigns {"{"}volume, fs_uuid{"}"}.</small></p>
       </Section>
 
-      <Section title="Backups" description="Add a restic repository (e.g. Hetzner Storage Box or S3). Daily backup + weekly verify timers enable automatically.">
+      <Section title="Backups" description="Hetzner Storage Box (recommended, ~€4/mo). Create a sub-account with SSH enabled; enter its username and password once. The restic password is derived from your recovery phrase, so the phrase alone opens the repository.">
         <div className="form-stack">
+          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+            <button type="button" className={`button ${repoKind === "hetzner_storagebox" ? "primary" : "ghost"}`} onClick={() => setRepoKind("hetzner_storagebox")}>Hetzner Storage Box</button>
+            <button type="button" className={`button ${repoKind === "generic" ? "primary" : "ghost"}`} onClick={() => setRepoKind("generic")}>Advanced (restic URL)</button>
+          </div>
           <label className="field">
             <span>Label</span>
             <input value={repoLabel} onChange={(e) => setRepoLabel(e.target.value)} placeholder="primary" />
           </label>
-          <label className="field">
-            <span>Location (restic URL)</span>
-            <input value={repoLocation} onChange={(e) => setRepoLocation(e.target.value)} placeholder="sftp:user@host:restic-repo" className="mono" />
-          </label>
-          <label className="field">
-            <span>Repository password</span>
-            <input type="password" value={repoPassword} onChange={(e) => setRepoPassword(e.target.value)} autoComplete="new-password" />
-          </label>
-          <button className="button primary" type="button" onClick={() => void repoMutation.mutate()} disabled={repoMutation.isPending || !repoLabel.trim() || !repoLocation.trim() || !repoPassword}>
+          {repoKind === "hetzner_storagebox" ? (
+            <>
+              <label className="field">
+                <span>Username (u123456)</span>
+                <input value={repoUsername} onChange={(e) => setRepoUsername(e.target.value)} placeholder="u123456" autoComplete="off" />
+              </label>
+              <label className="field">
+                <span>Host (u123456.your-storagebox.de)</span>
+                <input value={repoHost} onChange={(e) => setRepoHost(e.target.value)} placeholder="u123456.your-storagebox.de" autoComplete="off" />
+              </label>
+              <label className="field">
+                <span>Sub-account password (used once to upload SSH key)</span>
+                <input type="password" value={repoSubPass} onChange={(e) => setRepoSubPass(e.target.value)} autoComplete="new-password" />
+              </label>
+              <p className="muted" style={{ fontSize: "0.85em" }}>Hetzner Storage Box (recommended, ~€4/mo). Create a sub-account with SSH enabled; enter its username and password once. The system will generate an ed25519 key at <code>/var/lib/omahab/backup_ssh/id_ed25519</code> and append it to <code>.ssh/authorized_keys</code> via SFTP:23.</p>
+            </>
+          ) : (
+            <>
+              <label className="field">
+                <span>Location (restic URL)</span>
+                <input value={repoLocation} onChange={(e) => setRepoLocation(e.target.value)} placeholder="sftp:user@host:restic-repo" className="mono" />
+              </label>
+              <label className="field">
+                <span>Repository password</span>
+                <input type="password" value={repoPassword} onChange={(e) => setRepoPassword(e.target.value)} autoComplete="new-password" />
+              </label>
+              <p className="muted" style={{ fontSize: "0.85em" }}>Generic restic repository (S3, REST, local). Password is stored as <code>platform-app/backup_repo_credentials</code>.</p>
+            </>
+          )}
+          <button
+            className="button primary"
+            type="button"
+            onClick={() => void repoMutation.mutate()}
+            disabled={
+              repoMutation.isPending ||
+              !repoLabel.trim() ||
+              (repoKind === "hetzner_storagebox"
+                ? !repoUsername.trim() || !repoHost.trim() || !repoSubPass
+                : !repoLocation.trim() || !repoPassword)
+            }
+          >
             {repoMutation.isPending ? "Configuring…" : "Add repository"}
           </button>
           {repoMutation.isError && (
             <p className="inline-error" role="alert">{repoMutation.error instanceof Error ? repoMutation.error.message : "Configure failed"}</p>
           )}
+          <p className="muted" style={{ fontSize: "0.85em" }}>After creation the first backup and verify run immediately so “Verify a restore” passes on day one; then daily backup + weekly verify timers are enabled.</p>
         </div>
       </Section>
+
 
       <Section title="Recovery drill" description="Test recovery while you have root access.">
         <p>Run on the server as root to test recovery for {recoveryEmail}:</p>

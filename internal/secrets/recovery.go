@@ -54,6 +54,27 @@ func DeriveRecoveryKey(seed [32]byte) [32]byte {
 	return out
 }
 
+// DeriveResticPassword derives the restic repository password from the 32-byte
+// recovery seed using HKDF-SHA256 with salt "omahab-recovery-v1" and info
+// "restic-password". The output is hex-encoded (64 chars) and suitable as
+// RESTIC_PASSWORD; the phrase alone can re-derive it for restore.
+func DeriveResticPassword(seed [32]byte) string {
+	h := hkdf.New(sha256.New, seed[:], []byte("omahab-recovery-v1"), []byte("restic-password"))
+	var out [32]byte
+	if _, err := io.ReadFull(h, out[:]); err != nil {
+		panic(fmt.Sprintf("hkdf restic: %v", err))
+	}
+	// Use hex to avoid whitespace/newline issues; restic accepts any string.
+	const hexChars = "0123456789abcdef"
+	b := make([]byte, 64)
+	for i, v := range out {
+		b[i*2] = hexChars[v>>4]
+		b[i*2+1] = hexChars[v&0x0f]
+	}
+	return string(b)
+}
+
+
 // WrapMasterKey encrypts the 32-byte master key with the 32-byte recovery
 // key using AES-256-GCM. The returned blob is nonce (12 bytes) || ciphertext+tag.
 func WrapMasterKey(master, recoveryKey [32]byte) []byte {

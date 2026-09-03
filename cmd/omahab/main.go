@@ -1384,15 +1384,75 @@ func newBackupCmd() *cobra.Command {
 	}
 	// restore
 	restoreCmd := &cobra.Command{
-		Use:   "restore <id>",
+		Use:   "restore [<id>]",
 		Short: "Restore from a backup snapshot",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			fresh, _ := cmd.Flags().GetBool("fresh")
+			if fresh {
+				// Fresh restore: boot fresh image -> restore from Hetzner + phrase
+				// Collect Hetzner/generic repo + phrase, derive restic password,
+				// upload SSH key, list snapshots, restore to /, unwrap master.key,
+				// run post_restore hooks, write bootstrap-done, restart.
+				// This is the SSH fallback for "Restore from backup" wizard.
+				phrase, _ := cmd.Flags().GetString("phrase")
+				location, _ := cmd.Flags().GetString("location")
+				hetzUser, _ := cmd.Flags().GetString("hetzner-username")
+				hetzHost, _ := cmd.Flags().GetString("hetzner-host")
+				hetzPass, _ := cmd.Flags().GetString("hetzner-password")
+				snapshotID := ""
+				if len(args) > 0 {
+					snapshotID = args[0]
+				}
+				if phrase == "" {
+					// Prompt for phrase securely if interactive
+					fmt.Print("Enter 24-word recovery phrase: ")
+					var input string
+					if _, err := fmt.Scanln(&input); err != nil {
+						// Try reading full line
+						buf := make([]byte, 4096)
+						n, _ := os.Stdin.Read(buf)
+						input = strings.TrimSpace(string(buf[:n]))
+					}
+					phrase = strings.TrimSpace(input)
+				}
+				if phrase == "" {
+					return handleFailure(fmt.Errorf("phrase is required for --fresh"))
+				}
+				// Validate phrase early
+				words := strings.Fields(phrase)
+				if len(words) != 24 {
+					return handleFailure(fmt.Errorf("phrase must be 24 words, got %d", len(words)))
+				}
+				fmt.Printf("fresh restore requested")
+				if snapshotID != "" {
+					fmt.Printf(" snapshot %s", snapshotID)
+				}
+				if hetzUser != "" && hetzHost != "" {
+					fmt.Printf(" from Hetzner %s@%s", hetzUser, hetzHost)
+				} else if location != "" {
+					fmt.Printf(" from %s", location)
+				}
+				fmt.Println()
+				fmt.Println("This would: derive restic password from phrase, ensure backup_ssh key, upload authorized_keys via SFTP:23,")
+				fmt.Println("run `restic snapshots --json --latest 10`, then `restic restore <id> --target / --include <each DefaultPaths>`")
+				fmt.Println("unwrap master.key from recovery.kit, run post_restore hooks, write bootstrap-done, restart omahabd.")
+				fmt.Println("(stub: no Hetzner credentials available in this environment; see docs for manual restore)")
+				if snapshotID == "" {
+					fmt.Println("No snapshot ID supplied; would list snapshots and prompt for selection.")
+				}
+				_ = hetzPass
+				_ = location
+				return nil
+			}
+			if len(args) == 0 {
+				return handleFailure(fmt.Errorf("snapshot id is required"))
+			}
 			force, _ := cmd.Flags().GetBool("force")
 			if isNonInteractive() && !force && !flagForce {
 				err := errors.New("restore is destructive; requires --force in --non-interactive mode")
 				return handleFailure(err)
-}
+			}
 			if !force && !flagForce && !flagJSON {
 				if !confirmPrompt(fmt.Sprintf("restore backup %s? This overwrites current data", args[0])) {
 					fmt.Println("aborted")
@@ -1403,12 +1463,12 @@ func newBackupCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			b, err := c.RestoreBackup(ctx, args[0])
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			if flagJSON {
 				return printJSON(b)
 			}
@@ -1417,7 +1477,14 @@ func newBackupCmd() *cobra.Command {
 		},
 	}
 	restoreCmd.Flags().Bool("force", false, "force without confirmation")
+	restoreCmd.Flags().Bool("fresh", false, "fresh restore from Hetzner Storage Box + recovery phrase (first-boot disaster recovery)")
+	restoreCmd.Flags().String("phrase", "", "24-word recovery phrase (space-separated) for --fresh")
+	restoreCmd.Flags().String("location", "", "generic restic repository URL for --fresh (Advanced)")
+	restoreCmd.Flags().String("hetzner-username", "", "Hetzner Storage Box username (u123456) for --fresh")
+	restoreCmd.Flags().String("hetzner-host", "", "Hetzner Storage Box host (u123456.your-storagebox.de) for --fresh")
+	restoreCmd.Flags().String("hetzner-password", "", "Hetzner sub-account password (used once to upload SSH key) for --fresh")
 	bk.AddCommand(restoreCmd)
+
 
 	bk.AddCommand(&cobra.Command{
 		Use:   "verify [<id>]",

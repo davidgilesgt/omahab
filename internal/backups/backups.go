@@ -64,6 +64,7 @@ func DefaultPaths() []string {
 		"/var/lib/syncthing",
 		"/var/lib/ntfy-sh",
 		"/var/lib/omahab/dumps",
+		"/var/lib/tailscale",
 	}
 }
 // Config holds controller-level defaults.

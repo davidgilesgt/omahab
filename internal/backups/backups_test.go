@@ -19,12 +19,15 @@ import (
 
 type fakeRunner struct {
 	mu           sync.Mutex
+	initFn       func(repo Repository, creds Credentials) error
 	backupFn     func(repo Repository, creds Credentials, req BackupRequest) (Snapshot, error)
 	restoreFn    func(repo Repository, creds Credentials, snapshotID, target string) error
+	snapshotsFn  func(repo Repository, creds Credentials, latest int) ([]SnapshotListEntry, error)
 	backupCalls  []BackupRequest
 	backupRepos  []Repository
 	backupCreds  []Credentials
 	restoreCalls []restoreCall
+	initCalls    []Repository
 }
 
 type restoreCall struct {
@@ -32,6 +35,27 @@ type restoreCall struct {
 	Creds      Credentials
 	SnapshotID string
 	Target     string
+}
+
+func (f *fakeRunner) Init(_ context.Context, repo Repository, creds Credentials) error {
+	f.mu.Lock()
+	f.initCalls = append(f.initCalls, repo)
+	fn := f.initFn
+	f.mu.Unlock()
+	if fn != nil {
+		return fn(repo, creds)
+	}
+	return nil
+}
+
+func (f *fakeRunner) Snapshots(_ context.Context, repo Repository, creds Credentials, latest int) ([]SnapshotListEntry, error) {
+	f.mu.Lock()
+	fn := f.snapshotsFn
+	f.mu.Unlock()
+	if fn != nil {
+		return fn(repo, creds, latest)
+	}
+	return []SnapshotListEntry{{ID: "snap1", Time: "2026-09-01T00:00:00Z", Hostname: "omahab-host"}}, nil
 }
 
 func (f *fakeRunner) Backup(_ context.Context, repo Repository, creds Credentials, req BackupRequest) (Snapshot, error) {

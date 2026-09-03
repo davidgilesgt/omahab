@@ -129,6 +129,76 @@ paths:
                 properties:
                   complete: { type: boolean }
 
+  /api/bootstrap/restore/connect:
+    post:
+      summary: Connect to Hetzner/generic restic repo for restore (first-boot)
+      description: |
+        First-boot only (LAN bootstrap, requires claim token). Derives the restic password from the 24-word recovery phrase (`HKDF-SHA256(seed, salt "omahab-recovery-v1", info "restic-password")`), uploads the ed25519 SSH key to Hetzner via SFTP:23 if needed, and runs `restic snapshots --json --latest 10`.
+      operationId: bootstrapRestoreConnect
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phrase]
+              properties:
+                kind: { type: string, enum: [hetzner_storagebox], description: "Hetzner when set" }
+                username: { type: string, example: "u123456" }
+                host: { type: string, example: "u123456.your-storagebox.de" }
+                sub_account_password: { type: string, format: password }
+                location: { type: string, example: "sftp:user@host:restic-repo" }
+                phrase: { type: string, description: "24-word recovery phrase (space-separated)" }
+      responses:
+        '200':
+          description: Snapshots
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  snapshots:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        time: { type: string, format: date-time }
+                        hostname: { type: string }
+        '400': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/Error' }
+
+  /api/bootstrap/restore/run:
+    post:
+      summary: Start restore of a snapshot (first-boot)
+      description: Restores `restic restore <id> --target /` with `--include` per DefaultPaths (including /var/lib/tailscale), unwraps master.key from recovery.kit, runs post_restore hooks, writes bootstrap-done and restarts omahabd. Streams progress via GET /api/bootstrap/restore/events (SSE).
+      operationId: bootstrapRestoreRun
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [snapshot_id]
+              properties:
+                snapshot_id: { type: string }
+      responses:
+        '202': { description: Started }
+        '400': { $ref: '#/components/responses/Error' }
+
+  /api/bootstrap/restore/events:
+    get:
+      summary: Stream restore progress (SSE)
+      operationId: bootstrapRestoreEvents
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: SSE stream of {stage, message, done, error}
+          content:
+            text/event-stream: {}
+
   /api/v1/setup/verify-cloudflare:
     post:
       summary: Live-verify a Cloudflare API token
@@ -261,7 +331,11 @@ paths:
                   $ref: '#/components/schemas/BackupRepository'
     post:
       summary: Configure a backup repository
-      description: Stores credentials via the secrets broker and configures the repository by secret reference; enables the daily backup and weekly verify timers.
+      description: |
+        Stores credentials via the secrets broker and configures the repository by secret reference; enables the daily backup and weekly verify timers.
+        Two forms are accepted:
+        - Hetzner Storage Box (recommended, ~€4/mo): `{kind:"hetzner_storagebox", label, username, host, sub_account_password}` — generates an ed25519 key at `/var/lib/omahab/backup_ssh/id_ed25519`, uploads the pubkey to `.ssh/authorized_keys` via SFTP:23, derives the restic password from the recovery phrase (`HKDF-SHA256(seed, salt "omahab-recovery-v1", info "restic-password")`), location `sftp://<user>@<host>:23/./omahab/<instanceID>`.
+        - Generic/Advanced: `{label, location, password}` — restic URL and password.
       operationId: createBackupRepository
       requestBody:
         required: true
@@ -269,11 +343,16 @@ paths:
           application/json:
             schema:
               type: object
-              required: [label, location, password]
+              required: [label]
               properties:
-                label: { type: string }
-                location: { type: string, example: "sftp:user@host:restic-repo" }
-                password: { type: string, format: password }
+                label: { type: string, example: "primary" }
+                kind: { type: string, enum: [hetzner_storagebox], description: "Hetzner Storage Box when set" }
+                username: { type: string, example: "u123456" }
+                host: { type: string, example: "u123456.your-storagebox.de" }
+                sub_account_password: { type: string, format: password, description: "Hetzner sub-account password (used once to upload SSH key, never stored)" }
+                location: { type: string, example: "sftp:user@host:restic-repo", description: "Generic restic URL (Advanced)" }
+                password: { type: string, format: password, description: "Generic restic password (Advanced)" }
+                phrase: { type: string, description: "Optional 24-word phrase to derive restic password for Hetzner when seed not in memory" }
       responses:
         '201':
           description: Repository configured
@@ -282,6 +361,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/BackupRepository'
         '400': { $ref: '#/components/responses/Error' }
+
 
   /api/v1/backup-repositories/{id}:
     delete:

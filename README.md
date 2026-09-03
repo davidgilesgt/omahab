@@ -44,9 +44,10 @@ Boot the appliance image (or a machine whose NixOS configuration imports `nix/mo
 Open the URL on any device in the same LAN (mDNS `omahab.local` also works, best-effort). The wizard:
 
 1. **Claim** — enter the one-time code shown on the console. The code is single-use, rotates after 20 failed attempts (5/min per host), and the claim returns your administrator token.
-2. **SSH keys** — import from GitHub or paste public keys for the `omahab` admin account (skippable; the console remains the recovery path).
-3. **Tailscale** — approve the server into your tailnet. The dashboard is reachable only over the tailnet.
-4. **Handoff** — the wizard points you at `http://<tailscale-ip>:8484/#token=…`; everything after (domain, Cloudflare, recovery key, storage, AI providers, backups) happens on the authenticated dashboard. Secrets never transit the LAN page.
+2. **Mode** — **New server** or **Restore from backup**. New server continues to SSH keys; Restore collects Hetzner Storage Box username+host+sub-account password (once, SFTP:23) + 24-word recovery phrase, lists `restic snapshots --json --latest 10`, restores `--target /` with `--include` per `DefaultPaths()` including `/var/lib/tailscale` (keeps Tailscale IP; fallback to normal Tailscale step if rejected), unwraps `recovery.kit` → `master.key`, runs `post_restore` hooks, writes `bootstrap-done`, restarts `omahabd`.
+3. **SSH keys** *(new-server mode)* — import from GitHub or paste public keys for the `omahab` admin account (skippable; the console remains the recovery path).
+4. **Tailscale** *(new-server mode)* — approve the server into your tailnet. The dashboard is reachable only over the tailnet.
+5. **Handoff** — the wizard points you at `http://<tailscale-ip>:8484/#token=…`; everything after (domain, Cloudflare, recovery key, storage, AI providers, backups) happens on the authenticated dashboard. Secrets never transit the LAN page.
 
 When the wizard completes, port 8485 closes.
 
@@ -65,10 +66,11 @@ It walks Tailscale enrollment and Cloudflare domain/token entry in the terminal,
 After the handoff, complete enrollment at `http://<tailscale-ip>:8484`:
 
 - **Recovery phrase** — 24 words shown once; confirm three of them. The phrase wraps the master key into `/var/lib/omahab/recovery.kit` (fingerprint `recovery_fingerprint`).
+- **Backups** — Hetzner Storage Box (recommended, ~€4/mo). Create a sub-account with SSH enabled; enter its username and password once. The system generates an ed25519 key at `/var/lib/omahab/backup_ssh/id_ed25519` (0600) and appends it to `.ssh/authorized_keys` via SFTP:23 (`golang.org/x/crypto/ssh` + `github.com/pkg/sftp`, `known_hosts` recorded, password discarded, location `sftp://<user>@<host>:23/./omahab/<instanceID>` with `-o sftp.command=...`, restic password `HKDF-SHA256(seed, salt "omahab-recovery-v1", info "restic-password")` so the phrase alone opens the repository, stored as `platform-app/backup_repo_credentials`); first backup + verify run immediately so “Verify a restore” passes on day one; then daily backup + weekly verify timers are enabled. Generic restic URL remains as “Advanced” (restic URL + password).
 - **Storage placement** *(optional)* — dedicate a disk to media (photos) or data; the `omahab-storage` unit mounts it before the app services start.
 - **AI providers** — provider credentials/OAuth and model aliases.
-- **Backups** — add a restic repository; the daily backup and weekly verify timers enable automatically.
 - **Semantic index** — pick the pinned embedding model (or full-text only).
+
 
 ## Applications
 
@@ -143,6 +145,7 @@ omahab project rollback demo
 | `/var/lib/omahab/master.key` | Master key (0600, sealed with TPM2 when available) |
 | `/var/lib/omahab/recovery.kit` | Recovery kit JSON `{version:1,fingerprint,master_wrapped base64,created_at}` (0600) |
 | `/var/lib/omahab/backup.env` | Backup env (if restic SFTP/REST credentials needed) |
+| `/var/lib/omahab/backup_ssh/` | Hetzner SFTP key: `id_ed25519` (0600), `id_ed25519.pub`, `known_hosts` (0600) |
 | `/run/omahab/bootstrap-code` | First-boot one-time claim code (tmpfs, 0600) |
 | `~omahab/.config/omahab/token` | Administrator CLI token (provisioned by omahabd, 0600) |
 | `/etc/omahab-release` | Pinned flake ref for `omahab system upgrade` |

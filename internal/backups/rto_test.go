@@ -69,10 +69,14 @@ func TestStatusReportSurfacesRTO(t *testing.T) {
 // fakes for RTO test – distinct names to avoid collision with backups_test.go
 type rtoFakeRunner struct{}
 
+func (f *rtoFakeRunner) Init(_ context.Context, _ Repository, _ Credentials) error { return nil }
 func (f *rtoFakeRunner) Backup(_ context.Context, _ Repository, _ Credentials, _ BackupRequest) (Snapshot, error) {
 	return Snapshot{}, nil
 }
 func (f *rtoFakeRunner) Restore(_ context.Context, _ Repository, _ Credentials, _, _ string) error { return nil }
+func (f *rtoFakeRunner) Snapshots(_ context.Context, _ Repository, _ Credentials, _ int) ([]SnapshotListEntry, error) {
+	return nil, nil
+}
 
 type rtoFakeSecretSource struct{}
 

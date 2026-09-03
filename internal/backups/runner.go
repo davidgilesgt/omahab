@@ -6,18 +6,41 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
 )
 
+const (
+	// BackupSSHDir is the state-owned directory holding the Hetzner SFTP key.
+	BackupSSHDir = "/var/lib/omahab/backup_ssh"
+	// BackupSSHKeyPath is the generated ed25519 private key for Hetzner.
+	BackupSSHKeyPath = "/var/lib/omahab/backup_ssh/id_ed25519"
+	// BackupKnownHostsPath records the Hetzner host key.
+	BackupKnownHostsPath = "/var/lib/omahab/backup_ssh/known_hosts"
+)
+
 // Runner performs restic repository operations. It is an explicit interface
 // so orchestration behavior is testable without the restic binary.
 type Runner interface {
+	// Init initializes a restic repository (restic init).
+	Init(ctx context.Context, repo Repository, creds Credentials) error
 	// Backup snapshots req.Paths in repo and returns the created snapshot.
 	Backup(ctx context.Context, repo Repository, creds Credentials, req BackupRequest) (Snapshot, error)
 	// Restore unpacks snapshotID into targetDir, which must exist.
 	Restore(ctx context.Context, repo Repository, creds Credentials, snapshotID, targetDir string) error
+	// Snapshots lists snapshots in repo as JSON (latest N).
+	Snapshots(ctx context.Context, repo Repository, creds Credentials, latest int) ([]SnapshotListEntry, error)
+}
+
+// SnapshotListEntry is the minimal snapshot info returned by restic snapshots --json.
+type SnapshotListEntry struct {
+	ID       string   `json:"id"`
+	Time     string   `json:"time"`
+	Hostname string   `json:"hostname"`
+	Paths    []string `json:"paths"`
+	Tags     []string `json:"tags"`
 }
 
 // BackupRequest describes one restic backup invocation.
@@ -70,6 +93,57 @@ func (c *CommandRunner) env(repo Repository, creds Credentials) []string {
 	return env
 }
 
+// sftpCommandArgs returns restic global -o sftp.command option for sftp repos.
+// For sftp://<user>@<host>:23/./path it returns ["-o", "sftp.command=ssh -p 23 -i <key> -o UserKnownHostsFile=<known_hosts> -o BatchMode=yes <user>@<host> -s sftp"].
+// Otherwise returns nil. Stub: if parsing fails, returns nil to avoid breaking generic sftp repos.
+func sftpCommandArgs(repo Repository) []string {
+	if !strings.HasPrefix(repo.Location, "sftp://") {
+		return nil
+	}
+	u, err := url.Parse(repo.Location)
+	if err != nil || u.Host == "" {
+		return nil
+	}
+	user := ""
+	if u.User != nil {
+		user = u.User.Username()
+	}
+	host := u.Hostname()
+	if host == "" {
+		return nil
+	}
+	if user == "" {
+		// No user in URL; don't inject command (let restic use default ssh).
+		return nil
+	}
+	// Build ssh command. Port is always 23 per Hetzner spec; generic sftp repos use same.
+	keyPath := BackupSSHKeyPath
+	if v := os.Getenv("OMAHAB_STATE_DIR"); v != "" {
+		if _, err := os.Stat(v + "/backup_ssh/id_ed25519"); err == nil {
+			keyPath = v + "/backup_ssh/id_ed25519"
+		}
+	}
+	knownHosts := BackupKnownHostsPath
+	if v := os.Getenv("OMAHAB_STATE_DIR"); v != "" {
+		if _, err := os.Stat(v + "/backup_ssh/known_hosts"); err == nil {
+			knownHosts = v + "/backup_ssh/known_hosts"
+		}
+	}
+	cmd := fmt.Sprintf("ssh -p 23 -i %s -o UserKnownHostsFile=%s -o BatchMode=yes %s@%s -s sftp", keyPath, knownHosts, user, host)
+	return []string{"-o", "sftp.command=" + cmd}
+}
+
+// withSFTP prepends global sftp options before the restic subcommand.
+func withSFTP(repo Repository, args []string) []string {
+	if opts := sftpCommandArgs(repo); len(opts) > 0 {
+		out := make([]string, 0, len(opts)+len(args))
+		out = append(out, opts...)
+		out = append(out, args...)
+		return out
+	}
+	return args
+}
+
 // backupPlan returns the argument vector and environment for a backup. It
 // is kept separate from Backup so callers and tests can assert that secret
 // values stay out of the argument vector.
@@ -82,7 +156,14 @@ func (c *CommandRunner) backupPlan(repo Repository, creds Credentials, req Backu
 		args = append(args, "--tag", tag)
 	}
 	args = append(args, req.Paths...)
+	args = withSFTP(repo, args)
 	return args, c.env(repo, creds)
+}
+
+func (c *CommandRunner) Init(ctx context.Context, repo Repository, creds Credentials) error {
+	args := withSFTP(repo, []string{"init"})
+	_, err := c.exec(ctx, args, c.env(repo, creds), creds)
+	return err
 }
 
 func (c *CommandRunner) Backup(ctx context.Context, repo Repository, creds Credentials, req BackupRequest) (Snapshot, error) {
@@ -106,9 +187,31 @@ func (c *CommandRunner) Restore(ctx context.Context, repo Repository, creds Cred
 	if snapshotID == "" || targetDir == "" {
 		return fmt.Errorf("%w: snapshot id and target directory are required", ErrInvalid)
 	}
-	args := []string{"restore", snapshotID, "--target", targetDir}
+	args := withSFTP(repo, []string{"restore", snapshotID, "--target", targetDir})
 	_, err := c.exec(ctx, args, c.env(repo, creds), creds)
 	return err
+}
+
+func (c *CommandRunner) Snapshots(ctx context.Context, repo Repository, creds Credentials, latest int) ([]SnapshotListEntry, error) {
+	args := []string{"snapshots", "--json"}
+	if latest > 0 {
+		args = append(args, "--latest", fmt.Sprintf("%d", latest))
+	}
+	args = withSFTP(repo, args)
+	out, err := c.exec(ctx, args, c.env(repo, creds), creds)
+	if err != nil {
+		return nil, err
+	}
+	var entries []SnapshotListEntry
+	if err := json.Unmarshal(out, &entries); err != nil {
+		// Try single object case (some restic versions)
+		var single SnapshotListEntry
+		if err2 := json.Unmarshal(out, &single); err2 == nil && single.ID != "" {
+			return []SnapshotListEntry{single}, nil
+		}
+		return nil, fmt.Errorf("parse snapshots json: %w", err)
+	}
+	return entries, nil
 }
 
 // exec runs the restic binary and returns stdout. On failure it returns an

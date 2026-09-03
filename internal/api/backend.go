@@ -233,12 +233,23 @@ type ConfigureStorageRequest struct {
 
 // CreateBackupRepositoryRequest carries repository credentials to the
 // secrets store (value material bridges to SecretRef server-side).
+// Two forms are accepted:
+//   - Hetzner Storage Box (recommended): {kind:"hetzner_storagebox", username, host, sub_account_password}
+//   - Generic/Advanced: {location, password}
 type CreateBackupRepositoryRequest struct {
-	Label    string            `json:"label"`
-	Location string            `json:"location"`
-	Password string            `json:"password"`
-	Env      map[string]string `json:"env,omitempty"`
+	Kind                string            `json:"kind,omitempty"`
+	Username            string            `json:"username,omitempty"`
+	Host                string            `json:"host,omitempty"`
+	SubAccountPassword  string            `json:"sub_account_password,omitempty"`
+	Label               string            `json:"label"`
+	Location            string            `json:"location"`
+	Password            string            `json:"password"`
+	Env                 map[string]string `json:"env,omitempty"`
+	// Phrase allows deriving the restic password from the recovery phrase
+	// when configuring Hetzner without a stored seed; optional.
+	Phrase              string            `json:"phrase,omitempty"`
 }
+
 
 // CatalogBundle is the installable view of one curated bundle. Compose
 // templates and digest pinning stay server-side.

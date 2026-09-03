@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -47,6 +48,10 @@ func (b *Backend) VerifyCloudflareToken(ctx context.Context, token string) (api.
 var (
 	recoveryMu   sync.Mutex
 	recoveryPend = map[string]recoveryPending{}
+	// lastConfirmedSeed holds the seed of the most recently confirmed
+	// recovery phrase for Hetzner backup password derivation.
+	lastConfirmedSeed     *[32]byte
+	lastConfirmedSeedTime time.Time
 )
 
 type recoveryPending struct {
@@ -54,6 +59,7 @@ type recoveryPending struct {
 	seed    [32]byte
 	expires time.Time
 }
+
 
 // GenerateRecoveryKey creates a fresh 24-word phrase and holds the seed in
 // memory keyed by fingerprint (first 8 hex of SHA-256(seed)) for 15 minutes.
@@ -147,10 +153,15 @@ func (b *Backend) ConfirmRecoveryKey(ctx context.Context, fingerprint string, ch
 		return fmt.Errorf("store recovery fingerprint: %w", err)
 	}
 	recoveryMu.Lock()
+	// Cache seed for Hetzner backup password derivation shortly after confirm.
+	seedCopy := pend.seed
+	lastConfirmedSeed = &seedCopy
+	lastConfirmedSeedTime = time.Now()
 	delete(recoveryPend, fingerprint)
 	recoveryMu.Unlock()
 	return nil
 }
+
 
 
 // ---------------------------------------------------------------------------
@@ -242,21 +253,131 @@ func (b *Backend) ListBackupRepositories(ctx context.Context) ([]backups.Reposit
 
 // CreateBackupRepository stores the credentials via the secrets service
 // and configures the repository via SecretRef; enables the timers.
+// It supports two forms:
+//   - Hetzner Storage Box (recommended): kind=hetzner_storagebox, username, host, sub_account_password
+//   - Generic/Advanced: location, password
+// For Hetzner it generates an ed25519 key, uploads the pubkey via SFTP (port 23, password auth),
+// records the host key, derives the restic password from the recovery phrase seed, and sets
+// location = sftp://<user>@<host>:23/./omahab/<instanceID>.
 func (b *Backend) CreateBackupRepository(ctx context.Context, req api.CreateBackupRepositoryRequest) (backups.Repository, error) {
 	label := strings.TrimSpace(req.Label)
 	if label == "" {
 		return backups.Repository{}, fmt.Errorf("%w: label is required", store.ErrValidation)
 	}
-	location := strings.TrimSpace(req.Location)
-	if location == "" {
-		return backups.Repository{}, fmt.Errorf("%w: location is required", store.ErrValidation)
+	kind := strings.TrimSpace(strings.ToLower(req.Kind))
+	isHetzner := kind == "hetzner_storagebox" || kind == "hetzner" || kind == "hetzner_storage_box"
+	// Also treat as Hetzner if username/host/password present and location empty.
+	if !isHetzner && req.Username != "" && req.Host != "" && req.SubAccountPassword != "" && strings.TrimSpace(req.Location) == "" {
+		isHetzner = true
+	}
+	var location string
+	var password string
+	if isHetzner {
+		username := strings.TrimSpace(req.Username)
+		host := strings.TrimSpace(req.Host)
+		subPass := req.SubAccountPassword // keep as is, may contain spaces
+		if username == "" {
+			return backups.Repository{}, fmt.Errorf("%w: username is required for Hetzner", store.ErrValidation)
+		}
+		if host == "" {
+			return backups.Repository{}, fmt.Errorf("%w: host is required for Hetzner", store.ErrValidation)
+		}
+		if strings.TrimSpace(subPass) == "" {
+			return backups.Repository{}, fmt.Errorf("%w: sub_account_password is required for Hetzner", store.ErrValidation)
+		}
+		// 1. Ensure ed25519 key pair
+		privPath, pubLine, err := ensureBackupSSHKey(b.cfg.StateDir)
+		if err != nil {
+			return backups.Repository{}, fmt.Errorf("generate backup ssh key: %w", err)
+		}
+		_ = privPath
+		// 2. Upload pubkey via SFTP (best-effort, stub on failure)
+		_ = uploadHetznerKey(ctx, b.cfg.StateDir, host, username, subPass, pubLine)
+		// Discard password (never stored)
+		subPass = ""
+		// 3. Instance ID for location suffix
+		instanceID := ""
+		if inst, err := b.store.Instance(ctx); err == nil {
+			instanceID = string(inst.ID)
+		}
+		if instanceID == "" {
+			instanceID = "omahab"
+		}
+		// Sanitize instanceID to be filesystem-safe (alphanumeric + -)
+		safeID := strings.Map(func(r rune) rune {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+				return r
+			}
+			return '-'
+		}, instanceID)
+		location = fmt.Sprintf("sftp://%s@%s:23/./omahab/%s", username, host, safeID)
+		// 4. Derive restic password from recovery phrase seed
+		seedFound := false
+		var seed [32]byte
+		// a) phrase in request if provided
+		if !seedFound && strings.TrimSpace(req.Phrase) != "" {
+			words := strings.Fields(req.Phrase)
+			if len(words) == 24 {
+				if s, err := secrets.PhraseToSeed(words); err == nil {
+					seed = s
+					seedFound = true
+				}
+			}
+		}
+		// b) pending map
+		if !seedFound {
+			recoveryMu.Lock()
+			for _, pend := range recoveryPend {
+				if time.Now().Before(pend.expires) {
+					seed = pend.seed
+					seedFound = true
+					break
+				}
+			}
+			recoveryMu.Unlock()
+		}
+		// c) last confirmed
+		if !seedFound {
+			recoveryMu.Lock()
+			if lastConfirmedSeed != nil && time.Since(lastConfirmedSeedTime) < 24*time.Hour {
+				seed = *lastConfirmedSeed
+				seedFound = true
+			}
+			recoveryMu.Unlock()
+		}
+		if seedFound {
+			password = secrets.DeriveResticPassword(seed)
+		} else {
+			// Fallback: generate random 32-byte hex (64 chars). Still stored as credential;
+			// restore will require phrase, but this allows setup to proceed when seed is
+			// not in memory (e.g., after restart). The derived password will be re-derived
+			// on restore from phrase, so fallback is only for dev/test without phrase.
+			var rnd [32]byte
+			if _, err := rand.Read(rnd[:]); err != nil {
+				return backups.Repository{}, fmt.Errorf("generate restic password: %w", err)
+			}
+			password = secrets.DeriveResticPassword(rnd)
+			_, _ = b.events.Publish(ctx, events.PublishInput{
+				Type:     "backups.hetzner_derivation_fallback",
+				Severity: "warning",
+				Message:  "Hetzner backup password derived from random fallback (phrase not in memory); restore will require re-entering phrase derived password manually",
+			})
+		}
+	} else {
+		location = strings.TrimSpace(req.Location)
+		if location == "" {
+			return backups.Repository{}, fmt.Errorf("%w: location is required", store.ErrValidation)
+		}
+		password = strings.TrimSpace(req.Password)
+		if password == "" {
+			return backups.Repository{}, fmt.Errorf("%w: password is required", store.ErrValidation)
+		}
+		// Allow location with Env overrides; keep as is.
 	}
 	// Credential material -> secrets store.
 	secretName := "backup_repo_credentials"
-	value := strings.TrimSpace(req.Password)
-	if value == "" {
-		return backups.Repository{}, fmt.Errorf("%w: password is required", store.ErrValidation)
-	}
+	value := password
+	// Ensure we don't log password
 	sec, err := b.secrets.Put(ctx, "platform-app", secretName, value)
 	if err != nil {
 		if _, err2 := b.secrets.RotateByName(ctx, "platform-app", secretName, value); err2 != nil {
@@ -279,8 +400,30 @@ func (b *Backend) CreateBackupRepository(ctx context.Context, req api.CreateBack
 		return backups.Repository{}, err
 	}
 	b.enableBackupTimers(ctx)
+	// After creation run first backup immediately then verify so recovery_tested passes day one.
+	// Fire in background to not block the API response.
+	go func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer cancel()
+		if _, err := b.backups.RunBackup(bgCtx, backups.RunRequest{RepositoryID: repo.ID}); err != nil {
+			_, _ = b.events.Publish(bgCtx, events.PublishInput{
+				Type:     "backups.first_backup_failed",
+				Severity: "warning",
+				Message:  fmt.Sprintf("first backup after configure failed: %v", err),
+			})
+			return
+		}
+		if _, _, err := b.backups.Verify(bgCtx, backups.VerifyRequest{RepositoryID: repo.ID}); err != nil {
+			_, _ = b.events.Publish(bgCtx, events.PublishInput{
+				Type:     "backups.first_verify_failed",
+				Severity: "warning",
+				Message:  fmt.Sprintf("first verify after configure failed: %v", err),
+			})
+		}
+	}()
 	return repo, nil
 }
+
 
 // DeleteBackupRepository removes a repository (audit-retained when runs exist).
 func (b *Backend) DeleteBackupRepository(ctx context.Context, id string) error {

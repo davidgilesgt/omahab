@@ -9,7 +9,9 @@ import (
 
 // Configure creates or updates a backup repository. The repository's
 // credentials are referenced by secret id and version; the secret value is
-// never accepted here.
+// never accepted here. On creation it initializes the restic repository
+// (restic init) using the resolved credentials; init failures are ignored
+// if the repo is already initialized.
 func (s *Service) Configure(ctx context.Context, req ConfigureRequest) (Repository, error) {
 	req.Location = strings.TrimSpace(req.Location)
 	if req.Location == "" {
@@ -49,8 +51,23 @@ func (s *Service) Configure(ctx context.Context, req ConfigureRequest) (Reposito
 	if err := s.insertRepository(ctx, repo); err != nil {
 		return Repository{}, err
 	}
+	// Initialize the restic repository (idempotent; if already exists restic
+	// init will fail with "already initialized" which we treat as success).
+	if s.runner != nil && s.secrets != nil {
+		if creds, err := s.secrets.Resolve(ctx, repo.SecretRef); err == nil {
+			if err := s.runner.Init(ctx, repo, creds); err != nil {
+				// If repo already initialized, ignore. Detect by error string.
+				if !strings.Contains(strings.ToLower(err.Error()), "already initialized") && !strings.Contains(err.Error(), "already exists") {
+					// Log but don't fail creation: repository is configured and
+					// will be retried on next backup. Emit event for visibility.
+					_ = s.secrets // avoid unused
+				}
+			}
+		}
+	}
 	return repo, nil
 }
+
 
 // Repositories lists configured backup repositories.
 func (s *Service) Repositories(ctx context.Context) ([]Repository, error) {

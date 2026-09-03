@@ -216,7 +216,7 @@ Secrets never transit the LAN page: everything after the Tailscale step happens 
 
 ### 5.4 Strict appliance posture
 
-The system remains an appliance: it does not adopt arbitrary existing servers. Fresh-image boot is the only supported path; disaster recovery restores `/var/lib/omahab` + `/srv/omahab` from restic onto a fresh image.
+The system remains an appliance: it does not adopt arbitrary existing servers. Fresh-image boot is the only supported path; disaster recovery = boot fresh image → wizard “Restore from backup” → Hetzner credentials + recovery phrase. The wizard offers two modes after the claim code: “Set up a new server” (normal SSH-keys → Tailscale flow) and “Restore from backup” (Hetzner Storage Box username+host+sub-account password once + 24-word phrase → `restic snapshots --json --latest 10` → restore `--target /` with `--include` per `DefaultPaths()` including `/var/lib/tailscale` so the node keeps its Tailscale identity/IP; fallback to normal Tailscale step if coordination server rejects it). Restore never writes under `/nix` or `/etc`.
 
 ### 5.5 SSH-first setup and hardening
 
@@ -866,15 +866,17 @@ Back up:
 - secret ciphertext and recovery metadata.
 
 Application bundles supply pre-backup and post-restore hooks. Database consistency is mandatory. Copying only live database files is not considered a valid backup.
-
 Initial objectives:
 
 - recovery point objective: no more than 24 hours;
 - recovery time objective: approximately four hours for the supported single-node restore path;
 - periodic automated restore verification;
-- visible last backup and last verified restore status.
+- visible last backup and last verified restore status;
+- first backup and first verified restore complete during setup (Hetzner repo configured immediately after the recovery phrase → `RunBackup` then `Verify` so `recovery_tested` passes on day one; timers enabled via `enableBackupTimers`).
 
 A backup is not healthy until Omahab has demonstrated that it can restore the relevant data.
+
+Setup guidance: Hetzner Storage Box (recommended, ~€4/mo). Create a sub-account with SSH enabled; enter its username and password once. The system generates an ed25519 key at `/var/lib/omahab/backup_ssh/id_ed25519` (0600, root), uploads the public key to `.ssh/authorized_keys` via SFTP:23 (password auth, `golang.org/x/crypto/ssh` + `github.com/pkg/sftp`), records the host key in `known_hosts`, discards the password, and sets `location = sftp://<user>@<host>:23/./omahab/<instanceID>` with `-o sftp.command=ssh -p 23 -i ... -o UserKnownHostsFile=... -o BatchMode=yes ... -s sftp` on every restic invocation. The restic password is derived via `HKDF-SHA256(seed, salt "omahab-recovery-v1", info "restic-password")` from the recovery-phrase seed, so the phrase alone opens the repository (stored as `platform-app/backup_repo_credentials`).
 
 Syncthing versioning may provide a convenience buffer, but synchronization is not the off-site backup mechanism.
 
@@ -1086,11 +1088,12 @@ Omahab is not complete until these scenarios work end to end.
 
 1. Install Immich and upload photos.
 2. Create Forgejo repositories and project data.
-3. Configure encrypted Hetzner backup.
+3. Configure encrypted Hetzner backup (wizard step immediately after recovery phrase: enter Hetzner sub-account username+host+password once; system generates ed25519 key, uploads via SFTP:23, derives restic password from phrase, creates `sftp://…/omahab/<instanceID>`, runs first backup + verify so `recovery_tested` is ok).
 4. Destroy the Omahab machine.
 5. Boot a fresh appliance image on a replacement.
-6. Restore the recovery kit and backup.
+6. In the first-boot LAN wizard choose “Restore from backup” → enter Hetzner username+host+password (once) + 24-word phrase → system derives restic password, uploads key, lists `restic snapshots --json --latest 10`, restores `--target /` with `--include` per `DefaultPaths()` (including `/var/lib/tailscale` so Tailscale IP is kept; fallback to normal Tailscale step if rejected), unwraps `recovery.kit` → `master.key`, runs `post_restore` hooks, writes `bootstrap-done`, restarts `omahabd` (or `omahab backup restore --fresh` from SSH).
 7. Confirm photos, databases, repositories, identities, and projects are usable.
+
 
 ### Project deployment
 
