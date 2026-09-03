@@ -724,11 +724,13 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) (*ProvisionR
 		ProjectID:          string(in.ProjectID),
 	})
 
-	// Seed Dockerfile, Caddyfile, index.html when absent (zero-config contract: port 80 /up /storage).
+	// Seed Dockerfile, Caddyfile, index.html, AGENTS.md when absent (zero-config contract: port 80 /up /storage + agent conventions).
+	agentsMD := fmt.Sprintf("# AGENTS.md — Omahab project %s\n\nThis repository is managed by Omahab. Agents in workspaces should follow these conventions.\n\n## Deploy contract\n- Container must listen on HTTP port 80 (:80)\n- Health check: GET /up must return 200\n- Persistent storage is mounted at /storage — keep state there\n- OCI image is built by Woodpecker pipeline (.woodpecker.yaml) and pushed to the Forgejo registry by digest\n- Release is created by the pipeline release callback: POST /api/v1/projects/{id}/releases/with-token with {commit, digest} and Authorization: Bearer $OMAHAB_RELEASE_TOKEN\n- Rollback: omahab project rollback <slug> <releaseID> or POST /api/v1/projects/{id}/releases/{releaseID}/rollback\n\n## Workspaces\n- Branch pattern: ws/<slug>-<id> e.g. ws/%s-a1b2c3 (slug from title, short ID server-generated)\n- Instructions are written to TASK.md at the workspace root before the agent (omp) starts; also mirrored at ws/<slug>-<id>/TASK.md when applicable\n- Agent: omp (only supported agent) runs inside a tmux session omp in the workspace container\n- Create: omahab workspace create --project <slug> --title \"...\" --instructions \"...\"\n- Attach (rejoin): omahab workspace attach <id> (tmux omahab-<id> -> devpod ssh --tty)\n- Stop: omahab workspace stop <id>\n\n## MCP tools (available to agents on server and devices)\n- Hermes connects at POST /mcp with Authorization: Bearer $OMAHAB_MCP_TOKEN; devices at POST /api/v1/companion/mcp with Bearer oma_dev_... (same handler, per-device token)\n- Non-destructive only: no repo_delete, doc_delete, pr_merge, workspace_delete, force-push or branch-delete tools are registered\n- Available tools include repos_list, repo_get, branches_list, branch_create, file_get, file_put, issues_list, prs_list, docs_search, projects_list, scm_*, workspaces_*, events_recent, backups_status\n- REST discovery: GET /api/openapi.yaml (tailnet, no auth) and omahab --help --json\n", repoName, repoName)
 	seedFiles := map[string][]byte{
 		"Dockerfile": []byte("FROM caddy:2-alpine\nCOPY Caddyfile /etc/caddy/Caddyfile\nCOPY . /srv\n"),
 		"Caddyfile":  []byte(":80 {\n\trespond /up 200\n\troot * /srv\n\tfile_server\n}\n"),
 		"index.html": []byte(fmt.Sprintf("<h1>%s</h1><p>Deployed by Omahab. Replace this repository's contents with your app; keep port 80 and /up.</p>\n", repoName)),
+		"AGENTS.md":  []byte(agentsMD),
 	}
 	for path, content := range seedFiles {
 		if _, err := s.forgejo.GetFile(ctx, RepoRef{Owner: owner, Name: repoName}, path, defaultBranch); err == nil {

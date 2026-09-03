@@ -252,6 +252,9 @@ func runEnroll() error {
 		}
 		fmt.Fprintln(os.Stderr, "Forgejo git token stored (forgejo-token).")
 	}
+	// E1: write omp MCP client config + OMAHAB_MCP_URL export.
+	_ = client.EnsureMCPConfig(strings.TrimSpace(cfg.ServerURL), token)
+	fmt.Fprintln(os.Stderr, "MCP client config written to "+client.MCPConfigPath()+" (OMAHAB_MCP_URL).")
 	fmt.Fprintln(os.Stderr, "Enrolled successfully. Device token stored in keyring (service \"omahab\", account \"device-token\").")
 	for i := range []byte(code) {
 		_ = i
