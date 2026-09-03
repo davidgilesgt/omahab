@@ -50,6 +50,12 @@ Item {
   }
   property var workspaces: []
   property var projects: []
+  // F2 notifications toggles (persist per session; could be stored via Settings)
+  property bool notifyAgentApproval: true
+  property bool notifyBackupFailed: true
+  property bool notifyCiFailed: true
+  property bool notifyDeploymentCompleted: true
+
 
   property var requestQueue: []
   property var currentRequest: null
@@ -148,6 +154,15 @@ Item {
   function workspaceStop(id) {
     enqueue("workspace.stop", {id: id}, "action", "Stop workspace")
   }
+
+  function workspaceOpenInEditor(id) {
+    enqueue("workspace.openInEditor", {id: id}, "action", "Open in editor")
+  }
+
+  function appOpen(app) {
+    enqueue("app.open", {app: app}, "action", "Open " + app)
+  }
+
 
   function backupRun() {
     if (actionBusy) return

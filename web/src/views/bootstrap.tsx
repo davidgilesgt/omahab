@@ -51,6 +51,59 @@ export function BootstrapPage() {
 
   useEffect(() => () => { if (pollRef.current) window.clearInterval(pollRef.current); }, []);
 
+  // F3: QR encodes http://<lan-ip>:8485/#code=<code> — consume fragment and skip code step.
+  useEffect(() => {
+    let codeFromHash = "";
+    try {
+      const hash = window.location.hash || "";
+      if (hash) {
+        const raw = hash.startsWith("#") ? hash.slice(1) : hash;
+        const hp = new URLSearchParams(raw);
+        codeFromHash = hp.get("code") || "";
+        if (!codeFromHash && raw.startsWith("code=")) {
+          codeFromHash = raw.slice(5).split("&")[0] || "";
+        }
+        if (!codeFromHash && raw.includes("code=")) {
+          // Fallback for encoded hash like #/code=...
+          const m = raw.match(/code=([^&]+)/);
+          if (m && m[1]) codeFromHash = decodeURIComponent(m[1]);
+        }
+      }
+      if (!codeFromHash) {
+        const sp = new URLSearchParams(window.location.search);
+        codeFromHash = sp.get("code") || "";
+      }
+    } catch {}
+    codeFromHash = codeFromHash.trim();
+    if (!codeFromHash) return;
+    setCode(codeFromHash);
+    let cancelled = false;
+    (async () => {
+      setBusy(true);
+      try {
+        const data = await bootstrapFetch("claim", null, { code: codeFromHash });
+        if (cancelled) return;
+        const t = typeof data.token === "string" ? data.token : null;
+        if (!t) throw new Error("no token in response");
+        setToken(t);
+        setStep("mode");
+        try {
+          history.replaceState(null, "", window.location.pathname + window.location.search);
+        } catch {}
+      } catch (err) {
+        if (cancelled) return;
+        toast.error(err instanceof Error ? err.message : "claim failed");
+        try {
+          history.replaceState(null, "", window.location.pathname + window.location.search);
+        } catch {}
+      } finally {
+        if (!cancelled) setBusy(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+
   async function submitCode(e: FormEvent) {
     e.preventDefault();
     setBusy(true);

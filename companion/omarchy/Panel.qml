@@ -330,6 +330,72 @@ Panel {
             width: parent.width
             spacing: Style.space(6)
             PanelSectionHeader {
+              text: "APPS"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+            Row {
+              width: parent.width
+              spacing: Style.space(8)
+              Repeater {
+                model: [
+                  { name: "Photos", icon: "󰋩", app: "photos" },
+                  { name: "Docs", icon: "󰈙", app: "docs" },
+                  { name: "Save", icon: "󰆓", app: "save" },
+                  { name: "AI", icon: "󰚩", app: "ai" },
+                  { name: "Git", icon: "󰊢", app: "git" },
+                  { name: "CI", icon: "󰖬", app: "ci" },
+                  { name: "Home", icon: "󰋜", app: "home" }
+                ]
+                delegate: Item {
+                  required property var modelData
+                  width: 56
+                  height: 48
+                  Column {
+                    anchors.centerIn: parent
+                    spacing: 2
+                    Rectangle {
+                      anchors.horizontalCenter: parent.horizontalCenter
+                      width: 10
+                      height: 10
+                      radius: 5
+                      color: client.serverOnline ? "#22c55e" : root.urgent
+                      border.width: 1
+                      border.color: root.dim
+                    }
+                    Text {
+                      anchors.horizontalCenter: parent.horizontalCenter
+                      text: modelData.icon
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      horizontalAlignment: Text.AlignHCenter
+                    }
+                    Text {
+                      anchors.horizontalCenter: parent.horizontalCenter
+                      text: modelData.name
+                      color: root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: 9
+                      horizontalAlignment: Text.AlignHCenter
+                    }
+                  }
+                  MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    enabled: client.clientdReachable
+                    onClicked: client.appOpen(modelData.app)
+                  }
+                }
+              }
+            }
+          }
+
+          Column {
+            visible: client.hasStatus
+            width: parent.width
+            spacing: Style.space(6)
+            PanelSectionHeader {
               text: "WORKSPACES"
               foreground: root.foreground
               fontFamily: root.fontFamily
@@ -407,6 +473,10 @@ Panel {
                     onClicked: client.workspaceAttach(modelData.id)
                   }
                   Button {
+                    text: "Editor"
+                    onClicked: client.workspaceOpenInEditor(modelData.id)
+                  }
+                  Button {
                     text: "Stop"
                     onClicked: client.workspaceStop(modelData.id)
                   }
@@ -462,7 +532,88 @@ Panel {
             }
           }
 
-          Text {
+          Column {
+            width: parent.width
+            spacing: Style.space(6)
+            PanelSectionHeader {
+              text: "NOTIFICATIONS"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+            Column {
+              width: parent.width
+              spacing: Style.space(4)
+              Row {
+                width: parent.width
+                spacing: Style.space(8)
+                Text {
+                  text: "Agent approval"
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: parent.width - toggleAgent.width - Style.space(8)
+                }
+                Switch {
+                  id: toggleAgent
+                  checked: client.notifyAgentApproval
+                  onToggled: client.notifyAgentApproval = checked
+                }
+              }
+              Row {
+                width: parent.width
+                spacing: Style.space(8)
+                Text {
+                  text: "Backup failed"
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: parent.width - toggleBackup.width - Style.space(8)
+                }
+                Switch {
+                  id: toggleBackup
+                  checked: client.notifyBackupFailed
+                  onToggled: client.notifyBackupFailed = checked
+                }
+              }
+              Row {
+                width: parent.width
+                spacing: Style.space(8)
+                Text {
+                  text: "CI failed"
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: parent.width - toggleCI.width - Style.space(8)
+                }
+                Switch {
+                  id: toggleCI
+                  checked: client.notifyCiFailed
+                  onToggled: client.notifyCiFailed = checked
+                }
+              }
+              Row {
+                width: parent.width
+                spacing: Style.space(8)
+                Text {
+                  text: "Deployment completed"
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: parent.width - toggleDeploy.width - Style.space(8)
+                }
+                Switch {
+                  id: toggleDeploy
+                  checked: client.notifyDeploymentCompleted
+                  onToggled: client.notifyDeploymentCompleted = checked
+                }
+              }
+            }
+          }
+
             visible: client.clientdReachable && !client.serverOnline
             width: parent.width
             text: "Only Diagnose is available until the private connection is ready."

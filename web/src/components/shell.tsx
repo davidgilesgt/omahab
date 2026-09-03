@@ -14,7 +14,8 @@ const NAVIGATION = [
   ["/workspaces", "Workspaces", "◇", "Remote workspaces"],
   ["/people", "People & access", "◎", "Users and access"],
   ["/providers", "Providers", "◐", "External providers"],
-  ["/tool-environment", "Tool environment", "⚙", "Agent tool variables and companion grants"],
+  ["/tool-environment", "Tool environment", "⚙", "Agent tool variables"],
+  ["/devices", "Devices", "◈", "Companion devices"],
 ] as const;
 
 function aiDashboardUrl(): string {
@@ -40,7 +41,26 @@ export function AppShell({ children }: { children: ReactNode }) {
   const { client, signOut } = useAuth();
   const navigate = useNavigate();
   const searchRef = useRef<HTMLInputElement>(null);
-  const [theme, setTheme] = useState(() => localStorage.getItem("omahab.theme") ?? "system");
+  const [theme, setTheme] = useState(() => {
+    // Honor #theme= fragment if present (clientd opens dashboard with #theme=...).
+    try {
+      const hash = typeof window !== "undefined" ? window.location.hash || "" : "";
+      if (hash) {
+        const raw = hash.startsWith("#") ? hash.slice(1) : hash;
+        const params = new URLSearchParams(raw);
+        let t = params.get("theme");
+        if (!t && raw.includes("theme=")) {
+          const m = raw.match(/theme=([^&]+)/);
+          if (m && m[1]) t = decodeURIComponent(m[1]);
+        }
+        if (t && ["tokyo-night", "catppuccin", "everforest", "gruvbox", "kanagawa", "nord", "rose-pine", "matte-black", "osaka-jade", "ristretto", "light", "dark", "system"].includes(t)) {
+          try { localStorage.setItem("omahab.theme", t); } catch {}
+          return t;
+        }
+      }
+    } catch {}
+    return localStorage.getItem("omahab.theme") ?? "system";
+  });
   const [query, setQuery] = useState("");
   const [showResults, setShowResults] = useState(false);
   const eventQuery = useQuery({ queryKey: ["events"], queryFn: client.events, staleTime: Infinity });
@@ -163,6 +183,16 @@ export function AppShell({ children }: { children: ReactNode }) {
               <option value="system">System theme</option>
               <option value="light">Light theme</option>
               <option value="dark">Dark theme</option>
+              <option value="tokyo-night">Tokyo Night</option>
+              <option value="catppuccin">Catppuccin</option>
+              <option value="everforest">Everforest</option>
+              <option value="gruvbox">Gruvbox</option>
+              <option value="kanagawa">Kanagawa</option>
+              <option value="nord">Nord</option>
+              <option value="rose-pine">Rose Pine</option>
+              <option value="matte-black">Matte Black</option>
+              <option value="osaka-jade">Osaka Jade</option>
+              <option value="ristretto">Ristretto</option>
             </select>
           </label>
         </header>

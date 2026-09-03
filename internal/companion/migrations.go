@@ -73,5 +73,19 @@ CREATE TABLE IF NOT EXISTS device_environment_grants (
 );
 `,
 		},
+		{
+			Name: "environments-006-companion_device_identity",
+			SQL: `
+ALTER TABLE companion_devices ADD COLUMN hostname TEXT NOT NULL DEFAULT '';
+ALTER TABLE companion_devices ADD COLUMN platform TEXT NOT NULL DEFAULT '';
+ALTER TABLE companion_devices ADD COLUMN arch TEXT NOT NULL DEFAULT '';
+ALTER TABLE companion_devices ADD COLUMN clientd_version TEXT NOT NULL DEFAULT '';
+ALTER TABLE companion_devices ADD COLUMN shell TEXT NOT NULL DEFAULT '';
+ALTER TABLE companion_devices ADD COLUMN env_revision INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE companion_devices ADD COLUMN env_variable_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE companion_devices ADD COLUMN backup_last_snapshot TEXT;
+ALTER TABLE companion_devices ADD COLUMN forgejo_token_name TEXT NOT NULL DEFAULT '';
+`,
+		},
 	}
 }

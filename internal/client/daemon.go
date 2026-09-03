@@ -649,6 +649,41 @@ func (d *Daemon) dispatchSocket(req SocketRequest) SocketResponse {
 		bErr := d.backupError
 		d.mu.RUnlock()
 		return SocketResponse{ID: req.ID, Result: map[string]any{"last_snapshot": snap, "error": bErr}}
+	case "app.open":
+		app, _ := req.Params["app"].(string)
+		app = strings.TrimSpace(strings.ToLower(app))
+		if app == "" {
+			app, _ = req.Params["name"].(string)
+			app = strings.TrimSpace(strings.ToLower(app))
+		}
+		if app == "" {
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "bad_request", Message: "app required"}}
+		}
+		target := appURL(d.cfg.ServerURL, app)
+		if target == "" {
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: "cannot derive app url"}}
+		}
+		// Theme is only for dashboard, but preserve behavior for home as dashboard variant
+		if app == "home" || app == "dashboard" {
+			target = DashboardURLWithTheme(target)
+		}
+		if err := d.launcher.OpenURL(target); err != nil {
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: err.Error()}}
+		}
+		return SocketResponse{ID: req.ID, Result: map[string]string{"app": app, "url": target}}
+	case "workspace.openInEditor":
+		id, _ := req.Params["id"].(string)
+		if strings.TrimSpace(id) == "" {
+			id, _ = req.Params["workspace_id"].(string)
+		}
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "bad_request", Message: "id required"}}
+		}
+		if err := d.openWorkspaceInEditor(id); err != nil {
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: err.Error()}}
+		}
+		return SocketResponse{ID: req.ID, Result: map[string]string{"workspace_id": id, "result": "editor opened"}}
 	case "subscribe":
 		return SocketResponse{ID: req.ID, Result: map[string]string{"result": "subscribed"}}
 	default:
@@ -697,7 +732,88 @@ func (d *Daemon) openOmahab() error {
 	if u == "" {
 		return fmt.Errorf("no server url configured")
 	}
+	u = DashboardURLWithTheme(u)
 	return d.launcher.OpenURL(u)
+}
+
+func (d *Daemon) openWorkspaceInEditor(id string) error {
+	host := d.serverHost()
+	if host == "" {
+		host = "omahab"
+	}
+	// Ensure SSH config entry exists for ws-<id> (best-effort)
+	_ = ensureWorkspaceSSHConfig(host, id)
+	editor := strings.TrimSpace(os.Getenv("OMAHAB_EDITOR"))
+	if editor == "" {
+		editor = strings.TrimSpace(os.Getenv("EDITOR"))
+	}
+	// Detect preferred editor command structure
+	if editor == "" || strings.Contains(strings.ToLower(editor), "code") {
+		// VS Code remote: code --remote ssh-remote+ws-<id> /workspace
+		args := []string{"code", "--remote", "ssh-remote+ws-" + id, "/workspace"}
+		if editor != "" && !strings.Contains(editor, "code") {
+			// User set EDITOR to something else but we default to code
+		}
+		if err := d.launcher.OpenTerminalCommand(args); err == nil {
+			return nil
+		}
+		// Fallback to ssh attach if code not available
+	}
+	if editor != "" && !strings.Contains(strings.ToLower(editor), "code") {
+		// Try generic editor with ssh config host
+		// e.g., zed ssh://ws-<id>/workspace or editor-specific
+		lower := strings.ToLower(editor)
+		if strings.Contains(lower, "zed") {
+			if err := d.launcher.OpenTerminalCommand([]string{"zed", "ssh://ws-" + id + "/workspace"}); err == nil {
+				return nil
+			}
+		} else {
+			// Generic: try to run editor with remote path
+			parts := strings.Fields(editor)
+			if len(parts) > 0 {
+				args := append(parts, "ssh://ws-"+id+"/workspace")
+				if err := d.launcher.OpenTerminalCommand(args); err == nil {
+					return nil
+				}
+			}
+		}
+	}
+	// Final fallback: open tmux attach like workspace.attach
+	sshArgs := []string{"ssh", "-t", "omahab@" + host, "sudo", "omahab", "workspace", "attach", id}
+	return d.launcher.OpenTerminalCommand(sshArgs)
+}
+
+func ensureWorkspaceSSHConfig(host, id string) error {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		home = os.Getenv("HOME")
+		if home == "" {
+			return fmt.Errorf("no home dir")
+		}
+	}
+	dir := filepath.Join(home, ".ssh", "config.d")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	path := filepath.Join(dir, fmt.Sprintf("omahab-ws-%s", id))
+	// Include main config if not already included
+	mainConfig := filepath.Join(home, ".ssh", "config")
+	if data, err := os.ReadFile(mainConfig); err == nil {
+		if !strings.Contains(string(data), "config.d/omahab-ws-") && !strings.Contains(string(data), "Include config.d/*") {
+			// Best-effort add Include line
+			f, err := os.OpenFile(mainConfig, os.O_APPEND|os.O_WRONLY, 0o600)
+			if err == nil {
+				_, _ = f.WriteString("\nInclude config.d/omahab-ws-*\n")
+				_ = f.Close()
+			}
+		}
+	}
+	content := fmt.Sprintf("Host ws-%s\n  HostName %s\n  User omahab\n  ProxyCommand ssh omahab@%s sudo omahab workspace ssh-proxy %s\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n", id, host, host, id)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(content), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 func (d *Daemon) serverHost() string {
@@ -908,16 +1024,46 @@ func (d *Daemon) handleCompanionEvent(ev domain.Event) {
 	case "environment.changed":
 		_ = d.envSyncOnce()
 		d.syncOnce()
+		d.syncWebApps()
+		d.broadcastStatus()
+	case "apps.changed", "application.created", "application.updated", "application.deleted", "exposure.changed":
+		d.syncWebApps()
+		d.syncOnce()
 		d.broadcastStatus()
 	case "companion.revoked":
 		d.mu.Lock()
 		d.lastErr = "device revoked"
 		d.mu.Unlock()
+		d.removeWebApps()
 		d.broadcastStatus()
 	default:
 		// For workspace.*, agent.awaiting_approval, etc.
+		if strings.HasPrefix(ev.Type, "application.") || strings.HasPrefix(ev.Type, "exposure.") || ev.Type == "apps.changed" {
+			d.syncWebApps()
+		}
 		d.syncOnce()
 		d.broadcastStatus()
+	}
+}
+
+func (d *Daemon) syncWebApps() {
+	if d.cfg == nil || strings.TrimSpace(d.cfg.ServerURL) == "" {
+		return
+	}
+	if d.remote == nil {
+		return
+	}
+	if auth, _ := d.remote.deviceAuthHeader(); auth == "" {
+		return
+	}
+	if err := SyncWebApps(d.cfg.ServerURL); err != nil {
+		d.log.Warn("webapp sync failed", "err", err)
+	}
+}
+
+func (d *Daemon) removeWebApps() {
+	if err := RemoveWebApps(); err != nil {
+		d.log.Warn("webapp remove failed", "err", err)
 	}
 }
 
@@ -947,6 +1093,7 @@ func (d *Daemon) reconcileOnce() {
 			d.projects.SyncFromRemote(ps)
 		}
 	}
+	d.syncWebApps()
 	d.broadcastStatus()
 }
 
@@ -1092,6 +1239,7 @@ func (d *Daemon) syncOnce() {
 	d.lastErr = ""
 	d.mu.Unlock()
 
+	d.syncWebApps()
 	d.maybeSelfUpdate()
 
 	// Reconcile projects in background (non-blocking for status)
