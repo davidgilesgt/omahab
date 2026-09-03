@@ -16,6 +16,8 @@ const NAVIGATION = [
   ["/providers", "Providers", "◐", "External providers"],
   ["/tool-environment", "Tool environment", "⚙", "Agent tool variables"],
   ["/devices", "Devices", "◈", "Companion devices"],
+  ["/ai", "AI", "✦", "Assistant knowledge"],
+  ["/doctor", "Doctor", "⚑", "Diagnostics"],
 ] as const;
 
 function aiDashboardUrl(): string {
@@ -37,7 +39,7 @@ function aiDashboardUrl(): string {
   return window.location.protocol + "//ai." + host;
 }
 
-export function AppShell({ children }: { children: ReactNode }) {
+export function AppShell({ children, basePath = "" }: { children: ReactNode; basePath?: string }) {
   const { client, signOut } = useAuth();
   const navigate = useNavigate();
   const searchRef = useRef<HTMLInputElement>(null);
@@ -68,9 +70,13 @@ export function AppShell({ children }: { children: ReactNode }) {
   const setupQuery = useQuery({ queryKey: ["setup"], queryFn: client.setup, retry: false, staleTime: 30_000 });
   const visibleNavigation = useMemo(() => {
     const state = setupQuery.data?.state;
-    if (!state || state === "complete") return NAVIGATION.filter(([to]) => to !== "/setup");
-    return [...NAVIGATION];
-  }, [setupQuery.data]);
+    const baseList = !state || state === "complete" ? NAVIGATION.filter(([to]) => to !== "/setup") : [...NAVIGATION];
+    if (!basePath) return baseList;
+    return baseList.map(([to, label, icon, title]) => {
+      const prefixed = to === "/" ? `${basePath}/` : `${basePath}${to}`;
+      return [prefixed, label, icon, title] as const;
+    });
+  }, [setupQuery.data, basePath]);
   useEventStream();
   // Keep theme in sync without flash - useLayoutEffect would be ideal but useEffect is okay with inline script
   useEffect(() => {
@@ -117,16 +123,16 @@ export function AppShell({ children }: { children: ReactNode }) {
     <div className="app-frame">
       <a href="#main-content" className="skip-link" onClick={() => document.getElementById("main-content")?.focus()}>Skip to content</a>
       <aside className="sidebar">
-        <NavLink to="/" className="brand" aria-label="Omahab overview">
+        <NavLink to={basePath ? `${basePath}/` : "/"} className="brand" aria-label="Omahab overview">
           <span className="brand-mark">O</span>
           <span><strong>Omahab</strong><small>Control plane</small></span>
         </NavLink>
         <nav aria-label="Primary navigation">
           {visibleNavigation.map(([to, label, icon, title]) => (
-            <NavLink key={to} to={to} end={to === "/"} className={({ isActive }) => isActive ? "nav-link active" : "nav-link"} title={title}>
+            <NavLink key={to} to={to} end={to === "/" || to === `${basePath}/`} className={({ isActive }) => isActive ? "nav-link active" : "nav-link"} title={title}>
               <span aria-hidden="true" className="nav-icon" title={title}>{icon}</span>
               <span>{label}</span>
-              {to === "/events" && unread > 0 && <span className="nav-badge" aria-label={`${unread} unread`}>{unread}</span>}
+              {to.endsWith("/events") && unread > 0 && <span className="nav-badge" aria-label={`${unread} unread`}>{unread}</span>}
             </NavLink>
           ))}
           <a href={aiDashboardUrl()} target="_blank" rel="noreferrer" className="nav-link" title="AI assistant (upstream Hermes dashboard)">

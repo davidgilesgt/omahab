@@ -801,6 +801,27 @@ func (s *Server) handleCompanionStopWorkspace(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, ws)
 }
 
+func (s *Server) handleCompanionCreateSyncFolder(w http.ResponseWriter, r *http.Request) {
+	var req CreateCompanionSyncFolderRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.Name) == "" {
+		writeError(w, r, errBadRequest("name is required"))
+		return
+	}
+	if strings.TrimSpace(req.DeviceID) == "" {
+		writeError(w, r, errBadRequest("device_id is required"))
+		return
+	}
+	f, err := s.backend.CreateCompanionSyncFolder(r.Context(), req)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, f)
+}
+
 // --- users / identity ---
 
 func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
@@ -1837,6 +1858,78 @@ func (s *Server) handleKnowledgeSetConsent(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"principal": req.Principal, "provider": req.Provider, "granted": req.Granted})
+}
+
+func (s *Server) handleKnowledgeGetIndexSetup(w http.ResponseWriter, r *http.Request) {
+	choice, err := s.backend.KnowledgeGetIndexSetup(r.Context())
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"choice": choice})
+}
+
+func (s *Server) handleKnowledgeSetIndexSetup(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Choice string `json:"choice"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.Choice) == "" {
+		writeError(w, r, errBadRequest("choice is required"))
+		return
+	}
+	if err := s.backend.KnowledgeSetIndexSetup(r.Context(), req.Choice); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	choice, _ := s.backend.KnowledgeGetIndexSetup(r.Context())
+	writeJSON(w, http.StatusOK, map[string]any{"choice": choice})
+}
+
+func (s *Server) handlePublicStatus(w http.ResponseWriter, r *http.Request) {
+	items, err := s.backend.ListApplications(r.Context(), apitypes.Pagination{Limit: 100, Offset: 0})
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	out := make([]apitypes.PublicAppStatus, 0, len(items))
+	for _, app := range items {
+		health := string(app.Health)
+		switch health {
+		case "healthy":
+			health = "healthy"
+		case "degraded":
+			health = "degraded"
+		case "unhealthy":
+			health = "down"
+		case "unknown":
+			health = "down"
+		default:
+			health = "down"
+		}
+		out = append(out, apitypes.PublicAppStatus{ID: string(app.ID), Name: app.Name, Health: health})
+	}
+	writeJSON(w, http.StatusOK, apitypes.PublicStatusResponse{Apps: out})
+}
+
+func (s *Server) handleGetHermesMCPToken(w http.ResponseWriter, r *http.Request) {
+	tok, err := s.backend.GetHermesMCPToken(r.Context())
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"token": tok})
+}
+
+func (s *Server) handleRotateHermesMCPToken(w http.ResponseWriter, r *http.Request) {
+	tok, err := s.backend.RotateHermesMCPToken(r.Context())
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"token": tok})
 }
 
 // --- identity extended ---

@@ -102,6 +102,7 @@ type Bundle struct {
 	SecretSources   []string         `json:"secret_sources,omitempty"`
 	PipelineImage   string           `json:"pipeline_image,omitempty"`
 	Units           []string         `json:"units,omitempty"`
+	Groups          []string         `json:"groups,omitempty"`
 }
 
 // exposureRank orders exposure so requests can be checked against a bundle's
@@ -239,6 +240,13 @@ func (b Bundle) validate() (Bundle, error) {
 			problems = append(problems, fmt.Sprintf("unit %q listed twice", u))
 		}
 		seenUnit[u] = true
+	}
+	for _, g := range b.Groups {
+		switch g {
+		case "members", "admins":
+		default:
+			problems = append(problems, fmt.Sprintf("group %q must be members or admins", g))
+		}
 	}
 	if len(problems) > 0 {
 		return Bundle{}, &ValidationError{Problems: problems}

@@ -83,6 +83,41 @@ export function OverviewPage() {
     undefined,
   );
   const unread = events.data?.filter((event) => !event.read_at) ?? [];
+  const publicCount = applications.data?.filter((a) => a.exposure === "public").length ?? 0;
+
+  function formatRelativeHours(iso: string): string {
+    const ms = Date.now() - Date.parse(iso);
+    if (!Number.isFinite(ms) || ms < 0) return "just now";
+    const h = Math.floor(ms / 3_600_000);
+    if (h < 1) {
+      const m = Math.floor(ms / 60_000);
+      return m <= 1 ? "just now" : `${m} min ago`;
+    }
+    if (h === 1) return "1 h ago";
+    if (h < 24) return `${h} h ago`;
+    const d = Math.floor(h / 24);
+    if (d === 1) return "1 day ago";
+    return `${d} days ago`;
+  }
+
+  function formatVerifiedDay(iso: string): string {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    return new Intl.DateTimeFormat(undefined, { weekday: "long" }).format(d);
+  }
+
+  let trustSentence = "";
+  let trustAttention = false;
+  {
+    const totalServices = applications.data?.length ?? 0;
+    const backedUpPart = latestBackup ? `Backed up ${formatRelativeHours(latestBackup.finished_at ?? latestBackup.started_at)}` : "No backups yet";
+    const verifiedPart = latestBackup?.verified_at ? `and verified ${formatVerifiedDay(latestBackup.verified_at)}` : "but not verified";
+    const servicesPart = totalServices === 0 ? "No services" : unhealthy.length === 0 ? `${totalServices} services healthy` : `${unhealthy.length} of ${totalServices} need attention`;
+    const exposurePart = publicCount === 0 ? "Nothing is public." : `${publicCount} public.`;
+    trustSentence = `${backedUpPart} ${verifiedPart}. ${servicesPart}. ${exposurePart}`;
+    trustAttention = !latestBackup || !latestBackup.verified_at || unhealthy.length > 0 || publicCount > 0;
+  }
+
   return (
     <div className="page">
       {setup.data && setup.data.state !== "complete" && (
@@ -90,6 +125,18 @@ export function OverviewPage() {
           <strong>Setup is not finished</strong> — <Link to="/setup">Continue setup</Link>
         </div>
       )}
+      <div
+        className={trustAttention ? "banner-card" : "trust-sentence"}
+        style={
+          trustAttention
+            ? { background: "var(--warning-muted, #fff3cd)", border: "1px solid var(--warning, #f59e0b)", padding: 12, borderRadius: 8, marginBottom: 16 }
+            : { background: "var(--success-muted, #ecfdf5)", border: "1px solid var(--success, #10b981)", padding: 12, borderRadius: 8, marginBottom: 16 }
+        }
+        role="status"
+        aria-live="polite"
+      >
+        {trustSentence}
+      </div>
       <PageHeader eyebrow="At a glance" title="Your server" description="Health, recovery readiness, and changes that need attention." />
       <div className="metric-strip">
         <article><span>Control plane</span><strong><StatusPill value={status.data.health} /></strong><small>Version {status.data.version}</small></article>

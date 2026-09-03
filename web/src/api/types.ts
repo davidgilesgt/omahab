@@ -41,6 +41,7 @@ export interface CatalogBundle {
   installed: boolean;
   /** "systemd" = native NixOS service (auto-installed, image-versioned); "compose" = Docker Compose. */
   runtime?: string;
+  groups?: string[];
 }
 export interface ExposureState {
   resource_type: "application" | "project";
@@ -297,4 +298,27 @@ export interface CreateCompanionEnrollmentResponse {
   id: string;
   code: string;
   expires_at: string;
+}
+
+export interface PublicAppStatus {
+  id: string;
+  name: string;
+  health: "healthy" | "degraded" | "down" | "unknown";
+}
+
+export interface PublicStatusResponse {
+  apps: PublicAppStatus[];
+}
+
+export interface DoctorCheck {
+  name: string;
+  status: "healthy" | "degraded" | "unhealthy" | "unknown";
+  message?: string;
+  detail?: string;
+}
+
+export interface DoctorReport {
+  healthy: boolean;
+  checks: DoctorCheck[];
+  generated_at: string;
 }

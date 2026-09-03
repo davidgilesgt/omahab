@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -23,6 +24,10 @@ import (
 	"github.com/omahab/omahab/internal/companion"
 	"github.com/omahab/omahab/internal/controlplane"
 )
+
+//go:embed openapi.yaml
+var openAPISpec []byte
+
 
 // Server is the Chi HTTP server for omahabd.
 type Server struct {
@@ -162,6 +167,7 @@ func (s *Server) buildRouter() chi.Router {
 
 	// Public routes (no bearer auth).
 	r.Get("/up", s.handleUp)
+	r.Get("/api/v1/public/status", s.handlePublicStatus)
 
 	// Release callback via per-project token (Woodpecker) — no admin bearer, verifies release token.
 	r.Post("/api/v1/projects/{id}/releases/with-token", s.withBodyLimit(defaultBodyLimit, s.handleReleaseWithToken))
@@ -179,6 +185,9 @@ func (s *Server) buildRouter() chi.Router {
 	r.Get("/dl/SHA256SUMS", s.handleDLSHA256)
 	r.Get("/dl/{file}", s.handleDL)
 	r.Get("/install.sh", s.handleInstallSh)
+
+	// OpenAPI spec — tailnet-only (no auth, like /dl), served from embedded api/openapi.yaml.
+	r.Get("/api/openapi.yaml", s.handleOpenAPI)
 
 	// MCP server for Hermes (outside bearerAuth, behind dedicated mcpAuth).
 	// Supports POST/GET /mcp with Bearer OMAHAB_MCP_TOKEN.
@@ -309,6 +318,10 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/api/v1/knowledge/pinned-models", s.handleKnowledgePinnedModels)
 		r.Get("/api/v1/knowledge/consent", s.handleKnowledgeGetConsent)
 		r.Put("/api/v1/knowledge/consent", s.withBodyLimit(defaultBodyLimit, s.handleKnowledgeSetConsent))
+		r.Get("/api/v1/knowledge/index-setup", s.handleKnowledgeGetIndexSetup)
+		r.Put("/api/v1/knowledge/index-setup", s.withBodyLimit(defaultBodyLimit, s.handleKnowledgeSetIndexSetup))
+		r.Get("/api/v1/hermes/mcp-token", s.handleGetHermesMCPToken)
+		r.Post("/api/v1/hermes/mcp-token/rotate", s.handleRotateHermesMCPToken)
 
 		// Setup (first-run provisioning)
 		r.Get("/api/v1/setup", s.handleGetSetup)
@@ -384,8 +397,13 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/api/v1/companion/workspaces", s.handleCompanionListWorkspaces)
 		r.Post("/api/v1/companion/workspaces", s.withBodyLimit(defaultBodyLimit, s.handleCompanionCreateWorkspace))
 		r.Post("/api/v1/companion/workspaces/{id}/stop", s.handleCompanionStopWorkspace)
+		r.Post("/api/v1/companion/sync/folders", s.withBodyLimit(defaultBodyLimit, s.handleCompanionCreateSyncFolder))
 		r.Get("/api/v1/companion/environment", s.handleGetCompanionEnvironment)
 		r.Post("/api/v1/provider-oauth/{provider}/callback/{session_id}", s.withBodyLimit(defaultBodyLimit, s.handleForwardProviderOAuthCallback))
+		if s.mcpHandler != nil {
+			r.Handle("/api/v1/companion/mcp", s.mcpHandler)
+			r.Handle("/api/v1/companion/mcp/", s.mcpHandler)
+		}
 	})
 	return r
 }
@@ -537,6 +555,20 @@ func (s *Server) handleInstallSh(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
+}
+
+// handleOpenAPI serves the embedded OpenAPI spec (api/openapi.yaml) with no auth.
+// It is tailnet-only via nftables (same as /dl/* and /up).
+func (s *Server) handleOpenAPI(w http.ResponseWriter, r *http.Request) {
+	if len(openAPISpec) == 0 {
+		writeError(w, r, errNotFound("not found"))
+		return
+	}
+	w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	w.Header().Set("Content-Length", strconv.Itoa(len(openAPISpec)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(openAPISpec)
 }
 
 // --- middleware ---

@@ -17,6 +17,33 @@ const GROUP_OPTIONS = ["admins", "members", "guests"] as const;
 function OperationError({ error }: { error: unknown }) {
   return error ? <p className="inline-error" role="alert">{error instanceof Error ? error.message : "The operation failed."}</p> : null;
 }
+function welcomeUrlFromEnrollment(enrollmentUrl: string): string | null {
+  try {
+    const u = new URL(enrollmentUrl);
+    let token = u.searchParams.get("token") || u.searchParams.get("code");
+    if (!token) {
+      const parts = u.pathname.split("/").filter(Boolean);
+      token = parts[parts.length - 1] || null;
+    }
+    if (!token) return null;
+    const host = u.hostname;
+    const hostParts = host.split(".");
+    const domain = hostParts.length >= 2 ? hostParts.slice(1).join(".") : host;
+    let homeHost = "";
+    try {
+      const cur = window.location.hostname;
+      if (cur.startsWith("home.")) homeHost = cur;
+      else if (cur.includes(".home.")) homeHost = `home.${cur.split(".home.")[1]}`;
+      else if (domain) homeHost = `home.${domain}`;
+    } catch {}
+    const scheme = typeof window !== "undefined" ? window.location.protocol : "https:";
+    if (!homeHost) return null;
+    return `${scheme}//${homeHost}/welcome/${encodeURIComponent(token)}`;
+  } catch {
+    return null;
+  }
+}
+
 
 function DestructiveConfirm({
   title,
@@ -334,7 +361,26 @@ export function PeoplePage() {
     <div className="page">
       <PageHeader eyebrow="Identity" title="People and recovery" description="Pocket ID enrollment and short-lived recovery. Omahab never verifies passwords or passkeys itself." />
       {recovery && <section className="recovery-banner" role="status"><div><strong>Recovery session created</strong><p>Expires {formatDate(recovery.expires_at)}. Share it only with the intended person over a trusted channel.</p>{recovery.login_url && <a href={recovery.login_url} target="_blank" rel="noreferrer">Open recovery sign-in</a>}{recovery.code && <><output className="recovery-code" aria-label="One-time recovery code">{recovery.code}</output> <CopyButton text={recovery.code} label="Copy code" /></>}</div><button className="icon-button" type="button" onClick={() => setRecovery(null)} aria-label="Dismiss">×</button></section>}
-      {enrollmentUrl && <section className="recovery-banner" role="status"><div><strong>Enrollment link</strong><p><a href={enrollmentUrl} target="_blank" rel="noreferrer">{enrollmentUrl}</a> <CopyButton text={enrollmentUrl} label="Copy" /></p>{enrollmentExpires && <small>Expires {enrollmentExpires}</small>}<p><small>Open this link in the user’s browser to register a passkey.</small></p></div><button className="icon-button" type="button" onClick={() => setEnrollmentUrl(null)} aria-label="Dismiss">×</button></section>}
+      {enrollmentUrl && (
+        <section className="recovery-banner" role="status">
+          <div>
+            <strong>Enrollment link</strong>
+            <p><a href={enrollmentUrl} target="_blank" rel="noreferrer">{enrollmentUrl}</a> <CopyButton text={enrollmentUrl} label="Copy" /></p>
+            {enrollmentExpires && <small>Expires {enrollmentExpires}</small>}
+            <p><small>Open this link in the user’s browser to register a passkey.</small></p>
+            {welcomeUrlFromEnrollment(enrollmentUrl) ? (
+              <p style={{ marginTop: 8 }}>
+                <strong>Welcome page for household members:</strong>{" "}
+                <a href={welcomeUrlFromEnrollment(enrollmentUrl)!} target="_blank" rel="noreferrer">{welcomeUrlFromEnrollment(enrollmentUrl)}</a>{" "}
+                <CopyButton text={welcomeUrlFromEnrollment(enrollmentUrl)!} label="Copy welcome link" />
+                <br />
+                <small>Share this home.* link — it walks them through Tailscale, passkey setup, and opening Photos. Print or show the QR on the welcome page.</small>
+              </p>
+            ) : null}
+          </div>
+          <button className="icon-button" type="button" onClick={() => setEnrollmentUrl(null)} aria-label="Dismiss">×</button>
+        </section>
+      )}
       <div className="split-grid wide-primary">
         <Section title="Users" description="Disable access without deleting identity history.">
           {query.isLoading ? <LoadingState label="Loading users" /> : query.isError ? <ErrorState error={query.error} retry={() => void query.refetch()} /> : !users.length ? <EmptyState title="No users" description="Invite the first person to begin Pocket ID enrollment." /> : (

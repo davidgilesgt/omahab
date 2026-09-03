@@ -110,11 +110,14 @@ func (b *Backend) KnowledgeIndexSetupOptions(ctx context.Context) ([]knowledge.I
 }
 
 func (b *Backend) KnowledgePinnedModels(ctx context.Context) ([]knowledge.ModelInfo, error) {
-	models, err := knowledge.PinnedModels()
+	if b.knowledge == nil {
+		return nil, translateError(fmt.Errorf("%w: knowledge not configured", ErrNotConfigured))
+	}
+	pinned, err := knowledge.PinnedModels()
 	if err != nil {
 		return nil, translateError(err)
 	}
-	return models, nil
+	return pinned, nil
 }
 
 func (b *Backend) KnowledgeGetSummarizationConsent(ctx context.Context, principal, provider string) (bool, error) {
@@ -132,25 +135,58 @@ func (b *Backend) KnowledgeSetSummarizationConsent(ctx context.Context, principa
 	if b.knowledge == nil {
 		return translateError(fmt.Errorf("%w: knowledge not configured", ErrNotConfigured))
 	}
-	if granted {
-		if _, err := b.knowledge.SetSummarizationConsent(ctx, principal, provider, true); err != nil {
-			return translateError(err)
-		}
-	} else {
-		// revoke any existing consent for this principal/provider
-		consents, err := b.knowledge.ListConsents(ctx, principal)
-		if err != nil {
-			return translateError(err)
-		}
-		for _, c := range consents {
-			if c.Principal == principal && c.Provider == provider {
-				if err := b.knowledge.RevokeConsent(ctx, c.ID); err != nil {
-					return translateError(err)
-				}
-			}
-		}
+	if _, err := b.knowledge.SetSummarizationConsent(ctx, principal, provider, granted); err != nil {
+		return translateError(err)
 	}
 	return nil
 }
 
+func (b *Backend) KnowledgeGetIndexSetup(ctx context.Context) (string, error) {
+	if b.knowledge == nil {
+		return "", translateError(fmt.Errorf("%w: knowledge not configured", ErrNotConfigured))
+	}
+	choice, err := b.knowledge.GetIndexSetupChoice(ctx)
+	if err != nil {
+		return "", translateError(err)
+	}
+	return choice, nil
+}
+
+func (b *Backend) KnowledgeSetIndexSetup(ctx context.Context, choice string) error {
+	if b.knowledge == nil {
+		return translateError(fmt.Errorf("%w: knowledge not configured", ErrNotConfigured))
+	}
+	if err := b.knowledge.SetIndexSetupChoice(ctx, choice); err != nil {
+		return translateError(err)
+	}
+	return nil
+}
+
+func (b *Backend) GetHermesMCPToken(ctx context.Context) (string, error) {
+	if b.secrets == nil {
+		return "", translateError(fmt.Errorf("%w: secrets not configured", ErrNotConfigured))
+	}
+	v, err := b.secrets.RevealByName(ctx, "platform-app", "hermes_mcp_token")
+	if err != nil {
+		return "", translateError(err)
+	}
+	return v, nil
+}
+
+func (b *Backend) RotateHermesMCPToken(ctx context.Context) (string, error) {
+	if b.secrets == nil {
+		return "", translateError(fmt.Errorf("%w: secrets not configured", ErrNotConfigured))
+	}
+	newToken := generateRandomBase64URL(32)
+	if newToken == "" {
+		return "", translateError(fmt.Errorf("failed to generate token"))
+	}
+	if _, err := b.secrets.RotateByName(ctx, "platform-app", "hermes_mcp_token", newToken); err != nil {
+		// If rotate fails because not found, try Put.
+		if _, perr := b.secrets.Put(ctx, "platform-app", "hermes_mcp_token", newToken); perr != nil {
+			return "", translateError(perr)
+		}
+	}
+	return newToken, nil
+}
 // Identity extended

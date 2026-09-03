@@ -1136,6 +1136,45 @@ func (s *Service) SetSummarizationConsent(ctx context.Context, principal, provid
 	return c, nil
 }
 
+// GetIndexSetupChoice returns the persisted semantic index setup choice.
+// Valid choices are "english", "worldwide", "full_text" (and "fulltext" alias).
+// Empty means no choice stored yet.
+func (s *Service) GetIndexSetupChoice(ctx context.Context) (string, error) {
+	if s.db == nil {
+		return "", nil
+	}
+	var value string
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM knowledge_settings WHERE key = 'index_setup_choice'`).Scan(&value)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
+		}
+		return "", fmt.Errorf("get index setup: %w", err)
+	}
+	return value, nil
+}
+
+// SetIndexSetupChoice persists the semantic index setup choice after validation.
+func (s *Service) SetIndexSetupChoice(ctx context.Context, choice string) error {
+	normalized := strings.TrimSpace(strings.ToLower(choice))
+	switch normalized {
+	case "english", "worldwide", "full_text", "fulltext":
+		if normalized == "fulltext" {
+			normalized = "full_text"
+		}
+	default:
+		return validation(fmt.Sprintf("choice must be english, worldwide, or fulltext (got %q)", choice))
+	}
+	if s.db == nil {
+		return fmt.Errorf("knowledge store not available")
+	}
+	nowStr := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO knowledge_settings (key, value, updated_at) VALUES ('index_setup_choice', ?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`, normalized, nowStr)
+	if err != nil {
+		return fmt.Errorf("set index setup: %w", err)
+	}
+	return nil
+}
 
 func (s *Service) paperlessSourcesWithAccess(ctx context.Context, principal string) ([]*Source, error) {
 	all, err := s.ListSources(ctx)

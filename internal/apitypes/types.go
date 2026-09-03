@@ -336,6 +336,13 @@ type CreateSyncFolderRequest struct {
 	ShareWithAI bool   `json:"share_with_ai"`
 }
 
+type CreateCompanionSyncFolderRequest struct {
+	Name        string `json:"name"`
+	LocalPath   string `json:"local_path,omitempty"`
+	ShareWithAI *bool  `json:"share_with_ai,omitempty"`
+	DeviceID    string `json:"device_id,omitempty"`
+	DeviceName  string `json:"device_name,omitempty"`
+}
 type UpdateSyncFolderRequest struct {
 	Name        *string `json:"name,omitempty"`
 	ShareWithAI *bool   `json:"share_with_ai,omitempty"`
@@ -537,6 +544,17 @@ type PaperlessMetadata = knowledge.PaperlessMetadata
 type Source = knowledge.Source
 type IndexSetupOption = knowledge.IndexSetupOption
 type ModelInfo = knowledge.ModelInfo
+
+// Public status (unauthenticated, tailnet-only) — minimal per-app health only.
+type PublicAppStatus struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Health string `json:"health"` // healthy|degraded|down|unknown
+}
+
+type PublicStatusResponse struct {
+	Apps []PublicAppStatus `json:"apps"`
+}
 
 // SCM aliases
 type PullRequestEvent = scm.PullRequestEvent

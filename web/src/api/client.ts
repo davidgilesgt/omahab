@@ -7,6 +7,7 @@ import type {
   ControlEvent,
   CreateCompanionEnrollmentResponse,
   CreateModelKeyResponse,
+  DoctorReport,
   Exposure,
   ExposureState,
   IndexSetupOption,
@@ -21,6 +22,7 @@ import type {
   OAuthSession,
   Project,
   ProviderCredential,
+  PublicStatusResponse,
   RecoverySession,
   Release,
   Secret,
@@ -207,6 +209,18 @@ export class ApiClient {
   setNtfyEnabled = (enabled: boolean) => this.request<NtfyConfig>("/ntfy", { method: "PUT", body: JSON.stringify({ enabled }) });
 
   knowledgeIndexSetupOptions = () => this.list<IndexSetupOption>("/knowledge/index-setup-options");
+  knowledgeGetIndexSetup = () => this.request<{ choice: string }>("/knowledge/index-setup");
+
+  knowledgeSetIndexSetup = (choice: string) => this.request<{ choice: string }>("/knowledge/index-setup", { method: "PUT", body: JSON.stringify({ choice }) });
+
+  publicStatus = () => this.request<PublicStatusResponse>("/public/status");
+
+  doctor = () => this.request<DoctorReport>("/doctor");
+
+  hermesMCPToken = () => this.request<{ token: string }>("/hermes/mcp-token");
+
+  rotateHermesMCPToken = () => this.request<{ token: string }>("/hermes/mcp-token/rotate", { method: "POST", body: JSON.stringify({}) });
+
 
   knowledgePinnedModels = () => this.list<ModelInfo>("/knowledge/pinned-models");
 

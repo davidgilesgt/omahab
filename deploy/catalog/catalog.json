@@ -38,6 +38,9 @@
       "route": "",
       "units": [
         "caddy.service"
+      ],
+      "groups": [
+        "admins"
       ]
     },
     {
@@ -87,6 +90,9 @@
       ],
       "units": [
         "pocket-id.service"
+      ],
+      "groups": [
+        "admins"
       ]
     },
     {
@@ -142,6 +148,10 @@
       ],
       "units": [
         "forgejo.service"
+      ],
+      "groups": [
+        "members",
+        "admins"
       ]
     },
     {
@@ -201,6 +211,10 @@
       "units": [
         "woodpecker-server.service",
         "woodpecker-agent-docker.service"
+      ],
+      "groups": [
+        "members",
+        "admins"
       ]
     },
     {
@@ -260,6 +274,10 @@
       "units": [
         "immich-server.service",
         "immich-machine-learning.service"
+      ],
+      "groups": [
+        "members",
+        "admins"
       ]
     },
     {
@@ -315,6 +333,10 @@
         "paperless-scheduler.service",
         "paperless-tika.service",
         "paperless-gotenberg.service"
+      ],
+      "groups": [
+        "members",
+        "admins"
       ]
     },
     {
@@ -375,6 +397,10 @@
       ],
       "units": [
         "karakeep.service"
+      ],
+      "groups": [
+        "members",
+        "admins"
       ]
     },
     {
@@ -418,6 +444,10 @@
       ],
       "units": [
         "syncthing.service"
+      ],
+      "groups": [
+        "members",
+        "admins"
       ]
     },
     {
@@ -472,6 +502,9 @@
       ],
       "units": [
         "litellm.service"
+      ],
+      "groups": [
+        "admins"
       ]
     },
     {
@@ -506,6 +539,9 @@
       "route": "",
       "units": [
         "omahab-embedding-worker.service"
+      ],
+      "groups": [
+        "admins"
       ]
     },
     {
@@ -552,6 +588,9 @@
       ],
       "units": [
         "ntfy-sh.service"
+      ],
+      "groups": [
+        "admins"
       ]
     },
     {
@@ -587,6 +626,10 @@
       ],
       "units": [
         "docker-hermes.service"
+      ],
+      "groups": [
+        "members",
+        "admins"
       ]
     },
     {
@@ -619,6 +662,9 @@
       ],
       "units": [
         "restic-rest-server.service"
+      ],
+      "groups": [
+        "admins"
       ]
     }
   ]

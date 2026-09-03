@@ -134,5 +134,15 @@ ALTER TABLE knowledge_sources_new RENAME TO knowledge_sources;
 CREATE INDEX IF NOT EXISTS idx_knowledge_sources_kind ON knowledge_sources(kind);
 `,
 		},
+		{
+			Name: "knowledge-008-settings",
+			SQL: `
+CREATE TABLE IF NOT EXISTS knowledge_settings (
+	key TEXT PRIMARY KEY,
+	value TEXT NOT NULL,
+	updated_at TEXT NOT NULL
+) STRICT;
+`,
+		},
 	}
 }
