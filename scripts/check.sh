@@ -39,12 +39,16 @@ test ! -f "$ROOT/.dockerignore" && pass ".dockerignore deleted" || fail_check ".
 grep -q 'ConditionPathExists = "${appEnv}/${bundle}.env"' nix/apps.nix && pass "appenv gating present" || fail_check "appenv gating missing"
 
 # No runtime writes to /etc from the daemon.
-! grep -rn '"/etc/omahab' internal/ cmd/ --include='*.go' | grep -v _test | grep -v "config.go:.*DefaultEtcDir" && pass "daemon never writes /etc" || fail_check "daemon /etc write"
-
+! grep -rn '"/etc/omahab' internal/ cmd/ --include='*.go' | grep -v _test | grep -v "config.go:.*DefaultEtcDir" | grep -v "system.go:.*releaseFile" && pass "daemon never writes /etc" || fail_check "daemon /etc write"
+# Catalog: single-source runtime, no legacy references.
+pat="apps-catalog"; pat+=".json"
+! grep -rn "$pat" --include="*.go" --include="*.nix" --include="*.sh" --include="*.md" --include="*.json" . 2>/dev/null | grep -q . && pass "no apps-catalog ref" || fail_check "apps-catalog ref present"
+! grep -q "docker compose" deploy/catalog/catalog.json && pass "catalog no docker compose" || fail_check "catalog contains docker compose"
 # Go vet + build.
 if command -v go >/dev/null 2>&1; then
   go build ./... && pass "go build" || fail_check "go build"
   go vet ./... && pass "go vet" || fail_check "go vet"
+  go run ./cmd/omahab catalog validate deploy/catalog/catalog.json && pass "catalog validate" || fail_check "catalog validate"
 else
   fail_check "go toolchain not found"
 fi

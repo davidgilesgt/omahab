@@ -71,7 +71,8 @@ EOF
           doCheck = false;
         };
         omahab-catalog = pkgs.runCommand "omahab-catalog" { } ''
-          cp -r ${./deploy/catalog} $out
+          mkdir -p $out
+          cp ${./deploy/catalog/catalog.json} $out/catalog.json
         '';
       in
       {

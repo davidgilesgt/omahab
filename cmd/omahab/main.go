@@ -18,6 +18,7 @@ import (
 	"github.com/charmbracelet/x/term"
 
 	"github.com/omahab/omahab/internal/apiclient"
+	"github.com/omahab/omahab/internal/apps"
 	"github.com/omahab/omahab/internal/domain"
 	"github.com/omahab/omahab/internal/tui"
 )
@@ -107,6 +108,7 @@ Use --server to target a different control plane (env OMAHAB_SERVER, then ~/.con
 	root.AddCommand(newProviderCmd())
 	root.AddCommand(newEnvCmd())
 	root.AddCommand(newVersionCmd())
+	root.AddCommand(newCatalogCmd())
 	// Completion
 	root.AddCommand(newCompletionCmd())
 	// Host/admin: expose doctor already, status, identity recover
@@ -2089,6 +2091,30 @@ func newVersionCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+func newCatalogCmd() *cobra.Command {
+	cat := &cobra.Command{
+		Use:    "catalog",
+		Short:  "Catalog utilities",
+		Hidden: true,
+	}
+	validate := &cobra.Command{
+		Use:   "validate [path]",
+		Short: "Validate a catalog file",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path := args[0]
+			c, err := apps.LoadCatalogFile(path)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("ok: %d bundles\n", len(c.Bundles()))
+			return nil
+		},
+	}
+	cat.AddCommand(validate)
+	return cat
 }
 
 func newCompletionCmd() *cobra.Command {

@@ -46,7 +46,9 @@ type BackupHooks struct {
 
 // OIDCConfig records whether the application supports native OIDC.
 type OIDCConfig struct {
-	Supported bool `json:"supported"`
+	Supported bool   `json:"supported"`
+	Mode      string `json:"mode,omitempty"`
+	Provider  string `json:"provider,omitempty"`
 }
 
 // ResourceGuidance carries scheduling guidance for the bundle.
@@ -181,7 +183,17 @@ func (b Bundle) validate() (Bundle, error) {
 	if b.Resources.MemoryMB < 0 {
 		problems = append(problems, "resources.memory_mb must not be negative")
 	}
-	if !routeRe.MatchString(b.Route) {
+	if strings.Contains(b.Route, "{{") {
+		if !strings.Contains(b.Route, "{{.Domain}}") {
+			problems = append(problems, fmt.Sprintf("route %q must contain {{.Domain}} when templated", b.Route))
+		} else {
+			prefix := strings.Split(b.Route, "{{")[0]
+			prefix = strings.TrimSuffix(prefix, ".")
+			if prefix != "" && !routeRe.MatchString(prefix) {
+				problems = append(problems, fmt.Sprintf("route %q prefix %q must match ^[a-z0-9-]*$", b.Route, prefix))
+			}
+		}
+	} else if !routeRe.MatchString(b.Route) {
 		problems = append(problems, fmt.Sprintf("route %q must match ^[a-z0-9-]*$", b.Route))
 	}
 	if len(b.Route) > 63 {

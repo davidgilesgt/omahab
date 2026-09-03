@@ -81,7 +81,7 @@ All of these install automatically (no click-to-install) as native NixOS service
 | Pocket ID | Sign-in with passkeys (OIDC) |
 | Forgejo | Git repositories (native PostgreSQL) |
 | Woodpecker | CI pipelines (agent on the rootless podman builder) |
-| Hermes | AI assistant (container; Omahab-owned image) |
+| Hermes | AI assistant (upstream `nousresearch/hermes-agent` container, dashboard on `ai.<domain>`) |
 | Immich | Photos (native PostgreSQL + ML) |
 | Paperless-ngx | Documents (with tika/gotenberg) |
 | Karakeep | Bookmarks and notes |
@@ -180,7 +180,6 @@ nix build .#image-qcow   # qcow2 appliance disk
 | `omahabd` health check timed out | `journalctl -u omahabd -n 50 --no-pager`; the daemon did not return `200` on `http://127.0.0.1:8484/up` |
 | Domain-gated service inactive | Expected before domain enrollment: the unit waits for `/var/lib/omahab/appenv/<bundle>.env` |
 | `omahab system upgrade` rolled back | The new generation failed the 120s health gate; check `journalctl -u omahabd` on the previous generation |
-| Hermes not in the catalog | The `ghcr.io/omahab/hermes` image is not yet published; the bundle is skipped until then |
 
 ## License
 

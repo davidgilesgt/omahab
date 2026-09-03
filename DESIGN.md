@@ -253,14 +253,16 @@ Platform applications are **native NixOS systemd services** managed by `omahabd`
 
 A platform bundle entry in the curated catalog declares:
 
-- systemd units;
-- health checks (HTTP probes against the loopback port map);
-- resource guidance;
-- persistent-data locations (host paths under `/srv/omahab` and `/var/lib/<svc>`);
-- database-safe backup hooks (native `pg_dump -Fc` into `/var/lib/omahab/dumps`);
-- restore hooks (pg_restore + unit restarts);
-- OIDC configuration;
-- exposure capability.
+- `id`, `name`, `port`, `default_exposure`, `max_exposure`;
+- `health_check` (HTTP probes against the loopback port map, `kind`/`path`/`port`);
+- `data` (persistent-data locations, `name`/`path` pairs under `/srv/omahab` and `/var/lib/<svc>`);
+- `backup` (`pre_backup`/`post_restore` native commands, e.g. `pg_dump -Fc <db> -f /var/lib/omahab/dumps/<db>.pgdump` and `pg_restore --clean --if-exists -d <db> ... && systemctl restart <unit>`);
+- `oidc` (`supported`/`mode`/`provider` for native OIDC via Pocket ID);
+- `resources` (`memory_mb` guidance);
+- `default` (whether installed by default);
+- `route` (subdomain prefix or templated host e.g. `ai.{{.Domain}}`);
+- `dependencies`, `secret_sources`, `pipeline_image`;
+- `units` (systemd units, required for every bundle).
 
 Domain-dependent units gate on their `appenv/<bundle>.env` file: before enrollment systemd skips them cleanly (condition-skip, not failure); `omahabd` renders the env file after enrollment and starts the units. Versions of native services track the nixpkgs pin — there is no per-app image update; `omahab system upgrade` switches the whole generation.
 

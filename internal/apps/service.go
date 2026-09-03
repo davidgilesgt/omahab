@@ -55,7 +55,7 @@ type EnvSource func(ctx context.Context, app domain.Application) ([]string, erro
 // are optional. Now exists so transitions are deterministically testable.
 type Options struct {
 	Catalog *Catalog
-	Runner  *SystemdRunner
+	Runner  Runner
 	Events  EventSink
 	Env     EnvSource
 	Now     func() time.Time
@@ -66,7 +66,7 @@ type Service struct {
 	db      *sql.DB
 	catalog *Catalog
 	catMu   sync.RWMutex
-	runner  *SystemdRunner
+	runner  Runner
 	events  EventSink
 	env     EnvSource
 	now     func() time.Time

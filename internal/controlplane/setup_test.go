@@ -191,7 +191,6 @@ func TestTopoSortDefaultOrder(t *testing.T) {
 func TestEnsureDefaultAppResume(t *testing.T) {
 	ctx := context.Background()
 	digestA := "sha256:" + strings.Repeat("a", 64)
-	digestB := "sha256:" + strings.Repeat("b", 64)
 	runner := &scriptedRunner{health: domain.HealthHealthy}
 	b := newAppsBackend(t, runner, digestA)
 
@@ -206,7 +205,7 @@ func TestEnsureDefaultAppResume(t *testing.T) {
 		t.Fatalf("skip current: %v", err)
 	}
 	if runner.deployCount != 1 {
-		t.Fatalf("current digest should skip deploy, deploys=%d", runner.deployCount)
+		t.Fatalf("current bundle should skip deploy, deploys=%d", runner.deployCount)
 	}
 
 	list, err := b.apps.List(ctx)
@@ -221,14 +220,6 @@ func TestEnsureDefaultAppResume(t *testing.T) {
 	}
 	if runner.startCount != 1 {
 		t.Fatalf("starts = %d want 1", runner.startCount)
-	}
-
-	caddy.Digest = digestB
-	if err := b.ensureDefaultApp(ctx, caddy, "omahab.com"); err != nil {
-		t.Fatalf("update digest: %v", err)
-	}
-	if runner.deployCount < 2 {
-		t.Fatalf("update should deploy again, deploys=%d", runner.deployCount)
 	}
 }
 
@@ -515,22 +506,21 @@ func testSetupBundle(id, digest string, exp domain.Exposure, route string, deps 
 	b := apps.Bundle{
 		ID:              id,
 		Name:            id,
-		Image:           "example.com/" + id,
-		Digest:          digest,
-		Architectures:   []string{"amd64", "arm64"},
-		Compose:         "services:\n  app:\n    image: {{.Image}}@{{.Digest}}\n",
 		DefaultExposure: exp,
 		MaxExposure:     max,
-		HealthCheck:     apps.HealthCheck{Kind: apps.CheckCommand, Service: "app", Command: []string{"true"}},
+		HealthCheck:     apps.HealthCheck{Kind: apps.CheckNone},
 		Default:         true,
 		Route:           route,
 		Dependencies:    deps,
+		Units:           []string{id + ".service"},
 	}
 	switch id {
 	case "pocket-id":
 		b.Port = 1411
 	case "immich":
 		b.Port = 2283
+	case "caddy":
+		b.Units = []string{"caddy.service"}
 	}
 	return b
 }
