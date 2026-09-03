@@ -1,0 +1,18 @@
+service: once-installer
+image: basecamp/once-installer
+
+servers:
+  - once-installer-101
+  - once-installer-102
+
+proxy:
+  host: get.once.com
+
+registry:
+  server: localhost:5555
+
+ssh:
+  user: app
+
+builder:
+  arch: amd64
