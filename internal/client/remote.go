@@ -516,3 +516,94 @@ func (c *RemoteClient) GetCompanionEnvironment(ctx context.Context) (map[string]
 	}
 	return bundle, resp.Header.Get("ETag"), nil
 }
+
+// WatchCompanionEvents streams SSE events from the device-authenticated endpoint.
+// It handles context cancellation and parses SSE data payloads as domain.Event.
+// Caller should provide since for replay after reconnect; empty means live only.
+func (c *RemoteClient) WatchCompanionEvents(ctx context.Context, since domain.ID, out chan<- domain.Event) error {
+	auth, err := c.deviceAuthHeader()
+	if err != nil {
+		return err
+	}
+	if auth == "" {
+		return ErrNotAuthenticated
+	}
+	u := c.baseURL + "/api/v1/companion/events/stream"
+	if since != "" {
+		u += "?lastEventId=" + url.QueryEscape(string(since))
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", auth)
+	req.Header.Set("Accept", "text/event-stream")
+	if since != "" {
+		req.Header.Set("Last-Event-ID", string(since))
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		return ErrNotAuthenticated
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("remote GET /api/v1/companion/events/stream: %d %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	return parseRemoteSSE(ctx, resp.Body, out)
+}
+
+func parseRemoteSSE(ctx context.Context, r io.Reader, out chan<- domain.Event) error {
+	buf := make([]byte, 0, 4096)
+	tmp := make([]byte, 1024)
+	var dataLines []string
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		n, err := r.Read(tmp)
+		if n > 0 {
+			buf = append(buf, tmp[:n]...)
+			for {
+				idx := bytes.Index(buf, []byte("\n"))
+				if idx < 0 {
+					break
+				}
+				line := string(bytes.TrimRight(buf[:idx], "\r"))
+				buf = buf[idx+1:]
+				if line == "" {
+					if len(dataLines) > 0 {
+						payload := strings.Join(dataLines, "\n")
+						dataLines = nil
+						var ev domain.Event
+						if jerr := json.Unmarshal([]byte(payload), &ev); jerr == nil {
+							select {
+							case out <- ev:
+							case <-ctx.Done():
+								return ctx.Err()
+							}
+						}
+					}
+					continue
+				}
+				if strings.HasPrefix(line, "data:") {
+					dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+				}
+			}
+		}
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return err
+		}
+	}
+}

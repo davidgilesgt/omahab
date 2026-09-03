@@ -1,15 +1,16 @@
 package controlplane
 
 import (
-	"github.com/omahab/omahab/internal/apitypes"
 	"context"
-	"github.com/omahab/omahab/internal/domain"
 	"fmt"
-
-	"github.com/omahab/omahab/internal/store"
 	"strings"
-	"github.com/omahab/omahab/internal/syncer"
 	"time"
+
+	"github.com/omahab/omahab/internal/apitypes"
+	"github.com/omahab/omahab/internal/domain"
+	"github.com/omahab/omahab/internal/events"
+	"github.com/omahab/omahab/internal/store"
+	"github.com/omahab/omahab/internal/syncer"
 	"github.com/omahab/omahab/internal/workspaces"
 )
 
@@ -80,7 +81,6 @@ func (b *Backend) GetWorkspace(ctx context.Context, id domain.ID) (domain.Worksp
 	}
 	return *w, nil
 }
-
 func (b *Backend) CreateWorkspace(ctx context.Context, req apitypes.CreateWorkspaceRequest) (domain.Workspace, error) {
 	projectID := req.ProjectID
 	if b.projects != nil {
@@ -101,6 +101,15 @@ func (b *Backend) CreateWorkspace(ctx context.Context, req apitypes.CreateWorksp
 	if err != nil {
 		return domain.Workspace{}, translateError(err)
 	}
+	if b.events != nil {
+		_, _ = b.events.Publish(ctx, events.PublishInput{
+			Type:       "workspace.created",
+			Severity:   "info",
+			Message:    fmt.Sprintf("workspace created: %s", w.ID),
+			ResourceID: string(w.ID),
+			Data:       map[string]any{"workspace_id": string(w.ID), "project_id": string(w.ProjectID)},
+		})
+	}
 	return *w, nil
 }
 
@@ -108,12 +117,30 @@ func (b *Backend) StopWorkspace(ctx context.Context, id domain.ID) (domain.Works
 	if err := b.workspaces.Stop(ctx, string(id)); err != nil {
 		return domain.Workspace{}, translateError(err)
 	}
+	if b.events != nil {
+		_, _ = b.events.Publish(ctx, events.PublishInput{
+			Type:       "workspace.stopped",
+			Severity:   "info",
+			Message:    fmt.Sprintf("workspace stopped: %s", id),
+			ResourceID: string(id),
+			Data:       map[string]any{"workspace_id": string(id)},
+		})
+	}
 	return b.GetWorkspace(ctx, id)
 }
 
 func (b *Backend) DeleteWorkspace(ctx context.Context, id domain.ID) error {
 	if err := b.workspaces.Delete(ctx, string(id)); err != nil {
 		return translateError(err)
+	}
+	if b.events != nil {
+		_, _ = b.events.Publish(ctx, events.PublishInput{
+			Type:       "workspace.deleted",
+			Severity:   "info",
+			Message:    fmt.Sprintf("workspace deleted: %s", id),
+			ResourceID: string(id),
+			Data:       map[string]any{"workspace_id": string(id)},
+		})
 	}
 	return nil
 }
@@ -135,7 +162,6 @@ func (b *Backend) AttachWorkspace(ctx context.Context, id domain.ID) error {
 func (b *Backend) ListCompanionWorkspaces(ctx context.Context, p apitypes.Pagination) ([]domain.Workspace, error) {
 	return b.ListWorkspaces(ctx, p)
 }
-
 func (b *Backend) CreateCompanionWorkspace(ctx context.Context, req apitypes.CompanionCreateWorkspaceRequest) (domain.Workspace, error) {
 	slug := strings.TrimSpace(req.ProjectSlug)
 	if slug == "" {
@@ -158,9 +184,17 @@ func (b *Backend) CreateCompanionWorkspace(ctx context.Context, req apitypes.Com
 	if err != nil {
 		return domain.Workspace{}, translateError(err)
 	}
+	if b.events != nil {
+		_, _ = b.events.Publish(ctx, events.PublishInput{
+			Type:       "workspace.created",
+			Severity:   "info",
+			Message:    fmt.Sprintf("workspace created: %s", w.ID),
+			ResourceID: string(w.ID),
+			Data:       map[string]any{"workspace_id": string(w.ID), "project_id": string(w.ProjectID)},
+		})
+	}
 	return *w, nil
 }
-
 // Users (glue)
 
 func (b *Backend) IssueWorkspaceCapability(ctx context.Context, workspaceID string) (apitypes.WorkspaceCapabilityResponse, error) {

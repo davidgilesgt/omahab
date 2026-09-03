@@ -104,6 +104,9 @@ type Daemon struct {
 	envInterval    time.Duration
 	backupInterval time.Duration
 
+	subsMu sync.Mutex
+	subs   map[net.Conn]struct{}
+
 	log *slog.Logger
 }
 
@@ -214,6 +217,7 @@ func NewDaemon(opts DaemonOpts) (*Daemon, error) {
 		fetchInterval:  fetchInt,
 		envInterval:    envInt,
 		backupInterval: backupInt,
+		subs:           make(map[net.Conn]struct{}),
 		log:            opts.Logger,
 		ctx:            ctx,
 		cancel:         cancel,
@@ -251,13 +255,7 @@ func (d *Daemon) Start() error {
 	go d.serve()
 
 	d.wg.Add(1)
-	go d.syncLoop()
-
-	d.wg.Add(1)
-	go d.fetchLoop()
-
-	d.wg.Add(1)
-	go d.envLoop()
+	go d.eventLoop()
 
 	d.wg.Add(1)
 	go d.backupLoop()
@@ -308,26 +306,89 @@ func (d *Daemon) serve() {
 }
 
 func (d *Daemon) handleConn(conn net.Conn) {
-	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	// For regular request/response, 10s deadline; for subscribe we remove it.
 	br := bufio.NewReader(conn)
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 	data, err := ioReadJSON(br)
 	if err != nil {
 		_ = writeSocketResponse(conn, SocketResponse{Error: &SocketError{Code: "bad_request", Message: fmt.Sprintf("read request: %v", err)}})
+		_ = conn.Close()
 		return
 	}
 	var sreq SocketRequest
 	if err := json.Unmarshal(data, &sreq); err != nil {
 		_ = writeSocketResponse(conn, SocketResponse{Error: &SocketError{Code: "bad_request", Message: fmt.Sprintf("invalid json: %v", err)}})
+		_ = conn.Close()
 		return
 	}
 	sreq.Method = strings.TrimSpace(strings.ToLower(sreq.Method))
 	if sreq.Method == "" {
 		_ = writeSocketResponse(conn, SocketResponse{ID: sreq.ID, Error: &SocketError{Code: "unknown_method", Message: fmt.Sprintf("unknown method %q", sreq.Method)}})
+		_ = conn.Close()
+		return
+	}
+	if sreq.Method == "subscribe" {
+		d.handleSubscribe(conn, sreq, br)
 		return
 	}
 	resp := d.dispatchSocket(sreq)
 	_ = writeSocketResponse(conn, resp)
+	_ = conn.Close()
+}
+
+func (d *Daemon) handleSubscribe(conn net.Conn, req SocketRequest, br *bufio.Reader) {
+	// No deadline for subscribed connection.
+	_ = conn.SetDeadline(time.Time{})
+	d.subsMu.Lock()
+	d.subs[conn] = struct{}{}
+	d.subsMu.Unlock()
+	defer func() {
+		d.subsMu.Lock()
+		delete(d.subs, conn)
+		d.subsMu.Unlock()
+		_ = conn.Close()
+	}()
+	_ = writeSocketResponse(conn, SocketResponse{ID: req.ID, Result: map[string]string{"result": "subscribed"}})
+	if err := writeStatusEvent(conn, d.buildStatus()); err != nil {
+		return
+	}
+	// Wait for client close or daemon cancel. Read in goroutine to detect close.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			_, err := ioReadJSON(br)
+			if err != nil {
+				return
+			}
+		}
+	}()
+	select {
+	case <-d.ctx.Done():
+	case <-done:
+	}
+}
+
+func writeStatusEvent(conn net.Conn, status DaemonStatus) error {
+	msg := map[string]any{"event": "status", "data": status}
+	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	enc := json.NewEncoder(conn)
+	enc.SetEscapeHTML(false)
+	err := enc.Encode(msg)
+	_ = conn.SetWriteDeadline(time.Time{})
+	return err
+}
+
+func (d *Daemon) broadcastStatus() {
+	status := d.buildStatus()
+	d.subsMu.Lock()
+	defer d.subsMu.Unlock()
+	for conn := range d.subs {
+		if err := writeStatusEvent(conn, status); err != nil {
+			_ = conn.Close()
+			delete(d.subs, conn)
+		}
+	}
 }
 
 func ioReadJSON(br *bufio.Reader) ([]byte, error) {
@@ -368,8 +429,6 @@ func writeSocketResponse(conn net.Conn, resp SocketResponse) error {
 	enc.SetEscapeHTML(false)
 	return enc.Encode(resp)
 }
-
-
 func (d *Daemon) dispatchSocket(req SocketRequest) SocketResponse {
 	switch req.Method {
 	case "status":
@@ -769,56 +828,126 @@ func (d *Daemon) buildStatus() DaemonStatus {
 	return ds
 }
 
-func (d *Daemon) syncLoop() {
+func (d *Daemon) eventLoop() {
 	defer d.wg.Done()
-	ticker := time.NewTicker(d.syncInterval)
-	defer ticker.Stop()
-	// Initial sync immediately
-	d.syncOnce()
-	for {
-		select {
-		case <-d.ctx.Done():
-			return
-		case <-ticker.C:
-			d.syncOnce()
-		}
-	}
-}
+	// Initial reconcile immediately.
+	d.reconcileOnce()
+	reconcileTicker := time.NewTicker(10 * time.Minute)
+	defer reconcileTicker.Stop()
 
-func (d *Daemon) fetchLoop() {
-	defer d.wg.Done()
-	ticker := time.NewTicker(d.fetchInterval)
-	defer ticker.Stop()
+	backoff := time.Second
+	const maxBackoff = 30 * time.Second
+	var lastID domain.ID
+	d.mu.RLock()
+	if len(d.events) > 0 {
+		lastID = d.events[len(d.events)-1].ID
+	}
+	d.mu.RUnlock()
+
 	for {
-		select {
-		case <-d.ctx.Done():
+		if d.ctx.Err() != nil {
 			return
-		case <-ticker.C:
-			d.projects.FetchAll(d.ctx)
-			// Also refresh remote project list periodically to reconcile
-			if d.remote != nil {
-				if ps, err := d.remote.GetProjects(d.ctx); err == nil {
-					d.projects.SyncFromRemote(ps)
+		}
+		if d.remote == nil {
+			select {
+			case <-d.ctx.Done():
+				return
+			case <-reconcileTicker.C:
+				d.reconcileOnce()
+			case <-time.After(30 * time.Second):
+			}
+			continue
+		}
+		ctx, cancel := context.WithCancel(d.ctx)
+		ch := make(chan domain.Event, 32)
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- d.remote.WatchCompanionEvents(ctx, lastID, ch)
+		}()
+		innerDone := false
+		for !innerDone {
+			select {
+			case <-d.ctx.Done():
+				cancel()
+				return
+			case <-reconcileTicker.C:
+				d.reconcileOnce()
+				backoff = time.Second
+			case ev, ok := <-ch:
+				if !ok {
+					innerDone = true
+					break
+				}
+				if ev.ID != "" {
+					lastID = ev.ID
+				}
+				d.handleCompanionEvent(ev)
+				backoff = time.Second
+			case err := <-errCh:
+				innerDone = true
+				if err != nil && !errors.Is(err, context.Canceled) && d.ctx.Err() == nil {
+					d.log.Warn("companion stream disconnected", "err", err, "backoff", backoff)
 				}
 			}
 		}
-	}
-}
-
-func (d *Daemon) envLoop() {
-	defer d.wg.Done()
-	// Initial sync immediately (startup).
-	_ = d.envSyncOnce()
-	ticker := time.NewTicker(d.envInterval)
-	defer ticker.Stop()
-	for {
+		cancel()
 		select {
 		case <-d.ctx.Done():
 			return
-		case <-ticker.C:
-			_ = d.envSyncOnce()
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
 		}
 	}
+}
+
+func (d *Daemon) handleCompanionEvent(ev domain.Event) {
+	switch ev.Type {
+	case "environment.changed":
+		_ = d.envSyncOnce()
+		d.syncOnce()
+		d.broadcastStatus()
+	case "companion.revoked":
+		d.mu.Lock()
+		d.lastErr = "device revoked"
+		d.mu.Unlock()
+		d.broadcastStatus()
+	default:
+		// For workspace.*, agent.awaiting_approval, etc.
+		d.syncOnce()
+		d.broadcastStatus()
+	}
+}
+
+func (d *Daemon) reconcileOnce() {
+	d.syncOnce()
+	_ = d.envSyncOnce()
+	if d.remote != nil {
+		d.projects.FetchAll(d.ctx)
+		ctx, cancel := context.WithTimeout(d.ctx, 10*time.Second)
+		defer cancel()
+		var ps []domain.Project
+		var err error
+		if auth, _ := d.remote.deviceAuthHeader(); auth != "" {
+			if p, err2 := d.remote.GetCompanionProjects(ctx); err2 == nil {
+				ps = p
+				err = nil
+			} else if p2, err3 := d.remote.GetProjects(ctx); err3 == nil {
+				ps = p2
+				err = nil
+			} else {
+				err = err3
+			}
+		} else {
+			ps, err = d.remote.GetProjects(ctx)
+		}
+		if err == nil {
+			d.projects.SyncFromRemote(ps)
+		}
+	}
+	d.broadcastStatus()
 }
 
 func (d *Daemon) envSyncOnce() error {
@@ -852,6 +981,7 @@ func (d *Daemon) envClear() error {
 func (d *Daemon) backupLoop() {
 	defer d.wg.Done()
 	_ = d.backupStatusOnce()
+	d.broadcastStatus()
 	ticker := time.NewTicker(d.backupInterval)
 	defer ticker.Stop()
 	for {
@@ -860,6 +990,7 @@ func (d *Daemon) backupLoop() {
 			return
 		case <-ticker.C:
 			_ = d.backupStatusOnce()
+			d.broadcastStatus()
 		}
 	}
 }
@@ -910,20 +1041,46 @@ func (d *Daemon) syncOnce() {
 	ctx, cancel := context.WithTimeout(d.ctx, 10*time.Second)
 	defer cancel()
 
-	st, err := d.remote.GetStatus(ctx)
+	var st *domain.Status
+	var evs []domain.Event
+	var err error
+
+	// Prefer companion endpoint when device token is available.
+	if auth, _ := d.remote.deviceAuthHeader(); auth != "" {
+		st, err = d.remote.GetCompanionStatus(ctx)
+		if err == nil {
+			if compEvs, eerr := d.remote.GetCompanionEvents(ctx); eerr == nil {
+				evs = compEvs
+			} else {
+				d.log.Warn("companion events sync failed", "err", eerr)
+			}
+		} else {
+			d.log.Warn("companion status sync failed, falling back to admin", "err", err)
+			st, err = d.remote.GetStatus(ctx)
+			if err == nil {
+				if adminEvs, eerr := d.remote.GetEvents(ctx); eerr == nil {
+					evs = adminEvs
+				} else {
+					d.log.Warn("events sync failed", "err", eerr)
+				}
+			}
+		}
+	} else {
+		st, err = d.remote.GetStatus(ctx)
+		if err == nil {
+			if adminEvs, eerr := d.remote.GetEvents(ctx); eerr == nil {
+				evs = adminEvs
+			} else {
+				d.log.Warn("events sync failed", "err", eerr)
+			}
+		}
+	}
 	if err != nil {
-		// Instance mismatch and public fallback are hard failures; surface them.
 		d.mu.Lock()
 		d.lastErr = err.Error()
-		// Do not clear last good status; keep it but mark error.
 		d.mu.Unlock()
 		d.log.Warn("status sync failed", "err", err)
 		return
-	}
-	evs, err := d.remote.GetEvents(ctx)
-	if err != nil {
-		d.log.Warn("events sync failed", "err", err)
-		evs = nil
 	}
 	now := time.Now().UTC()
 	d.mu.Lock()
@@ -939,7 +1096,20 @@ func (d *Daemon) syncOnce() {
 	go func() {
 		pctx, pcancel := context.WithTimeout(d.ctx, 10*time.Second)
 		defer pcancel()
-		if ps, err := d.remote.GetProjects(pctx); err == nil {
+		var ps []domain.Project
+		var perr error
+		if auth, _ := d.remote.deviceAuthHeader(); auth != "" {
+			if compPs, err2 := d.remote.GetCompanionProjects(pctx); err2 == nil {
+				ps = compPs
+			} else if p2, err3 := d.remote.GetProjects(pctx); err3 == nil {
+				ps = p2
+			} else {
+				perr = err3
+			}
+		} else {
+			ps, perr = d.remote.GetProjects(pctx)
+		}
+		if perr == nil {
 			d.projects.SyncFromRemote(ps)
 		}
 	}()

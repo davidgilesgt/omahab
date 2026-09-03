@@ -1,15 +1,16 @@
 package controlplane
 
 import (
-	"github.com/omahab/omahab/internal/apitypes"
 	"context"
-	"github.com/omahab/omahab/internal/domain"
-	"fmt"
-	"encoding/hex"
-
 	"crypto/sha256"
-	"github.com/omahab/omahab/internal/store"
+	"encoding/hex"
+	"fmt"
 	"strings"
+
+	"github.com/omahab/omahab/internal/apitypes"
+	"github.com/omahab/omahab/internal/domain"
+	"github.com/omahab/omahab/internal/events"
+	"github.com/omahab/omahab/internal/store"
 )
 
 func (b *Backend) ListCompanionDevices(ctx context.Context, p apitypes.Pagination) ([]apitypes.CompanionDevice, error) {
@@ -128,6 +129,14 @@ func (b *Backend) RevokeCompanionDevice(ctx context.Context, id domain.ID) error
 	if b.secrets != nil {
 		_ = b.secrets.DeleteByName(ctx, "platform-app", "device-key."+trimmed)
 	}
+	if b.events != nil {
+		_, _ = b.events.Publish(ctx, events.PublishInput{
+			Type:     "companion.revoked",
+			Severity: "warning",
+			Message:  fmt.Sprintf("companion device revoked: %s", trimmed),
+			Data:     map[string]any{"device_id": trimmed},
+		})
+	}
 	return nil
 }
 
@@ -200,15 +209,30 @@ func (b *Backend) PutToolEnvironment(ctx context.Context, name, value string) (a
 	if err != nil {
 		return apitypes.ToolEnvEntry{}, translateError(err)
 	}
+	if b.events != nil {
+		_, _ = b.events.Publish(ctx, events.PublishInput{
+			Type:     "environment.changed",
+			Severity: "info",
+			Message:  fmt.Sprintf("tool environment changed: %s updated", name),
+			Data:     map[string]any{"name": name, "action": "put", "version": meta.Version},
+		})
+	}
 	return apitypes.ToolEnvEntry{Name: meta.Name, Version: meta.Version, CreatedAt: meta.CreatedAt, UpdatedAt: meta.UpdatedAt}, nil
 }
-
 func (b *Backend) DeleteToolEnvironment(ctx context.Context, name string) error {
 	if b.environments == nil {
 		return translateError(fmt.Errorf("%w: environments not configured", ErrNotConfigured))
 	}
 	if err := b.environments.DeleteToolEnv(ctx, name); err != nil {
 		return translateError(err)
+	}
+	if b.events != nil {
+		_, _ = b.events.Publish(ctx, events.PublishInput{
+			Type:     "environment.changed",
+			Severity: "info",
+			Message:  fmt.Sprintf("tool environment changed: %s deleted", name),
+			Data:     map[string]any{"name": name, "action": "delete"},
+		})
 	}
 	return nil
 }

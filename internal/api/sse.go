@@ -4,10 +4,22 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/omahab/omahab/internal/domain"
 )
+
+func isDeviceRelevantEvent(t string) bool {
+	switch t {
+	case "agent.awaiting_approval", "deployment.completed", "ci.failed", "backup.failed", "service.unhealthy", "syncthing.conflict", "environment.changed", "companion.revoked":
+		return true
+	}
+	if strings.HasPrefix(t, "workspace.") {
+		return true
+	}
+	return false
+}
 
 // handleStreamEvents implements SSE with Last-Event-ID support, heartbeat, and clean cancellation.
 func (s *Server) handleStreamEvents(w http.ResponseWriter, r *http.Request) {
@@ -63,6 +75,59 @@ func (s *Server) handleStreamEvents(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		case <-heartbeat.C:
 			// Heartbeat comment keeps proxies/NATs from closing.
+			if _, err := fmt.Fprintf(w, ": heartbeat\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
+}
+
+// handleCompanionStreamEvents streams only device-relevant event types to authenticated companion devices.
+func (s *Server) handleCompanionStreamEvents(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, r, newAPIError(http.StatusInternalServerError, CodeInternal, "streaming not supported"))
+		return
+	}
+	since := domain.ID(r.Header.Get("Last-Event-ID"))
+	if since == "" {
+		since = domain.ID(r.URL.Query().Get("lastEventId"))
+	}
+	if since == "" {
+		since = domain.ID(r.URL.Query().Get("last_event_id"))
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	ctx := r.Context()
+	events := make(chan domain.Event, 32)
+	go func() {
+		defer close(events)
+		_ = s.backend.StreamEvents(ctx, since, events)
+	}()
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev, ok := <-events:
+			if !ok {
+				return
+			}
+			if !isDeviceRelevantEvent(ev.Type) {
+				continue
+			}
+			if err := writeSSEEvent(w, ev); err != nil {
+				return
+			}
+			flusher.Flush()
+		case <-heartbeat.C:
 			if _, err := fmt.Fprintf(w, ": heartbeat\n\n"); err != nil {
 				return
 			}

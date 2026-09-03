@@ -116,8 +116,8 @@ Panel {
 
   Clientd {
     id: client
-    refreshIntervalSec: Math.max(5, Number(root.setting("refreshIntervalSec", 15)))
   }
+
 
   IpcHandler {
     target: root.ipcTarget

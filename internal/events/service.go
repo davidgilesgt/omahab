@@ -48,6 +48,24 @@ var allowedTypes = map[string]bool{
 	"setup.reconciled":             true,
 	"scm.pull_request":             true,
 	"scm.push":                     true,
+	"environment.changed":          true,
+	"companion.revoked":            true,
+	"workspace.created":            true,
+	"workspace.active":             true,
+	"workspace.stopped":            true,
+	"workspace.deleted":            true,
+	"workspace.failed":             true,
+	"workspace.pending":            true,
+}
+
+func isAllowedType(t string) bool {
+	if allowedTypes[t] {
+		return true
+	}
+	if strings.HasPrefix(t, "workspace.") {
+		return true
+	}
+	return false
 }
 
 // Allowed severities.
@@ -130,7 +148,7 @@ func (s *Service) Publish(ctx context.Context, in PublishInput) (*domain.Event, 
 	if t == "" {
 		return nil, store.Validation("event type is required")
 	}
-	if !allowedTypes[t] {
+	if !isAllowedType(t) {
 		return nil, store.Validationf("unknown event type %q", t)
 	}
 	if sev == "" {

@@ -5,8 +5,6 @@ import Quickshell.Io
 Item {
   id: root
 
-  property int refreshIntervalSec: 15
-
   readonly property string socketPath: {
     var configured = String(Quickshell.env("OMAHAB_CLIENTD_SOCKET") || "")
     if (configured !== "") return configured
@@ -54,6 +52,10 @@ Item {
   property var projects: []
 
   property var requestQueue: []
+  property var currentRequest: null
+  property int nextRequestId: 1
+  property bool expectedDisconnect: false
+  property bool expectedSubscribeDisconnect: false
 
   signal actionFinished(string action, bool succeeded)
 
@@ -113,7 +115,6 @@ Item {
 
   function refresh() {
     enqueue("status", {}, "status", "")
-    // also refresh workspaces and projects for the picker and live list
     Qt.callLater(function() {
       enqueue("workspace.list", {}, "workspace_list", "")
       enqueue("project.list", {}, "project_list", "")
@@ -197,6 +198,30 @@ Item {
     reconnectTimer.restart()
   }
 
+  function handleSubscribeLine(line) {
+    var text = String(line || "").trim()
+    if (text === "") return
+    var msg
+    try {
+      msg = JSON.parse(text)
+    } catch (e) {
+      return
+    }
+    if (msg.event === "status" && msg.data) {
+      connecting = false
+      clientdReachable = true
+      applyStatus(msg.data)
+      // Also refresh workspaces/projects on status push if needed (non-blocking)
+      // Workspaces are not in status; trigger a lightweight refresh occasionally? Keep minimal.
+    } else if (msg.result && msg.id) {
+      // subscribe ack
+      connecting = false
+      clientdReachable = true
+    } else if (msg.error) {
+      lastErrorCode = String(msg.error.code || "subscribe_failed")
+    }
+  }
+
   function handleResponse(line) {
     var text = String(line || "").trim()
     if (text === "" || !currentRequest) return
@@ -256,12 +281,10 @@ Item {
         var snap = br.last_snapshot || br.backup_last_snapshot || br.lastSnapshot || ""
         var bErr = br.error || br.backup_error || br.backupError || ""
         if (snap && typeof snap === "object" && snap !== null) {
-          // If snap is object with time string, extract
           snap = snap.last_snapshot || snap.time || ""
         }
         backupLastSnapshot = snap ? String(snap) : ""
         backupError = String(bErr || "")
-        // Also apply backup fields from status if present (status kind already handled via applyStatus, but backup_status explicit)
       }
     } else {
       actionBusy = false
@@ -313,13 +336,11 @@ Item {
     environmentVariableCount = boundedCount(status.environment_variable_count !== undefined ? status.environment_variable_count : status.environmentVariableCount)
     environmentSyncedAt = String(status.environment_synced_at !== undefined ? status.environment_synced_at : (status.environmentSyncedAt || status.checked_at || ""))
     environmentError = String(status.environment_error !== undefined ? status.environment_error : (status.environmentError || ""))
-    // xAI loopback OAuth session assigned to this device — server reports via status field when active
     var xaiFlag = status.xai_oauth_active !== undefined ? status.xai_oauth_active
       : status.has_xai_oauth_session !== undefined ? status.has_xai_oauth_session
       : status.xaiOAuthActive !== undefined ? status.xaiOAuthActive
       : status.companion_has_xai_oauth !== undefined ? status.companion_has_xai_oauth
       : false
-    // Also consider oauth_sessions array or pending provider hint
     if (!xaiFlag && status.oauth_sessions instanceof Array) {
       for (var i = 0; i < status.oauth_sessions.length; i++) {
         var s = status.oauth_sessions[i] || {}
@@ -335,7 +356,6 @@ Item {
     }
     if (!xaiFlag && String(status.oauth_pending_provider || "") === "xai") xaiFlag = true
     hasXaiOAuthSession = xaiFlag === true
-    // Machine backup last snapshot — from daemon status cache.
     var bSnap = status.backup_last_snapshot !== undefined ? status.backup_last_snapshot
       : status.backupLastSnapshot !== undefined ? status.backupLastSnapshot
       : status.backup_lastSnapshot !== undefined ? status.backup_lastSnapshot
@@ -362,13 +382,48 @@ Item {
     }
     if (action === "backup.run" || action === "backup_run" || label === "Back up now") {
       actionStatus = "Machine backup started"
-      // Refresh backup status after a short delay.
       Qt.callLater(function() { refreshBackup() })
       return
     }
     actionStatus = label + " opened"
   }
 
+  // Persistent subscription socket for push updates
+  Socket {
+    id: subscribeSocket
+    path: root.socketPath
+    connected: false
+    parser: SplitParser {
+      splitMarker: "\n"
+      onRead: function(line) { root.handleSubscribeLine(line) }
+    }
+
+    onConnectionStateChanged: {
+      if (connected) {
+        subscribeReconnectTimer.stop()
+        // Send subscribe request
+        var subId = "omarchy-sub-" + nextRequestId++
+        subscribeSocket.write(JSON.stringify({id: subId, method: "subscribe", params: {}}) + "\n")
+        subscribeSocket.flush()
+      } else if (expectedSubscribeDisconnect) {
+        expectedSubscribeDisconnect = false
+      } else {
+        // Unexpected disconnect -> reconnect with backoff
+        if (!root.connecting) {
+          setUnavailable()
+        }
+        subscribeReconnectTimer.restart()
+      }
+    }
+
+    onError: function(error) {
+      if (expectedSubscribeDisconnect) return
+      setUnavailable()
+      subscribeReconnectTimer.restart()
+    }
+  }
+
+  // Request/response socket for actions
   Socket {
     id: clientSocket
     path: root.socketPath
@@ -401,11 +456,14 @@ Item {
   }
 
   Timer {
-    id: pollTimer
-    interval: Math.max(5, root.refreshIntervalSec) * 1000
-    repeat: true
-    running: true
-    onTriggered: root.refresh()
+    id: subscribeReconnectTimer
+    interval: 2000
+    repeat: false
+    onTriggered: {
+      if (!subscribeSocket.connected) {
+        subscribeSocket.connected = true
+      }
+    }
   }
 
   Timer {
@@ -429,5 +487,9 @@ Item {
     onTriggered: root.refresh()
   }
 
-  Component.onCompleted: refresh()
+  Component.onCompleted: {
+    subscribeSocket.connected = true
+    // Initial fetch for workspaces/projects via request socket
+    Qt.callLater(function() { refresh() })
+  }
 }

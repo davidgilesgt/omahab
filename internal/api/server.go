@@ -360,6 +360,7 @@ func (s *Server) buildRouter() chi.Router {
 		r.Use(s.deviceAuth)
 		r.Get("/api/v1/companion/status", s.handleCompanionStatus)
 		r.Get("/api/v1/companion/events", s.handleCompanionEvents)
+		r.Get("/api/v1/companion/events/stream", s.handleCompanionStreamEvents)
 		r.Get("/api/v1/companion/projects", s.handleCompanionProjects)
 		r.Get("/api/v1/companion/workspaces", s.handleCompanionListWorkspaces)
 		r.Post("/api/v1/companion/workspaces", s.withBodyLimit(defaultBodyLimit, s.handleCompanionCreateWorkspace))
@@ -367,7 +368,6 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/api/v1/companion/environment", s.handleGetCompanionEnvironment)
 		r.Post("/api/v1/provider-oauth/{provider}/callback/{session_id}", s.withBodyLimit(defaultBodyLimit, s.handleForwardProviderOAuthCallback))
 	})
-
 	return r
 }
 
@@ -427,7 +427,7 @@ func safeRecovery(next http.Handler) http.Handler {
 func (s *Server) timeoutMiddleware(d time.Duration) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/api/v1/events/stream" {
+			if r.URL.Path == "/api/v1/events/stream" || r.URL.Path == "/api/v1/companion/events/stream" {
 				next.ServeHTTP(w, r)
 				return
 			}
