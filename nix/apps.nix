@@ -340,13 +340,29 @@ in
         }
       ];
     };
-
     # ----------------------------------------------------------------
     # Redis for LiteLLM cache.
     # ----------------------------------------------------------------
     services.redis.servers.omahab = {
       enable = true;
       port = 6379;
+    };
+
+    # ----------------------------------------------------------------
+    # Restic REST server — per-machine backups, append-only, private repos.
+    # Data under /srv/omahab/machine-backups, htpasswd at
+    # /var/lib/omahab/machine-backups.htpasswd. Caddy route
+    # backup.<domain> -> 127.0.0.1:8500 via catalog bundle restic-server
+    # (private, max private). The server is append-only so forget only
+    # marks; prune is never run from clients.
+    # ----------------------------------------------------------------
+    services.restic.server = {
+      enable = true;
+      listenAddress = "127.0.0.1:8500";
+      dataDir = "/srv/omahab/machine-backups";
+      appendOnly = true;
+      privateRepos = true;
+      htpasswd-file = "/var/lib/omahab/machine-backups.htpasswd";
     };
   };
 }

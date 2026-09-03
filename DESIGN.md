@@ -876,14 +876,22 @@ Initial objectives:
 
 A backup is not healthy until Omahab has demonstrated that it can restore the relevant data.
 
-Setup guidance: Hetzner Storage Box (recommended, ~€4/mo). Create a sub-account with SSH enabled; enter its username and password once. The system generates an ed25519 key at `/var/lib/omahab/backup_ssh/id_ed25519` (0600, root), uploads the public key to `.ssh/authorized_keys` via SFTP:23 (password auth, `golang.org/x/crypto/ssh` + `github.com/pkg/sftp`), records the host key in `known_hosts`, discards the password, and sets `location = sftp://<user>@<host>:23/./omahab/<instanceID>` with `-o sftp.command=ssh -p 23 -i ... -o UserKnownHostsFile=... -o BatchMode=yes ... -s sftp` on every restic invocation. The restic password is derived via `HKDF-SHA256(seed, salt "omahab-recovery-v1", info "restic-password")` from the recovery-phrase seed, so the phrase alone opens the repository (stored as `platform-app/backup_repo_credentials`).
+Setup guidance: Hetzner Storage Box (recommended, ~€4/mo). Create a sub-account with SSH enabled; enter its username and password once. The system generates an ed25519 key at `/var/lib/omahab/backup_ssh/id_ed25519` (0600, root), uploads the public key to `.ssh/authorized_keys` via SFTP:23 (password auth, `golang.org/x/crypto/ssh` + `github.com/pkg/sftp`), records the host key in `known_hosts`, discards the password, and sets `location = sftp://<user>@<host>:23/./omahab/<instanceID>` with `-o sftp.command=ssh -p 23 -i ... -o UserKnownHostsFile=... -o BatchMode=yes ... -s sftp` on every restic invocation. The restic password is derived via `HKDF-SHA256(seed, salt "omahab-recovery-v1", info "restic-password")` from the recovery-phrase seed, so the phrase alone …
+
+### 19.1 Machine backups
+
+Each Omarchy workstation gets its own append-only restic repository on the server:
+
+- `services.restic.server` (`nix/apps.nix`) listens on `127.0.0.1:8500`, `dataDir /srv/omahab/machine-backups`, `appendOnly true`, `privateRepos true`, `htpasswd-file /var/lib/omahab/machine-backups.htpasswd` (systemd socket `restic-rest-server.socket` → `restic-rest-server.service`, user `restic`). Caddy exposes it as `https://backup.<domain>` → `127.0.0.1:8500` via the catalog bundle `restic-server` (`route backup.{{.Domain}}`, `max_exposure private`, `units restic-rest-server.service`). The data directory is included in `backups.DefaultPaths()` so the server's nightly Hetzner backup ships every machine's history off-site.
+- At companion enrollment, `companion.EnrollDevice` creates an htpasswd entry `dev-<deviceID>` with a random 32-byte password (bcrypt via `golang.org/x/crypto/bcrypt`), rewrites `/var/lib/omahab/machine-backups.htpasswd` atomically, `systemctl reload restic-rest-server` (fallback `restart` if SIGHUP not supported), and returns once `{restic_repo:"rest:https://backup.<domain>/dev-<id>", restic_password:<random 32B>, rest_user, rest_password}`. The repo directory `/srv/omahab/machine-backups/dev-<id>` is kept on revocation (admin deletes it manually); `RevokeDevice` removes only the htpasswd line.
+- `omahab-clientd` stores those four values in the desktop keyring (`backup-repo`, `backup-password`, `backup-rest-user`, `backup-rest-password`, service `omahab`). `omahab backup-drive enable [--paths ~/Documents,~/Pictures]` writes `~/.config/omahab/backup-paths` (default `$HOME`, excluding `~/.cache`, `~/.local/share/Trash`, `**/node_modules`, `**/.git`) and installs a systemd **user** timer `omahab-machine-backup.timer` (`OnCalendar=daily`, `Persistent=true`) whose service runs `omahab backup-drive run` = `restic backup --exclude-file <generated> $(paths)` → `restic forget --keep-daily 14 --keep-weekly 8 --keep-monthly 12` (no `--prune` — the server is append-only, so `forget` only marks; growth is bounded by deleting `/srv/omahab/machine-backups/dev-<id>` for retired devices and surfaced by `host.disk_low`). `omahab backup-drive status` prints the last snapshot time from `restic snapshots --latest 1 --json`. Env for restic comes from the keyring at run time, never from files.
+- `omahab-clientd` polls `StatusBackupDrive` every `backupInterval` (15 min) and surfaces `backup_last_snapshot`/`backup_error` in `DaemonStatus`; the Omarchy plugin shows “PC backup: <age>” and “Back up now” (`backup.run`/`backup.status` via the Unix socket).
 
 Syncthing versioning may provide a convenience buffer, but synchronization is not the off-site backup mechanism.
 
 ## 20. Events and notifications
 
 Build a normalized event system, but do not enable phone push by default.
-
 Initial event types include:
 
 ```text
@@ -925,8 +933,8 @@ Only Omarchy is supported initially.
 - enrolls Syncthing folders;
 - provides a local Unix socket to the shell plugin;
 - launches Hermes Desktop and terminals;
-- stores local credentials through the desktop keyring.
-
+- stores local credentials through the desktop keyring;
+- runs the nightly machine backup (`restic` to `backup.<domain>`) and surfaces its status.
 ### 21.2 CLI
 
 ```text
@@ -940,6 +948,9 @@ omahab runner send
 omahab runner stop
 omahab sync add
 omahab hermes open
+omahab backup-drive enable [--paths ~/Documents,~/Pictures]
+omahab backup-drive run
+omahab backup-drive status
 ```
 
 Interactive `install`, `status`, and `doctor` views use the same domain operations as normal CLI and JSON output; business logic does not live in Bubble Tea models. Full-screen behavior is optional and enabled only on a suitable TTY.
@@ -952,7 +963,8 @@ A user-owned Quickshell plugin such as `omahab.status` displays:
 - waiting agent turns;
 - Syncthing conflicts;
 - unread Omahab events;
-- workspaces (live list: name, project, idle minutes).
+- workspaces (live list: name, project, idle minutes);
+- PC backup: last snapshot age (from `omahab-clientd` `backup_last_snapshot` / `backup_error`, polled every 15 min via `StatusBackupDrive`; “never” until first run).
 
 Actions:
 
@@ -960,10 +972,10 @@ Actions:
 - New workspace… (picker over projects from `project.list`, text field for title);
 - Open Omahab;
 - Sync tool variables;
+- Back up now (`backup.run` → `POST /api/v1/...` via `backupRunOnce` → `restic backup` + `forget`);
 - Diagnose connection.
 
-Workspace list: each running workspace shows name, project, idle minutes with Attach (opens `ssh -t omahab@<ip> sudo omahab runner attach <id>` via `Launcher.OpenTerminalCommand` with terminal search `alacritty -e`, `kitty`, `gnome-terminal --`) and Stop. `Clientd.qml` implements `workspace.create` → `POST /api/v1/companion/workspaces` (deviceAuth) → on `running` attach, `workspace.attach` → same ssh, `workspace.list` → `GET /api/v1/companion/workspaces`, `project.list` → existing.
-
+Workspace list: each running workspace shows name, project, idle minutes with Attach (opens `ssh -t omahab@<ip> sudo omahab runner attach <id>` via `Launcher.OpenTerminalCommand` with terminal search `alacritty -e`, `kitty`, `gnome-terminal --`) and Stop. `Clientd.qml` implements `workspace.create` → `POST /api/v1/companion/workspaces` (deviceAuth) → on `running` attach, `workspace.attach` → same ssh, `workspace.list` → `GET /api/v1/companion/workspaces`, `project.list` → existing, plus `backup.run`/`backup.status` (`GET /api/v1/...` via `backupStatusOnce`/`backupRunOnce`).
 The QML plugin talks only to `omahab-clientd` and stores no server or provider secrets.
 
 ### 21.4 Tailscale checks

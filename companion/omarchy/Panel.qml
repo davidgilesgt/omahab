@@ -38,7 +38,8 @@ Panel {
     { label: "Waiting agents", value: client.waitingAgents, urgent: client.waitingAgents > 0 },
     { label: "Sync conflicts", value: client.syncConflicts, urgent: client.syncConflicts > 0 },
     { label: "Unread events", value: client.unreadEvents, urgent: client.unreadEvents > 0 },
-    { label: "Tool variables", value: (client.environmentVariableCount + " · rev " + client.environmentRevision) + (client.environmentError !== "" ? " · error" : ""), urgent: client.environmentError !== "" }
+    { label: "Tool variables", value: (client.environmentVariableCount + " · rev " + client.environmentRevision) + (client.environmentError !== "" ? " · error" : ""), urgent: client.environmentError !== "" },
+    { label: "PC backup", value: client.backupStatusText, urgent: client.backupError !== "" }
   ]
 
   property bool showNewWorkspacePicker: false
@@ -50,6 +51,7 @@ Panel {
     { label: "New workspace…", action: "workspace.new", icon: "󰆍", requiresOnline: true },
     { label: "Open Omahab", action: "open-omahab", icon: "󰖟", requiresOnline: true },
     { label: "Sync tool variables", action: "environment.sync", icon: "󰑓", requiresOnline: true },
+    { label: "Back up now", action: "backup.run", icon: "󰁯", requiresOnline: false },
     { label: "Diagnose Connection", action: "diagnose", icon: "󰒓", requiresOnline: false }
   ]
 

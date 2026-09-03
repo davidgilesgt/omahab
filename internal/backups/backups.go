@@ -65,6 +65,7 @@ func DefaultPaths() []string {
 		"/var/lib/ntfy-sh",
 		"/var/lib/omahab/dumps",
 		"/var/lib/tailscale",
+		"/srv/omahab/machine-backups",
 	}
 }
 // Config holds controller-level defaults.

@@ -212,10 +212,11 @@ func runEnroll() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	token, err := rc.EnrollCompanion(ctx, code)
+	res, err := rc.EnrollCompanion(ctx, code)
 	if err != nil {
 		return fmt.Errorf("enroll failed: %w", err)
 	}
+	token := strings.TrimSpace(res.Token)
 	if !strings.HasPrefix(token, "oma_dev_") {
 		return fmt.Errorf("invalid device token received")
 	}
@@ -227,6 +228,14 @@ func runEnroll() error {
 			return fmt.Errorf("keyring unavailable (Secret Service not found): %v — cannot store device token without Secret Service; ensure org.freedesktop.secrets is running", err)
 		}
 		return fmt.Errorf("store device token: %w", err)
+	}
+	// Store per-device machine backup credentials when server provided them (Step 10).
+	if strings.TrimSpace(res.ResticRepo) != "" {
+		_ = ks.Set(client.CredentialService, client.CredentialBackupRepo, strings.TrimSpace(res.ResticRepo))
+		_ = ks.Set(client.CredentialService, client.CredentialBackupPassword, strings.TrimSpace(res.ResticPassword))
+		_ = ks.Set(client.CredentialService, client.CredentialBackupRestUser, strings.TrimSpace(res.RestUser))
+		_ = ks.Set(client.CredentialService, client.CredentialBackupRestPassword, strings.TrimSpace(res.RestPassword))
+		fmt.Fprintln(os.Stderr, "Machine backup credentials stored (backup-repo, backup-password, backup-rest-*).")
 	}
 	fmt.Fprintln(os.Stderr, "Enrolled successfully. Device token stored in keyring (service \"omahab\", account \"device-token\").")
 	// Clear code from memory best-effort.

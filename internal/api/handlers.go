@@ -1155,16 +1155,23 @@ func (s *Server) handleEnrollCompanion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Code may not be bearer; it's single-use enrollment code. Reject NUL/CR/LF already validated in service.
-	token, err := s.backend.EnrollCompanion(r.Context(), code)
+	resp, err := s.backend.EnrollCompanion(r.Context(), code)
 	if err != nil {
 		writeError(w, r, err)
 		return
 	}
-	// Return token once: oma_dev_... . Stored only as hash server-side.
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"token":        token,
-		"token_prefix": token[:16],
-	})
+	// Return token once: oma_dev_... . Stored only as hash server-side. Include machine backup creds when present.
+	out := map[string]any{
+		"token":        resp.Token,
+		"token_prefix": resp.TokenPrefix,
+	}
+	if resp.ResticRepo != "" {
+		out["restic_repo"] = resp.ResticRepo
+		out["restic_password"] = resp.ResticPassword
+		out["rest_user"] = resp.RestUser
+		out["rest_password"] = resp.RestPassword
+	}
+	writeJSON(w, http.StatusCreated, out)
 }
 
 func (s *Server) handleListCompanionDevices(w http.ResponseWriter, r *http.Request) {

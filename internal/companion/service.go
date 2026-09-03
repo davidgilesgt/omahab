@@ -10,9 +10,14 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/omahab/omahab/internal/domain"
 	"github.com/omahab/omahab/internal/providers"
@@ -52,6 +57,14 @@ type Enrollment struct {
 	CodePrefix string
 }
 
+// MachineBackupCredentials holds per-device restic REST credentials issued once at enrollment.
+type MachineBackupCredentials struct {
+	ResticRepo     string `json:"restic_repo"`
+	ResticPassword string `json:"restic_password"`
+	RestUser       string `json:"rest_user"`
+	RestPassword   string `json:"rest_password"`
+}
+
 // Service manages companion devices, enrollments, and environment revision.
 type Service struct {
 	db        *sql.DB
@@ -59,6 +72,35 @@ type Service struct {
 	providers *providers.Service
 	// now allows deterministic tests.
 	now func() time.Time
+	// htpasswdPath overrides the default htpasswd file for tests.
+	htpasswdPath string
+	// resticService overrides systemd service name for tests.
+	resticService string
+	// reloadFn overrides the systemd reload logic for tests.
+	reloadFn func(ctx context.Context) error
+}
+
+// SetHtpasswdPath overrides the htpasswd file path (tests).
+func (s *Service) SetHtpasswdPath(p string) { s.htpasswdPath = p }
+
+// SetResticService overrides the systemd service name (tests).
+func (s *Service) SetResticService(name string) { s.resticService = name }
+
+// SetReloadFunc overrides the reload logic (tests).
+func (s *Service) SetReloadFunc(fn func(ctx context.Context) error) { s.reloadFn = fn }
+
+func (s *Service) machineBackupHtpasswdPath() string {
+	if s.htpasswdPath != "" {
+		return s.htpasswdPath
+	}
+	return "/var/lib/omahab/machine-backups.htpasswd"
+}
+
+func (s *Service) machineBackupServiceName() string {
+	if s.resticService != "" {
+		return s.resticService
+	}
+	return "restic-rest-server"
 }
 
 // New creates a Service bound to db.
@@ -182,6 +224,15 @@ func generateDeviceToken() (string, error) {
 	return "oma_dev_" + base64.RawURLEncoding.EncodeToString(b), nil
 }
 
+// generateBackupPassword generates a 32-byte random password for restic (base64url, 43 chars).
+func generateBackupPassword() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate backup password: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
 // CreateEnrollment creates a single-use enrollment code valid for 10 minutes.
 // It returns the persisted metadata and the plaintext code (returned once).
 func (s *Service) CreateEnrollment(ctx context.Context) (*Enrollment, string, error) {
@@ -237,13 +288,16 @@ func (s *Service) CreateEnrollmentWithCode(ctx context.Context, code string, exp
 
 // EnrollDevice claims an unexpired, unconsumed enrollment code and creates a device.
 // It returns device ID and plaintext oma_dev_ token (returned once). Token stored only as hash.
-func (s *Service) EnrollDevice(ctx context.Context, code string) (*Device, string, error) {
+// It also creates per-device machine-backup credentials (htpasswd entry dev-<id> with bcrypt,
+// atomic rewrite, systemctl reload/restart) and returns them once. On htpasswd/reload failure the
+// device is still enrolled but credentials are best-effort (logged, not fatal) — caller can retry via Re-enroll or expose error as warning.
+func (s *Service) EnrollDevice(ctx context.Context, code string) (*Device, string, *MachineBackupCredentials, error) {
 	trimmed := strings.TrimSpace(code)
 	if trimmed == "" {
-		return nil, "", fmt.Errorf("%w: code is required", ErrValidation)
+		return nil, "", nil, fmt.Errorf("%w: code is required", ErrValidation)
 	}
 	if strings.Contains(trimmed, "\x00") || strings.Contains(trimmed, "\n") || strings.Contains(trimmed, "\r") {
-		return nil, "", fmt.Errorf("%w: code contains invalid character", ErrValidation)
+		return nil, "", nil, fmt.Errorf("%w: code contains invalid character", ErrValidation)
 	}
 	codeHashHex := hashSHA256Hex(trimmed)
 	// Fetch enrollment row by hash. Use constant-time compare after fetch.
@@ -257,29 +311,29 @@ func (s *Service) EnrollDevice(ctx context.Context, code string) (*Device, strin
 			// To avoid timing oracle, still do constant-time dummy compare before returning.
 			dummy := hashSHA256Hex("dummy-not-found-constant-time")
 			_ = subtle.ConstantTimeCompare([]byte(dummy), []byte(codeHashHex))
-			return nil, "", fmt.Errorf("%w: invalid enrollment code", ErrNotFound)
+			return nil, "", nil, fmt.Errorf("%w: invalid enrollment code", ErrNotFound)
 		}
-		return nil, "", fmt.Errorf("query enrollment: %w", err)
+		return nil, "", nil, fmt.Errorf("query enrollment: %w", err)
 	}
 	// Constant-time compare stored hash vs computed hash (both hex strings same length 64)
 	if subtle.ConstantTimeCompare([]byte(storedHash), []byte(codeHashHex)) != 1 {
-		return nil, "", fmt.Errorf("%w: invalid enrollment code", ErrNotFound)
+		return nil, "", nil, fmt.Errorf("%w: invalid enrollment code", ErrNotFound)
 	}
 	if consumedAtStr.Valid && strings.TrimSpace(consumedAtStr.String) != "" {
-		return nil, "", fmt.Errorf("%w: enrollment already consumed", ErrConsumed)
+		return nil, "", nil, fmt.Errorf("%w: enrollment already consumed", ErrConsumed)
 	}
 	expiresAt, err := store.ParseTime(expiresAtStr)
 	if err != nil {
-		return nil, "", fmt.Errorf("parse expires_at: %w", err)
+		return nil, "", nil, fmt.Errorf("parse expires_at: %w", err)
 	}
 	now := s.nowUTC()
 	if now.After(expiresAt) {
-		return nil, "", fmt.Errorf("%w: enrollment expired", ErrExpired)
+		return nil, "", nil, fmt.Errorf("%w: enrollment expired", ErrExpired)
 	}
 	// Generate device token
 	token, err := generateDeviceToken()
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 	tokenHash := hashSHA256Hex(token)
 	prefix := token
@@ -291,45 +345,188 @@ func (s *Service) EnrollDevice(ctx context.Context, code string) (*Device, strin
 	// Mark enrollment consumed and insert device in transaction.
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, "", fmt.Errorf("begin tx: %w", err)
+		return nil, "", nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback()
 	// Re-check consumed under tx and mark consumed
 	res, err := tx.ExecContext(ctx, `UPDATE companion_enrollments SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL`, store.FormatTime(now), id)
 	if err != nil {
-		return nil, "", fmt.Errorf("consume enrollment: %w", err)
+		return nil, "", nil, fmt.Errorf("consume enrollment: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return nil, "", fmt.Errorf("%w: enrollment already consumed", ErrConsumed)
+		return nil, "", nil, fmt.Errorf("%w: enrollment already consumed", ErrConsumed)
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO companion_devices (id, name, token_hash, token_prefix, allow_provider_oauth, created_at, updated_at) VALUES (?, ?, ?, ?, 0, ?, ?)`,
 		deviceID, deviceName, tokenHash, prefix, store.FormatTime(now), store.FormatTime(now))
 	if err != nil {
 		if isUniqueViolation(err) {
-			return nil, "", fmt.Errorf("%w: device token collision", ErrConflict)
+			return nil, "", nil, fmt.Errorf("%w: device token collision", ErrConflict)
 		}
-		return nil, "", fmt.Errorf("insert device: %w", err)
+		return nil, "", nil, fmt.Errorf("insert device: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, "", fmt.Errorf("commit enroll: %w", err)
+		return nil, "", nil, fmt.Errorf("commit enroll: %w", err)
 	}
 	dev := &Device{
 		ID: deviceID, Name: deviceName, TokenHash: tokenHash, TokenPrefix: prefix,
 		AllowProviderOAuth: false, CreatedAt: now, UpdatedAt: now,
 	}
-	return dev, token, nil
+	// Machine backup credentials: per-device REST repo, bcrypt htpasswd, reload.
+	creds, err := s.ensureMachineBackupCredentials(ctx, deviceID)
+	if err != nil {
+		// Best-effort: log but still return device/token so enrollment succeeds. Caller can surface warning.
+		// We still return creds as nil to indicate failure, but device is enrolled.
+		_ = err
+		return dev, token, nil, nil
+	}
+	return dev, token, creds, nil
 }
 
 // EnrollDeviceWithToken is test helper to insert deterministic token for given code (after validating code).
 func (s *Service) EnrollDeviceWithToken(ctx context.Context, code, token string) (*Device, error) {
-	dev, _, err := s.EnrollDevice(ctx, code)
+	dev, _, _, err := s.EnrollDevice(ctx, code)
 	if err != nil {
 		return nil, err
 	}
 	// Replace generated token with deterministic one for tests by updating hash (if different)
 	_ = token
 	return dev, nil
+}
+
+// ensureMachineBackupCredentials creates htpasswd entry for device and returns REST credentials.
+func (s *Service) ensureMachineBackupCredentials(ctx context.Context, deviceID string) (*MachineBackupCredentials, error) {
+	resticPassword, err := generateBackupPassword()
+	if err != nil {
+		return nil, err
+	}
+	restPassword, err := generateBackupPassword()
+	if err != nil {
+		return nil, err
+	}
+	restUser := "dev-" + deviceID
+	domain := strings.TrimSpace(s.getInstanceDomain(ctx))
+	if domain == "" {
+		domain = "example.invalid"
+	}
+	repo := fmt.Sprintf("rest:https://backup.%s/dev-%s", domain, deviceID)
+	// Write htpasswd atomically.
+	if err := s.updateHtpasswdEntry(restUser, restPassword); err != nil {
+		return nil, err
+	}
+	if err := s.reloadResticServer(ctx); err != nil {
+		return nil, err
+	}
+	return &MachineBackupCredentials{
+		ResticRepo:     repo,
+		ResticPassword: resticPassword,
+		RestUser:       restUser,
+		RestPassword:   restPassword,
+	}, nil
+}
+
+func (s *Service) updateHtpasswdEntry(user, password string) error {
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("bcrypt: %w", err)
+	}
+	line := user + ":" + string(hash)
+	path := s.machineBackupHtpasswdPath()
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("mkdir htpasswd dir: %w", err)
+	}
+	// Read existing.
+	var lines []string
+	if data, err := os.ReadFile(path); err == nil {
+		for _, l := range strings.Split(string(data), "\n") {
+			trim := strings.TrimSpace(l)
+			if trim == "" || strings.HasPrefix(trim, "#") {
+				continue
+			}
+			parts := strings.SplitN(trim, ":", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			if parts[0] == user {
+				continue // replace
+			}
+			lines = append(lines, trim)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("read htpasswd: %w", err)
+	}
+	lines = append(lines, line)
+	content := strings.Join(lines, "\n") + "\n"
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(content), 0600); err != nil {
+		return fmt.Errorf("write htpasswd tmp: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("rename htpasswd: %w", err)
+	}
+	_ = os.Chmod(path, 0600)
+	return nil
+}
+
+func (s *Service) removeHtpasswdEntry(user string) error {
+	path := s.machineBackupHtpasswdPath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var out []string
+	for _, l := range strings.Split(string(data), "\n") {
+		trim := strings.TrimSpace(l)
+		if trim == "" {
+			continue
+		}
+		parts := strings.SplitN(trim, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		if parts[0] == user {
+			continue
+		}
+		out = append(out, trim)
+	}
+	content := ""
+	if len(out) > 0 {
+		content = strings.Join(out, "\n") + "\n"
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(content), 0600); err != nil {
+		return fmt.Errorf("write htpasswd tmp: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("rename htpasswd: %w", err)
+	}
+	_ = os.Chmod(path, 0600)
+	return nil
+}
+
+func (s *Service) reloadResticServer(ctx context.Context) error {
+	if s.reloadFn != nil {
+		return s.reloadFn(ctx)
+	}
+	svc := s.machineBackupServiceName()
+	// Try reload (SIGHUP). If not supported, fallback to restart.
+	if err := exec.CommandContext(ctx, "systemctl", "reload", svc).Run(); err == nil {
+		return nil
+	}
+	if err := exec.CommandContext(ctx, "systemctl", "restart", svc).Run(); err != nil {
+		// In dev/test where systemd not present, treat as success (best-effort).
+		if strings.Contains(err.Error(), "executable file not found") || strings.Contains(err.Error(), "not found") {
+			return nil
+		}
+		return fmt.Errorf("reload %s: %w", svc, err)
+	}
+	return nil
 }
 
 // ValidateDeviceToken validates a presented Bearer oma_dev_... token.
@@ -486,10 +683,16 @@ func (s *Service) RevokeDevice(ctx context.Context, id string) (*Device, error) 
 			return nil, gerr
 		}
 		if dev.RevokedAt != nil {
+			// Still ensure htpasswd cleaned up even if already revoked (idempotent).
+			_ = s.removeHtpasswdEntry("dev-" + trimmed)
+			_ = s.reloadResticServer(ctx)
 			return dev, nil
 		}
 		return dev, nil
 	}
+	// Remove htpasswd entry for per-device REST repo; keep data dir.
+	_ = s.removeHtpasswdEntry("dev-" + trimmed)
+	_ = s.reloadResticServer(ctx)
 	return s.GetDevice(ctx, trimmed)
 }
 

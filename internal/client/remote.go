@@ -298,27 +298,43 @@ func (c *RemoteClient) CheckPocketID(ctx context.Context) error {
 
 // EnrollCompanion claims a single-use enrollment code and returns a device token (oma_dev_...).
 // It is unauthenticated (no bearer) and must be called with the code from POST /api/v1/companion-enrollments.
-func (c *RemoteClient) EnrollCompanion(ctx context.Context, code string) (string, error) {
+// On success it also returns per-device machine-backup credentials when the server provides them.
+type EnrollResult struct {
+	Token          string `json:"token"`
+	TokenPrefix    string `json:"token_prefix"`
+	ResticRepo     string `json:"restic_repo"`
+	ResticPassword string `json:"restic_password"`
+	RestUser       string `json:"rest_user"`
+	RestPassword   string `json:"rest_password"`
+}
+
+func (c *RemoteClient) EnrollCompanion(ctx context.Context, code string) (*EnrollResult, error) {
 	trimmed := strings.TrimSpace(code)
 	if trimmed == "" {
-		return "", fmt.Errorf("code is required")
+		return nil, fmt.Errorf("code is required")
 	}
 	payload, _ := json.Marshal(map[string]string{"code": trimmed})
-	var resp struct {
-		Token       string `json:"token"`
-		TokenPrefix string `json:"token_prefix"`
-	}
+	var resp EnrollResult
 	if err := c.doWithAuth(ctx, http.MethodPost, "/api/v1/companion/enroll", "", bytes.NewReader(payload), &resp); err != nil {
-		return "", err
+		return nil, err
 	}
 	tok := strings.TrimSpace(resp.Token)
 	if tok == "" {
-		return "", fmt.Errorf("empty token in enroll response")
+		return nil, fmt.Errorf("empty token in enroll response")
 	}
 	if !strings.HasPrefix(tok, "oma_dev_") {
-		return "", fmt.Errorf("invalid device token prefix")
+		return nil, fmt.Errorf("invalid device token prefix")
 	}
-	return tok, nil
+	return &resp, nil
+}
+
+// EnrollCompanionToken is a convenience wrapper that returns only the token string (legacy).
+func (c *RemoteClient) EnrollCompanionToken(ctx context.Context, code string) (string, error) {
+	res, err := c.EnrollCompanion(ctx, code)
+	if err != nil {
+		return "", err
+	}
+	return res.Token, nil
 }
 
 // GetCompanionStatus fetches status via device-authenticated endpoint.

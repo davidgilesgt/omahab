@@ -136,6 +136,16 @@ type CompanionEnrollment struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// EnrollCompanionResponse is the one-time response for POST /api/v1/companion/enroll.
+// It returns the device token and, when machine backups are enabled, per-device restic REST credentials.
+type EnrollCompanionResponse struct {
+	Token          string `json:"token"`
+	TokenPrefix    string `json:"token_prefix"`
+	ResticRepo     string `json:"restic_repo,omitempty"`
+	ResticPassword string `json:"restic_password,omitempty"`
+	RestUser       string `json:"rest_user,omitempty"`
+	RestPassword   string `json:"rest_password,omitempty"`
+}
 // ToolEnvEntry is metadata for a tool-environment variable (no value).
 type ToolEnvEntry struct {
 	Name      string    `json:"name"`
@@ -511,12 +521,12 @@ type Backend interface {
 	// Companion / enrollment (Phase 6 stubs) — TODO: implement full lifecycle
 	ListCompanionDevices(ctx context.Context, p Pagination) ([]CompanionDevice, error)
 	CreateCompanionEnrollment(ctx context.Context) (CompanionEnrollment, string, error)
-	EnrollCompanion(ctx context.Context, code string) (string, error)
+	EnrollCompanion(ctx context.Context, code string) (EnrollCompanionResponse, error)
 	RevokeCompanionDevice(ctx context.Context, id domain.ID) error
 	SetDeviceAllowOAuth(ctx context.Context, id domain.ID, allow bool) (CompanionDevice, error)
 	// GetCompanionEnvironment is device-authenticated and returns raw values with ETag; admin bearer rejected.
 	GetCompanionEnvironment(ctx context.Context, deviceToken string) (map[string]string, string, error)
-	// Tool environment (server authoritative singleton agent-tools)
+
 	ListToolEnvironments(ctx context.Context) ([]ToolEnvEntry, error)
 	PutToolEnvironment(ctx context.Context, name, value string) (ToolEnvEntry, error)
 	DeleteToolEnvironment(ctx context.Context, name string) error

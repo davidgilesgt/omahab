@@ -34,6 +34,22 @@ Item {
   property string environmentSyncedAt: ""
   property string environmentError: ""
   property bool hasXaiOAuthSession: false
+  property string backupLastSnapshot: ""
+  property string backupError: ""
+  readonly property string backupStatusText: {
+    if (backupError !== "") return "error"
+    if (backupLastSnapshot === "" || backupLastSnapshot === null) return "never"
+    var d = new Date(backupLastSnapshot)
+    if (isNaN(d.getTime())) return String(backupLastSnapshot)
+    var ageMs = Date.now() - d.getTime()
+    var ageMin = Math.floor(ageMs / 60000)
+    if (ageMin < 1) return "just now"
+    if (ageMin < 60) return ageMin + "m ago"
+    var ageH = Math.floor(ageMin / 60)
+    if (ageH < 24) return ageH + "h ago"
+    var ageD = Math.floor(ageH / 24)
+    return ageD + "d ago"
+  }
   property var workspaces: []
   property var projects: []
 
@@ -101,6 +117,7 @@ Item {
     Qt.callLater(function() {
       enqueue("workspace.list", {}, "workspace_list", "")
       enqueue("project.list", {}, "project_list", "")
+      enqueue("backup.status", {}, "backup_status", "")
     })
   }
 
@@ -110,6 +127,10 @@ Item {
 
   function refreshProjects() {
     enqueue("project.list", {}, "project_list", "")
+  }
+
+  function refreshBackup() {
+    enqueue("backup.status", {}, "backup_status", "")
   }
 
   function workspaceCreate(projectSlug, title) {
@@ -125,6 +146,17 @@ Item {
 
   function workspaceStop(id) {
     enqueue("workspace.stop", {id: id}, "action", "Stop workspace")
+  }
+
+  function backupRun() {
+    if (actionBusy) return
+    actionBusy = true
+    actionStatus = ""
+    enqueue("backup.run", {}, "action", "Back up now")
+  }
+
+  function backupStatus() {
+    enqueue("backup.status", {}, "backup_status", "")
   }
 
   function runAction(method, label) {
@@ -216,6 +248,21 @@ Item {
         else if (r2 && r2.projects instanceof Array) projects = r2.projects
         else projects = []
       }
+    } else if (completed.kind === "backup_status") {
+      if (response.error) {
+        backupError = String(response.error.message || response.error.code || "backup status failed")
+      } else {
+        var br = response.result || {}
+        var snap = br.last_snapshot || br.backup_last_snapshot || br.lastSnapshot || ""
+        var bErr = br.error || br.backup_error || br.backupError || ""
+        if (snap && typeof snap === "object" && snap !== null) {
+          // If snap is object with time string, extract
+          snap = snap.last_snapshot || snap.time || ""
+        }
+        backupLastSnapshot = snap ? String(snap) : ""
+        backupError = String(bErr || "")
+        // Also apply backup fields from status if present (status kind already handled via applyStatus, but backup_status explicit)
+      }
     } else {
       actionBusy = false
       if (response.error) {
@@ -288,8 +335,17 @@ Item {
     }
     if (!xaiFlag && String(status.oauth_pending_provider || "") === "xai") xaiFlag = true
     hasXaiOAuthSession = xaiFlag === true
+    // Machine backup last snapshot — from daemon status cache.
+    var bSnap = status.backup_last_snapshot !== undefined ? status.backup_last_snapshot
+      : status.backupLastSnapshot !== undefined ? status.backupLastSnapshot
+      : status.backup_lastSnapshot !== undefined ? status.backup_lastSnapshot
+      : ""
+    backupLastSnapshot = bSnap ? String(bSnap) : ""
+    var bErr = status.backup_error !== undefined ? status.backup_error
+      : status.backupError !== undefined ? status.backupError
+      : ""
+    backupError = String(bErr || "")
   }
-
   function applyActionResult(action, label, data) {
     if (action === "diagnose") {
       var checks = data.checks instanceof Array ? data.checks : []
@@ -302,6 +358,12 @@ Item {
     }
     if (action === "environment.sync" || action === "environment_sync" || action === "env.sync" || action === "environment_sync" || label === "Sync tool variables") {
       actionStatus = "Applied to new apps; restart existing apps"
+      return
+    }
+    if (action === "backup.run" || action === "backup_run" || label === "Back up now") {
+      actionStatus = "Machine backup started"
+      // Refresh backup status after a short delay.
+      Qt.callLater(function() { refreshBackup() })
       return
     }
     actionStatus = label + " opened"

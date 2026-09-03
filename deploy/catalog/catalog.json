@@ -590,6 +590,38 @@
       "units": [
         "docker-hermes.service"
       ]
+    },
+    {
+      "id": "restic-server",
+      "name": "Restic REST Server",
+      "port": 8500,
+      "default_exposure": "private",
+      "max_exposure": "private",
+      "health_check": {
+        "kind": "http",
+        "path": "/",
+        "port": 8500
+      },
+      "data": [
+        {
+          "name": "machine_backups",
+          "path": "/srv/omahab/machine-backups"
+        }
+      ],
+      "oidc": {
+        "supported": false
+      },
+      "resources": {
+        "memory_mb": 256
+      },
+      "default": true,
+      "route": "backup.{{.Domain}}",
+      "dependencies": [
+        "caddy"
+      ],
+      "units": [
+        "restic-rest-server.service"
+      ]
     }
   ]
 }

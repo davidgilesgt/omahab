@@ -2908,22 +2908,34 @@ func (b *Backend) CreateCompanionEnrollment(ctx context.Context) (api.CompanionE
 	}, code, nil
 }
 
-func (b *Backend) EnrollCompanion(ctx context.Context, code string) (string, error) {
+func (b *Backend) EnrollCompanion(ctx context.Context, code string) (api.EnrollCompanionResponse, error) {
 	if b.environments == nil {
-		return "", translateError(fmt.Errorf("%w: environments not configured", ErrNotConfigured))
+		return api.EnrollCompanionResponse{}, translateError(fmt.Errorf("%w: environments not configured", ErrNotConfigured))
 	}
 	if strings.TrimSpace(code) == "" {
-		return "", translateError(fmt.Errorf("%w: code is required", store.ErrValidation))
+		return api.EnrollCompanionResponse{}, translateError(fmt.Errorf("%w: code is required", store.ErrValidation))
 	}
-	dev, token, err := b.environments.EnrollDevice(ctx, code)
+	dev, token, creds, err := b.environments.EnrollDevice(ctx, code)
 	if err != nil {
-		return "", translateError(err)
+		return api.EnrollCompanionResponse{}, translateError(err)
 	}
 	// Device token issued; no LiteLLM key yet — per-device key will be issued on first environment sync via ensureDeviceVirtualKey.
 	_ = dev
-	return token, nil
+	resp := api.EnrollCompanionResponse{
+		Token:       token,
+		TokenPrefix: token[:16],
+	}
+	if creds != nil {
+		resp.ResticRepo = creds.ResticRepo
+		resp.ResticPassword = creds.ResticPassword
+		resp.RestUser = creds.RestUser
+		resp.RestPassword = creds.RestPassword
+	}
+	if len(resp.TokenPrefix) > len(token) {
+		resp.TokenPrefix = token
+	}
+	return resp, nil
 }
-
 func (b *Backend) RevokeCompanionDevice(ctx context.Context, id domain.ID) error {
 	if b.environments == nil {
 		return translateError(fmt.Errorf("%w: environments not configured", ErrNotConfigured))

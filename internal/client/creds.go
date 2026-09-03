@@ -20,6 +20,13 @@ const (
 	CredentialAccount = "server-token"
 )
 
+// Backup accounts for per-device machine backups (restic REST).
+const (
+	CredentialBackupRepo         = "backup-repo"
+	CredentialBackupPassword     = "backup-password"
+	CredentialBackupRestUser     = "backup-rest-user"
+	CredentialBackupRestPassword = "backup-rest-password"
+)
 // ErrCredentialNotFound is returned when no credential exists.
 var ErrCredentialNotFound = fmt.Errorf("credential not found")
 

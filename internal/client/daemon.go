@@ -76,6 +76,9 @@ type DaemonStatus struct {
 	EnvironmentError         string     `json:"environment_error,omitempty"`
 	// xAI subscription OAuth loopback session assigned to this device (no secrets).
 	HasXaiOAuthSession bool `json:"has_xai_oauth_session,omitempty"`
+	// Machine backup (per-device restic REST) — last snapshot.
+	BackupLastSnapshot *time.Time `json:"backup_last_snapshot,omitempty"`
+	BackupError        string     `json:"backup_error,omitempty"`
 }
 // Daemon is the user-level omahab-clientd. It owns the Unix socket, background
 // status/event sync, project fetch state, and launch delegation.
@@ -99,14 +102,18 @@ type Daemon struct {
 	events     []domain.Event
 	lastSyncAt *time.Time
 	lastErr    string
+	// Machine backup cache.
+	backupLastSnapshot *time.Time
+	backupError        string
 
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	syncInterval  time.Duration
-	fetchInterval time.Duration
-	envInterval   time.Duration
+	syncInterval   time.Duration
+	fetchInterval  time.Duration
+	envInterval    time.Duration
+	backupInterval time.Duration
 
 	log *slog.Logger
 }
@@ -126,6 +133,7 @@ type DaemonOpts struct {
 	SyncInterval    time.Duration
 	FetchInterval   time.Duration
 	EnvInterval     time.Duration
+	BackupInterval  time.Duration
 	EnvManager      *EnvironmentManager // injectable for tests; if nil, one is created
 	EnvFilePath     string              // override managed file path (tests)
 	EnvDBus         SystemdDBus         // injectable D-Bus (tests)
@@ -185,6 +193,10 @@ func NewDaemon(opts DaemonOpts) (*Daemon, error) {
 	if envInt == 0 {
 		envInt = 5 * time.Minute
 	}
+	backupInt := opts.BackupInterval
+	if backupInt == 0 {
+		backupInt = 15 * time.Minute
+	}
 	// Environment manager: prefer injected, else create with remote/creds.
 	envMgr := opts.EnvManager
 	if envMgr == nil {
@@ -198,23 +210,24 @@ func NewDaemon(opts DaemonOpts) (*Daemon, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Daemon{
-		cfg:           opts.Config,
-		creds:         opts.CredentialStore,
-		remote:        remote,
-		launcher:      opts.Launcher,
-		checker:       opts.Checker,
-		resolver:      opts.Resolver,
-		tlsChecker:    opts.TLSChecker,
-		projects:      opts.ProjectStore,
-		gitRunner:     opts.GitRunner,
-		envManager:    envMgr,
-		socketPath:    opts.Config.EffectiveSocketPath(),
-		syncInterval:  syncInt,
-		fetchInterval: fetchInt,
-		envInterval:   envInt,
-		log:           opts.Logger,
-		ctx:           ctx,
-		cancel:        cancel,
+		cfg:            opts.Config,
+		creds:          opts.CredentialStore,
+		remote:         remote,
+		launcher:       opts.Launcher,
+		checker:        opts.Checker,
+		resolver:       opts.Resolver,
+		tlsChecker:     opts.TLSChecker,
+		projects:       opts.ProjectStore,
+		gitRunner:      opts.GitRunner,
+		envManager:     envMgr,
+		socketPath:     opts.Config.EffectiveSocketPath(),
+		syncInterval:   syncInt,
+		fetchInterval:  fetchInt,
+		envInterval:    envInt,
+		backupInterval: backupInt,
+		log:            opts.Logger,
+		ctx:            ctx,
+		cancel:         cancel,
 	}, nil
 }
 
@@ -256,6 +269,9 @@ func (d *Daemon) Start() error {
 
 	d.wg.Add(1)
 	go d.envLoop()
+
+	d.wg.Add(1)
+	go d.backupLoop()
 
 	d.log.Info("clientd started", "socket", d.socketPath, "server", redactServerURL(d.cfg.ServerURL))
 	return nil
@@ -557,6 +573,18 @@ func (d *Daemon) dispatch(req Request) Response {
 	case "environment.status", "environment_status", "env.status", "env_status":
 		rev, cnt, syncedAt, envErr := d.envManager.Status()
 		return Response{OK: true, Data: map[string]any{"revision": rev, "variable_count": cnt, "synced_at": syncedAt, "error": envErr}}
+	case "backup.run", "backup_run", "backupRun", "backup-run", "machine-backup.run", "backup-drive.run", "backup_drive.run":
+		if err := d.backupRunOnce(); err != nil {
+			return Response{OK: false, Error: err.Error()}
+		}
+		return Response{OK: true, Data: map[string]string{"result": "backup completed"}}
+	case "backup.status", "backup_status", "backupStatus", "backup-status", "machine-backup.status", "backup-drive.status", "backup_drive.status":
+		_ = d.backupStatusOnce()
+		d.mu.RLock()
+		snap := d.backupLastSnapshot
+		bErr := d.backupError
+		d.mu.RUnlock()
+		return Response{OK: true, Data: map[string]any{"last_snapshot": snap, "error": bErr}}
 	case "xai.oauth.connect", "xai_oauth.connect", "xai-oauth.connect", "xai.oauth_connect", "provider.xai.connect", "connect-xai":
 		if !d.buildStatus().HasXaiOAuthSession {
 			return Response{OK: false, Error: "no active xAI OAuth session assigned to this device"}
@@ -740,6 +768,18 @@ func (d *Daemon) dispatchSocket(req SocketRequest) SocketResponse {
 	case "environment.status", "environment_status", "env.status", "env_status":
 		rev, cnt, syncedAt, envErr := d.envManager.Status()
 		return SocketResponse{ID: req.ID, Result: map[string]any{"revision": rev, "variable_count": cnt, "synced_at": syncedAt, "error": envErr}}
+	case "backup.run", "backup_run", "backupRun", "backup-run", "machine-backup.run", "backup-drive.run", "backup_drive.run":
+		if err := d.backupRunOnce(); err != nil {
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: err.Error()}}
+		}
+		return SocketResponse{ID: req.ID, Result: map[string]string{"result": "backup completed"}}
+	case "backup.status", "backup_status", "backupStatus", "backup-status", "machine-backup.status", "backup-drive.status", "backup_drive.status":
+		_ = d.backupStatusOnce()
+		d.mu.RLock()
+		snap := d.backupLastSnapshot
+		bErr := d.backupError
+		d.mu.RUnlock()
+		return SocketResponse{ID: req.ID, Result: map[string]any{"last_snapshot": snap, "error": bErr}}
 	case "xai.oauth.connect", "xai_oauth.connect", "xai-oauth.connect", "xai.oauth_connect", "provider.xai.connect", "connect-xai":
 		// xAI loopback OAuth connect — requires companion enrollment with allow_provider_oauth and active session assigned to this device.
 		// No secrets in response; actual relay is via omahab provider login xai or companion port 56121.
@@ -918,6 +958,9 @@ func (d *Daemon) buildStatus() DaemonStatus {
 			break
 		}
 	}
+	// Machine backup cache.
+	ds.BackupLastSnapshot = d.backupLastSnapshot
+	ds.BackupError = d.backupError
 	return ds
 }
 
@@ -1001,6 +1044,56 @@ func (d *Daemon) envClear() error {
 	return nil
 }
 
+func (d *Daemon) backupLoop() {
+	defer d.wg.Done()
+	_ = d.backupStatusOnce()
+	ticker := time.NewTicker(d.backupInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-d.ctx.Done():
+			return
+		case <-ticker.C:
+			_ = d.backupStatusOnce()
+		}
+	}
+}
+
+func (d *Daemon) backupStatusOnce() error {
+	ctx, cancel := context.WithTimeout(d.ctx, 15*time.Second)
+	defer cancel()
+	st, err := StatusBackupDrive(ctx, d.creds)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err != nil {
+		// If no repo configured, clear error to avoid noise? But surface as backupError
+		if st != nil && st.Error != "" {
+			d.backupError = st.Error
+		} else {
+			d.backupError = err.Error()
+		}
+		// Keep last snapshot as is (maybe nil)
+		return err
+	}
+	// Success — update cache, clear error.
+	d.backupLastSnapshot = st.LastSnapshotTime
+	d.backupError = st.Error
+	return nil
+}
+
+func (d *Daemon) backupRunOnce() error {
+	ctx, cancel := context.WithTimeout(d.ctx, 10*time.Minute)
+	defer cancel()
+	if err := RunBackupDrive(ctx, d.creds); err != nil {
+		d.mu.Lock()
+		d.backupError = err.Error()
+		d.mu.Unlock()
+		return err
+	}
+	// Refresh status after successful backup.
+	_ = d.backupStatusOnce()
+	return nil
+}
 
 func (d *Daemon) syncOnce() {
 	if d.remote == nil {
