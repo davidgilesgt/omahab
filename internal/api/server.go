@@ -28,6 +28,7 @@ type Server struct {
 	tokenHash    []byte // SHA256 of bearer token, nil means auth disabled (tests only)
 	mcpTokenHash []byte // SHA256 of hermes_mcp_token, nil means MCP auth disabled
 	emailHMACKey []byte
+	scmWebhookSecret []byte
 	version      string
 	startedAt    time.Time
 	router       chi.Router
@@ -42,7 +43,6 @@ type Server struct {
 	// mcpHandler is the streamable HTTP MCP handler for /mcp.
 	mcpHandler http.Handler
 }
-// Config configures the API server.
 type Config struct {
 	Backend      Backend
 	Environments *environments.Service
@@ -51,6 +51,7 @@ type Config struct {
 	MCPToken     string // raw hermes_mcp_token; hashed and checked by mcpAuth
 	MCPHandler   http.Handler
 	EmailHMACKey string // raw HMAC key for email webhook; empty disables HMAC check (tests)
+	SCMWebhookSecret string // raw HMAC key for Forgejo webhook (platform-app/forgejo_webhook_secret)
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
 	IdleTimeout  time.Duration
@@ -87,14 +88,15 @@ func New(cfg Config) (*Server, error) {
 	}
 
 	s := &Server{
-		backend:      cfg.Backend,
-		environments: cfg.Environments,
-		version:      cfg.Version,
-		startedAt:    time.Now().UTC(),
-		emailHMACKey: []byte(cfg.EmailHMACKey),
-		bootstrap:    cfg.Bootstrap,
-		adminToken:   cfg.BearerToken,
-		mcpHandler:   cfg.MCPHandler,
+		backend:          cfg.Backend,
+		environments:     cfg.Environments,
+		version:          cfg.Version,
+		startedAt:        time.Now().UTC(),
+		emailHMACKey:     []byte(cfg.EmailHMACKey),
+		scmWebhookSecret: []byte(cfg.SCMWebhookSecret),
+		bootstrap:        cfg.Bootstrap,
+		adminToken:       cfg.BearerToken,
+		mcpHandler:       cfg.MCPHandler,
 	}
 	if cfg.BearerToken != "" {
 		h := sha256.Sum256([]byte(cfg.BearerToken))
@@ -155,6 +157,9 @@ func (s *Server) buildRouter() chi.Router {
 
 	// Email webhook with separate HMAC auth (not bearer).
 	r.Post("/api/v1/email/ingest", s.withBodyLimit(maxBodyLimit, s.handleEmailIngestHMAC))
+
+	// SCM webhook from Forgejo (pull_request, push) — HMAC-verified, no bearer.
+	r.Post("/api/v1/scm/webhook", s.withBodyLimit(defaultBodyLimit, s.handleSCMWebhook))
 
 	// Companion enrollment: device claim with single-use code, no bearer (open). Code in JSON body {code}.
 	r.Post("/api/v1/companion/enroll", s.withBodyLimit(defaultBodyLimit, s.handleEnrollCompanion))

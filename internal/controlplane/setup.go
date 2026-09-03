@@ -588,6 +588,11 @@ func (b *Backend) setupPhaseSecrets(ctx context.Context) error {
 				_ = upsertSecret(ctx, b.secrets, "platform-app", "hermes_mcp_token", generateRandomBase64URL(32))
 			}
 		}
+		if _, err := b.secrets.RevealByName(ctx, "platform-app", "forgejo_webhook_secret"); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				_ = upsertSecret(ctx, b.secrets, "platform-app", "forgejo_webhook_secret", generateRandomBase64URL(32))
+			}
+		}
 	}
 	if b.apps == nil {
 		return nil

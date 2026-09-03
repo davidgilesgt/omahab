@@ -168,6 +168,8 @@ type ProvisionInput struct {
 	ReleaseCallbackURL string
 	BuilderImage       string
 	ReleaseToken       string
+	WebhookURL         string
+	WebhookSecret      string
 	Mirror             *MirrorConfig
 }
 
@@ -630,11 +632,10 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) (*ProvisionR
 
 	// Upsert Woodpecker repo secrets. Raw values only in memory/secret store/Woodpecker.
 	releaseToken := strings.TrimSpace(in.ReleaseToken)
-	// If release token not supplied, try to generate or fetch? For tests, allow empty but still create placeholder.
 	if releaseToken == "" {
-		// Try to get from secrets? If not, use a placeholder that will be replaced by backend's issued token.
-		// Generate a random placeholder to avoid empty secret.
-		releaseToken = "placeholder-" + newID()
+		markError("missing release token")
+		compensate()
+		return nil, fmt.Errorf("%w: release token is required", ErrValidation)
 	}
 	if err := s.woodpecker.UpsertRepoSecret(ctx, woodpeckerRepoID, "omahab_registry_user", ciUsername); err != nil {
 		markError("upsert registry user secret failed")
@@ -733,6 +734,15 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) (*ProvisionR
 		markError("seed pipeline failed")
 		compensate()
 		return nil, fmt.Errorf("seed woodpecker config: %w", err)
+	}
+
+	// Ensure Forgejo webhook for pull_request and push events (HMAC-verified ingress).
+	if strings.TrimSpace(in.WebhookURL) != "" && strings.TrimSpace(in.WebhookSecret) != "" {
+		if err := s.forgejo.EnsureWebhook(ctx, RepoRef{Owner: owner, Name: repoName}, strings.TrimSpace(in.WebhookURL), strings.TrimSpace(in.WebhookSecret), []string{"pull_request", "push"}); err != nil {
+			markError("ensure webhook failed")
+			compensate()
+			return nil, fmt.Errorf("ensure webhook: %w", err)
+		}
 	}
 
 	// Mark repository ready.

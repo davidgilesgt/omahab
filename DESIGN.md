@@ -326,6 +326,8 @@ git push
   -> health check
   -> release recorded
   -> previous release retained for rollback
+
+Forgejo webhooks (pull_request, push) -> omahabd webhook ingress (HMAC-verified) -> scm.push / OnPullRequest -> event log (automated review in Step 6)
 ```
 
 Woodpecker receives no host SSH key or broad Omahab administrator credential.
@@ -547,7 +549,7 @@ No prompt-content logging by default. LiteLLM is configured with `general_settin
 
 ### 11.1 Forgejo
 
-Forgejo is the canonical Git system and is private by default.
+Forgejo is the canonical Git system and is private by default. Forgejo webhooks (`pull_request`, `push`) feed omahabd; HMAC-verified.
 
 ### 11.2 Woodpecker only
 

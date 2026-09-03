@@ -32,8 +32,84 @@ type Repo struct {
 	DefaultBranch  string
 	ActionsEnabled bool
 	RemoteID       int64
+	Archived       bool
 }
 
+// Branch represents a Forgejo branch.
+type Branch struct {
+	Name      string
+	CommitSHA string
+}
+
+// PullRequest is the observed Forgejo pull request.
+type PullRequest struct {
+	Index            int64
+	Title            string
+	Body             string
+	State            string
+	HeadSHA          string
+	HeadBranch       string
+	BaseBranch       string
+	HeadRepoFullName string
+	BaseRepoFullName string
+	Author           string
+	HTMLURL          string
+}
+// CreatePullInput is the narrow input for creating a pull request.
+type CreatePullInput struct {
+	Title      string
+	Body       string
+	HeadBranch string
+	BaseBranch string
+}
+
+// PullReviewComment is one inline comment on a pull request review.
+type PullReviewComment struct {
+	Path        string `json:"path"`
+	Body        string `json:"body"`
+	NewPosition int    `json:"new_position"`
+}
+
+// PullReviewInput is the narrow input for creating a pull request review.
+type PullReviewInput struct {
+	Event    string              `json:"event"`
+	Body     string              `json:"body"`
+	CommitID string              `json:"commit_id"`
+	Comments []PullReviewComment `json:"comments"`
+}
+
+// PullRequestEvent is the normalized pull_request webhook payload.
+type PullRequestEvent struct {
+	Action      string
+	Repository  RepoRef
+	PullRequest PullRequest
+	Sender      string
+}
+
+// PushEvent is the normalized push webhook payload.
+type PushEvent struct {
+	Repository RepoRef
+	Ref        string
+	AfterSHA   string
+	BeforeSHA  string
+	Sender     string
+}
+
+// Issue is the observed Forgejo issue.
+type Issue struct {
+	Index   int64
+	Title   string
+	Body    string
+	State   string
+	Author  string
+	HTMLURL string
+}
+
+// CreateIssueInput is the narrow input for creating an issue.
+type CreateIssueInput struct {
+	Title string
+	Body  string
+}
 // MirrorInput carries a push-mirror configuration for Forgejo.
 // CredentialSecretRef is a repository-scoped secret reference (scope/name), never
 // a raw token. The Forgejo client implementation resolves the reference via the
@@ -69,10 +145,24 @@ type ForgejoClient interface {
 	AddCollaborator(ctx context.Context, ref RepoRef, username, permission string) error
 	RemoveCollaborator(ctx context.Context, ref RepoRef, username string) error
 	CreateToken(ctx context.Context, username, tokenName string, scopes []string) (string, error)
-	CreateAccessToken(ctx context.Context, username, tokenName string, scopes []string) (string, error)
+	CreateAccessToken(ctx context.Context, username, tokenName string, scopes []string, repos []RepoRef) (string, error)
 	DeleteUser(ctx context.Context, username string) error
 	DeleteToken(ctx context.Context, username, tokenName string) error
 	DeleteAccessToken(ctx context.Context, username, tokenName string) error
+	ArchiveRepo(ctx context.Context, ref RepoRef, archived bool) error
+	CreateBranch(ctx context.Context, ref RepoRef, newBranch, fromRef string) error
+	ListBranches(ctx context.Context, ref RepoRef) ([]*Branch, error)
+	GetFile(ctx context.Context, ref RepoRef, path, refStr string) ([]byte, error)
+	ListPulls(ctx context.Context, ref RepoRef, state string) ([]*PullRequest, error)
+	GetPull(ctx context.Context, ref RepoRef, index int64) (*PullRequest, error)
+	GetPullDiff(ctx context.Context, ref RepoRef, index int64) (string, error)
+	CreatePull(ctx context.Context, ref RepoRef, in CreatePullInput) (*PullRequest, error)
+	CreatePullReview(ctx context.Context, ref RepoRef, index int64, in PullReviewInput) error
+	ListIssues(ctx context.Context, ref RepoRef, state string) ([]*Issue, error)
+	GetIssue(ctx context.Context, ref RepoRef, index int64) (*Issue, error)
+	CreateIssue(ctx context.Context, ref RepoRef, in CreateIssueInput) (*Issue, error)
+	CreateIssueComment(ctx context.Context, ref RepoRef, index int64, body string) error
+	EnsureWebhook(ctx context.Context, ref RepoRef, url, secret string, events []string) error
 }
 
 // EnsureCIRepoInput is the narrow input for activating a repository in Woodpecker.
@@ -194,6 +284,17 @@ type FakeForgejo struct {
 	Tokens  map[string]string            // key: username/tokenName -> token value
 	Collabs map[string]map[string]string // repoKey -> username -> permission
 	Files   map[string]map[string][]byte // repoKey -> filePath -> content
+	// Extended SCM surface for Step 4
+	Branches    map[string]map[string]*Branch       // repoKey -> branchName -> Branch
+	Pulls       map[string]map[int64]*PullRequest   // repoKey -> index -> PR
+	PullDiffs   map[string]map[int64]string         // repoKey -> index -> diff
+	Issues      map[string]map[int64]*Issue         // repoKey -> index -> Issue
+	IssueCmts   map[string]map[int64][]string       // repoKey/index -> comments
+	Webhooks    map[string]map[string]struct{}      // repoKey -> url -> struct
+	WebhookMeta map[string]map[string]struct {      // repoKey -> url -> meta
+		Secret string
+		Events []string
+	}
 	// Hooks for fault injection
 	CreateErr             error
 	SetActionsEnabledErr  error
@@ -209,6 +310,20 @@ type FakeForgejo struct {
 	DeleteTokenErr        error
 	GetUserErr            error
 	RemoveCollaboratorErr error
+	ArchiveErr            error
+	CreateBranchErr       error
+	ListBranchesErr       error
+	GetFileErr            error
+	ListPullsErr          error
+	GetPullErr            error
+	GetPullDiffErr        error
+	CreatePullErr         error
+	CreatePullReviewErr   error
+	ListIssuesErr         error
+	GetIssueErr           error
+	CreateIssueErr        error
+	CreateIssueCommentErr error
+	EnsureWebhookErr      error
 	// Call capture
 	CreateCalls     []CreateRepoInput
 	SetActionsCalls []struct {
@@ -238,6 +353,7 @@ type FakeForgejo struct {
 		Username  string
 		TokenName string
 		Scopes    []string
+		Repos     []RepoRef
 	}
 	RemoveCollaboratorCalls []struct {
 		Ref      RepoRef
@@ -248,16 +364,41 @@ type FakeForgejo struct {
 		TokenName string
 	}
 	DeleteUserCalls []string
+	ArchiveCalls    []struct {
+		Ref      RepoRef
+		Archived bool
+	}
+	CreateBranchCalls []struct {
+		Ref       RepoRef
+		NewBranch string
+		FromRef   string
+	}
+	EnsureWebhookCalls []struct {
+		Ref    RepoRef
+		URL    string
+		Secret string
+		Events []string
+	}
 }
 
 func NewFakeForgejo() *FakeForgejo {
 	return &FakeForgejo{
-		Repos:   make(map[string]*Repo),
-		Mirrors: make(map[string]MirrorInput),
-		Users:   make(map[string]bool),
-		Tokens:  make(map[string]string),
-		Collabs: make(map[string]map[string]string),
-		Files:   make(map[string]map[string][]byte),
+		Repos:       make(map[string]*Repo),
+		Mirrors:     make(map[string]MirrorInput),
+		Users:       make(map[string]bool),
+		Tokens:      make(map[string]string),
+		Collabs:     make(map[string]map[string]string),
+		Files:       make(map[string]map[string][]byte),
+		Branches:    make(map[string]map[string]*Branch),
+		Pulls:       make(map[string]map[int64]*PullRequest),
+		PullDiffs:   make(map[string]map[int64]string),
+		Issues:      make(map[string]map[int64]*Issue),
+		IssueCmts:   make(map[string]map[int64][]string),
+		Webhooks:    make(map[string]map[string]struct{}),
+		WebhookMeta: make(map[string]map[string]struct {
+			Secret string
+			Events []string
+		}),
 	}
 }
 
@@ -449,7 +590,8 @@ func (f *FakeForgejo) CreateToken(_ context.Context, username, tokenName string,
 		Username  string
 		TokenName string
 		Scopes    []string
-	}{Username: username, TokenName: tokenName, Scopes: append([]string(nil), scopes...)})
+		Repos     []RepoRef
+	}{Username: username, TokenName: tokenName, Scopes: append([]string(nil), scopes...), Repos: nil})
 	if f.Users == nil || !f.Users[username] {
 		if f.Users == nil {
 			f.Users = make(map[string]bool)
@@ -468,8 +610,30 @@ func (f *FakeForgejo) CreateToken(_ context.Context, username, tokenName string,
 	return tok, nil
 }
 
-func (f *FakeForgejo) CreateAccessToken(ctx context.Context, username, tokenName string, scopes []string) (string, error) {
-	return f.CreateToken(ctx, username, tokenName, scopes)
+func (f *FakeForgejo) CreateAccessToken(_ context.Context, username, tokenName string, scopes []string, repos []RepoRef) (string, error) {
+	// Record with repos for Step5
+	f.CreateTokenCalls = append(f.CreateTokenCalls, struct {
+		Username  string
+		TokenName string
+		Scopes    []string
+		Repos     []RepoRef
+	}{Username: username, TokenName: tokenName, Scopes: append([]string(nil), scopes...), Repos: append([]RepoRef(nil), repos...)})
+	if f.Users == nil || !f.Users[username] {
+		if f.Users == nil {
+			f.Users = make(map[string]bool)
+		}
+		f.Users[username] = true
+	}
+	key := username + "/" + tokenName
+	if tok, ok := f.Tokens[key]; ok {
+		return tok, nil
+	}
+	tok := fmt.Sprintf("token-%s-%s-%d", username, tokenName, len(f.Tokens)+1)
+	if f.Tokens == nil {
+		f.Tokens = make(map[string]string)
+	}
+	f.Tokens[key] = tok
+	return tok, nil
 }
 
 func (f *FakeForgejo) DeleteUser(_ context.Context, username string) error {
@@ -503,6 +667,327 @@ func (f *FakeForgejo) DeleteToken(_ context.Context, username, tokenName string)
 
 func (f *FakeForgejo) DeleteAccessToken(ctx context.Context, username, tokenName string) error {
 	return f.DeleteToken(ctx, username, tokenName)
+}
+
+func (f *FakeForgejo) ArchiveRepo(_ context.Context, ref RepoRef, archived bool) error {
+	if f.ArchiveErr != nil {
+		return f.ArchiveErr
+	}
+	f.ArchiveCalls = append(f.ArchiveCalls, struct {
+		Ref      RepoRef
+		Archived bool
+	}{Ref: ref, Archived: archived})
+	if r, ok := f.Repos[repoKey(ref)]; ok {
+		r.Archived = archived
+		return nil
+	}
+	return fmt.Errorf("%w: repository not found", ErrNotFound)
+}
+
+func (f *FakeForgejo) CreateBranch(_ context.Context, ref RepoRef, newBranch, fromRef string) error {
+	if f.CreateBranchErr != nil {
+		return f.CreateBranchErr
+	}
+	f.CreateBranchCalls = append(f.CreateBranchCalls, struct {
+		Ref       RepoRef
+		NewBranch string
+		FromRef   string
+	}{Ref: ref, NewBranch: newBranch, FromRef: fromRef})
+	key := repoKey(ref)
+	if _, ok := f.Repos[key]; !ok {
+		return fmt.Errorf("%w: repository not found", ErrNotFound)
+	}
+	if f.Branches == nil {
+		f.Branches = make(map[string]map[string]*Branch)
+	}
+	if f.Branches[key] == nil {
+		f.Branches[key] = make(map[string]*Branch)
+	}
+	if _, exists := f.Branches[key][newBranch]; exists {
+		return fmt.Errorf("%w: branch already exists", ErrConflict)
+	}
+	f.Branches[key][newBranch] = &Branch{Name: newBranch, CommitSHA: fromRef}
+	// Ensure the base branch exists if not already
+	if _, ok := f.Branches[key][fromRef]; !ok && fromRef != "" {
+		// treat fromRef as existing commit; no action
+	}
+	return nil
+}
+
+func (f *FakeForgejo) ListBranches(_ context.Context, ref RepoRef) ([]*Branch, error) {
+	if f.ListBranchesErr != nil {
+		return nil, f.ListBranchesErr
+	}
+	key := repoKey(ref)
+	if _, ok := f.Repos[key]; !ok {
+		return nil, fmt.Errorf("%w: repository not found", ErrNotFound)
+	}
+	m := f.Branches[key]
+	out := make([]*Branch, 0, len(m))
+	for _, b := range m {
+		cp := *b
+		out = append(out, &cp)
+	}
+	// include default branch if no branches stored yet
+	if len(out) == 0 {
+		if r, ok := f.Repos[key]; ok && r.DefaultBranch != "" {
+			out = append(out, &Branch{Name: r.DefaultBranch})
+		}
+	}
+	return out, nil
+}
+
+func (f *FakeForgejo) GetFile(_ context.Context, ref RepoRef, path, refStr string) ([]byte, error) {
+	if f.GetFileErr != nil {
+		return nil, f.GetFileErr
+	}
+	_ = refStr
+	key := repoKey(ref)
+	if _, ok := f.Repos[key]; !ok {
+		return nil, fmt.Errorf("%w: repository not found", ErrNotFound)
+	}
+	if m, ok := f.Files[key]; ok {
+		if data, ok := m[path]; ok {
+			cp := make([]byte, len(data))
+			copy(cp, data)
+			return cp, nil
+		}
+	}
+	return nil, fmt.Errorf("%w: file not found", ErrNotFound)
+}
+
+func (f *FakeForgejo) ListPulls(_ context.Context, ref RepoRef, state string) ([]*PullRequest, error) {
+	if f.ListPullsErr != nil {
+		return nil, f.ListPullsErr
+	}
+	key := repoKey(ref)
+	if _, ok := f.Repos[key]; !ok {
+		return nil, fmt.Errorf("%w: repository not found", ErrNotFound)
+	}
+	m := f.Pulls[key]
+	var out []*PullRequest
+	for _, pr := range m {
+		if state != "" && state != "all" && pr.State != state {
+			continue
+		}
+		cp := *pr
+		out = append(out, &cp)
+	}
+	return out, nil
+}
+
+func (f *FakeForgejo) GetPull(_ context.Context, ref RepoRef, index int64) (*PullRequest, error) {
+	if f.GetPullErr != nil {
+		return nil, f.GetPullErr
+	}
+	key := repoKey(ref)
+	if m, ok := f.Pulls[key]; ok {
+		if pr, ok := m[index]; ok {
+			cp := *pr
+			return &cp, nil
+		}
+	}
+	return nil, fmt.Errorf("%w: pull request not found", ErrNotFound)
+}
+
+func (f *FakeForgejo) GetPullDiff(_ context.Context, ref RepoRef, index int64) (string, error) {
+	if f.GetPullDiffErr != nil {
+		return "", f.GetPullDiffErr
+	}
+	key := repoKey(ref)
+	if m, ok := f.PullDiffs[key]; ok {
+		if d, ok := m[index]; ok {
+			return d, nil
+		}
+	}
+	// Fallback: try to generate from PR body if exists.
+	if m2, ok := f.Pulls[key]; ok {
+		if pr, ok := m2[index]; ok && pr.Body != "" {
+			return "diff for " + pr.Title, nil
+		}
+	}
+	return "", fmt.Errorf("%w: diff not found", ErrNotFound)
+}
+
+func (f *FakeForgejo) CreatePull(_ context.Context, ref RepoRef, in CreatePullInput) (*PullRequest, error) {
+	if f.CreatePullErr != nil {
+		return nil, f.CreatePullErr
+	}
+	key := repoKey(ref)
+	if _, ok := f.Repos[key]; !ok {
+		return nil, fmt.Errorf("%w: repository not found", ErrNotFound)
+	}
+	if f.Pulls == nil {
+		f.Pulls = make(map[string]map[int64]*PullRequest)
+	}
+	if f.Pulls[key] == nil {
+		f.Pulls[key] = make(map[int64]*PullRequest)
+	}
+	idx := int64(len(f.Pulls[key]) + 1)
+	pr := &PullRequest{
+		Index:            idx,
+		Title:            in.Title,
+		Body:             in.Body,
+		State:            "open",
+		HeadBranch:       in.HeadBranch,
+		BaseBranch:       in.BaseBranch,
+		HeadRepoFullName: ref.Owner + "/" + ref.Name,
+		BaseRepoFullName: ref.Owner + "/" + ref.Name,
+		Author:           "test",
+		HTMLURL:          fmt.Sprintf("https://git.example.com/%s/%s/pulls/%d", ref.Owner, ref.Name, idx),
+	}
+	f.Pulls[key][idx] = pr
+	return pr, nil
+}
+
+func (f *FakeForgejo) CreatePullReview(_ context.Context, ref RepoRef, index int64, in PullReviewInput) error {
+	if f.CreatePullReviewErr != nil {
+		return f.CreatePullReviewErr
+	}
+	key := repoKey(ref)
+	if _, ok := f.Repos[key]; !ok {
+		return fmt.Errorf("%w: repository not found", ErrNotFound)
+	}
+	if m, ok := f.Pulls[key]; ok {
+		if _, ok := m[index]; !ok {
+			return fmt.Errorf("%w: pull request not found", ErrNotFound)
+		}
+	} else {
+		return fmt.Errorf("%w: pull request not found", ErrNotFound)
+	}
+	if f.PullDiffs == nil {
+		f.PullDiffs = make(map[string]map[int64]string)
+	}
+	// Validate event
+	ev := in.Event
+	if ev != "COMMENT" && ev != "REQUEST_CHANGES" && ev != "APPROVED" && ev != "" {
+		return fmt.Errorf("%w: invalid review event %q", ErrValidation, ev)
+	}
+	return nil
+}
+
+func (f *FakeForgejo) ListIssues(_ context.Context, ref RepoRef, state string) ([]*Issue, error) {
+	if f.ListIssuesErr != nil {
+		return nil, f.ListIssuesErr
+	}
+	key := repoKey(ref)
+	if _, ok := f.Repos[key]; !ok {
+		return nil, fmt.Errorf("%w: repository not found", ErrNotFound)
+	}
+	m := f.Issues[key]
+	var out []*Issue
+	for _, is := range m {
+		if state != "" && state != "all" && is.State != state {
+			continue
+		}
+		cp := *is
+		out = append(out, &cp)
+	}
+	return out, nil
+}
+
+func (f *FakeForgejo) GetIssue(_ context.Context, ref RepoRef, index int64) (*Issue, error) {
+	if f.GetIssueErr != nil {
+		return nil, f.GetIssueErr
+	}
+	key := repoKey(ref)
+	if m, ok := f.Issues[key]; ok {
+		if is, ok := m[index]; ok {
+			cp := *is
+			return &cp, nil
+		}
+	}
+	return nil, fmt.Errorf("%w: issue not found", ErrNotFound)
+}
+
+func (f *FakeForgejo) CreateIssue(_ context.Context, ref RepoRef, in CreateIssueInput) (*Issue, error) {
+	if f.CreateIssueErr != nil {
+		return nil, f.CreateIssueErr
+	}
+	key := repoKey(ref)
+	if _, ok := f.Repos[key]; !ok {
+		return nil, fmt.Errorf("%w: repository not found", ErrNotFound)
+	}
+	if f.Issues == nil {
+		f.Issues = make(map[string]map[int64]*Issue)
+	}
+	if f.Issues[key] == nil {
+		f.Issues[key] = make(map[int64]*Issue)
+	}
+	idx := int64(len(f.Issues[key]) + 1)
+	is := &Issue{
+		Index:   idx,
+		Title:   in.Title,
+		Body:    in.Body,
+		State:   "open",
+		Author:  "test",
+		HTMLURL: fmt.Sprintf("https://git.example.com/%s/%s/issues/%d", ref.Owner, ref.Name, idx),
+	}
+	f.Issues[key][idx] = is
+	return is, nil
+}
+
+func (f *FakeForgejo) CreateIssueComment(_ context.Context, ref RepoRef, index int64, body string) error {
+	if f.CreateIssueCommentErr != nil {
+		return f.CreateIssueCommentErr
+	}
+	key := repoKey(ref)
+	if _, ok := f.Repos[key]; !ok {
+		return fmt.Errorf("%w: repository not found", ErrNotFound)
+	}
+	if m, ok := f.Issues[key]; ok {
+		if _, ok := m[index]; !ok {
+			return fmt.Errorf("%w: issue not found", ErrNotFound)
+		}
+	} else {
+		return fmt.Errorf("%w: issue not found", ErrNotFound)
+	}
+	if f.IssueCmts == nil {
+		f.IssueCmts = make(map[string]map[int64][]string)
+	}
+	if f.IssueCmts[key] == nil {
+		f.IssueCmts[key] = make(map[int64][]string)
+	}
+	f.IssueCmts[key][index] = append(f.IssueCmts[key][index], body)
+	return nil
+}
+
+func (f *FakeForgejo) EnsureWebhook(_ context.Context, ref RepoRef, url, secret string, events []string) error {
+	if f.EnsureWebhookErr != nil {
+		return f.EnsureWebhookErr
+	}
+	f.EnsureWebhookCalls = append(f.EnsureWebhookCalls, struct {
+		Ref    RepoRef
+		URL    string
+		Secret string
+		Events []string
+	}{Ref: ref, URL: url, Secret: secret, Events: append([]string(nil), events...)})
+	key := repoKey(ref)
+	if _, ok := f.Repos[key]; !ok {
+		return fmt.Errorf("%w: repository not found", ErrNotFound)
+	}
+	if f.Webhooks == nil {
+		f.Webhooks = make(map[string]map[string]struct{})
+	}
+	if f.WebhookMeta == nil {
+		f.WebhookMeta = make(map[string]map[string]struct {
+			Secret string
+			Events []string
+		})
+	}
+	if f.Webhooks[key] == nil {
+		f.Webhooks[key] = make(map[string]struct{})
+		f.WebhookMeta[key] = make(map[string]struct {
+			Secret string
+			Events []string
+		})
+	}
+	f.Webhooks[key][url] = struct{}{}
+	f.WebhookMeta[key][url] = struct {
+		Secret string
+		Events []string
+	}{Secret: secret, Events: append([]string(nil), events...)}
+	return nil
 }
 
 // FakeWoodpecker is a fake WoodpeckerClient for tests.
@@ -831,7 +1316,7 @@ func (NoopForgejo) RemoveCollaborator(_ context.Context, ref RepoRef, username s
 func (NoopForgejo) CreateToken(_ context.Context, username, tokenName string, scopes []string) (string, error) {
 	return "noop-token", nil
 }
-func (NoopForgejo) CreateAccessToken(_ context.Context, username, tokenName string, scopes []string) (string, error) {
+func (NoopForgejo) CreateAccessToken(_ context.Context, username, tokenName string, scopes []string, repos []RepoRef) (string, error) {
 	return "noop-token", nil
 }
 func (NoopForgejo) DeleteUser(_ context.Context, username string) error { return nil }
@@ -839,6 +1324,20 @@ func (NoopForgejo) DeleteToken(_ context.Context, username, tokenName string) er
 func (NoopForgejo) DeleteAccessToken(_ context.Context, username, tokenName string) error {
 	return nil
 }
+func (NoopForgejo) ArchiveRepo(_ context.Context, _ RepoRef, _ bool) error { return nil }
+func (NoopForgejo) CreateBranch(_ context.Context, _ RepoRef, _, _ string) error { return nil }
+func (NoopForgejo) ListBranches(_ context.Context, _ RepoRef) ([]*Branch, error) { return nil, nil }
+func (NoopForgejo) GetFile(_ context.Context, _ RepoRef, _, _ string) ([]byte, error) { return nil, nil }
+func (NoopForgejo) ListPulls(_ context.Context, _ RepoRef, _ string) ([]*PullRequest, error) { return nil, nil }
+func (NoopForgejo) GetPull(_ context.Context, _ RepoRef, _ int64) (*PullRequest, error) { return nil, nil }
+func (NoopForgejo) GetPullDiff(_ context.Context, _ RepoRef, _ int64) (string, error) { return "", nil }
+func (NoopForgejo) CreatePull(_ context.Context, _ RepoRef, _ CreatePullInput) (*PullRequest, error) { return &PullRequest{}, nil }
+func (NoopForgejo) CreatePullReview(_ context.Context, _ RepoRef, _ int64, _ PullReviewInput) error { return nil }
+func (NoopForgejo) ListIssues(_ context.Context, _ RepoRef, _ string) ([]*Issue, error) { return nil, nil }
+func (NoopForgejo) GetIssue(_ context.Context, _ RepoRef, _ int64) (*Issue, error) { return nil, nil }
+func (NoopForgejo) CreateIssue(_ context.Context, _ RepoRef, _ CreateIssueInput) (*Issue, error) { return &Issue{}, nil }
+func (NoopForgejo) CreateIssueComment(_ context.Context, _ RepoRef, _ int64, _ string) error { return nil }
+func (NoopForgejo) EnsureWebhook(_ context.Context, _ RepoRef, _, _ string, _ []string) error { return nil }
 
 // NoopWoodpecker is a no-op WoodpeckerClient for wiring without a real Woodpecker.
 type NoopWoodpecker struct{}

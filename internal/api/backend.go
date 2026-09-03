@@ -9,6 +9,7 @@ import (
 	"github.com/omahab/omahab/internal/health"
 	"github.com/omahab/omahab/internal/identity"
 	"github.com/omahab/omahab/internal/knowledge"
+	"github.com/omahab/omahab/internal/scm"
 )
 
 // Pagination controls list endpoints.
@@ -538,6 +539,11 @@ type Backend interface {
 
 	// Email routing gated on verification
 	EnsureEmailRoute(ctx context.Context, recipient string) error
+
+	// SCM webhooks (Forgejo pull_request/push, HMAC-verified)
+	OnPullRequest(ctx context.Context, ev scm.PullRequestEvent) error
+	OnPush(ctx context.Context, ev scm.PushEvent) error
+	ForgejoWebhookSecret(ctx context.Context) (string, error)
 }
 
 // SetupWoodpeckerRequest is the body for PUT /api/v1/setup/woodpecker.

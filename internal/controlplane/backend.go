@@ -1196,15 +1196,32 @@ func (b *Backend) CreateProject(ctx context.Context, req api.CreateProjectReques
 	if err != nil {
 		return domain.Project{}, translateError(err)
 	}
+	// Issue release token first so it can be handed to SCM provision for Woodpecker secret.
+	releaseToken := ""
+	if b.projects != nil {
+		if tok, err := b.projects.IssueReleaseToken(ctx, pr.ID); err != nil {
+			_, _ = b.events.Publish(ctx, events.PublishInput{Type: "service.unhealthy", Severity: "warning", Message: "release token issue failed: " + err.Error(), ResourceID: string(pr.ID)})
+		} else {
+			releaseToken = tok
+		}
+	}
 
-	// scm provision: private repo, actions disabled, woodpecker linked, .woodpecker.yaml seeded
+	// scm provision: private repo, actions disabled, woodpecker linked, .woodpecker.yaml seeded, webhook ensured
 	if b.scm != nil {
 		inst, _ := b.store.Instance(ctx)
 		registryHost := ""
 		callbackBase := ""
+		webhookURL := ""
+		webhookSecret := ""
 		if inst.Domain != "" {
 			registryHost = "registry." + inst.Domain
 			callbackBase = "https://" + inst.Domain
+			webhookURL = "https://" + inst.Domain + "/api/v1/scm/webhook"
+			if b.secrets != nil {
+				if sec, err := b.secrets.RevealByName(ctx, "platform-app", "forgejo_webhook_secret"); err == nil {
+					webhookSecret = strings.TrimSpace(sec)
+				}
+			}
 		}
 		provInput := scm.ProvisionInput{
 			ProjectID:          pr.ID,
@@ -1214,22 +1231,14 @@ func (b *Backend) CreateProject(ctx context.Context, req api.CreateProjectReques
 			DefaultBranch:      "main",
 			RegistryHost:       registryHost,
 			ReleaseCallbackURL: callbackBase,
+			ReleaseToken:       releaseToken,
+			WebhookURL:         webhookURL,
+			WebhookSecret:      webhookSecret,
 		}
 		if provRes, err := b.scm.Provision(ctx, provInput); err != nil {
 			_, _ = b.events.Publish(ctx, events.PublishInput{Type: "ci.failed", Severity: "warning", Message: "scm provision failed: " + err.Error(), ResourceID: string(pr.ID)})
-		} else if provRes != nil {
-			// seed .woodpecker.yaml via service helper (type-asserts underlying forgejo client)
-			if provRes.PipelineTemplate != "" {
-				ref := scm.RepoRef{Owner: "omahab", Name: slug}
-				_ = b.scm.SeedWoodpeckerConfig(ctx, ref, provRes.PipelineTemplate)
-				_, _ = b.events.Publish(ctx, events.PublishInput{Type: "service.update_available", Severity: "info", Message: "pipeline template generated", ResourceID: string(pr.ID), Data: map[string]any{"pipeline_template": provRes.PipelineTemplate}})
-			}
-		}
-	}
-	// issue first release token (stored hash only, plaintext not persisted)
-	if b.projects != nil {
-		if _, err := b.projects.IssueReleaseToken(ctx, pr.ID); err != nil {
-			_, _ = b.events.Publish(ctx, events.PublishInput{Type: "service.unhealthy", Severity: "warning", Message: "release token issue failed: " + err.Error(), ResourceID: string(pr.ID)})
+		} else if provRes != nil && provRes.PipelineTemplate != "" {
+			_, _ = b.events.Publish(ctx, events.PublishInput{Type: "service.update_available", Severity: "info", Message: "pipeline template generated", ResourceID: string(pr.ID), Data: map[string]any{"pipeline_template": provRes.PipelineTemplate}})
 		}
 	}
 	return pr.Project, nil
@@ -3297,9 +3306,67 @@ func (b *Backend) EnsureEmailRoute(ctx context.Context, recipient string) error 
 	return nil
 }
 
+// ForgejoWebhookSecret returns the HMAC secret for Forgejo webhooks (platform-app/forgejo_webhook_secret).
+func (b *Backend) ForgejoWebhookSecret(ctx context.Context) (string, error) {
+	if b.secrets == nil {
+		return "", fmt.Errorf("%w: secrets not configured", ErrNotConfigured)
+	}
+	sec, err := b.secrets.RevealByName(ctx, "platform-app", "forgejo_webhook_secret")
+	if err != nil {
+		return "", translateError(err)
+	}
+	return strings.TrimSpace(sec), nil
+}
+
+// OnPullRequest handles a verified pull_request webhook event (opened/synchronized/reopened).
+// It records a normalized domain event and is the hook for Step 6 automated review (stub for now).
+func (b *Backend) OnPullRequest(ctx context.Context, ev scm.PullRequestEvent) error {
+	// Record event for observability; Step 6 will create a review workspace here, fork PRs are skipped.
+	_, _ = b.events.Publish(ctx, events.PublishInput{
+		Type:       "scm.pull_request",
+		Severity:   "info",
+		ResourceID: ev.Repository.Owner + "/" + ev.Repository.Name,
+		Message:    fmt.Sprintf("pull_request %s #%d %s/%s", ev.Action, ev.PullRequest.Index, ev.Repository.Owner, ev.Repository.Name),
+		Data: map[string]any{
+			"action":               ev.Action,
+			"owner":                ev.Repository.Owner,
+			"repo":                 ev.Repository.Name,
+			"pull_index":           ev.PullRequest.Index,
+			"pull_title":           ev.PullRequest.Title,
+			"pull_state":           ev.PullRequest.State,
+			"head_sha":             ev.PullRequest.HeadSHA,
+			"head_branch":          ev.PullRequest.HeadBranch,
+			"base_branch":          ev.PullRequest.BaseBranch,
+			"head_repo_full_name":  ev.PullRequest.HeadRepoFullName,
+			"base_repo_full_name":  ev.PullRequest.BaseRepoFullName,
+			"author":               ev.PullRequest.Author,
+			"html_url":             ev.PullRequest.HTMLURL,
+			"sender":               ev.Sender,
+		},
+	})
+	return nil
+}
+
+// OnPush handles a verified push webhook event. It records scm.push for observability.
+func (b *Backend) OnPush(ctx context.Context, ev scm.PushEvent) error {
+	_, _ = b.events.Publish(ctx, events.PublishInput{
+		Type:       "scm.push",
+		Severity:   "info",
+		ResourceID: ev.Repository.Owner + "/" + ev.Repository.Name,
+		Message:    fmt.Sprintf("push %s %s", ev.Repository.Owner+"/"+ev.Repository.Name, ev.Ref),
+		Data: map[string]any{
+			"owner":      ev.Repository.Owner,
+			"repo":       ev.Repository.Name,
+			"ref":        ev.Ref,
+			"after":      ev.AfterSHA,
+			"before":     ev.BeforeSHA,
+			"sender":     ev.Sender,
+		},
+	})
+	return nil
+}
 
 
-// Scheduler helpers for omahabd
 
 func (b *Backend) StartIdleExpirer(ctx context.Context, every time.Duration) {
 	if b.workspaces != nil {
