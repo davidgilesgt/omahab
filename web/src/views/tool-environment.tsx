@@ -164,6 +164,16 @@ export function ToolEnvironmentPage() {
                 <button className="icon-button" type="button" onClick={() => setEnrollCode(null)} aria-label="Dismiss">×</button>
               </div>
             )}
+            {enrollCode && (
+              <div className="callout" role="status" style={{ border: "1px solid var(--border)", borderRadius: "0.5rem", padding: "0.75rem", background: "var(--surface-raised, #f8f8f4)" }}>
+                <strong>One-liner (Omarchy) — paste on the device</strong>
+                <pre className="mono" style={{ whiteSpace: "pre-wrap", wordBreak: "break-all", margin: "0.5rem 0", padding: "0.5rem", background: "var(--surface)", borderRadius: "0.25rem", fontSize: "0.85rem" }}>{`curl -fsSL ${typeof window !== "undefined" ? window.location.origin : ""}/install.sh?code=${encodeURIComponent(enrollCode)} | sh`}</pre>
+                <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
+                  <CopyButton text={`curl -fsSL ${typeof window !== "undefined" ? window.location.origin : ""}/install.sh?code=${encodeURIComponent(enrollCode)} | sh`} label="Copy one-liner" />
+                  <small className="muted">Installs binary to ~/.local/bin, unit to ~/.config/systemd/user/omahab-clientd.service (ExecStart %h/.local/bin/omahab-clientd), Quickshell plugin to Omarchy plugin dir, then enrolls. Code single-use, 10m.</small>
+                </div>
+              </div>
+            )}
             <small className="muted">If Secret Service is unavailable, enrollment/sync fails with diagnostic — never falls back to plaintext.</small>
           </div>
         </Section>

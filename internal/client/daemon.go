@@ -1092,6 +1092,8 @@ func (d *Daemon) syncOnce() {
 	d.lastErr = ""
 	d.mu.Unlock()
 
+	d.maybeSelfUpdate()
+
 	// Reconcile projects in background (non-blocking for status)
 	go func() {
 		pctx, pcancel := context.WithTimeout(d.ctx, 10*time.Second)

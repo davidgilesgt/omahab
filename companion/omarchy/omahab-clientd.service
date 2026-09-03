@@ -9,7 +9,7 @@ After=graphical-session.target
 
 [Service]
 Type=exec
-ExecStart=/usr/bin/omahab-clientd
+ExecStart=%h/.local/bin/omahab-clientd
 Restart=on-failure
 RestartSec=5s
 

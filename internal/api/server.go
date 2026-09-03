@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -35,6 +37,9 @@ type Server struct {
 	router       chi.Router
 	httpServer   *http.Server
 
+	// dlDir is the filesystem directory for /dl/* and /install.sh.
+	dlDirPath string
+
 	// bootstrap is the first-boot gate (LAN listener, /api/bootstrap/*).
 	// nil disables the bootstrap routes.
 	bootstrap BootstrapGate
@@ -57,6 +62,9 @@ type Config struct {
 	WriteTimeout time.Duration
 	IdleTimeout  time.Duration
 	BodyLimit    int64 // max JSON body bytes (default 1MiB)
+
+	// DLDir is the directory serving /dl/* and /install.sh. If empty, OMAHAB_DL_DIR env or ./dist/dl fallback is used.
+	DLDir string
 
 	// Bootstrap enables the first-boot route group. Nil disables it.
 	Bootstrap BootstrapGate
@@ -96,6 +104,7 @@ func New(cfg Config) (*Server, error) {
 		startedAt:        time.Now().UTC(),
 		emailHMACKey:     []byte(cfg.EmailHMACKey),
 		scmWebhookSecret: []byte(cfg.SCMWebhookSecret),
+		dlDirPath:        cfg.DLDir,
 		bootstrap:        cfg.Bootstrap,
 		adminToken:       cfg.BearerToken,
 		mcpHandler:       cfg.MCPHandler,
@@ -165,6 +174,11 @@ func (s *Server) buildRouter() chi.Router {
 
 	// Companion enrollment: device claim with single-use code, no bearer (open). Code in JSON body {code}.
 	r.Post("/api/v1/companion/enroll", s.withBodyLimit(defaultBodyLimit, s.handleEnrollCompanion))
+
+	// B2: distribution — prebuilt client binaries, plugin, install.sh, checksums (tailnet-only, no auth; binaries public).
+	r.Get("/dl/SHA256SUMS", s.handleDLSHA256)
+	r.Get("/dl/{file}", s.handleDL)
+	r.Get("/install.sh", s.handleInstallSh)
 
 	// MCP server for Hermes (outside bearerAuth, behind dedicated mcpAuth).
 	// Supports POST/GET /mcp with Bearer OMAHAB_MCP_TOKEN.
@@ -371,6 +385,155 @@ func (s *Server) buildRouter() chi.Router {
 	return r
 }
 
+// --- B2 distribution handlers ---
+
+// dlDir returns the directory serving /dl/* and install.sh.
+// Precedence: Config.DLDir, OMAHAB_DL_DIR env, ./dist/dl, ./install.sh fallback, /usr/share/omahab/dl.
+func (s *Server) dlDir() string {
+	if s.dlDirPath != "" {
+		return s.dlDirPath
+	}
+	if v := strings.TrimSpace(os.Getenv("OMAHAB_DL_DIR")); v != "" {
+		return v
+	}
+	// Common dev fallback: repo root install.sh and companion/omarchy for plugin.
+	// The Nix module sets OMAHAB_DL_DIR to ${omahab-dl}/share/omahab/dl.
+	candidates := []string{
+		"./dist/dl",
+		"./dl",
+		"/usr/share/omahab/dl",
+		"/var/lib/omahab/dl",
+	}
+	for _, c := range candidates {
+		if info, err := os.Stat(c); err == nil && info.IsDir() {
+			return c
+		}
+	}
+	return "./dist/dl"
+}
+
+// allowedDLFiles is the allowlist for /dl/{file}. Keep in sync with flake.nix omahab-dl.
+var allowedDLFiles = map[string]bool{
+	"omahab-clientd-linux-amd64":    true,
+	"omahab-clientd-linux-arm64":     true,
+	"omahab-clientd-darwin-arm64":    true,
+	"omahab-clientd-darwin-amd64":    true,
+	"omahab-clientd-linux-amd64.sha256": true, // not used but allow
+	"omarchy-plugin.tar.gz":          true,
+	"install.sh":                     true,
+	"SHA256SUMS":                     true,
+}
+
+func (s *Server) handleDL(w http.ResponseWriter, r *http.Request) {
+	file := chi.URLParam(r, "file")
+	// chi param may be empty if route is /dl/SHA256SUMS handled separately; fallback to path parsing.
+	if file == "" {
+		file = strings.TrimPrefix(r.URL.Path, "/dl/")
+	}
+	file = filepath.Base(file) // prevent traversal
+	if !allowedDLFiles[file] {
+		writeError(w, r, errNotFound("not found"))
+		return
+	}
+	dir := s.dlDir()
+	path := filepath.Join(dir, file)
+	// Special: if file is install.sh, delegate to handleInstallSh for templating.
+	if file == "install.sh" {
+		s.handleInstallSh(w, r)
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		// Fallback: try repo-root install.sh for install.sh, or try serving from companion dir for plugin.
+		if file == "omarchy-plugin.tar.gz" {
+			// Try to generate tar on the fly if not present (dev mode).
+			writeError(w, r, errNotFound("not found"))
+			return
+		}
+		writeError(w, r, errNotFound("not found"))
+		return
+	}
+	// Set content-type based on file.
+	switch {
+	case strings.HasSuffix(file, ".tar.gz"):
+		w.Header().Set("Content-Type", "application/gzip")
+	case strings.HasSuffix(file, "SHA256SUMS"):
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	case file == "install.sh":
+		w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
+	default:
+		w.Header().Set("Content-Type", "application/octet-stream")
+	}
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+func (s *Server) handleDLSHA256(w http.ResponseWriter, r *http.Request) {
+	dir := s.dlDir()
+	path := filepath.Join(dir, "SHA256SUMS")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		writeError(w, r, errNotFound("not found"))
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+func (s *Server) handleInstallSh(w http.ResponseWriter, r *http.Request) {
+	dir := s.dlDir()
+	path := filepath.Join(dir, "install.sh")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		// Fallback to repo-root install.sh for dev.
+		if alt, err2 := os.ReadFile("./install.sh"); err2 == nil {
+			data = alt
+		} else if alt, err2 := os.ReadFile("../install.sh"); err2 == nil {
+			data = alt
+		} else {
+			writeError(w, r, errNotFound("not found"))
+			return
+		}
+	}
+	// Templating: if ?code= is present, inject into script's __CODE__ placeholder and server into __SERVER__.
+	code := strings.TrimSpace(r.URL.Query().Get("code"))
+	if code != "" {
+		// Validate code shape: enrollment codes are 32 chars base64url raw (A-Za-z0-9_-). Be permissive but reject NUL/newline and overly long.
+		if len(code) > 128 || strings.Contains(code, "\x00") || strings.Contains(code, "\n") || strings.Contains(code, "\r") {
+			code = ""
+		} else {
+			// Replace first occurrence of __CODE__ with code (script has TEMPLATED_CODE="__CODE__").
+			data = []byte(strings.Replace(string(data), "__CODE__", code, 1))
+		}
+	}
+	// Inject server host: use request host (tailnet IP/host) as SERVER if templated.
+	// Prefer X-Forwarded-Proto / X-Forwarded-Host if behind Caddy, else r.Host.
+	host := r.Host
+	if fwd := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); fwd != "" {
+		host = fwd
+	}
+	scheme := "http"
+	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") || strings.EqualFold(r.Header.Get("X-Forwarded-Ssl"), "on") {
+		scheme = "https"
+	}
+	// For install.sh, server is http://host (port already in host if non-standard like 8484).
+	// The one-liner uses http://<tailscale-ip>:8484/install.sh — so host includes port.
+	serverURL := scheme + "://" + host
+	// If request came via localhost without port, try to preserve port from Host header; otherwise use host as-is.
+	if serverURL != "" {
+		data = []byte(strings.Replace(string(data), "__SERVER__", serverURL, 1))
+	}
+	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
 // --- middleware ---
 
 type ctxKey string
@@ -423,11 +586,11 @@ func safeRecovery(next http.Handler) http.Handler {
 	})
 }
 
-// timeoutMiddleware applies a per-request context timeout except for SSE.
+// timeoutMiddleware applies a per-request context timeout except for SSE and DL (large binaries).
 func (s *Server) timeoutMiddleware(d time.Duration) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/api/v1/events/stream" || r.URL.Path == "/api/v1/companion/events/stream" {
+			if r.URL.Path == "/api/v1/events/stream" || r.URL.Path == "/api/v1/companion/events/stream" || strings.HasPrefix(r.URL.Path, "/dl/") || r.URL.Path == "/install.sh" || strings.HasPrefix(r.URL.Path, "/api/bootstrap/restore/events") {
 				next.ServeHTTP(w, r)
 				return
 			}

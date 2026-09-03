@@ -238,6 +238,9 @@ in
         OMAHAB_LISTEN = cfg.listen;
         OMAHAB_CATALOG = "${cfg.catalogPackage}/catalog.json";
         OMAHAB_WEB_DIR = "${cfg.webPackage}";
+        # B2: distribution bundle for /dl/* and /install.sh (tailnet-only, no auth).
+        # Only set if dlPackage is available (flake provides omahab-dl; fallback for standalone use).
+        OMAHAB_DL_DIR = let dl = flakePkgs.omahab-dl or null; in if dl != null then "${dl}/share/omahab/dl" else "";
         # First-boot LAN wizard listener; inert once bootstrap-done exists.
         OMAHAB_BOOTSTRAP_LISTEN = "0.0.0.0:8485";
         DEVPOD_HOME = "${stateDir}/devpod";

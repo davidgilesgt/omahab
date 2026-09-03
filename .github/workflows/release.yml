@@ -1,0 +1,77 @@
+name: Release
+
+permissions:
+  contents: write
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+
+      - name: Build appliance images
+        run: |
+          set -euo pipefail
+          nix build .#image-iso -o result-iso --print-build-logs
+          nix build .#packages.x86_64-linux.omahab-dl -o result-dl --print-build-logs
+          # image-qcow may be vmware or vm depending on nixpkgs version
+          if nix build .#image-qcow -o result-qcow --print-build-logs; then
+            echo "built image-qcow"
+          else
+            echo "image-qcow not available, skipping"
+          fi
+          ls -lh result-iso result-dl || true
+          ls -lh result-iso/iso/*.iso 2>/dev/null || ls -lh result-iso || true
+          ls -lh result-dl/share/omahab/dl/ 2>/dev/null || true
+
+      - name: Build cross clientd binaries (verify)
+        run: |
+          set -euo pipefail
+          nix build .#packages.x86_64-linux.omahab-clientd-linux-amd64 --print-build-logs -o result-clientd-linux-amd64
+          nix build .#packages.x86_64-linux.omahab-clientd-linux-arm64 --print-build-logs -o result-clientd-linux-arm64
+          nix build .#packages.x86_64-linux.omahab-clientd-darwin-arm64 --print-build-logs -o result-clientd-darwin-arm64
+          nix build .#packages.x86_64-linux.omahab-clientd-darwin-amd64 --print-build-logs -o result-clientd-darwin-amd64
+          ls -lh result-clientd-*
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          # Collect artifacts
+          mkdir -p dist
+          # ISO
+          if [ -d result-iso/iso ]; then
+            cp result-iso/iso/*.iso dist/ 2>/dev/null || cp -r result-iso/* dist/ 2>/dev/null || true
+          else
+            cp -r result-iso dist/image-iso 2>/dev/null || true
+          fi
+          # QCOW if built
+          if [ -d result-qcow ] || [ -e result-qcow ]; then
+            cp -r result-qcow dist/ 2>/dev/null || true
+          fi
+          # DL bundle for reference (optional)
+          if [ -d result-dl/share/omahab/dl ]; then
+            tar -czf "dist/omahab-dl-${TAG}.tar.gz" -C result-dl/share/omahab/dl .
+            cp result-dl/share/omahab/dl/SHA256SUMS "dist/SHA256SUMS" 2>/dev/null || true
+          fi
+          ls -lh dist/
+          # Create release (if exists, upload)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --title "Release $TAG" --generate-notes
+          fi

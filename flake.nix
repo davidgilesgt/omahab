@@ -12,6 +12,14 @@
         pkgs = import nixpkgs { inherit system; };
         lib = pkgs.lib;
         version = lib.strings.trim (builtins.readFile ./version);
+        # Single ldflags set used for all Go binaries — main.version for CLI/server
+        # plus internal/client.Version for daemon self-update comparison.
+        ldflagsBase = [
+          "-s"
+          "-w"
+          "-X main.version=${version}"
+          "-X github.com/omahab/omahab/internal/client.Version=${version}"
+        ];
         omahab = pkgs.buildGoModule {
           pname = "omahab";
           inherit version;
@@ -23,11 +31,7 @@
             "cmd/omahab-clientd"
           ];
           env.CGO_ENABLED = "0";
-          ldflags = [
-            "-s"
-            "-w"
-            "-X main.version=${version}"
-          ];
+          ldflags = ldflagsBase;
         };
         omahab-web = pkgs.buildNpmPackage {
           pname = "omahab-web";
@@ -87,10 +91,60 @@ EOF
           ];
           postInstall = "mv $out/bin/once $out/bin/omahab-once";
         };
+
+        # ------------------------------------------------------------------
+        # B2: cross-compiled omahab-clientd for the 4 supported targets.
+        # CGO_ENABLED=0 already set at top; godbus/go-keyring are pure-Go or
+        # have build-tag fallbacks, so cross-compile from linux succeeds.
+        # ------------------------------------------------------------------
+        mkClientd = { goos, goarch }: pkgs.buildGoModule {
+          pname = "omahab-clientd-${goos}-${goarch}";
+          inherit version;
+          src = lib.cleanSource ./.;
+          vendorHash = "sha256-cJECbocgfOBy4NTdsmOrYUjso1s3nvCGaeOua9hXszw=";
+          subPackages = [ "cmd/omahab-clientd" ];
+          env.CGO_ENABLED = "0";
+          env.GOOS = goos;
+          env.GOARCH = goarch;
+          ldflags = ldflagsBase;
+        };
+        omahab-clientd-linux-amd64 = mkClientd { goos = "linux"; goarch = "amd64"; };
+        omahab-clientd-linux-arm64 = mkClientd { goos = "linux"; goarch = "arm64"; };
+        omahab-clientd-darwin-arm64 = mkClientd { goos = "darwin"; goarch = "arm64"; };
+        omahab-clientd-darwin-amd64 = mkClientd { goos = "darwin"; goarch = "amd64"; };
+
+        # Quickshell plugin tarball (companion/omarchy).
+        omarchy-plugin = pkgs.runCommand "omarchy-plugin" {} ''
+          mkdir -p $out
+          tar -czf $out/omarchy-plugin.tar.gz -C ${./companion/omarchy} .
+        '';
+
+        # Download bundle: the 4 clientd binaries + plugin + install.sh + SHA256SUMS.
+        # Served by omahabd at GET /dl/* and GET /install.sh (tailnet-only, no auth).
+        # Version skew disappears: device always installs the exact build of the server it talks to.
+        omahab-dl = pkgs.runCommand "omahab-dl" {
+          nativeBuildInputs = [ pkgs.coreutils ];
+        } ''
+          mkdir -p $out/share/omahab/dl
+          cp ${omahab-clientd-linux-amd64}/bin/omahab-clientd $out/share/omahab/dl/omahab-clientd-linux-amd64
+          cp ${omahab-clientd-linux-arm64}/bin/omahab-clientd $out/share/omahab/dl/omahab-clientd-linux-arm64
+          cp ${omahab-clientd-darwin-arm64}/bin/omahab-clientd $out/share/omahab/dl/omahab-clientd-darwin-arm64
+          cp ${omahab-clientd-darwin-amd64}/bin/omahab-clientd $out/share/omahab/dl/omahab-clientd-darwin-amd64
+          cp ${omarchy-plugin}/omarchy-plugin.tar.gz $out/share/omahab/dl/omarchy-plugin.tar.gz
+          cp ${./install.sh} $out/share/omahab/dl/install.sh
+          chmod +x $out/share/omahab/dl/install.sh
+          # Also expose install.sh at top-level for /install.sh route alias.
+          cp ${./install.sh} $out/share/omahab/install.sh
+          (cd $out/share/omahab/dl && sha256sum omahab-clientd-* omarchy-plugin.tar.gz install.sh > SHA256SUMS)
+          cat $out/share/omahab/dl/SHA256SUMS
+          echo "omahab-dl: $(ls -lh $out/share/omahab/dl/)"
+        '';
       in
       {
         packages = {
           inherit omahab omahab-web omahab-embedding-worker omahab-catalog omahab-once;
+          inherit omahab-clientd-linux-amd64 omahab-clientd-linux-arm64 omahab-clientd-darwin-arm64 omahab-clientd-darwin-amd64;
+          inherit omarchy-plugin omahab-dl;
           default = omahab;
           # Appliance images (nixos-rebuild build-image under the hood).
           image-qcow = self.nixosConfigurations.omahab-appliance.config.system.build.vmware or

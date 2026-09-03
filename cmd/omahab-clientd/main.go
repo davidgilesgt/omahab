@@ -29,7 +29,13 @@ func main() {
 var (
 	cfgPath    string
 	socketPath string
+	version    = "dev"
 )
+
+func init() {
+	// Wire compiled-in version into internal/client for self-update comparison.
+	client.Version = version
+}
 
 var rootCmd = &cobra.Command{
 	Use:   "omahab-clientd",

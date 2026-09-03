@@ -90,6 +90,7 @@ func run() error {
 	if h := backend.MCPHandler(); h != nil {
 		mcpHandler = h.Handler()
 	}
+	dlDir := strings.TrimSpace(os.Getenv("OMAHAB_DL_DIR"))
 	srv, err := api.New(api.Config{
 		Backend:          backend,
 		Version:          version,
@@ -98,6 +99,7 @@ func run() error {
 		MCPHandler:       mcpHandler,
 		EmailHMACKey:     string(emailKey),
 		SCMWebhookSecret: webhookSecret,
+		DLDir:            dlDir,
 		Bootstrap:        backend,
 	})
 	if err != nil {
