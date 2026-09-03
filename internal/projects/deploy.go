@@ -249,10 +249,10 @@ func (s *Service) deployProject(ctx context.Context, proj *Project, rawCommit, r
 	if err := os.MkdirAll(storagePath, 0o750); err != nil {
 		return nil, fmt.Errorf("create project storage %s: %w", storagePath, err)
 	}
-	rel, err := s.beginRelease(ctx, proj.ID, commit, digest)
-	if err != nil {
-		return nil, err
+	if err := s.writeProjectSecretsFile(ctx, proj); err != nil {
+		return nil, fmt.Errorf("write project secrets file: %w", err)
 	}
+	rel, err := s.beginRelease(ctx, proj.ID, commit, digest)
 	in := DeployInput{
 		App:         proj.Slug,
 		Hostname:    s.routeHostname(proj),
@@ -304,6 +304,7 @@ func (s *Service) deployProject(ctx context.Context, proj *Project, rawCommit, r
 
 func (s *Service) awaitHealth(ctx context.Context, proj *Project) (bool, string) {
 	in := HealthInput{
+		App:       proj.Slug,
 		ProxyBind: s.cfg.ProxyBind,
 		Hostname:  s.routeHostname(proj),
 		Port:      proj.Contract.Port,

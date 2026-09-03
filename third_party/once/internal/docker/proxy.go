@@ -9,6 +9,8 @@ import (
 	"io"
 	"log/slog"
 	"net/netip"
+	"os"
+	"strconv"
 	"strings"
 
 	"github.com/containerd/errdefs"
@@ -79,6 +81,19 @@ func (p *Proxy) Boot(ctx context.Context, settings ProxySettings) error {
 	if settings.MetricsPort == 0 {
 		settings.MetricsPort = DefaultMetricsPort
 	}
+	// Omahab patch: handle --proxy-bind loopback (e.g. 127.0.0.1:8080)
+	loopbackBind := ""
+	if v := os.Getenv("OMAHAB_PROXY_BIND"); v != "" {
+		loopbackBind = v
+		portStr := v
+		if strings.Contains(v, ":") {
+			parts := strings.Split(v, ":")
+			portStr = parts[len(parts)-1]
+		}
+		if p, err := strconv.Atoi(portStr); err == nil {
+			settings.HTTPPort = p
+		}
+	}
 
 	info, err := p.namespace.client.ContainerInspect(ctx, p.containerName(), client.ContainerInspectOptions{})
 	if err == nil {
@@ -100,6 +115,23 @@ func (p *Proxy) Boot(ctx context.Context, settings ProxySettings) error {
 	httpsPortTCP := network.MustParsePort("443/tcp")
 	metricsPortTCP := network.MustParsePort(fmt.Sprintf("%d/tcp", settings.MetricsPort))
 
+	// Omahab loopback: when OMAHAB_PROXY_BIND is set, publish 127.0.0.1:<port>:80 only, no 443
+	isLoopback := loopbackBind != ""
+	exposed := network.PortSet{
+		httpPortTCP:    struct{}{},
+		metricsPortTCP: struct{}{},
+	}
+	portBindings := network.PortMap{
+		httpPortTCP:    []network.PortBinding{{HostIP: netip.MustParseAddr("127.0.0.1"), HostPort: fmt.Sprintf("%d", settings.HTTPPort)}},
+		metricsPortTCP: []network.PortBinding{{HostIP: netip.MustParseAddr("127.0.0.1"), HostPort: fmt.Sprintf("%d", settings.MetricsPort)}},
+	}
+	if !isLoopback {
+		exposed[httpsPortTCP] = struct{}{}
+		portBindings[httpsPortTCP] = []network.PortBinding{{HostPort: fmt.Sprintf("%d", settings.HTTPSPort)}}
+		// In non-loopback, http also binds 0.0.0.0 (no HostIP)
+		portBindings[httpPortTCP] = []network.PortBinding{{HostPort: fmt.Sprintf("%d", settings.HTTPPort)}}
+	}
+
 	resp, err := p.namespace.client.ContainerCreate(ctx, client.ContainerCreateOptions{
 		Name: name,
 		Config: &container.Config{
@@ -108,18 +140,10 @@ func (p *Proxy) Boot(ctx context.Context, settings ProxySettings) error {
 			Labels: map[string]string{
 				labelKey: settings.Marshal(),
 			},
-			ExposedPorts: network.PortSet{
-				httpPortTCP:    struct{}{},
-				httpsPortTCP:   struct{}{},
-				metricsPortTCP: struct{}{},
-			},
+			ExposedPorts: exposed,
 		},
 		HostConfig: &container.HostConfig{
-			PortBindings: network.PortMap{
-				httpPortTCP:    []network.PortBinding{{HostPort: fmt.Sprintf("%d", settings.HTTPPort)}},
-				httpsPortTCP:   []network.PortBinding{{HostPort: fmt.Sprintf("%d", settings.HTTPSPort)}},
-				metricsPortTCP: []network.PortBinding{{HostIP: netip.MustParseAddr("127.0.0.1"), HostPort: fmt.Sprintf("%d", settings.MetricsPort)}},
-			},
+			PortBindings: portBindings,
 			RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyAlways},
 			LogConfig:     ContainerLogConfig(),
 			Mounts: []mount.Mount{

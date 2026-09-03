@@ -4,7 +4,7 @@ import (
 	"github.com/omahab/omahab/internal/apps"
 	"github.com/omahab/omahab/internal/backups"
 	"github.com/omahab/omahab/internal/emailing"
-	"github.com/omahab/omahab/internal/environments"
+	"github.com/omahab/omahab/internal/companion"
 	"github.com/omahab/omahab/internal/events"
 	"github.com/omahab/omahab/internal/exposure"
 	"github.com/omahab/omahab/internal/health"
@@ -59,8 +59,8 @@ func AllMigrations() []store.Migration {
 	out = append(out, knowledge.Migrations()...)
 	// emailing
 	out = append(out, emailing.Migrations()...)
-	// environments (companion devices + enrollments + env meta)
-	out = append(out, environments.Migrations()...)
+	// companion (devices + enrollments + env meta) — migration IDs keep environments-001 strings
+	out = append(out, companion.Migrations()...)
 	// controlplane glue (users, release tokens)
 	out = append(out, glueMigrations()...)
 	return out

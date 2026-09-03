@@ -25,7 +25,7 @@ import (
 	"github.com/omahab/omahab/internal/config"
 	"github.com/omahab/omahab/internal/domain"
 	"github.com/omahab/omahab/internal/emailing"
-	"github.com/omahab/omahab/internal/environments"
+	"github.com/omahab/omahab/internal/companion"
 	"github.com/omahab/omahab/internal/events"
 	"github.com/omahab/omahab/internal/exposure"
 	"github.com/omahab/omahab/internal/health"
@@ -61,7 +61,7 @@ type Backend struct {
 	workspaces   *workspaces.Service
 	providers    *providers.Service
 	gateway      providers.GatewayAdmin
-	environments *environments.Service
+	environments *companion.Service
 	emailing     *emailing.Service
 	backups      *backups.Service
 	hermes       *hermes.Service
@@ -304,8 +304,8 @@ func (b *Backend) initServices(ctx context.Context) error {
 	}
 	// wire self-verifier: projects.Service implements ReleaseTokenVerifier
 	projSvc.SetReleaseTokenVerifier(projSvc)
+	projSvc.SetSecrets(b.secrets)
 	b.projects = projSvc
-
 	// backups with real HookSource
 	backupSvc := backups.New(b.store, backups.Config{
 		Paths: []string{
@@ -486,7 +486,7 @@ func (b *Backend) initServices(ctx context.Context) error {
 		})
 	}
 	// environments — companion enrollment + tool-environment sync
-	if envSvc, err := environments.New(b.db); err == nil {
+	if envSvc, err := companion.New(b.db); err == nil {
 		envSvc.SetSecrets(b.secrets)
 		envSvc.SetProviders(b.providers)
 		b.environments = envSvc
@@ -731,6 +731,47 @@ func (b *Backend) getExposure() *exposure.Service {
 	return b.exposure
 }
 
+func (b *Backend) ensureProjectExposure(ctx context.Context, proj *projects.Project) error {
+	expSvc := b.getExposure()
+	if expSvc == nil {
+		return nil
+	}
+	hostname := strings.TrimSpace(proj.Hostname)
+	if hostname == "" {
+		hostname = proj.Slug
+		if inst, err := b.store.Instance(ctx); err == nil {
+			d := strings.TrimSpace(inst.Domain)
+			if d != "" && d != "example.com" && d != "not-configured.invalid" {
+				hostname = proj.Slug + "." + d
+			}
+		}
+	}
+	if hostname == "" {
+		return nil
+	}
+	return b.ensureExposureRecord(ctx, expSvc, hostname, "127.0.0.1:8080")
+}
+
+func (b *Backend) removeProjectExposure(ctx context.Context, hostname string) error {
+	expSvc := b.getExposure()
+	if expSvc == nil {
+		return nil
+	}
+	hostname = strings.ToLower(strings.TrimSpace(hostname))
+	if hostname == "" {
+		return nil
+	}
+	rec, err := expSvc.GetServiceByHostname(ctx, hostname)
+	if err != nil {
+		return nil
+	}
+	plan, err := expSvc.Delete(ctx, rec.ID)
+	if err != nil {
+		return err
+	}
+	_, err = expSvc.Apply(ctx, plan.ID)
+	return err
+}
 // APIToken returns raw token (for server)
 func (b *Backend) APIToken() string { return b.apiToken }
 
@@ -808,19 +849,19 @@ func translateError(err error) error {
 	if errors.Is(err, secrets.ErrConflict) {
 		return fmt.Errorf("%w: %v", api.ErrAlreadyExists, err)
 	}
-	if errors.Is(err, environments.ErrNotFound) {
+	if errors.Is(err, companion.ErrNotFound) {
 		return fmt.Errorf("%w: %v", api.ErrNotFound, err)
 	}
-	if errors.Is(err, environments.ErrValidation) || errors.Is(err, environments.ErrReservedName) || errors.Is(err, environments.ErrInvalidName) || errors.Is(err, environments.ErrInvalidValue) {
+	if errors.Is(err, companion.ErrValidation) || errors.Is(err, companion.ErrReservedName) || errors.Is(err, companion.ErrInvalidName) || errors.Is(err, companion.ErrInvalidValue) {
 		return fmt.Errorf("%w: %v", api.ErrValidation, err)
 	}
-	if errors.Is(err, environments.ErrConflict) || errors.Is(err, environments.ErrConsumed) {
+	if errors.Is(err, companion.ErrConflict) || errors.Is(err, companion.ErrConsumed) {
 		return fmt.Errorf("%w: %v", api.ErrAlreadyExists, err)
 	}
-	if errors.Is(err, environments.ErrExpired) {
+	if errors.Is(err, companion.ErrExpired) {
 		return fmt.Errorf("%w: %v", api.ErrValidation, err)
 	}
-	if errors.Is(err, environments.ErrRevoked) {
+	if errors.Is(err, companion.ErrRevoked) {
 		return fmt.Errorf("%w: %v", api.ErrForbidden, err)
 	}
 	if errors.Is(err, ErrNotConfigured) {
@@ -840,7 +881,13 @@ func translateError(err error) error {
 	return err
 }
 
-func mapHealth(h domain.Health) string { return string(h) }
+func registryHost(domain string) string {
+	domain = strings.TrimSpace(strings.ToLower(domain))
+	if domain == "" {
+		return ""
+	}
+	return "git." + domain
+}
 
 // --- Backend methods ---
 
@@ -1202,12 +1249,20 @@ func (b *Backend) CreateProject(ctx context.Context, req api.CreateProjectReques
 		name = slug
 	}
 	repoURL := strings.TrimSpace(req.RepositoryURL)
-	image := fmt.Sprintf("registry.local/omahab/%s", slug)
-	if repoURL == "" {
-		repoURL = fmt.Sprintf("https://forgejo.local/%s/%s", "omahab", slug)
-	}
-	// Use provided hostname if any
 	hostname := strings.TrimSpace(req.Hostname)
+	instForDefaults, _ := b.store.Instance(ctx)
+	domainForDefaults := strings.TrimSpace(instForDefaults.Domain)
+	gitHost := registryHost(domainForDefaults)
+	if gitHost == "" {
+		gitHost = "git.example.com"
+	}
+	image := fmt.Sprintf("%s/omahab/%s", gitHost, slug)
+	if repoURL == "" {
+		repoURL = fmt.Sprintf("https://%s/omahab/%s", gitHost, slug)
+	}
+	if hostname == "" && domainForDefaults != "" && domainForDefaults != "example.com" && domainForDefaults != "not-configured.invalid" {
+		hostname = slug + "." + domainForDefaults
+	}
 	exposure := req.Exposure
 	if exposure == "" {
 		exposure = domain.ExposurePrivate
@@ -1236,14 +1291,17 @@ func (b *Backend) CreateProject(ctx context.Context, req api.CreateProjectReques
 	// scm provision: private repo, actions disabled, woodpecker linked, .woodpecker.yaml seeded, webhook ensured
 	if b.scm != nil {
 		inst, _ := b.store.Instance(ctx)
-		registryHost := ""
+		domain := ""
+		if inst.Domain != "" {
+			domain = strings.TrimSpace(inst.Domain)
+		}
+		regHost := registryHost(domain)
 		callbackBase := ""
 		webhookURL := ""
 		webhookSecret := ""
-		if inst.Domain != "" {
-			registryHost = "registry." + inst.Domain
-			callbackBase = "https://" + inst.Domain
-			webhookURL = "https://" + inst.Domain + "/api/v1/scm/webhook"
+		if domain != "" && domain != "example.com" && domain != "not-configured.invalid" {
+			callbackBase = "https://" + domain
+			webhookURL = "https://" + domain + "/api/v1/scm/webhook"
 			if b.secrets != nil {
 				if sec, err := b.secrets.RevealByName(ctx, "platform-app", "forgejo_webhook_secret"); err == nil {
 					webhookSecret = strings.TrimSpace(sec)
@@ -1256,7 +1314,7 @@ func (b *Backend) CreateProject(ctx context.Context, req api.CreateProjectReques
 			RepoName:           slug,
 			Description:        name,
 			DefaultBranch:      "main",
-			RegistryHost:       registryHost,
+			RegistryHost:       regHost,
 			ReleaseCallbackURL: callbackBase,
 			ReleaseToken:       releaseToken,
 			WebhookURL:         webhookURL,
@@ -1313,8 +1371,26 @@ func (b *Backend) DeleteProject(ctx context.Context, id domain.ID) error {
 	if b.projects == nil {
 		return translateError(fmt.Errorf("%w: projects not configured", ErrNotConfigured))
 	}
+	// Capture hostname before delete for exposure cleanup.
+	proj, _ := b.projects.Get(ctx, id)
+	hostname := ""
+	if proj != nil {
+		hostname = proj.Hostname
+		if strings.TrimSpace(hostname) == "" {
+			hostname = proj.Slug
+			if inst, err := b.store.Instance(ctx); err == nil {
+				d := strings.TrimSpace(inst.Domain)
+				if d != "" && d != "example.com" && d != "not-configured.invalid" {
+					hostname = proj.Slug + "." + d
+				}
+			}
+		}
+	}
 	if err := b.projects.Delete(ctx, id); err != nil {
 		return translateError(err)
+	}
+	if hostname != "" {
+		_ = b.removeProjectExposure(ctx, hostname)
 	}
 	// cleanup release token rows (FK not CASCADE in all migrations)
 	_, _ = b.db.ExecContext(ctx, `DELETE FROM project_release_tokens WHERE project_id = ?`, string(id))
@@ -1371,6 +1447,9 @@ func (b *Backend) CreateRelease(ctx context.Context, projectID domain.ID, req ap
 	if err != nil {
 		return domain.Release{}, translateError(err)
 	}
+	if proj, err := b.projects.Get(ctx, projectID); err == nil {
+		_ = b.ensureProjectExposure(ctx, proj)
+	}
 	return *rel, nil
 }
 
@@ -1379,9 +1458,11 @@ func (b *Backend) RollbackRelease(ctx context.Context, projectID domain.ID, rele
 	if err != nil {
 		return domain.Release{}, translateError(err)
 	}
+	if proj, err := b.projects.Get(ctx, projectID); err == nil {
+		_ = b.ensureProjectExposure(ctx, proj)
+	}
 	return *rel, nil
 }
-
 // Secrets (metadata only)
 func (b *Backend) ListSecrets(ctx context.Context, scope string, p api.Pagination) ([]domain.Secret, error) {
 	list, err := b.secrets.List(ctx)
@@ -2629,9 +2710,9 @@ func (b *Backend) ForwardProviderOAuthCallback(ctx context.Context, provider, se
 	}
 	// Permit XAI callback relay only from enrolled companion with allow_provider_oauth=true.
 	if b.environments != nil {
-		deviceID := environments.DeviceIDFromContext(ctx)
+		deviceID := companion.DeviceIDFromContext(ctx)
 		if deviceID == "" {
-			if dev := environments.DeviceFromContext(ctx); dev != nil {
+			if dev := companion.DeviceFromContext(ctx); dev != nil {
 				deviceID = dev.ID
 			}
 		}
@@ -3107,10 +3188,10 @@ func (b *Backend) ReleaseWithToken(ctx context.Context, projectID domain.ID, tok
 	if err != nil {
 		return domain.Release{}, translateError(err)
 	}
+	_ = b.ensureProjectExposure(ctx, proj)
 	return *rel, nil
 }
 
-// Push mirror
 func (b *Backend) GetPushMirror(ctx context.Context, projectID domain.ID) (api.MirrorResponse, error) {
 	if b.scm == nil {
 		return api.MirrorResponse{}, translateError(fmt.Errorf("%w: scm not configured", ErrNotConfigured))

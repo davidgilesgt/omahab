@@ -74,10 +74,23 @@ EOF
           mkdir -p $out
           cp ${./deploy/catalog/catalog.json} $out/catalog.json
         '';
+        omahab-once = pkgs.buildGoModule {
+          pname = "omahab-once";
+          inherit version;
+          src = ./third_party/once;
+          subPackages = [ "cmd/once" ];
+          vendorHash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+          env.CGO_ENABLED = "0";
+          ldflags = [
+            "-s"
+            "-w"
+          ];
+          postInstall = "mv $out/bin/once $out/bin/omahab-once";
+        };
       in
       {
         packages = {
-          inherit omahab omahab-web omahab-embedding-worker omahab-catalog;
+          inherit omahab omahab-web omahab-embedding-worker omahab-catalog omahab-once;
           default = omahab;
           # Appliance images (nixos-rebuild build-image under the hood).
           image-qcow = self.nixosConfigurations.omahab-appliance.config.system.build.vmware or

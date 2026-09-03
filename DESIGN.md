@@ -290,7 +290,7 @@ A project that requires PostgreSQL, Redis, multiple workers, or several independ
 
 Omahab is not a supersized ONCE fork. ONCE's current assumptions include one container and volume per app, Docker labels as state, and application secrets in Docker-managed configuration. Those assumptions do not fit users, projects, external services, synchronization, identity, or the Omahab secrets model.
 
-Maintain a narrow fork `third_party/once` in this repository (patch list in `third_party/once/PATCHES.md`) for project deployment. Keep its patch set suitable for upstreaming:
+Maintain a narrow fork `third_party/once` in this repository (patch list in `third_party/once/PATCHES.md`) for project deployment. Patches 1–6 are applied in-tree; patch 7 (external-state interface) is deferred pending upstream. Keep its patch set suitable for upstreaming:
 
 1. configurable proxy bind address, including loopback;
 2. external TLS mode;
@@ -298,8 +298,7 @@ Maintain a narrow fork `third_party/once` in this repository (patch list in `thi
 4. lifecycle event hooks;
 5. external secrets-file support;
 6. machine-readable deployment and health status;
-7. an external-state interface if upstream accepts it.
-
+7. an external-state interface if upstream accepts it (deferred).
 Do not add Pocket ID, Immich, Hermes, DNS, device management, or project records to the ONCE fork.
 
 Edge topology:
@@ -594,7 +593,6 @@ A project owns:
 - one Hermes project;
 - one project secret namespace;
 - one default ONCE deployment;
-- zero or more deployment environments;
 - zero or more remote workspaces;
 - one CI pipeline family;
 - optional GitHub mirror configuration;

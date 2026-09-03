@@ -117,6 +117,19 @@ omahab runner send <id> "continue"                             # tmux send-keys 
 ```
 Flow: Title → slug (`[a-z0-9-]`, ≤40) → branch `ws/<slug>-<id>` (4 hex, retry once on exists); per-workspace Forgejo token (`ws-<id>`, `read:repository`+`write:repository`, `Repositories:[{owner,name}]`) via `~/.git-credentials`; per-workspace LiteLLM key (`workspace-<id>`, scopes `omahab/fast`, `omahab/balanced`, `omahab/reasoning`, `omahab/embedding`); devcontainer default (`omahab-<name>`, `mcr.microsoft.com/devcontainers/base:ubuntu`, `ghcr.io/devcontainers/features/node:1`, `npm install -g @oh-my-pi/pi-coding-agent && git config --global credential.helper store`) or repo `.devcontainer/devcontainer.json`; `TASK.md` + `tmux new-session -d -s omp "omp"`; Omarchy plugin "New workspace…" (project picker + title) and live list (Attach/Stop) via `POST /api/v1/companion/workspaces` (deviceAuth) and `Launcher.OpenTerminalCommand` (`alacritty -e`, `kitty`, `gnome-terminal --`); `DEVPOD_HOME=/var/lib/omahab/devpod` (`omahab-devpod-init` docker provider, `INACTIVITY_TIMEOUT=45m`), `sudo omahab runner attach *` NOPASSWD.
 
+## Project deploys (ONCE)
+
+Default contract for every project (DESIGN §6.2): one repo → one OCI image → HTTP on `80` with `/up` health and `/storage` persistence. `git push` → Woodpecker builds image, pushes `git.<domain>/omahab/<slug>@sha256:<digest>` to the Forgejo registry, calls the narrow `POST /api/v1/projects/<id>/releases/with-token`, `omahabd` invokes `omahab-once` (`third_party/once`, patches in `PATCHES.md`) on `127.0.0.1:8080` with `--proxy-bind`, `--tls external`, `--secrets-file`, `--json`, records the release and keeps the prior one for `omahab project rollback`.
+
+Zero-config: `scm.Provision` seeds `Dockerfile` (`FROM caddy:2-alpine` + `COPY Caddyfile` + `COPY . /srv`), `Caddyfile` (`:80 { respond /up 200; root * /srv; file_server }`), `index.html` (`<h1><slug></h1>…`), and `.woodpecker.yaml` when absent. Hostname defaults to `<slug>.<domain>`; `omahabd` writes `/var/lib/omahab/secrets/projects/<slug>.env` (0600) from `project:<id>` secrets and ensures a private Caddy route `https://<slug>.<domain>` → `127.0.0.1:8080` → container (`FORGEJO__packages__ENABLED=true` for the registry).
+
+```sh
+omahab project create --name demo
+git push              # Woodpecker builds, deploys, health-checks /up
+curl https://demo.<domain>/up
+omahab project rollback demo
+```
+
 ## The three-tier model
 
 1. **NixOS closure (immutable)** — packages, systemd units, nftables, sshd, docker/podman, and every platform app service. `services.omahab.enable = true` is the only knob; a `.nix` file never contains a secret or per-household value.

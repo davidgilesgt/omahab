@@ -1001,6 +1001,11 @@ func (b *Backend) renderNativeAppEnv(ctx context.Context, dnsToken, domainName s
 	}, "ntfy-sh"); err != nil {
 		return fmt.Errorf("ntfy: %w", err)
 	}
+	if err := b.writeAppEnv("forgejo", map[string]string{
+		"FORGEJO__packages__ENABLED": "true",
+	}, "forgejo"); err != nil {
+		return fmt.Errorf("forgejo: %w", err)
+	}
 	return nil
 }
 

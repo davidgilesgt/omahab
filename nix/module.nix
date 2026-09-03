@@ -27,7 +27,7 @@ let
   omahabCatalogPkg = flakePkgs.omahab-catalog or pkgs.omahab-catalog;
   omahabEmbeddingWorkerPkg =
     flakePkgs.omahab-embedding-worker or pkgs.omahab-embedding-worker;
-
+  omahabOncePkg = flakePkgs.omahab-once or pkgs.omahab-once;
   stateDir = "/var/lib/omahab";
   dataDir = "/srv/omahab";
   appEnvDir = "${stateDir}/appenv";
@@ -687,6 +687,7 @@ in
     '';
     environment.systemPackages = with pkgs; [
       cfg.package
+      omahabOncePkg
       restic
       git
       tailscale
@@ -694,5 +695,6 @@ in
       devpod
       tmux
     ];
+    systemd.services.omahabd.path = [ omahabOncePkg ];
   };
 }

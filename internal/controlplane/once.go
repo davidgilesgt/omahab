@@ -130,11 +130,14 @@ func (r *CommandOnceRunner) Health(ctx context.Context, in projects.HealthInput)
 	if _, lookErr := exec.LookPath(r.Binary); lookErr != nil {
 		return projects.HealthResult{Healthy: false, Detail: err.Error()}, nil
 	}
-	args := []string{"status", "--app", in.Hostname, "--proxy-bind", bind, "--json"}
+	app := in.App
+	if app == "" {
+		app = in.Hostname
+	}
+	args := []string{"status", "--app", app, "--proxy-bind", bind, "--json"}
 	cmd := exec.CommandContext(ctx, r.Binary, args...)
 	var out bytes.Buffer
 	var errBuf bytes.Buffer
-	cmd.Stdout = &out
 	cmd.Stderr = &errBuf
 	if err := cmd.Run(); err != nil {
 		return projects.HealthResult{Healthy: false, Detail: fmt.Sprintf("health check failed: %v: %s", err, errBuf.String())}, nil

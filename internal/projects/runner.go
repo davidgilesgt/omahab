@@ -36,6 +36,7 @@ type DeployResult struct {
 // HealthInput asks the runner to probe a deployed project through the
 // loopback proxy.
 type HealthInput struct {
+	App       string // project slug; used for --app in status fallback (once.go:133)
 	ProxyBind string
 	Hostname  string
 	Port      int

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -45,6 +46,13 @@ type Service struct {
 	cfg    Config
 	events EventRecorder
 	tokens ReleaseTokenVerifier
+	secrets secretsSource
+}
+
+// secretsSource is the minimal interface for project secrets file projection.
+type secretsSource interface {
+	List(ctx context.Context) ([]domain.Secret, error)
+	Reveal(ctx context.Context, id domain.ID) (string, error)
 }
 
 // Deps wires the service. DB and Runner are required; Events and Tokens are
@@ -85,6 +93,10 @@ func (s *Service) SetReleaseTokenVerifier(v ReleaseTokenVerifier) {
 	s.tokens = v
 }
 
+// SetSecrets sets the secrets source for per-project secrets file projection.
+func (s *Service) SetSecrets(src secretsSource) {
+	s.secrets = src
+}
 // Ensure the package honors the store.Migrate contract.
 var _ = func() {
 	var _ = Migrations
@@ -406,6 +418,45 @@ func (s *Service) storageHostPath(slug string) string {
 
 func (s *Service) secretsFilePath(slug string) string {
 	return filepath.Join(s.cfg.SecretsDir, slug+".env")
+}
+
+func (s *Service) writeProjectSecretsFile(ctx context.Context, proj *Project) error {
+	path := s.secretsFilePath(proj.Slug)
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create secrets dir %s: %w", dir, err)
+	}
+	if s.secrets == nil {
+		if err := os.WriteFile(path, []byte(""), 0o600); err != nil {
+			return fmt.Errorf("write empty secrets file %s: %w", path, err)
+		}
+		return nil
+	}
+	scope := "project:" + string(proj.ID)
+	list, err := s.secrets.List(ctx)
+	if err != nil {
+		return fmt.Errorf("list project secrets: %w", err)
+	}
+	var lines []string
+	for _, sec := range list {
+		if sec.Scope != scope {
+			continue
+		}
+		val, err := s.secrets.Reveal(ctx, sec.ID)
+		if err != nil {
+			continue
+		}
+		// Validate name already validated on Put; write as KEY=VAL
+		lines = append(lines, sec.Name+"="+val)
+	}
+	content := strings.Join(lines, "\n")
+	if content != "" {
+		content += "\n"
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		return fmt.Errorf("write secrets file %s: %w", path, err)
+	}
+	return nil
 }
 
 func fmtTimeNow() domainTime {

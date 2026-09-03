@@ -724,6 +724,18 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) (*ProvisionR
 		ProjectID:          string(in.ProjectID),
 	})
 
+	// Seed Dockerfile, Caddyfile, index.html when absent (zero-config contract: port 80 /up /storage).
+	seedFiles := map[string][]byte{
+		"Dockerfile": []byte("FROM caddy:2-alpine\nCOPY Caddyfile /etc/caddy/Caddyfile\nCOPY . /srv\n"),
+		"Caddyfile":  []byte(":80 {\n\trespond /up 200\n\troot * /srv\n\tfile_server\n}\n"),
+		"index.html": []byte(fmt.Sprintf("<h1>%s</h1><p>Deployed by Omahab. Replace this repository's contents with your app; keep port 80 and /up.</p>\n", repoName)),
+	}
+	for path, content := range seedFiles {
+		if _, err := s.forgejo.GetFile(ctx, RepoRef{Owner: owner, Name: repoName}, path, defaultBranch); err == nil {
+			continue
+		}
+		_ = s.forgejo.PutFile(ctx, RepoRef{Owner: owner, Name: repoName}, path, content, "Add "+path+" (managed by Omahab)")
+	}
 	// Seed .woodpecker.yaml via Forgejo only after initial commit exists.
 	if _, err := s.forgejo.GetRepo(ctx, RepoRef{Owner: owner, Name: repoName}); err != nil {
 		markError("verify repo for seeding failed")
@@ -735,7 +747,6 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) (*ProvisionR
 		compensate()
 		return nil, fmt.Errorf("seed woodpecker config: %w", err)
 	}
-
 	// Ensure Forgejo webhook for pull_request and push events (HMAC-verified ingress).
 	if strings.TrimSpace(in.WebhookURL) != "" && strings.TrimSpace(in.WebhookSecret) != "" {
 		if err := s.forgejo.EnsureWebhook(ctx, RepoRef{Owner: owner, Name: repoName}, strings.TrimSpace(in.WebhookURL), strings.TrimSpace(in.WebhookSecret), []string{"pull_request", "push"}); err != nil {
@@ -861,8 +872,7 @@ func (s *Service) Deprovision(ctx context.Context, projectID domain.ID) error {
 // ReconcileLegacySentinels repairs rows created by the old no-op clients.
 // It identifies only the sentinel clone prefix https://git.example.invalid/,
 // deletes its synthetic CI row, marks the repository integration error,
-// rewrites forgejo.local/registry.local defaults to git.<domain>, and lets
-// normal provisioning repair it after the PAT handoff. Non-sentinel rows are untouched.
+// and rewrites the sentinel to git.<domain>. Non-sentinel rows are untouched.
 func (s *Service) ReconcileLegacySentinels(ctx context.Context, domainName string) error {
 	if strings.TrimSpace(domainName) == "" {
 		return nil
@@ -893,19 +903,13 @@ func (s *Service) ReconcileLegacySentinels(ctx context.Context, domainName strin
 	for _, ss := range sentinels {
 		_, _ = s.db.ExecContext(ctx, `DELETE FROM scm_ci_repos WHERE repository_id=?`, ss.id)
 		_, _ = s.db.ExecContext(ctx, `UPDATE scm_repositories SET observed_state='error', observed_detail='legacy sentinel requires reprovisioning', updated_at=? WHERE id=?`, time.Now().UTC().Format(time.RFC3339Nano), ss.id)
-		_, _ = s.db.ExecContext(ctx, `UPDATE projects SET repository_url = REPLACE(repository_url, 'https://forgejo.local', 'https://`+gitHost+`') WHERE id=? AND repository_url LIKE 'https://forgejo.local%'`, ss.projectID)
 		_, _ = s.db.ExecContext(ctx, `UPDATE projects SET repository_url = REPLACE(repository_url, 'https://git.example.invalid', 'https://`+gitHost+`') WHERE id=? AND repository_url LIKE 'https://git.example.invalid%'`, ss.projectID)
-		_, _ = s.db.ExecContext(ctx, `UPDATE projects SET image_base = REPLACE(image_base, 'registry.local', '`+gitHost+`') WHERE id=? AND image_base LIKE 'registry.local%'`, ss.projectID)
-		_, _ = s.db.ExecContext(ctx, `UPDATE projects SET image_base = REPLACE(image_base, 'forgejo.local', '`+gitHost+`') WHERE id=? AND image_base LIKE '%forgejo.local%'`, ss.projectID)
 		newClone := strings.Replace(ss.cloneURL, "https://git.example.invalid", "https://"+gitHost, 1)
 		if newClone != ss.cloneURL {
 			_, _ = s.db.ExecContext(ctx, `UPDATE scm_repositories SET clone_url=?, updated_at=? WHERE id=?`, newClone, time.Now().UTC().Format(time.RFC3339Nano), ss.id)
 		}
 	}
-	_, _ = s.db.ExecContext(ctx, `UPDATE projects SET repository_url = REPLACE(repository_url, 'https://forgejo.local', 'https://`+gitHost+`') WHERE repository_url LIKE 'https://forgejo.local%'`)
 	_, _ = s.db.ExecContext(ctx, `UPDATE projects SET repository_url = REPLACE(repository_url, 'https://git.example.invalid', 'https://`+gitHost+`') WHERE repository_url LIKE 'https://git.example.invalid%'`)
-	_, _ = s.db.ExecContext(ctx, `UPDATE projects SET image_base = REPLACE(image_base, 'registry.local', '`+gitHost+`') WHERE image_base LIKE 'registry.local%'`)
-	_, _ = s.db.ExecContext(ctx, `UPDATE projects SET image_base = REPLACE(image_base, 'forgejo.local', '`+gitHost+`') WHERE image_base LIKE '%forgejo.local%'`)
 	return nil
 }
 

@@ -18,13 +18,13 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
-	"github.com/omahab/omahab/internal/environments"
+	"github.com/omahab/omahab/internal/companion"
 )
 
 // Server is the Chi HTTP server for omahabd.
 type Server struct {
 	backend      Backend
-	environments *environments.Service
+	environments *companion.Service
 	tokenHash    []byte // SHA256 of bearer token, nil means auth disabled (tests only)
 	mcpTokenHash []byte // SHA256 of hermes_mcp_token, nil means MCP auth disabled
 	emailHMACKey []byte
@@ -45,7 +45,7 @@ type Server struct {
 }
 type Config struct {
 	Backend      Backend
-	Environments *environments.Service
+	Environments *companion.Service
 	Version      string
 	BearerToken  string // raw token; hashed with SHA256 and compared constant-time
 	MCPToken     string // raw hermes_mcp_token; hashed and checked by mcpAuth
@@ -480,8 +480,7 @@ func (s *Server) bearerAuth(next http.Handler) http.Handler {
 	})
 }
 
-// deviceAuth validates companion device tokens (oma_dev_...) via environments.Service.
-// It rejects admin bearer with 403, missing/invalid device token with 401, revoked with 403,
+// deviceAuth validates companion device tokens (oma_dev_...) via companion.Service.
 // and on success sets device ID and device object in context.
 func (s *Server) deviceAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -515,8 +514,7 @@ func (s *Server) deviceAuth(next http.Handler) http.Handler {
 		}
 		dev, err := s.environments.ValidateDeviceToken(r.Context(), token)
 		if err != nil {
-			// Map revoked to 403, other invalid to 401 per spec.
-			if errors.Is(err, environments.ErrRevoked) {
+		if errors.Is(err, companion.ErrRevoked) {
 				writeError(w, r, errForbidden("device revoked"))
 				return
 			}
@@ -524,9 +522,8 @@ func (s *Server) deviceAuth(next http.Handler) http.Handler {
 			return
 		}
 		// Set device context for handlers.
-		ctx := context.WithValue(r.Context(), environments.DeviceIDKey, dev.ID)
-		ctx = context.WithValue(ctx, environments.DeviceKey, dev)
-		next.ServeHTTP(w, r.WithContext(ctx))
+		ctx := context.WithValue(r.Context(), companion.DeviceIDKey, dev.ID)
+		ctx = context.WithValue(ctx, companion.DeviceKey, dev)
 	})
 }
 

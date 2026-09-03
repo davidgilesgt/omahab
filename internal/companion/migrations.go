@@ -1,4 +1,4 @@
-package environments
+package companion
 
 import "github.com/omahab/omahab/internal/store"
 

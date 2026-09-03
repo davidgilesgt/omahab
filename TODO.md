@@ -34,9 +34,9 @@ exist; only the web surface is missing:
 - [x] Add `sqlc.yaml` + query files; generate typed queries for the SQLite schema. (Wave A: `internal/store` done — `sqlc.yaml`, `internal/store/query.sql.go`)
 - [ ] Migrate packages off hand-written `database/sql` string SQL incrementally (suggest order: `internal/apps/store.go`, `internal/secrets`, `internal/projects/schema.go`, `internal/providers`, remaining controllers). Schema migrations themselves stay explicit as designed.
 
-### P2-2. omahab-once fork patches (external repo, §6.3)
+### P2-2. omahab-once fork patches (in-repo, §6.3)
 
-Patches 1–3, 5, 6 are implemented/consumed here (`--proxy-bind`, `--tls external`, `--json`, `--secrets-file`, JSON health). Patch 4 consumer (`internal/projects/events.go:IngestOnceEvent`) is also implemented. Remaining:
+Patches 1–6 are applied in-tree at `third_party/once` (see `third_party/once/PATCHES.md`): 1 `--proxy-bind` loopback, 2 `--tls external`, 3 `--json` on deploy|status|undeploy|list, 4 `--secrets-file` KEY=VAL, 5 `status --app --json`, 6 `undeploy --app --hostname`. Remaining:
 
 - [ ] Patch 7 — external-state interface (contingent on upstream acceptance; keep patch set upstreamable).
 
