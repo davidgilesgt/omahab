@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -58,6 +59,61 @@ func (b *Backend) DeleteSyncFolder(ctx context.Context, id domain.ID) error {
 		return translateError(err)
 	}
 	return nil
+}
+
+// CreateCompanionSyncFolder creates a sync folder on behalf of a companion device.
+// It derives the server path from the sync root + name, creates the folder, and enrolls the device's Syncthing ID.
+// The device's Syncthing ID is obtained by the client via local Syncthing REST (127.0.0.1:8384) + key from config.xml.
+func (b *Backend) CreateCompanionSyncFolder(ctx context.Context, req apitypes.CreateCompanionSyncFolderRequest) (domain.SyncFolder, error) {
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		return domain.SyncFolder{}, fmt.Errorf("%w: name is required", store.ErrValidation)
+	}
+	deviceID := strings.TrimSpace(req.DeviceID)
+	if deviceID == "" {
+		return domain.SyncFolder{}, fmt.Errorf("%w: device_id is required", store.ErrValidation)
+	}
+	deviceName := strings.TrimSpace(req.DeviceName)
+	if deviceName == "" {
+		if len(deviceID) > 8 {
+			deviceName = deviceID[:8]
+		} else {
+			deviceName = deviceID
+		}
+	}
+	share := false
+	if req.ShareWithAI != nil {
+		share = *req.ShareWithAI
+	}
+	syncRoot := b.syncer.SyncRoot()
+	if strings.TrimSpace(syncRoot) == "" {
+		syncRoot = syncer.DefaultSyncRoot
+	}
+	serverPath := filepath.Join(syncRoot, name)
+	// Sanitize: ensure no traversal; syncer will validate
+	f, err := b.syncer.Create(ctx, syncer.CreateInput{Name: name, ServerPath: serverPath, ShareWithAI: share})
+	if err != nil {
+		return domain.SyncFolder{}, translateError(err)
+	}
+	if _, err := b.syncer.EnrollDevice(ctx, string(f.ID), deviceID, deviceName); err != nil {
+		// Enroll failure is not fatal to folder creation but should be reported.
+		// If device already enrolled, ignore.
+		if !strings.Contains(strings.ToLower(err.Error()), "already") {
+			// Log via events
+			_, _ = b.events.Publish(ctx, events.PublishInput{
+				Type:     "syncthing.enroll_failed",
+				Severity: "warning",
+				Message:  fmt.Sprintf("enroll device %s to folder %s failed: %v", deviceID, name, err),
+			})
+		}
+	}
+	// Best-effort: try to configure server Syncthing REST to add device/folder.
+	// The syncer service's SyncthingClient currently only supports FolderErrors/Connections checks.
+	// Full config manipulation (GET /rest/config, PUT) would require extending the client; for now
+	// we rely on DB enrollment and the regular Syncthing poll to surface conflicts. The device will be
+	// added to Syncthing's config via the next restart or via external automation.
+	// Emitting an event for local folder addition on the device is handled client-side via local REST.
+	return *f, nil
 }
 
 // Workspaces

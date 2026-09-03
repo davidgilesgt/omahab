@@ -4,10 +4,13 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -17,6 +20,7 @@ import (
 	"time"
 
 	"github.com/omahab/omahab/internal/domain"
+	"github.com/omahab/omahab/internal/syncer"
 )
 
 // SocketRequest is the shared request/response contract (newline-JSON) used by
@@ -543,6 +547,72 @@ func (d *Daemon) dispatchSocket(req SocketRequest) SocketResponse {
 			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: err.Error()}}
 		}
 		return SocketResponse{ID: req.ID, Result: map[string]string{"project_id": slug, "dir": dir}}
+	case "sync.add":
+		name, _ := req.Params["name"].(string)
+		name = strings.TrimSpace(name)
+		localPath, _ := req.Params["local_path"].(string)
+		localPath = strings.TrimSpace(localPath)
+		if localPath == "" {
+			if v, ok := req.Params["path"].(string); ok {
+				localPath = strings.TrimSpace(v)
+			}
+		}
+		if name == "" {
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "bad_request", Message: "name required"}}
+		}
+		if localPath == "" {
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "bad_request", Message: "local_path required"}}
+		}
+		// Expand ~ for local path
+		if strings.HasPrefix(localPath, "~/") {
+			if home, err := os.UserHomeDir(); err == nil {
+				localPath = filepath.Join(home, localPath[2:])
+			}
+		} else if localPath == "~" {
+			if home, err := os.UserHomeDir(); err == nil {
+				localPath = home
+			}
+		}
+		shareWithAI := false
+		if v, ok := req.Params["share_with_ai"]; ok {
+			switch vv := v.(type) {
+			case bool:
+				shareWithAI = vv
+			case string:
+				shareWithAI = strings.ToLower(strings.TrimSpace(vv)) == "true" || vv == "1"
+			case float64:
+				shareWithAI = vv != 0
+			}
+		}
+		if d.remote == nil {
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: "not connected to server"}}
+		}
+		// Read local Syncthing device ID + API key
+		apiKey := syncthingAPIKey()
+		deviceID, err := syncthingDeviceID(apiKey)
+		if err != nil || strings.TrimSpace(deviceID) == "" {
+			// If Syncthing not running, still try server creation with empty device ID? Better fail with internal.
+			// Attempt to provide helpful error.
+			msg := "syncthing not available locally (is Syncthing running at 127.0.0.1:8384?)"
+			if err != nil {
+				msg = fmt.Sprintf("syncthing device ID: %v", err)
+			}
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: msg}}
+		}
+		hostname, _ := os.Hostname()
+		hostname = strings.TrimSpace(hostname)
+		if hostname == "" {
+			hostname = "device"
+		}
+		ctx2, cancel := context.WithTimeout(d.ctx, 15*time.Second)
+		folder, err := d.remote.CreateCompanionSyncFolder(ctx2, name, localPath, shareWithAI, deviceID, hostname)
+		cancel()
+		if err != nil {
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: err.Error()}}
+		}
+		// Best-effort local Syncthing folder add with DefaultNotesExclusions
+		_ = ensureLocalSyncthingFolder(apiKey, name, localPath, deviceID)
+		return SocketResponse{ID: req.ID, Result: folder}
 	case "workspace.list":
 		if d.remote == nil {
 			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: "not connected to server"}}
@@ -573,6 +643,8 @@ func (d *Daemon) dispatchSocket(req SocketRequest) SocketResponse {
 		if err != nil {
 			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: err.Error()}}
 		}
+		// Ensure SSH config for editor/ssh-proxy path (best-effort)
+		_ = ensureWorkspaceSSHConfig(d.serverHostOrDefault(), string(ws.ID))
 		if ws.Status == "running" || ws.Status == "pending" {
 			host := d.serverHost()
 			if host == "" {
@@ -590,6 +662,7 @@ func (d *Daemon) dispatchSocket(req SocketRequest) SocketResponse {
 			id, _ = req.Params["workspace_id"].(string)
 		}
 		if strings.TrimSpace(id) != "" {
+			_ = ensureWorkspaceSSHConfig(d.serverHostOrDefault(), strings.TrimSpace(id))
 			host := d.serverHost()
 			if host == "" {
 				host = "omahab"
@@ -629,6 +702,8 @@ func (d *Daemon) dispatchSocket(req SocketRequest) SocketResponse {
 		if err != nil {
 			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: err.Error()}}
 		}
+		// Remove SSH config on successful stop (best-effort)
+		_ = removeWorkspaceSSHConfig(id)
 		return SocketResponse{ID: req.ID, Result: map[string]string{"workspace_id": id, "result": "stopped"}}
 	case "environment.sync":
 		if err := d.envSyncOnce(); err != nil {
@@ -749,7 +824,11 @@ func (d *Daemon) openWorkspaceInEditor(id string) error {
 	}
 	// Ensure SSH config entry exists for ws-<id> (best-effort)
 	_ = ensureWorkspaceSSHConfig(host, id)
-	editor := strings.TrimSpace(os.Getenv("OMAHAB_EDITOR"))
+	// EDITOR_REMOTE is the primary knob per spec; fallback to OMAHAB_EDITOR then EDITOR for compat.
+	editor := strings.TrimSpace(os.Getenv("EDITOR_REMOTE"))
+	if editor == "" {
+		editor = strings.TrimSpace(os.Getenv("OMAHAB_EDITOR"))
+	}
 	if editor == "" {
 		editor = strings.TrimSpace(os.Getenv("EDITOR"))
 	}
@@ -757,7 +836,7 @@ func (d *Daemon) openWorkspaceInEditor(id string) error {
 	if editor == "" || strings.Contains(strings.ToLower(editor), "code") {
 		// VS Code remote: code --remote ssh-remote+ws-<id> /workspace
 		args := []string{"code", "--remote", "ssh-remote+ws-" + id, "/workspace"}
-		if editor != "" && !strings.Contains(editor, "code") {
+		if editor != "" && !strings.Contains(strings.ToLower(editor), "code") {
 			// User set EDITOR to something else but we default to code
 		}
 		if err := d.launcher.OpenTerminalCommand(args); err == nil {
@@ -822,6 +901,29 @@ func ensureWorkspaceSSHConfig(host, id string) error {
 	return os.Rename(tmp, path)
 }
 
+func removeWorkspaceSSHConfig(id string) error {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		home = os.Getenv("HOME")
+		if home == "" {
+			return fmt.Errorf("no home dir")
+		}
+	}
+	path := filepath.Join(home, ".ssh", "config.d", fmt.Sprintf("omahab-ws-%s", id))
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+func (d *Daemon) serverHostOrDefault() string {
+	h := d.serverHost()
+	if strings.TrimSpace(h) == "" {
+		return "omahab"
+	}
+	return h
+}
+
 func (d *Daemon) serverHost() string {
 	raw := strings.TrimSpace(d.cfg.ServerURL)
 	if raw == "" && d.remote != nil {
@@ -852,6 +954,206 @@ func (d *Daemon) serverHost() string {
 	}
 	return host
 }
+
+// syncthingAPIKey reads the Syncthing API key from ~/.config/syncthing/config.xml
+// It looks for apikey="..." attribute or <apikey> element.
+func syncthingAPIKey() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		home = os.Getenv("HOME")
+	}
+	candidates := []string{}
+	if home != "" {
+		candidates = append(candidates, filepath.Join(home, ".config", "syncthing", "config.xml"))
+		candidates = append(candidates, filepath.Join(home, ".local", "state", "syncthing", "config.xml"))
+	}
+	if dir := os.Getenv("XDG_CONFIG_HOME"); strings.TrimSpace(dir) != "" {
+		candidates = append([]string{filepath.Join(strings.TrimSpace(dir), "syncthing", "config.xml")}, candidates...)
+	}
+	// Also try XDG_STATE_HOME
+	if dir := os.Getenv("XDG_STATE_HOME"); strings.TrimSpace(dir) != "" {
+		candidates = append(candidates, filepath.Join(strings.TrimSpace(dir), "syncthing", "config.xml"))
+	}
+	for _, path := range candidates {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		content := string(data)
+		// Search for apikey="..."
+		if idx := strings.Index(content, "apikey=\""); idx != -1 {
+			start := idx + len("apikey=\"")
+			if end := strings.Index(content[start:], "\""); end != -1 {
+				key := strings.TrimSpace(content[start : start+end])
+				if key != "" {
+					return key
+				}
+			}
+		}
+		// Fallback: <apikey>...</apikey>
+		if start := strings.Index(content, "<apikey>"); start != -1 {
+			start += len("<apikey>")
+			if end := strings.Index(content[start:], "</apikey>"); end != -1 {
+				key := strings.TrimSpace(content[start : start+end])
+				if key != "" {
+					return key
+				}
+			}
+		}
+		// XML parse fallback for robustness
+		type gui struct {
+			APIKey string `xml:"apikey,attr"`
+		}
+		type cfg struct {
+			GUI gui `xml:"gui"`
+		}
+		var c cfg
+		if err := xml.Unmarshal(data, &c); err == nil && strings.TrimSpace(c.GUI.APIKey) != "" {
+			return strings.TrimSpace(c.GUI.APIKey)
+		}
+	}
+	return ""
+}
+
+// syncthingDeviceID fetches the local Syncthing device ID via REST.
+func syncthingDeviceID(apiKey string) (string, error) {
+	client := &http.Client{Timeout: 5 * time.Second}
+	req, err := http.NewRequest("GET", "http://127.0.0.1:8384/rest/system/status", nil)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(apiKey) != "" {
+		req.Header.Set("X-API-Key", apiKey)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("syncthing status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var out struct {
+		MyID string `json:"myID"`
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(out.MyID) == "" {
+		return "", fmt.Errorf("syncthing myID empty")
+	}
+	return strings.TrimSpace(out.MyID), nil
+}
+
+// ensureLocalSyncthingFolder creates the local folder directory, writes .stignore with DefaultNotesExclusions,
+// and best-effort adds the folder to local Syncthing via REST.
+func ensureLocalSyncthingFolder(apiKey, folderName, localPath, deviceID string) error {
+	if strings.TrimSpace(localPath) == "" || strings.TrimSpace(folderName) == "" {
+		return fmt.Errorf("folder name and path required")
+	}
+	// Ensure directory exists
+	if err := os.MkdirAll(localPath, 0755); err != nil {
+		return err
+	}
+	// Write .stignore with DefaultNotesExclusions
+	ignorePath := filepath.Join(localPath, ".stignore")
+	exclusions := syncer.DefaultNotesExclusions()
+	// Also add basic exclusions for safety
+	content := strings.Join(exclusions, "\n") + "\n"
+	_ = os.WriteFile(ignorePath, []byte(content), 0644)
+	// Best-effort Syncthing REST: try to create folder via /rest/config/folders
+	// If Syncthing not running, ignore error (folder will be created when Syncthing starts, or manual).
+	client := &http.Client{Timeout: 5 * time.Second}
+	// Try to POST folder config; Syncthing API is GET /rest/config then PUT, but we try simple POST first.
+	// Build folder config payload
+	folderID := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(folderName), " ", "-"))
+	// Sanitize folder ID: alphanumeric + - _
+	safeID := ""
+	for _, r := range folderID {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			safeID += string(r)
+		} else if r >= 'A' && r <= 'Z' {
+			safeID += strings.ToLower(string(r))
+		} else {
+			safeID += "-"
+		}
+	}
+	if safeID == "" {
+		safeID = folderName
+	}
+	payload := map[string]any{
+		"id":    safeID,
+		"label": folderName,
+		"path":  localPath,
+		"type":  "sendreceive",
+		"devices": []map[string]string{
+			{"deviceID": deviceID},
+		},
+		"filesystemType": "basic",
+	}
+	b, _ := json.Marshal(payload)
+	req, err := http.NewRequest("POST", "http://127.0.0.1:8384/rest/config/folders", strings.NewReader(string(b)))
+	if err != nil {
+		return nil // best-effort
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if strings.TrimSpace(apiKey) != "" {
+		req.Header.Set("X-API-Key", apiKey)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		// If POST not supported, try GET+PUT config approach
+		// Fetch current config
+		getReq, _ := http.NewRequest("GET", "http://127.0.0.1:8384/rest/config", nil)
+		if strings.TrimSpace(apiKey) != "" {
+			getReq.Header.Set("X-API-Key", apiKey)
+		}
+		getResp, err := client.Do(getReq)
+		if err != nil || getResp.StatusCode != 200 {
+			_ = body
+			return nil
+		}
+		cfgData, _ := io.ReadAll(getResp.Body)
+		_ = getResp.Body.Close()
+		var cfg map[string]any
+		if err := json.Unmarshal(cfgData, &cfg); err != nil {
+			return nil
+		}
+		// Insert folder if not already present
+		folders, _ := cfg["folders"].([]any)
+		for _, f := range folders {
+			if m, ok := f.(map[string]any); ok && m["id"] == safeID {
+				return nil // already exists
+			}
+		}
+		folders = append(folders, payload)
+		cfg["folders"] = folders
+		newCfg, _ := json.Marshal(cfg)
+		putReq, _ := http.NewRequest("PUT", "http://127.0.0.1:8384/rest/config", strings.NewReader(string(newCfg)))
+		putReq.Header.Set("Content-Type", "application/json")
+		if strings.TrimSpace(apiKey) != "" {
+			putReq.Header.Set("X-API-Key", apiKey)
+		}
+		putResp, _ := client.Do(putReq)
+		if putResp != nil {
+			_ = putResp.Body.Close()
+		}
+		return nil
+	}
+	_ = body
+	return nil
+}
+
 func (d *Daemon) buildStatus() DaemonStatus {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
@@ -1121,6 +1423,12 @@ func (d *Daemon) envSyncOnce() error {
 		// Error already recorded in manager's status with redacted message.
 		d.log.Warn("environment sync failed", "err", sanitizeEnvError(err))
 		return err
+	}
+	// E1: ensure omp MCP client config and OMAHAB_MCP_URL export.
+	if d.cfg != nil && d.remote != nil {
+		if tok, _ := d.creds.Get(CredentialService, CredentialDeviceAccount); strings.TrimSpace(tok) != "" {
+			_ = EnsureMCPConfig(strings.TrimSpace(d.cfg.ServerURL), strings.TrimSpace(tok))
+		}
 	}
 	return nil
 }

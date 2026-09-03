@@ -49,6 +49,46 @@ var allowedAgents = map[string]bool{
 	"":    true, // empty defaults to omp
 }
 
+// sensitiveWaitingTokens mirrors health.sensitiveTokens for waiting-line redaction.
+var sensitiveWaitingTokens = []string{"token", "secret", "password", "key", "auth", "credential", "private", "hmac", "bearer"}
+
+func redactWaitingLine(s string) string {
+	if s == "" {
+		return s
+	}
+	low := strings.ToLower(s)
+	for _, tok := range sensitiveWaitingTokens {
+		if strings.Contains(low, tok) {
+			return "[REDACTED]"
+		}
+	}
+	if len(s) > 200 {
+		return s[:200]
+	}
+	return s
+}
+
+func (s *Service) populateWaitingLine(ctx context.Context, ws *domain.Workspace) {
+	if ws == nil || ws.Status != StatusRunning {
+		return
+	}
+	if s.runner == nil {
+		return
+	}
+	cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	raw, err := s.runner.CapturePane(cctx, string(ws.ID))
+	if err != nil || strings.TrimSpace(raw) == "" {
+		return
+	}
+	raw = strings.TrimSpace(raw)
+	if len(raw) > 200 {
+		raw = raw[:200]
+	}
+	ws.WaitingLine = redactWaitingLine(raw)
+}
+
+
 // BranchCreator is the Forgejo branch creation surface needed by Service.
 type BranchCreator interface {
 	CreateBranch(ctx context.Context, ref scm.RepoRef, newBranch, fromRef string) error
@@ -80,6 +120,8 @@ type Runner interface {
 	IsRunning(ctx context.Context, workspaceID string) (bool, error)
 	Send(ctx context.Context, workspaceID string, message string) error
 	RunPrint(ctx context.Context, workspaceID string, prompt string) ([]byte, error)
+	CapturePane(ctx context.Context, workspaceID string) (string, error)
+	SSHProxy(ctx context.Context, workspaceID string) error
 }
 
 // RunnerOpts holds non-secret, non-privileged options for workspace creation.
@@ -120,7 +162,8 @@ func (NoopRunner) Attach(_ context.Context, _ string) error                     
 func (NoopRunner) IsRunning(_ context.Context, _ string) (bool, error)                 { return true, nil }
 func (NoopRunner) Send(_ context.Context, _, _ string) error                           { return nil }
 func (NoopRunner) RunPrint(_ context.Context, _, _ string) ([]byte, error)             { return []byte("{}"), nil }
-
+func (NoopRunner) CapturePane(_ context.Context, _ string) (string, error)             { return "", nil }
+func (NoopRunner) SSHProxy(_ context.Context, _ string) error                          { return nil }
 // Service owns workspace lifecycle.
 type Service struct {
 	db     *sql.DB
@@ -563,9 +606,13 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*domain.Workspace
 func (s *Service) Get(ctx context.Context, id string) (*domain.Workspace, error) {
 	row := s.db.QueryRowContext(ctx,
 		`SELECT id, project_id, branch, title, instructions, agent, status, last_active_at, expires_at, created_at, updated_at, gateway_key_id FROM workspaces WHERE id = ?`, id)
-	return scanWorkspace(row)
+	ws, err := scanWorkspace(row)
+	if err != nil {
+		return nil, err
+	}
+	s.populateWaitingLine(ctx, ws)
+	return ws, nil
 }
-
 // List returns all workspaces ordered by creation time.
 func (s *Service) List(ctx context.Context) ([]*domain.Workspace, error) {
 	rows, err := s.db.QueryContext(ctx,
@@ -580,6 +627,7 @@ func (s *Service) List(ctx context.Context) ([]*domain.Workspace, error) {
 		if err != nil {
 			return nil, err
 		}
+		s.populateWaitingLine(ctx, ws)
 		out = append(out, ws)
 	}
 	return out, rows.Err()
@@ -674,6 +722,22 @@ func (s *Service) Attach(ctx context.Context, id string) error {
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, _ = s.db.ExecContext(ctx, `UPDATE workspaces SET last_active_at = ?, updated_at = ? WHERE id = ?`, now, now, id)
+	return nil
+}
+
+// SSHProxy proxies stdio to the workspace via the Runner (devpod ssh --stdio).
+// It validates that the workspace exists and is running.
+func (s *Service) SSHProxy(ctx context.Context, id string) error {
+	ws, err := s.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if ws.Status == StatusStopped || ws.Status == StatusExpired {
+		return fmt.Errorf("%w: workspace is %s", ErrValidation, ws.Status)
+	}
+	if err := s.runner.SSHProxy(ctx, id); err != nil {
+		return fmt.Errorf("runner ssh-proxy: %w", err)
+	}
 	return nil
 }
 // Send sends a message to the workspace tmux session via the Runner.

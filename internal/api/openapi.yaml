@@ -1,0 +1,2564 @@
+openapi: 3.1.0
+info:
+  title: Omahab Control API
+  description: |
+    Authenticated control-plane API for omahabd. All routes are under /api/v1 except
+    /up. Bearer authentication is required except for /up and the email webhook which
+    uses a separate HMAC authentication path. Mutating requests require Content-Type
+    application/json. Unknown JSON fields are rejected. Request bodies are limited
+    (1 MiB JSON, 5 MiB email webhook) and per-request timeouts are enforced. SSE
+    streaming at /api/v1/events/stream supports Last-Event-ID replay and heartbeat
+    comments. Secret and provider-credential reads return metadata only.
+  version: 0.1.0
+  contact:
+    name: Omahab
+servers:
+  - url: http://localhost:8484
+    description: omahabd default listen address
+security:
+  - bearerAuth: []
+tags:
+  - name: setup
+    description: First-run setup status and Woodpecker PAT handoff
+paths:
+  /api/bootstrap/claim:
+    post:
+      summary: Claim the appliance with the one-time bootstrap code
+      description: |
+        First-boot only (served on the LAN listener, port 8485). Exchanges the
+        one-time code shown on the tty1 console for the administrator API
+        token. Single-use; 5 attempts/min per host and 20 total, after which
+        the code rotates. Inert once bootstrap is complete.
+      operationId: claimBootstrap
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string, example: 7gc3x9k2mq }
+      responses:
+        '200':
+          description: Claimed; the token is returned once
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/Error' }
+
+  /api/bootstrap/ssh-keys:
+    post:
+      summary: Install administrator SSH keys (bootstrap)
+      description: First-boot only; requires the bootstrap-claimed bearer token. Imports keys from a GitHub user and/or pasted public keys for the omahab admin account. Empty input skips the step.
+      operationId: bootstrapSSHKeys
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                github_user: { type: string }
+                keys:
+                  type: array
+                  items: { type: string }
+      responses:
+        '200':
+          description: Keys merged additively
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  added: { type: integer }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /api/bootstrap/tailscale/up:
+    post:
+      summary: Start Tailscale enrollment (bootstrap)
+      description: First-boot only; runs `tailscale up` and returns the printed auth URL.
+      operationId: bootstrapTailscaleUp
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Enrollment started
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  auth_url: { type: string }
+        '502': { $ref: '#/components/responses/Error' }
+
+  /api/bootstrap/tailscale/status:
+    get:
+      summary: Poll Tailscale enrollment state (bootstrap)
+      operationId: bootstrapTailscaleStatus
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Current state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  running: { type: boolean }
+                  ip: { type: string }
+                  state: { type: string }
+
+  /api/bootstrap/complete:
+    post:
+      summary: Finish first-boot bootstrap
+      description: Writes /var/lib/omahab/bootstrap-done and closes the LAN listener. Further enrollment happens on the authenticated dashboard.
+      operationId: bootstrapComplete
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Bootstrap complete
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  complete: { type: boolean }
+
+  /api/bootstrap/restore/connect:
+    post:
+      summary: Connect to Hetzner/generic restic repo for restore (first-boot)
+      description: |
+        First-boot only (LAN bootstrap, requires claim token). Derives the restic password from the 24-word recovery phrase (`HKDF-SHA256(seed, salt "omahab-recovery-v1", info "restic-password")`), uploads the ed25519 SSH key to Hetzner via SFTP:23 if needed, and runs `restic snapshots --json --latest 10`.
+      operationId: bootstrapRestoreConnect
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phrase]
+              properties:
+                kind: { type: string, enum: [hetzner_storagebox], description: "Hetzner when set" }
+                username: { type: string, example: "u123456" }
+                host: { type: string, example: "u123456.your-storagebox.de" }
+                sub_account_password: { type: string, format: password }
+                location: { type: string, example: "sftp:user@host:restic-repo" }
+                phrase: { type: string, description: "24-word recovery phrase (space-separated)" }
+      responses:
+        '200':
+          description: Snapshots
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  snapshots:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        time: { type: string, format: date-time }
+                        hostname: { type: string }
+        '400': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/Error' }
+
+  /api/bootstrap/restore/run:
+    post:
+      summary: Start restore of a snapshot (first-boot)
+      description: Restores `restic restore <id> --target /` with `--include` per DefaultPaths (including /var/lib/tailscale), unwraps master.key from recovery.kit, runs post_restore hooks, writes bootstrap-done and restarts omahabd. Streams progress via GET /api/bootstrap/restore/events (SSE).
+      operationId: bootstrapRestoreRun
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [snapshot_id]
+              properties:
+                snapshot_id: { type: string }
+      responses:
+        '202': { description: Started }
+        '400': { $ref: '#/components/responses/Error' }
+
+  /api/bootstrap/restore/events:
+    get:
+      summary: Stream restore progress (SSE)
+      operationId: bootstrapRestoreEvents
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: SSE stream of {stage, message, done, error}
+          content:
+            text/event-stream: {}
+
+  /api/v1/setup/verify-cloudflare:
+    post:
+      summary: Live-verify a Cloudflare API token
+      description: Server-side call to Cloudflare's token verify endpoint (the browser cannot call it cross-origin).
+      operationId: verifyCloudflareToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string }
+      responses:
+        '200':
+          description: Verification result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  status: { type: string }
+                  detail: { type: string }
+        '400': { $ref: '#/components/responses/Error' }
+
+  /api/v1/recovery/generate:
+    post:
+      summary: Generate a recovery phrase (one-time)
+      description: Creates a 24-word BIP39 recovery phrase. The phrase is shown exactly once and never persisted; the seed is held in memory keyed by fingerprint for 15 minutes until /api/v1/recovery/confirm verifies a 3-word challenge and persists recovery.kit.
+      operationId: generateRecoveryKey
+      responses:
+        '200':
+          description: Key material (shown once)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [phrase, fingerprint]
+                properties:
+                  phrase: { type: array, items: { type: string }, minItems: 24, maxItems: 24, description: "24 BIP39 words" }
+                  fingerprint: { type: string, description: "first 8 hex of SHA-256(seed)", example: "a1b2c3d4" }
+
+  /api/v1/recovery/confirm:
+    post:
+      summary: Confirm the saved recovery phrase
+      description: Verifies 3 words from the generated phrase (map of 0-based index to word), wraps the master key with the derived recovery key, persists it at /var/lib/omahab/recovery.kit (0600) as {version:1,fingerprint,master_wrapped base64,created_at RFC3339}, and stores platform-app/recovery_fingerprint.
+      operationId: confirmRecoveryKey
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fingerprint, challenge]
+              properties:
+                fingerprint: { type: string, example: "a1b2c3d4" }
+                challenge: { type: object, additionalProperties: { type: string }, description: "3 entries: index (0-23) -> word", minProperties: 3, maxProperties: 3 }
+      responses:
+        '200':
+          description: Kit stored
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  confirmed: { type: boolean }
+        '400': { $ref: '#/components/responses/Error' }
+  /api/v1/system/disks:
+    get:
+      summary: List candidate storage disks
+      description: Parses `lsblk -J` and returns non-root/boot filesystems.
+      operationId: listDisks
+      responses:
+        '200':
+          description: Candidate disks
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    name: { type: string }
+                    size: { type: string }
+                    type: { type: string }
+                    fstype: { type: string }
+                    uuid: { type: string }
+                    mountpoint: { type: string }
+
+  /api/v1/system/storage:
+    put:
+      summary: Assign a filesystem to a volume role
+      description: Appends to /var/lib/omahab/storage.json (consumed by the omahab-storage oneshot unit). volume is media or data; rejected once the target holds data.
+      operationId: configureStorage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [volume, fs_uuid]
+              properties:
+                volume: { type: string, enum: [media, data] }
+                fs_uuid: { type: string }
+      responses:
+        '200':
+          description: Placement recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  configured: { type: boolean }
+        '400': { $ref: '#/components/responses/Error' }
+
+  /api/v1/backup-repositories:
+    get:
+      summary: List backup repositories
+      operationId: listBackupRepositories
+      responses:
+        '200':
+          description: Configured repositories
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/BackupRepository'
+    post:
+      summary: Configure a backup repository
+      description: |
+        Stores credentials via the secrets broker and configures the repository by secret reference; enables the daily backup and weekly verify timers.
+        Two forms are accepted:
+        - Hetzner Storage Box (recommended, ~€4/mo): `{kind:"hetzner_storagebox", label, username, host, sub_account_password}` — generates an ed25519 key at `/var/lib/omahab/backup_ssh/id_ed25519`, uploads the pubkey to `.ssh/authorized_keys` via SFTP:23, derives the restic password from the recovery phrase (`HKDF-SHA256(seed, salt "omahab-recovery-v1", info "restic-password")`), location `sftp://<user>@<host>:23/./omahab/<instanceID>`.
+        - Generic/Advanced: `{label, location, password}` — restic URL and password.
+      operationId: createBackupRepository
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [label]
+              properties:
+                label: { type: string, example: "primary" }
+                kind: { type: string, enum: [hetzner_storagebox], description: "Hetzner Storage Box when set" }
+                username: { type: string, example: "u123456" }
+                host: { type: string, example: "u123456.your-storagebox.de" }
+                sub_account_password: { type: string, format: password, description: "Hetzner sub-account password (used once to upload SSH key, never stored)" }
+                location: { type: string, example: "sftp:user@host:restic-repo", description: "Generic restic URL (Advanced)" }
+                password: { type: string, format: password, description: "Generic restic password (Advanced)" }
+                phrase: { type: string, description: "Optional 24-word phrase to derive restic password for Hetzner when seed not in memory" }
+      responses:
+        '201':
+          description: Repository configured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BackupRepository'
+        '400': { $ref: '#/components/responses/Error' }
+
+
+  /api/v1/backup-repositories/{id}:
+    delete:
+      summary: Delete a backup repository
+      description: Repositories with recorded runs are retained for audit.
+      operationId: deleteBackupRepository
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '204': { description: Deleted }
+        '409': { $ref: '#/components/responses/Error' }
+
+  /up:
+    get:
+      summary: Liveness probe
+      description: Unauthenticated liveness check.
+      operationId: getUp
+      security: []
+      responses:
+        '200':
+          description: Service is up
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, example: up }
+                  version: { type: string }
+        '500':
+          $ref: '#/components/responses/Error'
+
+  /api/v1/status:
+    get:
+      summary: Get control-plane status
+      operationId: getStatus
+      responses:
+        '200':
+          description: Status
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Status' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/Error' }
+
+  /api/v1/instance:
+    get:
+      summary: Get instance identity
+      operationId: getInstance
+      responses:
+        '200':
+          description: Instance
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Instance' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/Error' }
+    put:
+      summary: Update instance identity
+      operationId: updateInstance
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [domain]
+              properties:
+                domain: { type: string, example: example.com }
+                assistant_name: { type: string, example: My Assistant }
+              additionalProperties: false
+      responses:
+        '200':
+          description: Updated instance
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Instance' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/Error' }
+
+  /api/v1/catalog:
+    get:
+      summary: List installable curated bundles
+      description: Runtime catalog shipped with signed releases. Empty when no release catalog is present; installs then fail closed.
+      operationId: listCatalog
+      responses:
+        '200':
+          description: Catalog bundles
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/CatalogBundle' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/Error' }
+
+  /api/v1/applications:
+    get:
+      summary: List applications
+      operationId: listApplications
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+      responses:
+        '200':
+          description: Applications
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Application' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/Error' }
+    post:
+      summary: Install a curated bundle
+      description: Installs a catalog bundle by id with digest-pinned images. Non-private exposure requires a hostname.
+      operationId: installApplication
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/InstallApplicationRequest' }
+      responses:
+        '201': { description: Installed, content: { application/json: { schema: { $ref: '#/components/schemas/Application' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+
+  /api/v1/applications/{id}:
+    get:
+      summary: Get application
+      operationId: getApplication
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      responses:
+        '200': { description: Application, content: { application/json: { schema: { $ref: '#/components/schemas/Application' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/Error' }
+    patch:
+      summary: Update application
+      operationId: updateApplication
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateApplicationRequest' }
+      responses:
+        '200': { description: Updated, content: { application/json: { schema: { $ref: '#/components/schemas/Application' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/Error' }
+
+  /api/v1/applications/{id}/actions:
+    post:
+      summary: Perform application action
+      description: Lifecycle actions (start, stop, restart, update, rollback). Installing a bundle is POST /api/v1/applications.
+      operationId: doApplicationAction
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ApplicationActionRequest' }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/Application' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/Error' }
+
+  /api/v1/applications/{id}/exposure:
+    get:
+      summary: Get application exposure
+      operationId: getApplicationExposure
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      responses:
+        '200': { description: Exposure, content: { application/json: { schema: { $ref: '#/components/schemas/ExposureState' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      summary: Update application exposure
+      operationId: updateApplicationExposure
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/UpdateExposureRequest' } } } }
+      responses:
+        '200': { description: Updated, content: { application/json: { schema: { $ref: '#/components/schemas/ExposureState' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/exposure:
+    get:
+      summary: List all exposure states
+      operationId: listExposure
+      responses:
+        '200':
+          description: Exposure list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties: { items: { type: array, items: { $ref: '#/components/schemas/ExposureState' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/exposure/{kind}/{id}:
+    parameters:
+      - name: kind
+        in: path
+        required: true
+        schema: { type: string, enum: [application, project] }
+      - $ref: '#/components/parameters/IdPath'
+    get:
+      summary: Get exposure by kind
+      operationId: getExposure
+      responses:
+        '200': { description: Exposure, content: { application/json: { schema: { $ref: '#/components/schemas/ExposureState' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      summary: Update exposure by kind
+      operationId: updateExposure
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/UpdateExposureRequest' } } } }
+      responses:
+        '200': { description: Updated, content: { application/json: { schema: { $ref: '#/components/schemas/ExposureState' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/projects:
+    get:
+      summary: List projects
+      operationId: listProjects
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+      responses:
+        '200':
+          description: Projects
+          content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/Project' } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      summary: Create project
+      operationId: createProject
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CreateProjectRequest' } } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Project' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/projects/{id}:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    get:
+      summary: Get project
+      operationId: getProject
+      responses:
+        '200': { description: Project, content: { application/json: { schema: { $ref: '#/components/schemas/Project' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      summary: Update project
+      operationId: updateProject
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/UpdateProjectRequest' } } } }
+      responses:
+        '200': { description: Updated, content: { application/json: { schema: { $ref: '#/components/schemas/Project' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      summary: Delete project
+      operationId: deleteProject
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/projects/{id}/exposure:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    get:
+      summary: Get project exposure
+      operationId: getProjectExposure
+      responses:
+        '200': { description: Exposure, content: { application/json: { schema: { $ref: '#/components/schemas/ExposureState' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      summary: Update project exposure
+      operationId: updateProjectExposure
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/UpdateExposureRequest' } } } }
+      responses:
+        '200': { description: Updated, content: { application/json: { schema: { $ref: '#/components/schemas/ExposureState' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/v1/projects/{id}/releases:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    get:
+      summary: List releases
+      operationId: listReleases
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+      responses:
+        '200': { description: Releases, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/Release' } } } } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      summary: Create release
+      operationId: createRelease
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CreateReleaseRequest' } } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Release' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/v1/projects/{id}/releases/{releaseID}:
+    parameters:
+      - $ref: '#/components/parameters/IdPath'
+      - name: releaseID
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      summary: Get release
+      operationId: getRelease
+      responses:
+        '200': { description: Release, content: { application/json: { schema: { $ref: '#/components/schemas/Release' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/projects/{id}/releases/{releaseID}/rollback:
+    post:
+      summary: Rollback to release
+      operationId: rollbackRelease
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+        - name: releaseID
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Rolled back, content: { application/json: { schema: { $ref: '#/components/schemas/Release' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/secrets:
+    get:
+      summary: List secrets (metadata only)
+      description: Secret values are never returned. Each entry is metadata.
+      operationId: listSecrets
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+        - name: scope
+          in: query
+          schema: { type: string }
+          description: Filter by scope
+      responses:
+        '200': { description: Secrets, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/Secret' } } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      summary: Create secret
+      operationId: createSecret
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CreateSecretRequest' } } } }
+      responses:
+        '201': { description: Created metadata, content: { application/json: { schema: { $ref: '#/components/schemas/Secret' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/secrets/{id}:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    get:
+      summary: Get secret metadata
+      operationId: getSecret
+      responses:
+        '200': { description: Metadata, content: { application/json: { schema: { $ref: '#/components/schemas/Secret' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      summary: Rotate secret value
+      operationId: updateSecret
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/UpdateSecretRequest' } } } }
+      responses:
+        '200': { description: Updated metadata, content: { application/json: { schema: { $ref: '#/components/schemas/Secret' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      summary: Delete secret
+      operationId: deleteSecret
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/backups:
+    get:
+      summary: List backups
+      operationId: listBackups
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+      responses:
+        '200': { description: Backups, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/Backup' } } } } } } }
+    post:
+      summary: Trigger backup
+      operationId: createBackup
+      requestBody:
+        required: false
+        content: { application/json: { schema: { $ref: '#/components/schemas/CreateBackupRequest' } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Backup' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/v1/backups/{id}:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    get:
+      summary: Get backup
+      operationId: getBackup
+      responses:
+        '200': { description: Backup, content: { application/json: { schema: { $ref: '#/components/schemas/Backup' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/backups/{id}/restore:
+    post:
+      summary: Restore backup
+      operationId: restoreBackup
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      responses:
+        '200': { description: Restoring, content: { application/json: { schema: { $ref: '#/components/schemas/Backup' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/backups/{id}/verify:
+    post:
+      summary: Verify backup
+      operationId: verifyBackup
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      responses:
+        '200': { description: Verified, content: { application/json: { schema: { $ref: '#/components/schemas/Backup' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/backups/verify:
+    post:
+      summary: Verify latest backup
+      description: Verify the latest snapshot when no id is given.
+      operationId: verifyLatestBackup
+      responses:
+        '200': { description: Verified, content: { application/json: { schema: { $ref: '#/components/schemas/Backup' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/events:
+    get:
+      summary: List events
+      operationId: listEvents
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+        - name: type
+          in: query
+          schema: { type: string }
+        - name: severity
+          in: query
+          schema: { type: string }
+        - name: unread
+          in: query
+          schema: { type: boolean }
+      responses:
+        '200': { description: Events, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/Event' } } } } } } }
+
+  /api/v1/events/stream:
+    get:
+      summary: Stream events via SSE
+      description: |
+        Server-Sent Events stream. Honors Last-Event-ID header (or ?lastEventId query) for replay.
+        Sends heartbeat comments every 15s. Respects client cancellation and server shutdown.
+      operationId: streamEvents
+      parameters:
+        - name: lastEventId
+          in: query
+          schema: { type: string }
+          required: false
+        - name: Last-Event-ID
+          in: header
+          schema: { type: string }
+          required: false
+      responses:
+        '200':
+          description: Event stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/events/{id}:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    get:
+      summary: Get event
+      operationId: getEvent
+      responses:
+        '200': { description: Event, content: { application/json: { schema: { $ref: '#/components/schemas/Event' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/events/{id}/read:
+    post:
+      summary: Mark event read
+      operationId: markEventRead
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      responses:
+        '200': { description: Updated, content: { application/json: { schema: { $ref: '#/components/schemas/Event' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/events/read-all:
+    post:
+      summary: Mark all events read
+      operationId: markAllEventsRead
+      responses:
+        '204': { description: All marked read }
+
+  /api/v1/sync/folders:
+    get:
+      summary: List sync folders
+      operationId: listSyncFolders
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+      responses:
+        '200': { description: Folders, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/SyncFolder' } } } } } } }
+    post:
+      summary: Create sync folder
+      operationId: createSyncFolder
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CreateSyncFolderRequest' } } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/SyncFolder' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/v1/sync/folders/{id}:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    get:
+      summary: Get sync folder
+      operationId: getSyncFolder
+      responses:
+        '200': { description: Folder, content: { application/json: { schema: { $ref: '#/components/schemas/SyncFolder' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      summary: Update sync folder
+      operationId: updateSyncFolder
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/UpdateSyncFolderRequest' } } } }
+      responses:
+        '200': { description: Updated, content: { application/json: { schema: { $ref: '#/components/schemas/SyncFolder' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      summary: Delete sync folder
+      operationId: deleteSyncFolder
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/workspaces:
+    get:
+      summary: List workspaces
+      operationId: listWorkspaces
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+      responses:
+        '200': { description: Workspaces, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/Workspace' } } } } } } }
+    post:
+      summary: Create workspace
+      operationId: createWorkspace
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CreateWorkspaceRequest' } } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Workspace' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/v1/workspaces/{id}:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    get:
+      summary: Get workspace
+      operationId: getWorkspace
+      responses:
+        '200': { description: Workspace, content: { application/json: { schema: { $ref: '#/components/schemas/Workspace' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      summary: Delete workspace
+      operationId: deleteWorkspace
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/workspaces/{id}/stop:
+    post:
+      summary: Stop workspace
+      operationId: stopWorkspace
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      responses:
+        '200': { description: Stopped, content: { application/json: { schema: { $ref: '#/components/schemas/Workspace' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/users:
+    get:
+      summary: List users
+      operationId: listUsers
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+      responses:
+        '200': { description: Users, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/User' } } } } } } }
+    post:
+      summary: Create user
+      operationId: createUser
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CreateUserRequest' } } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/v1/users/{id}:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    get:
+      summary: Get user
+      operationId: getUser
+      responses:
+        '200': { description: User, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      summary: Update user
+      operationId: updateUser
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/UpdateUserRequest' } } } }
+      responses:
+        '200': { description: Updated, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      summary: Delete user
+      operationId: deleteUser
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/users/{id}/recovery:
+    post:
+      summary: Create recovery session for user
+      operationId: createUserRecovery
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      responses:
+        '201': { description: Recovery session, content: { application/json: { schema: { $ref: '#/components/schemas/RecoverySession' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/identity/recover:
+    post:
+      summary: Recover identity by email (requires local root via CLI, exposed as API for completeness)
+      operationId: identityRecover
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [email], properties: { email: { type: string, format: email } } } } } }
+      responses:
+        '201': { description: Recovery session, content: { application/json: { schema: { $ref: '#/components/schemas/RecoverySession' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/v1/provider-credentials:
+    get:
+      summary: List provider credentials (metadata)
+      operationId: listProviderCredentials
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+      responses:
+        '200': { description: Credentials, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/ProviderCredential' } } } } } } }
+    post:
+      summary: Create provider credential
+      operationId: createProviderCredential
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CreateProviderCredentialRequest' } } } }
+      responses:
+        '201': { description: Created metadata, content: { application/json: { schema: { $ref: '#/components/schemas/ProviderCredential' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/v1/provider-credentials/{id}:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    get:
+      summary: Get provider credential metadata
+      operationId: getProviderCredential
+      responses:
+        '200': { description: Credential, content: { application/json: { schema: { $ref: '#/components/schemas/ProviderCredential' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      summary: Delete provider credential
+      operationId: deleteProviderCredential
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/model-aliases:
+    get:
+      summary: List model aliases
+      operationId: listModelAliases
+      responses:
+        '200':
+          description: Aliases
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/ModelAlias' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/model-aliases/{name}:
+    put:
+      summary: Upsert model alias
+      operationId: setModelAlias
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string, enum: [omahab/fast, omahab/balanced, omahab/reasoning, omahab/embedding] }
+          description: Alias name
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetModelAliasRequest' }
+      responses:
+        '200': { description: Alias, content: { application/json: { schema: { $ref: '#/components/schemas/ModelAlias' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/model-keys:
+    get:
+      summary: List model keys (metadata)
+      description: Returns metadata only; plaintext keys never returned in list.
+      operationId: listModelKeys
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+      responses:
+        '200':
+          description: Keys
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/ModelKey' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      summary: Create model key
+      description: Creates a scoped virtual key via LiteLLM. Plaintext key returned once in response; stored only as hash/prefix.
+      operationId: createModelKey
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateModelKeyRequest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ModelKey'
+                  - type: object
+                    properties:
+                      key: { type: string, description: Plaintext key returned once, never persisted }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/model-keys/{id}:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    delete:
+      summary: Delete model key
+      description: Revokes virtual key in LiteLLM and marks metadata revoked.
+      operationId: deleteModelKey
+      responses:
+        '204': { description: Deleted }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/provider-oauth/{provider}/start:
+    post:
+      summary: Start provider OAuth flow
+      description: Initiates subscription OAuth for chatgpt (device_code) or xai (loopback). Returns verification URL and session metadata; never returns device codes, tokens, or master key.
+      operationId: startProviderOAuth
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema: { type: string, enum: [chatgpt, xai] }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StartProviderOAuthRequest' }
+      responses:
+        '201': { description: OAuth session, content: { application/json: { schema: { $ref: '#/components/schemas/OAuthSession' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/provider-oauth/{provider}/poll/{session_id}:
+    get:
+      summary: Poll provider OAuth session
+      description: Polls OAuth session status; returns safe OAuthSession without device codes, tokens, or master key.
+      operationId: pollProviderOAuth
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema: { type: string, enum: [chatgpt, xai] }
+        - name: session_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: OAuth session, content: { application/json: { schema: { $ref: '#/components/schemas/OAuthSession' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/provider-oauth/{provider}/callback/{session_id}:
+    post:
+      summary: Forward OAuth callback (device only)
+      description: |
+        Device-only endpoint. Forwards only the received /callback?<query> path to LiteLLM's fixed loopback at 127.0.0.1:56121.
+        Requires device token from an enrolled companion with allow_provider_oauth=true; admin bearer is rejected with 403.
+        Rejects foreign host/scheme/port, expired session, wrong device, or shell metacharacters.
+      operationId: forwardProviderOAuthCallback
+      security: [{ deviceAuth: [] }]
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema: { type: string, enum: [xai] }
+        - name: session_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ForwardOAuthCallbackRequest' }
+      responses:
+        '200': { description: OAuth session, content: { application/json: { schema: { $ref: '#/components/schemas/OAuthSession' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/tool-environment:
+    get:
+      summary: List tool-environment variables (metadata only)
+      description: |
+        Admin only. Returns names, versions, and timestamps only; values never returned.
+        Server authoritative singleton `agent-tools`; devices never upload edits.
+      operationId: listToolEnvironment
+      responses:
+        '200':
+          description: Tool environment metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/ToolEnvEntry' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/tool-environment/{NAME}:
+    parameters:
+      - name: NAME
+        in: path
+        required: true
+        schema: { type: string, pattern: '^[A-Z_][A-Z0-9_]{0,127}$' }
+        description: Tool environment variable name (e.g., PARALLEL_API_KEY)
+    put:
+      summary: Create or rotate tool-environment variable
+      description: |
+        Admin only. Creates or atomically rotates a write-only value via secrets broker (scope environment).
+        Validates name ^[A-Z_][A-Z0-9_]{0,127}$ (max 128), rejects reserved names (OPENAI_BASE_URL, OPENAI_API_KEY, ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY, OMAHAB_MODEL_FAST etc.) with distinct error, and rejects NUL/CR/LF in values so persistent one-line systemd assignments are unambiguous.
+        Bumps singleton revision; every mutation, grant change, or generated model-key rotation increments revision.
+        Reserved names cannot be overwritten; they are composed per device at fetch time.
+      operationId: putToolEnvironment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PutToolEnvRequest' }
+      responses:
+        '200':
+          description: Created/rotated metadata
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ToolEnvEntry' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    delete:
+      summary: Delete tool-environment variable
+      description: Admin only. Removes variable and bumps revision. Returns 404 if not found.
+      operationId: deleteToolEnvironment
+      responses:
+        '204': { description: Deleted }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/companion/environment:
+    get:
+      summary: Get companion device tool environment (device only)
+      description: |
+        Device-only. Returns authoritative bundle of raw values for this device, including per-device reserved vars
+        (OPENAI_BASE_URL=https://models.<domain>, ANTHROPIC_BASE_URL, OPENAI_API_KEY=distinct LiteLLM key, ANTHROPIC_API_KEY, OMAHAB_MODEL_*).
+        Reserved vars are composed per device at fetch time; admin cannot overwrite them.
+        Requires device token (oma_dev_...); admin bearer is rejected with 403.
+        Includes ETag W/"rev-<revision>-<deviceIDHash>" derived from revision/device key; honors If-None-Match with 304 so unchanged syncs never resend secrets.
+        If device grant removed while still enrolled, returns empty bundle so client clears local values. Fully revoking/losing device cannot erase already downloaded shared keys; dashboard must warn to rotate.
+      operationId: getCompanionEnvironment
+      security: [{ deviceAuth: [] }]
+      parameters:
+        - name: If-None-Match
+          in: header
+          required: false
+          schema: { type: string }
+          description: ETag from previous fetch; returns 304 if unchanged
+      responses:
+        '200':
+          description: Environment bundle (raw values)
+          headers:
+            ETag: { schema: { type: string }, description: 'W/"rev-<revision>-<hash>"' }
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: { type: string }
+        '304': { description: Not modified (If-None-Match matches current ETag) }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/companion-enrollments:
+    post:
+      summary: Create companion enrollment code (admin)
+      description: |
+        Admin only. Generates a single-use enrollment code with at least 192 random bits (24 bytes, base64url),
+        10-minute expiry, stored only as SHA-256 hash with constant-time compare.
+        Code is returned once and never stored plaintext. Consumed on claim via POST /api/v1/companion/enroll.
+      operationId: createCompanionEnrollment
+      responses:
+        '201':
+          description: Enrollment code (once)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, code, expires_at, created_at]
+                properties:
+                  id: { type: string }
+                  code: { type: string, description: "Single-use code, returned once, at least 192 bits" }
+                  expires_at: { type: string, format: date-time }
+                  created_at: { type: string, format: date-time }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/companion/enroll:
+    post:
+      summary: Claim enrollment code and create device (public, single-use)
+      description: |
+        Public (no bearer). Body {code}. Validates SHA-256 hash constant-time, 10-min expiry, single-use consumed_at.
+        On success returns oma_dev_... token (stored only as hash, prefix for display) and creates companion_devices row.
+        Code never as query/arg; only JSON body. Device token stored only as hash server-side, constant-time compare.
+      operationId: enrollCompanion
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string }
+              additionalProperties: false
+      responses:
+        '201':
+          description: Device token (once)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token, token_prefix]
+                properties:
+                  token: { type: string, description: "oma_dev_... token, returned once" }
+                  token_prefix: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/companion/status:
+    get:
+      summary: Get status (device only)
+      description: Device-only. Returns control-plane status visible to companion device. Admin bearer rejected with 403.
+      operationId: getCompanionStatus
+      security: [{ deviceAuth: [] }]
+      responses:
+        '200': { description: Status, content: { application/json: { schema: { $ref: '#/components/schemas/Status' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/companion/events:
+    get:
+      summary: List events (device only)
+      description: Device-only. Returns events visible to companion. Admin bearer rejected.
+      operationId: getCompanionEvents
+      security: [{ deviceAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200': { description: Events, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/Event' } } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/companion/projects:
+    get:
+      summary: List projects (device only)
+      description: Device-only. Returns projects visible to companion. Admin bearer rejected.
+      operationId: getCompanionProjects
+      security: [{ deviceAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200': { description: Projects, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/Project' } } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/companion/devices:
+    get:
+      summary: List companion devices (admin)
+      operationId: listCompanionDevices
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200': { description: Devices, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/CompanionDevice' } } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/companion/devices/{id}:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    delete:
+      summary: Revoke companion device
+      description: Admin only. Marks revoked_at, revokes its LiteLLM virtual key (owner_kind=device) and future companion API access. Idempotent.
+      operationId: revokeCompanionDevice
+      responses:
+        '204': { description: Revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/companion/devices/{id}/allow-oauth:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    put:
+      summary: Set device allow_provider_oauth
+      description: Admin only. Toggles whether device may relay xAI loopback callback (allow_provider_oauth). Used to gate POST /api/v1/provider-oauth/xai/callback/{session_id}.
+      operationId: setDeviceAllowOAuth
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                allow: { type: boolean }
+                allow_provider_oauth: { type: boolean }
+      responses:
+        '200': { description: Updated device, content: { application/json: { schema: { $ref: '#/components/schemas/CompanionDevice' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/email/ingest:
+      summary: Ingest email from Email Worker (HMAC auth)
+      description: |
+        Separate HMAC auth path for the Cloudflare Email Worker. X-Omahab-Signature
+        is HMAC-SHA256 over `v1\n<timestamp>\n<nonce>\n<from>\n<to>\n<raw-size>\n`
+        followed by the decoded raw bytes. X-Omahab-Timestamp, X-Omahab-Nonce,
+        X-Omahab-From, and X-Omahab-To must exactly match the JSON payload.
+        Bearer auth is not accepted here.
+      operationId: ingestEmail
+      security: [{ hmacAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EmailIngestRequest' }
+      responses:
+        '201': { description: Ingested, content: { application/json: { schema: { $ref: '#/components/schemas/EmailMessage' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/email/messages:
+    get:
+      summary: List ingested email messages
+      operationId: listEmailMessages
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+      responses:
+        '200': { description: Messages, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/EmailMessage' } } } } } } }
+
+  /api/v1/email/messages/{id}:
+    get:
+      summary: Get email message
+      operationId: getEmailMessage
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      responses:
+        '200': { description: Message, content: { application/json: { schema: { $ref: '#/components/schemas/EmailMessage' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/email/routes:
+    post:
+      summary: Ensure email routing rule (gated on sender verification)
+      description: Dashboard-triggered activation of the AI address Cloudflare Email Routing rule. Requires sender verification; routed via scoped Token C.
+      operationId: ensureEmailRoute
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                recipient: { type: string, format: email }
+      responses:
+        '200': { description: Route ensured, content: { application/json: { schema: { type: object, required: [ok], properties: { ok: { type: boolean } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/projects/{id}/release-token:
+    post:
+      summary: Issue per-project release token (admin only, never to Forgejo)
+      description: Generates a per-project release token. Returns plaintext once; only hash persisted. Woodpecker holds this token, not an admin bearer.
+      operationId: issueReleaseToken
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      responses:
+        '201': { description: Issued, content: { application/json: { schema: { $ref: '#/components/schemas/ReleaseTokenResponse' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/projects/{id}/release-token/rotate:
+    post:
+      summary: Rotate per-project release token (admin only)
+      operationId: rotateReleaseToken
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      responses:
+        '200': { description: Rotated, content: { application/json: { schema: { $ref: '#/components/schemas/ReleaseTokenResponse' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/projects/{id}/releases/with-token:
+    post:
+      summary: Create release via per-project token (Woodpecker callback, not admin bearer)
+      description: |
+        Woodpecker release callback. Authorization Bearer is the per-project release token verified via projects.Service.Release (ReleaseTokenVerifier).
+        Keeps admin bearer path working but verified via token path. Woodpecker holds no host SSH key or admin credential.
+      operationId: releaseWithToken
+      security: []
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CreateReleaseRequest' } } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Release' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/projects/{id}/mirror:
+    get:
+      summary: Get push-mirror config
+      operationId: getPushMirror
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      responses:
+        '200': { description: Mirror, content: { application/json: { schema: { $ref: '#/components/schemas/MirrorResponse' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      summary: Configure push-mirror (repo-scoped credential, force-push warning)
+      description: |
+        Configures a read-only GitHub push mirror via Forgejo. Warnings include force-push overwrite, branch/tag scope, and explicit LFS handling.
+        Raw token is stored as repo-scoped secret (scope/name), never in SQLite state or Woodpecker args.
+      operationId: configurePushMirror
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ConfigureMirrorRequest' } } } }
+      responses:
+        '200': { description: Configured, content: { application/json: { schema: { $ref: '#/components/schemas/MirrorResponse' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      summary: Remove push mirror
+      operationId: removePushMirror
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      responses:
+        '204': { description: Removed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/workspaces/{id}/capabilities:
+    post:
+      summary: Issue workspace capability (one-time, TTL 5m)
+      operationId: issueWorkspaceCapability
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      responses:
+        '201': { description: Issued, content: { application/json: { schema: { $ref: '#/components/schemas/WorkspaceCapabilityResponse' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/workspaces/{id}/capabilities/validate:
+    post:
+      summary: Validate workspace capability (one-time)
+      operationId: validateWorkspaceCapability
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [token], properties: { token: { type: string } } } } } }
+      responses:
+        '200': { description: Valid, content: { application/json: { schema: { type: object, required: [valid], properties: { valid: { type: boolean } } } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/knowledge/search:
+    post:
+      summary: Knowledge search (assistant tool)
+      operationId: knowledgeSearch
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/KnowledgeSearchRequest' } } } }
+      responses:
+        '200': { description: Citations, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/Citation' } } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/knowledge/documents/{id}:
+    get:
+      summary: Get knowledge document metadata + text (assistant tool)
+      operationId: knowledgeGetDocument
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      responses:
+        '200': { description: Document, content: { application/json: { schema: { type: object, required: [metadata, text], properties: { metadata: { $ref: '#/components/schemas/PaperlessMetadata' }, text: { type: string } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/knowledge/documents/{id}/text:
+    get:
+      summary: Get knowledge document extracted text
+      operationId: knowledgeGetText
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      responses:
+        '200': { description: Text, content: { application/json: { schema: { type: object, required: [text], properties: { text: { type: string } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/knowledge/correspondents:
+    get:
+      summary: List Paperless correspondents (assistant tool)
+      operationId: knowledgeListCorrespondents
+      responses:
+        '200': { description: Correspondents, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { type: string } } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/knowledge/document-types:
+    get:
+      summary: List Paperless document types (assistant tool)
+      operationId: knowledgeListDocumentTypes
+      responses:
+        '200': { description: Types, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { type: string } } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/knowledge/tags:
+    get:
+      summary: List Paperless tags (assistant tool)
+      operationId: knowledgeListTags
+      responses:
+        '200': { description: Tags, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { type: string } } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/knowledge/upload:
+    post:
+      summary: Upload document to Paperless (assistant tool)
+      operationId: knowledgeUpload
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/KnowledgeUploadRequest' } } } }
+      responses:
+        '201': { description: Uploaded, content: { application/json: { schema: { type: object, required: [id], properties: { id: { type: string } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/knowledge/documents/{id}/tags:
+    post:
+      summary: Add tag to document (assistant tool)
+      operationId: knowledgeAddTag
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [tag], properties: { tag: { type: string } } } } } }
+      responses:
+        '204': { description: Tagged }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/knowledge/sources:
+    get:
+      summary: List knowledge sources with deep links
+      operationId: knowledgeListSources
+      responses:
+        '200': { description: Sources, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/KnowledgeSource' } } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/knowledge/index-setup-options:
+    get:
+      summary: Index setup options (Best English / Best worldwide / Full-text only)
+      operationId: knowledgeIndexSetupOptions
+      responses:
+        '200': { description: Options, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/IndexSetupOption' } } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/knowledge/pinned-models:
+    get:
+      summary: Pinned model metadata (license, size, memory)
+      operationId: knowledgePinnedModels
+      responses:
+        '200': { description: Models, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/ModelInfo' } } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/knowledge/consent:
+    get:
+      summary: Get summarization consent (per provider)
+      operationId: knowledgeGetConsent
+      parameters:
+        - name: principal
+          in: query
+          required: true
+          schema: { type: string }
+        - name: provider
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Consent, content: { application/json: { schema: { type: object, required: [principal, provider, granted], properties: { principal: { type: string }, provider: { type: string }, granted: { type: boolean } } } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    put:
+      summary: Set summarization consent (per provider)
+      operationId: knowledgeSetConsent
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [principal, provider, granted], properties: { principal: { type: string }, provider: { type: string }, granted: { type: boolean } } } } } }
+      responses:
+        '200': { description: Updated, content: { application/json: { schema: { type: object, required: [principal, provider, granted], properties: { principal: { type: string }, provider: { type: string }, granted: { type: boolean } } } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/setup:
+    get:
+      summary: Get first-run setup status
+      operationId: getSetup
+      tags: [setup]
+      responses:
+        '200':
+          description: Setup status
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SetupStatus' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/Error' }
+
+  /api/v1/setup/reconcile:
+    post:
+      summary: Trigger setup reconciler
+      operationId: triggerSetupReconcile
+      tags: [setup]
+      responses:
+        '200':
+          description: Reconcile started
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, example: reconciling }
+                  already_running: { type: boolean }
+        '202':
+          description: Reconcile already running
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, example: reconciling }
+                  already_running: { type: boolean }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/Error' }
+
+  /api/v1/setup/woodpecker:
+    put:
+      summary: Connect Woodpecker with Forgejo PAT
+      description: |
+        Validates a Woodpecker personal access token against Forgejo, verifies the user is a Woodpecker administrator,
+        persists the encrypted PAT, redeploys Woodpecker with WOODPECKER_ADMIN_USERNAME, and revalidates administration.
+        Strict validation, bounded non-empty inputs, never returns or logs the token. Failures leave setup check failed with redacted detail.
+      operationId: setupWoodpecker
+      tags: [setup]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, token]
+              properties:
+                username:
+                  type: string
+                  minLength: 1
+                  maxLength: 255
+                  description: Forgejo login that must match Woodpecker GET /api/user login
+                token:
+                  type: string
+                  minLength: 1
+                  maxLength: 4096
+                  description: Woodpecker personal access token
+              additionalProperties: false
+      responses:
+        '200':
+          description: Woodpecker PAT accepted and admin verified
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, example: ok }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503':
+          description: Woodpecker unavailable or token validation failed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+          headers:
+            X-Request-ID: { schema: { type: string } }
+
+  /api/v1/users/{id}/enrollment:
+    get:
+      summary: Get enrollment state per user (proxy from PocketID)
+      operationId: getEnrollmentState
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      responses:
+        '200': { description: Enrollment, content: { application/json: { schema: { $ref: '#/components/schemas/EnrollmentState' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/users/{id}/app-access:
+    get:
+      summary: List per-user application access
+      operationId: listApplicationAccess
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      responses:
+        '200': { description: Access, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/AppAccess' } } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/users/{id}/groups:
+    get:
+      summary: Get user groups
+      operationId: getUserGroups
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      responses:
+        '200': { description: Groups, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/Group' } } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    put:
+      summary: Set user groups
+      operationId: setUserGroups
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, properties: { group_ids: { type: array, items: { type: string } }, groups: { type: array, items: { type: string } } } } } } }
+      responses:
+        '204': { description: Updated }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: Bearer token verified via constant-time SHA256 comparison. Required for all /api/v1 routes except /up and /api/v1/email/ingest.
+    deviceAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: Device token issued via companion enrollment (oma_dev_...). Required for companion device endpoints; admin bearer is rejected with 403 on these routes.
+    hmacAuth:
+      type: apiKey
+      in: header
+      name: X-Omahab-Signature
+      description: Worker v1 canonical HMAC-SHA256, optionally prefixed with sha256=. Metadata mirror headers are also required.
+
+  parameters:
+    IdPath:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+      description: Opaque control-plane ID
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 0, maximum: 100, default: 50 }
+      description: Item limit for pagination (alternative to per_page)
+    Offset:
+      name: offset
+      in: query
+      schema: { type: integer, minimum: 0 }
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1 }
+    PerPage:
+      name: per_page
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100 }
+
+  responses:
+    BadRequest:
+      description: Bad request
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } }
+      headers:
+        X-Request-ID: { schema: { type: string } }
+    Unauthorized:
+      description: Unauthorized
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } }
+      headers:
+        X-Request-ID: { schema: { type: string } }
+    NotFound:
+      description: Not found
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } }
+    Conflict:
+      description: Conflict
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } }
+    Error:
+      description: Error
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } }
+
+  headers:
+    RequestID:
+      description: Echoed / generated request identifier
+      schema: { type: string }
+
+  schemas:
+    BackupRepository:
+      type: object
+      required: [id, label, location]
+      properties:
+        id: { type: string }
+        label: { type: string }
+        location: { type: string }
+        secret_ref:
+          type: object
+          properties:
+            id: { type: string }
+            version: { type: integer }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, example: not_found }
+            message: { type: string }
+
+    ID: { type: string, description: Opaque stable identifier }
+
+    Health: { type: string, enum: [unknown, healthy, degraded, unhealthy] }
+    Exposure: { type: string, enum: [private, shared, public] }
+
+    Instance:
+      type: object
+      required: [id, domain, tailnet, tailscale_ip, assistant_name, assistant_slug, created_at]
+      properties:
+        id: { $ref: '#/components/schemas/ID' }
+        domain: { type: string }
+        tailnet: { type: string }
+        tailscale_ip: { type: string }
+        assistant_name: { type: string }
+        assistant_slug: { type: string }
+        created_at: { type: string, format: date-time }
+
+    Status:
+      type: object
+      required: [instance_id, version, health, started_at, now]
+      properties:
+        instance_id: { type: string }
+        version: { type: string }
+        health: { $ref: '#/components/schemas/Health' }
+        started_at: { type: string, format: date-time }
+        now: { type: string, format: date-time }
+
+    Application:
+      type: object
+      required: [id, name, image, digest, hostname, exposure, health, desired_state, observed_state, updated_at]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        bundle_id: { type: string }
+        image: { type: string }
+        digest: { type: string }
+        hostname: { type: string }
+        exposure: { $ref: '#/components/schemas/Exposure' }
+        health: { $ref: '#/components/schemas/Health' }
+        desired_state: { type: string }
+        observed_state: { type: string }
+        installed_at: { type: string, format: date-time, nullable: true }
+        updated_at: { type: string, format: date-time }
+
+    CatalogBundle:
+      type: object
+      required: [id, name, image, architectures, default_exposure, max_exposure, installed]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        image: { type: string }
+        architectures: { type: array, items: { type: string, enum: [amd64, arm64] } }
+        default_exposure: { $ref: '#/components/schemas/Exposure' }
+        max_exposure: { $ref: '#/components/schemas/Exposure' }
+        memory_mb: { type: integer }
+        installed: { type: boolean }
+
+    Project:
+      type: object
+      required: [id, slug, name, repository_url, exposure, hostname, created_at, updated_at]
+      properties:
+        id: { type: string }
+        slug: { type: string }
+        name: { type: string }
+        repository_url: { type: string, format: uri }
+        exposure: { $ref: '#/components/schemas/Exposure' }
+        hostname: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    Release:
+      type: object
+      required: [id, project_id, commit, digest, status, active, created_at, updated_at]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        commit: { type: string }
+        digest: { type: string }
+        status: { type: string }
+        active: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    Secret:
+      type: object
+      description: Metadata only; value never returned.
+      required: [id, scope, name, version, created_at, updated_at]
+      properties:
+        id: { type: string }
+        scope: { type: string }
+        name: { type: string }
+        version: { type: integer }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    Backup:
+      type: object
+      required: [id, repository, status, started_at]
+      properties:
+        id: { type: string }
+        repository: { type: string }
+        snapshot_id: { type: string }
+        status: { type: string }
+        verified_at: { type: string, format: date-time, nullable: true }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time, nullable: true }
+        error: { type: string }
+
+    Event:
+      type: object
+      required: [id, type, severity, message, created_at]
+      properties:
+        id: { type: string }
+        type: { type: string }
+        severity: { type: string }
+        resource_id: { type: string }
+        message: { type: string }
+        data: { type: object, additionalProperties: true }
+        read_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    SyncFolder:
+      type: object
+      required: [id, name, server_path, share_with_ai, health, created_at, updated_at]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        server_path: { type: string }
+        share_with_ai: { type: boolean }
+        health: { $ref: '#/components/schemas/Health' }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    Workspace:
+      type: object
+      required: [id, project_id, branch, agent, status, last_active_at, created_at]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        branch: { type: string }
+        agent: { type: string }
+        status: { type: string }
+        last_active_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    User:
+      type: object
+      required: [id, email, name, groups, disabled, created_at, updated_at]
+      properties:
+        id: { type: string }
+        email: { type: string, format: email }
+        name: { type: string }
+        groups: { type: array, items: { type: string } }
+        disabled: { type: boolean }
+    ProviderCredential:
+      type: object
+      description: Metadata only; value and secret_id never returned. managed_by=omahab for API keys via secrets broker, litellm for subscription (chatgpt/xai_oauth) with external_ref.
+      required: [id, provider, name, kind, status, configured, managed_by, updated_at]
+      properties:
+        id: { type: string }
+        provider: { type: string, enum: [openai, anthropic, openrouter, chatgpt, xai] }
+        name: { type: string }
+        kind: { type: string, enum: [api_key, oauth] }
+        status: { type: string }
+        configured: { type: boolean }
+        managed_by: { type: string, enum: [omahab, litellm], description: "omahab=API key via secrets broker (secret_id non-null), litellm=subscription via LiteLLM (external_ref chatgpt|xai_oauth)" }
+        external_ref: { type: string, nullable: true, description: "External reference for subscription credentials: chatgpt or xai_oauth; null for API keys" }
+        entitlement: { type: string, nullable: true }
+        expires_at: { type: string, format: date-time, nullable: true }
+        updated_at: { type: string, format: date-time }
+
+    RecoverySession:
+      type: object
+      required: [expires_at]
+      properties:
+        expires_at: { type: string, format: date-time }
+        login_url: { type: string, nullable: true }
+        code: { type: string, nullable: true }
+
+    EmailMessage:
+      type: object
+      required: [id, envelope_from, header_from, recipient, subject, authentication, status, received_at]
+      properties:
+        id: { type: string }
+        envelope_from: { type: string }
+        header_from: { type: string }
+        recipient: { type: string }
+        subject: { type: string }
+        authentication: { type: string }
+        status: { type: string }
+        received_at: { type: string, format: date-time }
+
+    ExposureState:
+      type: object
+      required: [resource_type, resource_id, hostname, exposure, updated_at]
+      properties:
+        resource_type: { type: string, enum: [application, project] }
+        resource_id: { type: string }
+        hostname: { type: string }
+        exposure: { $ref: '#/components/schemas/Exposure' }
+        updated_at: { type: string, format: date-time }
+
+    ReleaseTokenResponse:
+      type: object
+      required: [token, token_prefix]
+      properties:
+        token: { type: string }
+        token_prefix: { type: string }
+
+    MirrorResponse:
+      type: object
+      required: [remote_url, lfs]
+      properties:
+        remote_url: { type: string, format: uri }
+        secret_ref: { type: string }
+        warnings: { type: array, items: { type: string } }
+        lfs: { type: boolean }
+
+    ConfigureMirrorRequest:
+      type: object
+      required: [remote_url, token]
+      properties:
+        remote_url: { type: string, format: uri }
+        token: { type: string }
+        lfs: { type: boolean }
+      additionalProperties: false
+
+    WorkspaceCapabilityResponse:
+      type: object
+      required: [token, expires_at]
+      properties:
+        token: { type: string }
+        expires_at: { type: string, format: date-time }
+
+    KnowledgeSearchRequest:
+      type: object
+      required: [query]
+      properties:
+        query: { type: string }
+        principal: { type: string }
+        limit: { type: integer, minimum: 0, maximum: 100 }
+      additionalProperties: false
+
+    KnowledgeUploadRequest:
+      type: object
+      required: [filename, content]
+      properties:
+        filename: { type: string }
+        content: { type: string, format: byte }
+        tags: { type: array, items: { type: string } }
+        principal: { type: string }
+      additionalProperties: false
+
+    Citation:
+      type: object
+      required: [source_id, deep_link]
+      properties:
+        source_id: { type: string }
+        deep_link: { type: string }
+        snippet: { type: string }
+        score: { type: number }
+
+    PaperlessMetadata:
+      type: object
+      properties:
+        id: { type: string }
+        title: { type: string }
+        correspondent: { type: string }
+        document_type: { type: string }
+        tags: { type: array, items: { type: string } }
+        deep_link: { type: string }
+        text: { type: string }
+
+    KnowledgeSource:
+      type: object
+      required: [id, kind, name, base_url]
+      properties:
+        id: { type: string }
+        kind: { type: string, enum: [paperless, karakeep, notes] }
+        name: { type: string }
+        base_url: { type: string }
+
+    IndexSetupOption:
+      type: object
+      required: [id, label, description]
+      properties:
+        id: { type: string }
+        label: { type: string }
+        description: { type: string }
+        model_alias: { type: string, nullable: true }
+
+    ModelInfo:
+      type: object
+      required: [alias, name, license, size_bytes, expected_memory_mb]
+      properties:
+        alias: { type: string }
+        name: { type: string }
+        model_id: { type: string }
+        license: { type: string }
+        size_bytes: { type: integer }
+        expected_memory_mb: { type: integer }
+        dimensions: { type: integer }
+
+    EnrollmentState:
+      type: object
+      required: [user_id, has_passkey, passkey_count]
+      properties:
+        user_id: { type: string }
+        has_passkey: { type: boolean }
+        passkey_count: { type: integer }
+        enrolled_at: { type: string, format: date-time, nullable: true }
+
+    AppAccess:
+      type: object
+      required: [client_id, client_name]
+      properties:
+        client_id: { type: string }
+        client_name: { type: string }
+
+    Group:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        friendly_name: { type: string }
+
+    SetupStatus:
+      type: object
+      required: [state, checks]
+      properties:
+        state: { type: string, enum: [waiting_for_cloudflare, reconciling, attention, complete] }
+        checks: { type: array, items: { $ref: '#/components/schemas/SetupCheck' } }
+
+    SetupCheck:
+      type: object
+      required: [id, status, label, owner]
+      properties:
+        id: { type: string }
+        label: { type: string }
+        owner: { type: string, enum: [operator, system] }
+        status: { type: string, enum: [ok, pending, failed, skipped] }
+        detail: { type: string }
+        action: { type: string }
+        apps: { type: array, items: { $ref: '#/components/schemas/SetupAppStatus' } }
+        passkey_count: { type: integer }
+        target: { type: integer }
+
+    SetupAppStatus:
+      type: object
+      required: [bundle_id, status]
+      properties:
+        bundle_id: { type: string }
+        status: { type: string, enum: [running, failed, pending] }
+        detail: { type: string }
+
+    CreateProjectRequest:
+      type: object
+      required: [slug, name]
+      properties:
+        slug: { type: string, pattern: '^[a-z0-9-]+$' }
+        name: { type: string }
+        repository_url: { type: string, format: uri }
+        exposure: { $ref: '#/components/schemas/Exposure' }
+        hostname: { type: string }
+      additionalProperties: false
+
+    UpdateProjectRequest:
+      type: object
+      properties:
+        name: { type: string }
+        exposure: { $ref: '#/components/schemas/Exposure' }
+        hostname: { type: string }
+      additionalProperties: false
+
+    CreateReleaseRequest:
+      type: object
+      required: [commit, digest]
+      properties:
+        commit: { type: string }
+        digest: { type: string }
+      additionalProperties: false
+
+    UpdateApplicationRequest:
+      type: object
+      properties:
+        exposure: { $ref: '#/components/schemas/Exposure' }
+        desired_state: { type: string }
+      additionalProperties: false
+
+    ApplicationActionRequest:
+      type: object
+      required: [action]
+      properties:
+        action: { type: string, enum: [start, stop, restart, update, rollback] }
+      additionalProperties: false
+
+    InstallApplicationRequest:
+      type: object
+      required: [bundle_id]
+      properties:
+        bundle_id: { type: string }
+        name: { type: string }
+        hostname: { type: string }
+        exposure: { $ref: '#/components/schemas/Exposure' }
+      additionalProperties: false
+
+    UpdateExposureRequest:
+      type: object
+      required: [exposure]
+      properties:
+        exposure: { $ref: '#/components/schemas/Exposure' }
+        confirmation:
+          type: string
+          description: |
+            Required when exposure=public. The caller must repeat the exact
+            hostname being made public (case-insensitive). Requests without a
+            matching confirmation are rejected with 400 code confirmation_required.
+            Optional and ignored for private/shared targets.
+      additionalProperties: false
+
+    CreateSecretRequest:
+      type: object
+      required: [scope, name, value]
+      properties:
+        scope: { type: string }
+        name: { type: string }
+        value: { type: string, description: Never returned in reads }
+      additionalProperties: false
+
+    UpdateSecretRequest:
+      type: object
+      required: [value]
+      properties:
+        value: { type: string }
+      additionalProperties: false
+
+    CreateBackupRequest:
+      type: object
+      properties:
+        repository: { type: string }
+      additionalProperties: false
+
+    CreateSyncFolderRequest:
+      type: object
+      required: [name, server_path]
+      properties:
+        name: { type: string }
+        server_path: { type: string }
+        share_with_ai: { type: boolean }
+      additionalProperties: false
+
+    UpdateSyncFolderRequest:
+      type: object
+      properties:
+        name: { type: string }
+        share_with_ai: { type: boolean }
+      additionalProperties: false
+
+    CreateWorkspaceRequest:
+      type: object
+      required: [project_id]
+      properties:
+        project_id: { type: string }
+        branch: { type: string }
+        agent: { type: string }
+      additionalProperties: false
+
+    CreateUserRequest:
+      type: object
+      required: [email]
+      properties:
+        email: { type: string, format: email }
+        name: { type: string }
+        groups: { type: array, items: { type: string } }
+      additionalProperties: false
+
+    UpdateUserRequest:
+      type: object
+      properties:
+        name: { type: string }
+        groups: { type: array, items: { type: string } }
+        disabled: { type: boolean }
+      additionalProperties: false
+
+    CreateProviderCredentialRequest:
+      type: object
+      required: [provider, kind, value]
+      properties:
+        provider: { type: string }
+        name: { type: string }
+        kind: { type: string }
+        value: { type: string, description: Secret value, never returned } 
+      additionalProperties: false
+
+    EmailIngestRequest:
+      type: object
+      required: [from, to, timestamp, nonce, raw, rawSize]
+      properties:
+        from: { type: string, description: SMTP envelope sender }
+        to: { type: string, description: SMTP envelope recipient }
+        timestamp: { type: string, pattern: '^[0-9]+$' }
+        nonce: { type: string }
+        raw: { type: string, contentEncoding: base64, description: Base64-encoded raw RFC 5322 message }
+        rawSize: { type: integer, minimum: 1, description: Decoded raw byte length }
+      additionalProperties: false
+    ModelAlias:
+      type: object
+      description: Stable omahab alias routed via LiteLLM.
+      required: [name, credential_id, model, updated_at]
+      properties:
+        name: { type: string, enum: [omahab/fast, omahab/balanced, omahab/reasoning, omahab/embedding] }
+        credential_id: { type: string }
+        model: { type: string, description: Upstream model, e.g. gpt-4o, anthropic/claude-3-5-sonnet, xai/grok-4, chatgpt/gpt-4o }
+        fallback_order: { type: array, items: { type: string }, nullable: true, description: Ordered fallback credential IDs or model names; empty means no fallback } 
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    SetModelAliasRequest:
+      type: object
+      required: [credential_id, model]
+      properties:
+        credential_id: { type: string }
+        model: { type: string }
+        fallback_order: { type: array, items: { type: string } }
+      additionalProperties: false
+    ModelKey:
+      type: object
+      description: Metadata for a scoped LiteLLM virtual key; plaintext never returned except once on creation.
+      required: [id, name, key_prefix, owner_kind, owner_id, scopes, created_at]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        key_prefix: { type: string, description: First 7 chars of key for display, e.g. sk-... }
+        owner_kind: { type: string, enum: [hermes, device, harness] }
+        owner_id: { type: string }
+        scopes: { type: array, items: { type: string } }
+        rpm: { type: integer, nullable: true, minimum: 1 }
+        tpm: { type: integer, nullable: true, minimum: 1 }
+        concurrency: { type: integer, nullable: true, minimum: 1 }
+        budget: { type: number, nullable: true, minimum: 0 }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time, nullable: true }
+    CreateModelKeyRequest:
+      type: object
+      required: [name, owner_kind, owner_id]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 128 }
+        owner_kind: { type: string, enum: [hermes, device, harness] }
+        owner_id: { type: string, minLength: 1 }
+        scopes: { type: array, items: { type: string, enum: [omahab/fast, omahab/balanced, omahab/reasoning, omahab/embedding] } }
+        rpm: { type: integer, minimum: 1 }
+        tpm: { type: integer, minimum: 1 }
+        concurrency: { type: integer, minimum: 1 }
+        budget: { type: number, minimum: 0 }
+        expires_at: { type: string, format: date-time }
+      additionalProperties: false
+    OAuthSession:
+      type: object
+      description: Safe OAuth session; never includes device codes, access/refresh tokens, auth file contents, or LiteLLM master key.
+      required: [provider, flow, verification_url, expires_at, status]
+      properties:
+        id: { type: string }
+        provider: { type: string, enum: [chatgpt, xai] }
+        flow: { type: string, enum: [device_code, loopback] }
+        verification_url: { type: string, format: uri }
+        user_code: { type: string, nullable: true, description: Device-code user code for ChatGPT flow }
+        callback_port: { type: integer, nullable: true, description: Loopback callback port for xAI flow (fixed 56121) }
+        expires_at: { type: string, format: date-time }
+        status: { type: string, enum: [pending, connected, denied, expired, error] }
+    StartProviderOAuthRequest:
+      type: object
+      required: [flow]
+      properties:
+        flow: { type: string, enum: [device_code, loopback] }
+      additionalProperties: false
+    ForwardOAuthCallbackRequest:
+      type: object
+      required: [callback_path]
+      properties:
+        callback_path: { type: string, description: "Only the /callback?<query> path; host/scheme/port never accepted; shell metacharacters rejected" }
+      additionalProperties: false
+    ToolEnvEntry:
+      type: object
+      description: Metadata for a tool-environment variable (value never returned)
+      required: [name, version, created_at, updated_at]
+      properties:
+        name: { type: string, pattern: '^[A-Z_][A-Z0-9_]{0,127}$', description: Variable name }
+        version: { type: integer, minimum: 1 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    PutToolEnvRequest:
+      type: object
+      required: [value]
+      properties:
+        value: { type: string, description: Write-only value; must not contain NUL, CR, or LF }
+      additionalProperties: false
+    CompanionDevice:
+      type: object
+      description: Companion device record (device token never returned; only prefix)
+      required: [id, name, allow_provider_oauth, created_at, updated_at]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        allow_provider_oauth: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    CompanionEnrollment:
+      type: object
+      description: Enrollment metadata (code returned once, stored only as hash)
+      required: [id, expires_at, created_at]
+      properties:
+        id: { type: string }
+        expires_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }

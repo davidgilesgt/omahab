@@ -366,6 +366,22 @@ func (r *DevPodRunner) Attach(ctx context.Context, workspaceID string) error {
 	return r.run(ctx, "tmux", args...)
 }
 
+// SSHProxy proxies stdio to the workspace via `devpod ssh --stdio`.
+// It is used as ProxyCommand for `ssh ws-<id>` (see internal/client/daemon.go ensureWorkspaceSSHConfig).
+// The caller must have stdin/stdout wired (typically ssh's ProxyCommand).
+func (r *DevPodRunner) SSHProxy(ctx context.Context, workspaceID string) error {
+	if strings.TrimSpace(workspaceID) == "" {
+		return fmt.Errorf("%w: workspace id is required", ErrValidation)
+	}
+	return r.withDevPodEnv(func() error {
+		cmd := exec.CommandContext(ctx, r.bin, "ssh", workspaceID, "--stdio")
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		return cmd.Run()
+	})
+}
+
 // Send sends a message to the workspace tmux session via `devpod ssh` + tmux send-keys.
 func (r *DevPodRunner) Send(ctx context.Context, workspaceID string, message string) error {
 	if strings.TrimSpace(workspaceID) == "" {
@@ -392,7 +408,6 @@ func (r *DevPodRunner) RunPrint(ctx context.Context, workspaceID string, prompt 
 	cmd := fmt.Sprintf("cd $(ls -d /workspaces/* 2>/dev/null | head -n 1) && omp -p --mode json %s", quotedPrompt)
 	return r.output(ctx, r.bin, "ssh", workspaceID, "--command", cmd)
 }
-
 func (r *DevPodRunner) sessionName(workspaceID string) string {
 	name := "omahab-" + workspaceID
 	if len(name) > 64 {
@@ -403,6 +418,38 @@ func (r *DevPodRunner) sessionName(workspaceID string) string {
 	name = strings.ReplaceAll(name, "/", "-")
 	return name
 }
+
+// CapturePane captures the last pane content of the workspace agent tmux session.
+// It runs `devpod ssh <id> --command "tmux capture-pane -p -t omp"` and returns the last line.
+// On any error (workspace not running, tmux missing) it returns "", nil to avoid failing the caller.
+func (r *DevPodRunner) CapturePane(ctx context.Context, workspaceID string) (string, error) {
+	if strings.TrimSpace(workspaceID) == "" {
+		return "", fmt.Errorf("%w: workspace id is required", ErrValidation)
+	}
+	cmd := "tmux capture-pane -p -t omp 2>/dev/null || tmux capture-pane -p 2>/dev/null || echo \"\""
+	out, err := r.output(ctx, r.bin, "ssh", workspaceID, "--command", cmd)
+	if err != nil {
+		return "", nil
+	}
+	text := strings.TrimSpace(string(out))
+	if text == "" {
+		return "", nil
+	}
+	lines := strings.Split(text, "\n")
+	var last string
+	for i := len(lines) - 1; i >= 0; i-- {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed != "" {
+			last = trimmed
+			break
+		}
+	}
+	if last == "" {
+		last = strings.TrimSpace(lines[len(lines)-1])
+	}
+	return last, nil
+}
+
 
 // IsRunning reports whether the workspace is running via `devpod status --output json`.
 func (r *DevPodRunner) IsRunning(ctx context.Context, workspaceID string) (bool, error) {

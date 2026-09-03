@@ -490,6 +490,31 @@ func (c *RemoteClient) StopCompanionWorkspace(ctx context.Context, id string) er
 	return c.doWithAuth(ctx, http.MethodPost, path, auth, strings.NewReader("{}"), nil)
 }
 
+// CreateCompanionSyncFolder creates a sync folder via device endpoint.
+// It sends name, local_path, share_with_ai and the client's Syncthing device ID.
+func (c *RemoteClient) CreateCompanionSyncFolder(ctx context.Context, name, localPath string, shareWithAI bool, deviceID, deviceName string) (*domain.SyncFolder, error) {
+	auth, err := c.deviceAuthHeader()
+	if err != nil {
+		return nil, err
+	}
+	if auth == "" {
+		return nil, ErrNotAuthenticated
+	}
+	body := map[string]any{
+		"name":           name,
+		"local_path":     localPath,
+		"share_with_ai":  shareWithAI,
+		"device_id":      deviceID,
+		"device_name":    deviceName,
+	}
+	b, _ := json.Marshal(body)
+	var out domain.SyncFolder
+	if err := c.doWithAuth(ctx, http.MethodPost, "/api/v1/companion/sync/folders", auth, strings.NewReader(string(b)), &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // GetCompanionEnvironment fetches the tool-environment bundle via device endpoint.
 // It returns a map of name->value and ETag for caching (If-None-Match -> 304).
 func (c *RemoteClient) GetCompanionEnvironment(ctx context.Context) (map[string]string, string, error) {

@@ -135,6 +135,7 @@ type Workspace struct {
 	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
 	CreatedAt    time.Time  `json:"created_at"`
 	GatewayKeyID *ID        `json:"gateway_key_id,omitempty"`
+	WaitingLine  string     `json:"waiting_line,omitempty"`
 }
 
 type EmailMessage struct {

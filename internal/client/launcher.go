@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 )
 
 // Launcher launches external apps. It is injectable for tests.
@@ -46,11 +47,27 @@ func (e *ExecLauncher) OpenTerminal(dir string) error {
 	if e.TerminalFunc != nil {
 		return e.TerminalFunc(dir)
 	}
-	// Try common terminals; fallback to xdg-open on dir.
+	if runtime.GOOS == "darwin" {
+		// macOS: try Ghostty then Terminal.app via open -a
+		for _, app := range []string{"Ghostty", "Terminal"} {
+			cmd := exec.Command("open", "-a", app, dir)
+			if err := cmd.Start(); err == nil {
+				return nil
+			}
+		}
+		// Fallback to generic open
+		cmd := exec.Command("open", dir)
+		if err := cmd.Start(); err == nil {
+			return nil
+		}
+		return e.OpenURL("file://" + dir)
+	}
+	// Linux: try common terminals; fallback to xdg-open on dir.
 	terms := [][]string{
 		{"xdg-terminal-exec", dir},
 		{"alacritty", "--working-directory", dir},
 		{"kitty", "--directory", dir},
+		{"ghostty", "--working-directory=" + dir},
 		{"gnome-terminal", "--working-directory=" + dir},
 	}
 	for _, t := range terms {
@@ -65,13 +82,29 @@ func (e *ExecLauncher) OpenTerminal(dir string) error {
 	// Fallback: open directory
 	return e.OpenURL("file://" + dir)
 }
-
 func (e *ExecLauncher) OpenTerminalCommand(args []string) error {
 	if e.TerminalCommandFunc != nil {
 		return e.TerminalCommandFunc(args)
 	}
 	if len(args) == 0 {
 		return fmt.Errorf("no command provided")
+	}
+	if runtime.GOOS == "darwin" {
+		// macOS: open -a Ghostty --args <cmd> or open -a Terminal with osascript fallback
+		for _, app := range []string{"Ghostty", "Terminal"} {
+			oa := []string{"-a", app, "--args"}
+			oa = append(oa, args...)
+			cmd := exec.Command("open", oa...)
+			if err := cmd.Start(); err == nil {
+				return nil
+			}
+		}
+		// Fallback: AppleScript tell Terminal to do script
+		script := fmt.Sprintf(`tell application "Terminal" to do script "%s"`, escapeAppleScriptDarwinTerminal(strings.Join(args, " ")))
+		cmd := exec.Command("osascript", "-e", script)
+		if err := cmd.Start(); err == nil {
+			return nil
+		}
 	}
 	// Try terminals with -e / -- support: alacritty -e, kitty, gnome-terminal --, xterm -e
 	terms := [][]string{
@@ -81,6 +114,8 @@ func (e *ExecLauncher) OpenTerminalCommand(args []string) error {
 		append([]string{"kitty"}, args...),
 		// kitty with -- (alternative)
 		append([]string{"kitty", "--"}, args...),
+		// ghostty -e (Ghostty supports -e on Linux)
+		append([]string{"ghostty", "-e"}, args...),
 		// gnome-terminal -- <cmd...>
 		append([]string{"gnome-terminal", "--"}, args...),
 		// xterm -e <cmd...>
@@ -104,6 +139,20 @@ func (e *ExecLauncher) OpenTerminalCommand(args []string) error {
 		return nil
 	}
 	return fmt.Errorf("no terminal found to run %v", args)
+}
+
+func escapeAppleScriptDarwinTerminal(s string) string {
+	out := ""
+	for _, r := range s {
+		if r == '"' {
+			out += `\"`
+		} else if r == '\\' {
+			out += `\\`
+		} else {
+			out += string(r)
+		}
+	}
+	return out
 }
 
 func (e *ExecLauncher) LaunchHermes(url string) error {

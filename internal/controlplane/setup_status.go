@@ -378,12 +378,60 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (apitypes.SetupStatus, err
 		if backupCount > 0 {
 			backupCheck.Status = "ok"
 			backupCheck.Detail = "backup repository configured"
+			// Persistent posture: detect local-only (no off-site copy)
+			rows, err := b.db.QueryContext(ctx, `SELECT location FROM backup_repositories`)
+			if err == nil {
+				defer rows.Close()
+				hasLocal := false
+				hasOffsite := false
+				for rows.Next() {
+					var loc string
+					if err := rows.Scan(&loc); err == nil {
+						loc = strings.TrimSpace(loc)
+						if strings.HasPrefix(loc, "/srv/omahab/backup-local") || strings.Contains(loc, "backup-local") {
+							hasLocal = true
+						} else {
+							hasOffsite = true
+						}
+					}
+				}
+				if hasLocal && !hasOffsite {
+					backupCheck.Detail = "backup repository configured (local only — no off-site copy)"
+				}
+			}
 		} else {
 			backupCheck.Status = "pending"
 			backupCheck.Detail = "no backup repository"
 		}
 	}
 	checks = append(checks, backupCheck)
+
+	// Persistent posture line for local-only backups: if only local repos exist, add a dedicated check so the trade-off stays visible.
+	// This ensures Overview and setup show "No off-site copy" even when backups_configured is ok.
+	if backupCount > 0 {
+		rows2, err := b.db.QueryContext(ctx, `SELECT location FROM backup_repositories`)
+		if err == nil {
+			defer rows2.Close()
+			hasLocal2 := false
+			hasOffsite2 := false
+			for rows2.Next() {
+				var loc string
+				if err := rows2.Scan(&loc); err == nil {
+					loc = strings.TrimSpace(loc)
+					if strings.HasPrefix(loc, "/srv/omahab/backup-local") || strings.Contains(loc, "backup-local") {
+						hasLocal2 = true
+					} else {
+						hasOffsite2 = true
+					}
+				}
+			}
+			if hasLocal2 && !hasOffsite2 {
+				offsiteCheck := apitypes.SetupCheck{ID: "backups_offsite", Status: "pending", Detail: "No off-site copy — add an off-site backup repository for disaster recovery"}
+				offsiteCheck = applySetupCheckMeta(offsiteCheck)
+				checks = append(checks, offsiteCheck)
+			}
+		}
+	}
 
 	tailCheck := apitypes.SetupCheck{ID: "tailscale"}
 	tsIP := ""

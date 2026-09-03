@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -85,9 +86,20 @@ func NewEnvironmentManager(opts EnvironmentManagerOpts) *EnvironmentManager {
 	}
 }
 
-// EnvironmentFilePath returns the managed file path: $XDG_CONFIG_HOME/environment.d/90-omahab-agent-tools.conf
-// or ~/.config/environment.d/90-omahab-agent-tools.conf.
+// EnvironmentFilePath returns the managed file path.
+// Linux: $XDG_CONFIG_HOME/environment.d/90-omahab-agent-tools.conf
+// Darwin: $XDG_CONFIG_HOME/omahab/agent-tools.env (or ~/.config/omahab/agent-tools.env)
+// The darwin path is sourced from shell rc via a one-line include written on enroll.
 func EnvironmentFilePath() string {
+	if runtimeGOOS() == "darwin" {
+		if dir := os.Getenv("XDG_CONFIG_HOME"); strings.TrimSpace(dir) != "" {
+			return filepath.Join(strings.TrimSpace(dir), "omahab", "agent-tools.env")
+		}
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			return filepath.Join(home, ".config", "omahab", "agent-tools.env")
+		}
+		return filepath.Join(os.TempDir(), "omahab-agent-tools.env")
+	}
 	if dir := os.Getenv("XDG_CONFIG_HOME"); strings.TrimSpace(dir) != "" {
 		return filepath.Join(strings.TrimSpace(dir), "environment.d", "90-omahab-agent-tools.conf")
 	}
@@ -95,6 +107,10 @@ func EnvironmentFilePath() string {
 		return filepath.Join(home, ".config", "environment.d", "90-omahab-agent-tools.conf")
 	}
 	return filepath.Join(os.TempDir(), "90-omahab-agent-tools.conf")
+}
+
+func runtimeGOOS() string {
+	return runtime.GOOS
 }
 
 // Status returns redacted sync state for DaemonStatus/QML. Values never included.
@@ -239,11 +255,16 @@ func (m *EnvironmentManager) Sync(ctx context.Context) error {
 			return err
 		}
 	}
-
 	now := time.Now().UTC()
 	etagToStore := newETag
 	if strings.TrimSpace(etagToStore) == "" {
 		etagToStore = fmt.Sprintf(`W/"%d"`, bundle.Revision)
+	}
+	// Darwin: ensure shell rc sources the env file (best-effort).
+	if runtimeGOOS() == "darwin" {
+		if applier := newDarwinEnvApplierShim(); applier != nil {
+			_ = applier.EnsureShellInclude()
+		}
 	}
 	m.mu.Lock()
 	m.etag = etagToStore
@@ -253,6 +274,75 @@ func (m *EnvironmentManager) Sync(ctx context.Context) error {
 	m.lastErr = ""
 	m.mu.Unlock()
 	m.logger.Info("environment synced", "revision", bundle.Revision, "count", len(bundle.Variables))
+	return nil
+}
+
+// newDarwinEnvApplierShim returns a darwin EnvApplier for EnsureShellInclude without importing platform (avoid cycle).
+// On linux it returns nil.
+func newDarwinEnvApplierShim() interface{ EnsureShellInclude() error } {
+	if runtimeGOOS() != "darwin" {
+		return nil
+	}
+	// Dynamic import via platform would create cycle; implement inline minimal shim that mirrors platform.DarwinEnvApplier.EnsureShellInclude.
+	return &darwinShellInclude{}
+}
+
+type darwinShellInclude struct{}
+
+func (d *darwinShellInclude) EnsureShellInclude() error {
+	envFile := EnvironmentFilePath()
+	includeLine := fmt.Sprintf(`[ -f "%s" ] && set -a && . "%s" && set +a # omahab-agent-tools`, envFile, envFile)
+	// Legacy fixed path line for compatibility
+	legacy := `[ -f "$HOME/.config/omahab/agent-tools.env" ] && set -a && . "$HOME/.config/omahab/agent-tools.env" && set +a # omahab-agent-tools`
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		home = os.Getenv("HOME")
+		if home == "" {
+			return nil
+		}
+	}
+	candidates := []string{
+		filepath.Join(home, ".zshrc"),
+		filepath.Join(home, ".bashrc"),
+		filepath.Join(home, ".bash_profile"),
+		filepath.Join(home, ".config", "fish", "config.fish"),
+	}
+	for _, rc := range candidates {
+		if _, err := os.Stat(rc); err != nil {
+			if os.IsNotExist(err) && strings.Contains(rc, "fish") {
+				_ = os.MkdirAll(filepath.Dir(rc), 0755)
+			} else {
+				continue
+			}
+		}
+		data, err := os.ReadFile(rc)
+		if err != nil {
+			continue
+		}
+		content := string(data)
+		if strings.Contains(content, "omahab-agent-tools") {
+			continue
+		}
+		f, err := os.OpenFile(rc, os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			continue
+		}
+		if !strings.HasSuffix(content, "\n") && len(content) > 0 {
+			_, _ = f.WriteString("\n")
+		}
+		if strings.Contains(rc, "fish") {
+			fishLine := fmt.Sprintf("test -f %s; and set -a; and source %s; and set +a # omahab-agent-tools\n", envFile, envFile)
+			_, _ = f.WriteString(fishLine)
+		} else {
+			// Prefer legacy line if envFile is the default darwin path
+			line := includeLine
+			if envFile == filepath.Join(home, ".config", "omahab", "agent-tools.env") {
+				line = legacy
+			}
+			_, _ = f.WriteString(line + "\n")
+		}
+		_ = f.Close()
+	}
 	return nil
 }
 
@@ -385,6 +475,34 @@ func (m *EnvironmentManager) parseFileAssignments(data []byte) map[string]string
 	return out
 }
 
+// parseFileAssignments is a package-level helper for mcp.go (which needs to parse env files without a manager).
+// It mirrors EnvironmentManager.parseFileAssignments but is accessible package-wide.
+func parseFileAssignments(data []byte) map[string]string {
+	out := map[string]string{}
+	sc := bufio.NewScanner(strings.NewReader(string(data)))
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		idx := strings.Index(line, "=")
+		if idx <= 0 {
+			continue
+		}
+		k := strings.TrimSpace(line[:idx])
+		v := strings.TrimSpace(line[idx+1:])
+		if len(v) >= 2 && v[0] == '"' && v[len(v)-1] == '"' {
+			inner := v[1 : len(v)-1]
+			inner = strings.ReplaceAll(inner, "\\`", "`")
+			inner = strings.ReplaceAll(inner, "\\$", "$")
+			inner = strings.ReplaceAll(inner, "\\\"", "\"")
+			inner = strings.ReplaceAll(inner, "\\\\", "\\")
+			v = inner
+		}
+		out[k] = v
+	}
+	return out
+}
 // fetchBundle performs GET /api/v1/companion/environment with If-None-Match and device-token auth.
 // Returns bundle, ETag, notModified, error. Never includes values in errors.
 func (m *EnvironmentManager) fetchBundle(ctx context.Context, ifNoneMatch string) (*EnvironmentBundle, string, bool, error) {

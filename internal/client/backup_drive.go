@@ -8,8 +8,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
+
+	"github.com/omahab/omahab/internal/client/platform"
 )
 
 // BackupDriveStatus is the last snapshot info for a machine backup.
@@ -66,9 +69,18 @@ func ExcludePatterns() []string {
 	}
 }
 
-// EnableBackupDrive writes the backup-paths file and installs the systemd user timer.
+// EnableBackupDrive writes the backup-paths file and installs the periodic backup job.
+// It is platform-aware: on Linux it installs a systemd user timer; on Darwin it creates a launchd plist.
 // paths is a slice of absolute paths; empty means DefaultBackupPaths().
 func EnableBackupDrive(paths []string) error {
+	if runtime.GOOS == "darwin" {
+		if len(paths) == 0 {
+			paths = DefaultBackupPaths()
+		}
+		// Delegate to platform scheduler for Darwin (launchd)
+		sched := platform.NewScheduler()
+		return sched.Install(paths)
+	}
 	if len(paths) == 0 {
 		paths = DefaultBackupPaths()
 	}

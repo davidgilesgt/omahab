@@ -88,7 +88,6 @@ Use --server to target a different control plane (env OMAHAB_SERVER, then ~/.con
 	root.PersistentFlags().BoolVar(&flagForce, "force", false, "force destructive or public operations without confirmation (required in --non-interactive)")
 	// Also --yes alias for force (common UX)
 	root.PersistentFlags().BoolVarP(&flagYes, "yes", "y", false, "alias for --force")
-	// Core commands
 	root.AddCommand(newLoginCmd())
 	root.AddCommand(newStatusCmd())
 	root.AddCommand(newUpCmd())
@@ -112,7 +111,7 @@ Use --server to target a different control plane (env OMAHAB_SERVER, then ~/.con
 	root.AddCommand(newEnvCmd())
 	root.AddCommand(newVersionCmd())
 	root.AddCommand(newCatalogCmd())
-	// Completion
+	root.AddCommand(newMCPBridgeCmd())
 	root.AddCommand(newCompletionCmd())
 	// Host/admin: expose doctor already, status, identity recover
 	// Ensure help is discoverable
@@ -2005,6 +2004,58 @@ func newRunnerCmd() *cobra.Command {
 				return handleFailure(err)
 			}
 			return cd.Call(ctx, "workspace.attach", map[string]any{"id": args[0]}, nil)
+		},
+	})
+	// ssh-proxy: stdio proxy for ssh ProxyCommand (internal, used by clientd ensureWorkspaceSSHConfig)
+	runner.AddCommand(&cobra.Command{
+		Use:   "ssh-proxy <id>",
+		Short: "Proxy stdio to workspace via devpod ssh --stdio (internal)",
+		Args:  cobra.ExactArgs(1),
+		Hidden: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id := strings.TrimSpace(args[0])
+			if id == "" {
+				return errors.New("id required")
+			}
+			// Re-exec via sudo when not root (server path requires root for devpod access)
+			if os.Geteuid() != 0 {
+				if sudoPath, err := exec.LookPath("sudo"); err == nil {
+					c := exec.Command(sudoPath, os.Args...)
+					c.Stdin = os.Stdin
+					c.Stdout = os.Stdout
+					c.Stderr = os.Stderr
+					if err := c.Run(); err != nil {
+						return handleFailure(err)
+					}
+					return nil
+				}
+			}
+			// Direct devpod ssh --stdio with DEVPOD_HOME handling
+			bin := "devpod"
+			if p, err := exec.LookPath("devpod"); err == nil {
+				bin = p
+			}
+			devpodHome := strings.TrimSpace(os.Getenv("DEVPOD_HOME"))
+			if devpodHome == "" {
+				devpodHome = "/var/lib/omahab/devpod"
+			}
+			// Ensure env as DevPodRunner.withDevPodEnv does
+			origDevpod := os.Getenv("DEVPOD_HOME")
+			origHome := os.Getenv("HOME")
+			_ = os.Setenv("DEVPOD_HOME", devpodHome)
+			_ = os.Setenv("HOME", devpodHome)
+			defer func() {
+				_ = os.Setenv("DEVPOD_HOME", origDevpod)
+				_ = os.Setenv("HOME", origHome)
+			}()
+			c := exec.CommandContext(cmd.Context(), bin, "ssh", id, "--stdio")
+			c.Stdin = os.Stdin
+			c.Stdout = os.Stdout
+			c.Stderr = os.Stderr
+			if err := c.Run(); err != nil {
+				return handleFailure(err)
+			}
+			return nil
 		},
 	})
 

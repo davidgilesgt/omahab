@@ -75,6 +75,8 @@ func (f *fakeReviewRunner) Delete(_ context.Context, id string) error {
 func (f *fakeReviewRunner) Attach(_ context.Context, _ string) error { return nil }
 func (f *fakeReviewRunner) IsRunning(_ context.Context, _ string) (bool, error) { return true, nil }
 func (f *fakeReviewRunner) Send(_ context.Context, _, _ string) error { return nil }
+func (f *fakeReviewRunner) CapturePane(_ context.Context, _ string) (string, error) { return "", nil }
+func (f *fakeReviewRunner) SSHProxy(_ context.Context, _ string) error { return nil }
 func (f *fakeReviewRunner) RunPrint(_ context.Context, _ string, _ string) ([]byte, error) {
 	if f.err != nil {
 		return nil, f.err
