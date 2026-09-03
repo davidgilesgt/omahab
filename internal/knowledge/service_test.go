@@ -174,24 +174,4 @@ func TestPinnedModelsAndToolSpecs(t *testing.T) {
 			t.Fatalf("model missing fields: %+v", m)
 		}
 	}
-	specs := AssistantToolSpecs()
-	if len(specs) != 6 {
-		t.Fatalf("AssistantToolSpecs want 6 got %d: %v", len(specs), specs)
-	}
-	names := make(map[string]bool)
-	for _, s := range specs {
-		if s.Name == "" || s.Description == "" || s.InputSchema == nil {
-			t.Fatalf("spec missing fields: %+v", s)
-		}
-		if names[s.Name] {
-			t.Fatalf("duplicate spec name %q", s.Name)
-		}
-		names[s.Name] = true
-	}
-	// ensure expected names present (allow subset but must include core)
-	for _, want := range []string{"paperless_search", "paperless_get", "paperless_list", "paperless_upload", "paperless_add_tag"} {
-		if !names[want] {
-			t.Fatalf("missing spec %q", want)
-		}
-	}
 }

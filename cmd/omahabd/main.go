@@ -84,10 +84,17 @@ func run() error {
 	// Create API server
 	token := backend.APIToken()
 	emailKey := backend.EmailHMACKey()
+	mcpToken := backend.MCPToken(context.Background())
+	var mcpHandler http.Handler
+	if h := backend.MCPHandler(); h != nil {
+		mcpHandler = h.Handler()
+	}
 	srv, err := api.New(api.Config{
 		Backend:      backend,
 		Version:      version,
 		BearerToken:  token,
+		MCPToken:     mcpToken,
+		MCPHandler:   mcpHandler,
 		EmailHMACKey: string(emailKey),
 		Bootstrap:    backend,
 	})

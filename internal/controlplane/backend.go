@@ -32,6 +32,7 @@ import (
 	"github.com/omahab/omahab/internal/identity"
 	"github.com/omahab/omahab/internal/integrations"
 	"github.com/omahab/omahab/internal/knowledge"
+	"github.com/omahab/omahab/internal/mcp"
 	"github.com/omahab/omahab/internal/projects"
 	"github.com/omahab/omahab/internal/providers"
 	"github.com/omahab/omahab/internal/scm"
@@ -69,6 +70,7 @@ type Backend struct {
 	integrations *integrations.Service
 	exposure     *exposure.Service
 	exposureMu   sync.Mutex
+	mcpServer    *mcp.Server
 
 	masterKey [32]byte
 	apiToken  string
@@ -468,6 +470,17 @@ func (b *Backend) initServices(ctx context.Context) error {
 			Message:  "environments init failed: " + err.Error(),
 		})
 	}
+	// mcp — streamable HTTP server for Hermes (stateless, JSONResponse)
+	// Wire providers via adapters; workspaces stub until Step 5.
+	b.mcpServer = mcp.New(mcp.Deps{
+		Forgejo:    newMCPForgejoAdapter(b),
+		Docs:       newMCPDocsAdapter(b),
+		Projects:   newMCPProjectsAdapter(b),
+		SCM:        newMCPSCMAdapter(b),
+		Workspaces: &mcpWorkspacesStub{backend: b},
+		Events:     newMCPEventsAdapter(b),
+		Backups:    newMCPBackupsAdapter(b),
+	})
 
 	return nil
 }

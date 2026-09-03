@@ -26,6 +26,7 @@ type Server struct {
 	backend      Backend
 	environments *environments.Service
 	tokenHash    []byte // SHA256 of bearer token, nil means auth disabled (tests only)
+	mcpTokenHash []byte // SHA256 of hermes_mcp_token, nil means MCP auth disabled
 	emailHMACKey []byte
 	version      string
 	startedAt    time.Time
@@ -38,14 +39,17 @@ type Server struct {
 	// adminToken is the raw admin API token returned by the bootstrap
 	// claim (kept in memory only; never logged).
 	adminToken string
+	// mcpHandler is the streamable HTTP MCP handler for /mcp.
+	mcpHandler http.Handler
 }
-
 // Config configures the API server.
 type Config struct {
 	Backend      Backend
 	Environments *environments.Service
 	Version      string
 	BearerToken  string // raw token; hashed with SHA256 and compared constant-time
+	MCPToken     string // raw hermes_mcp_token; hashed and checked by mcpAuth
+	MCPHandler   http.Handler
 	EmailHMACKey string // raw HMAC key for email webhook; empty disables HMAC check (tests)
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
@@ -90,10 +94,15 @@ func New(cfg Config) (*Server, error) {
 		emailHMACKey: []byte(cfg.EmailHMACKey),
 		bootstrap:    cfg.Bootstrap,
 		adminToken:   cfg.BearerToken,
+		mcpHandler:   cfg.MCPHandler,
 	}
 	if cfg.BearerToken != "" {
 		h := sha256.Sum256([]byte(cfg.BearerToken))
 		s.tokenHash = h[:]
+	}
+	if cfg.MCPToken != "" {
+		h := sha256.Sum256([]byte(cfg.MCPToken))
+		s.mcpTokenHash = h[:]
 	}
 	s.router = s.buildRouter()
 	s.httpServer = &http.Server{
@@ -149,6 +158,16 @@ func (s *Server) buildRouter() chi.Router {
 
 	// Companion enrollment: device claim with single-use code, no bearer (open). Code in JSON body {code}.
 	r.Post("/api/v1/companion/enroll", s.withBodyLimit(defaultBodyLimit, s.handleEnrollCompanion))
+
+	// MCP server for Hermes (outside bearerAuth, behind dedicated mcpAuth).
+	// Supports POST/GET /mcp with Bearer OMAHAB_MCP_TOKEN.
+	if s.mcpHandler != nil {
+		r.Group(func(r chi.Router) {
+			r.Use(s.mcpAuth)
+			r.Handle("/mcp", s.mcpHandler)
+			r.Handle("/mcp/", s.mcpHandler)
+		})
+	}
 
 	// First-boot bootstrap (LAN listener only; group is inert when the
 	// gate is nil or bootstrap already completed).
@@ -500,6 +519,54 @@ func (s *Server) deviceAuth(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), environments.DeviceIDKey, dev.ID)
 		ctx = context.WithValue(ctx, environments.DeviceKey, dev)
 		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// mcpAuth enforces the dedicated Hermes MCP token (platform-app/hermes_mcp_token).
+// It is mounted at POST/GET /mcp outside bearerAuth. Missing token -> 401, wrong
+// token -> 403, admin token and oma_dev_ tokens -> 403 with constant-time compare.
+func (s *Server) mcpAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.mcpTokenHash == nil {
+			// MCP auth disabled (no handler or no token) — in tests where mcpTokenHash is nil but handler exists, allow to surface 500? For hermetic tests, treat as unauthorized.
+			// If no MCP token is configured, reject with 401 to avoid open endpoint in prod.
+			writeError(w, r, errUnauthorized("mcp token not configured"))
+			return
+		}
+		hdr := r.Header.Get("Authorization")
+		if hdr == "" {
+			writeError(w, r, errUnauthorized("missing bearer token"))
+			return
+		}
+		parts := strings.SplitN(hdr, " ", 2)
+		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+			writeError(w, r, errUnauthorized("invalid authorization header"))
+			return
+		}
+		token := strings.TrimSpace(parts[1])
+		if token == "" {
+			writeError(w, r, errUnauthorized("missing bearer token"))
+			return
+		}
+		// Reject device tokens with 403
+		if strings.HasPrefix(token, "oma_dev_") {
+			writeError(w, r, errForbidden("device token not allowed on mcp endpoint"))
+			return
+		}
+		// Reject admin bearer with 403 (constant-time)
+		if s.tokenHash != nil {
+			gotAdmin := sha256.Sum256([]byte(token))
+			if subtle.ConstantTimeCompare(gotAdmin[:], s.tokenHash) == 1 {
+				writeError(w, r, errForbidden("admin bearer not allowed on mcp endpoint"))
+				return
+			}
+		}
+		got := sha256.Sum256([]byte(token))
+		if subtle.ConstantTimeCompare(got[:], s.mcpTokenHash) != 1 {
+			writeError(w, r, errForbidden("invalid mcp token"))
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 

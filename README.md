@@ -92,8 +92,21 @@ All of these install automatically (no click-to-install) as native NixOS service
 
 Cross-app integrations are provisioned automatically: Pocket ID OIDC clients for every supporting service (Forgejo, Woodpecker, Immich, Paperless, Karakeep, Hermes), Forgejo↔Woodpecker OAuth, and a real LiteLLM virtual key for Hermes. Application versions track the nixpkgs pin in `flake.lock` — the flake is the release gate.
 
-Docker Compose remains only for user project deploys and CI job containers.
+## AI tools (Hermes via MCP)
 
+Hermes (the `nousresearch/hermes-agent` dashboard at `https://ai.<domain>`) talks to `omahabd` over a streamable-HTTP MCP server at `http://host.docker.internal:8484/mcp` (`POST/GET /mcp` outside `bearerAuth`, `Authorization: Bearer ${OMAHAB_MCP_TOKEN}` SHA-256 verified; admin and `oma_dev_` tokens are rejected with 403). All tools return JSON text content.
+
+Tool surface (36 wire names, no destructive tools):
+
+- Forgejo: `repos_list`, `repo_get`, `repo_archive`/`repo_unarchive` (archive is reversible), `branches_list`, `branch_create`, `file_get`/`file_put`, `issues_list`/`issue_get`/`issue_create`/`issue_comment`, `prs_list`/`pr_get`/`pr_diff`/`pr_create`/`pr_comment`
+- Paperless: `docs_search`, `doc_get`, `docs_tags`, `docs_correspondents`, `docs_types`, `doc_add_tag`, `doc_upload` (Paperless-ngx is §15.1; see DESIGN §13.2 for the canonical list)
+- Projects / CI: `projects_list`, `project_get`, `releases_list`, `ci_runs`, `ci_run_logs`
+- Workspaces: `workspaces_list`, `workspace_create`, `workspace_get`, `workspace_send`, `workspace_stop` (via `WorkspacesProvider` stub until Step 5; no `workspace_delete`)
+- Control plane: `events_recent`, `backup_status`
+
+Rules enforced by the tool surface: archive, never delete; never merge a PR; never force-push or delete a branch. `repo_delete`, `doc_delete`, `pr_merge`, and `workspace_delete` do not exist. Forgejo access for Hermes uses a dedicated `platform-app/hermes_forgejo_token` (`read:repository`, `write:repository`, `read:issue`, `write:issue`).
+
+Docker Compose remains only for user project deploys and CI job containers.
 ## The three-tier model
 
 1. **NixOS closure (immutable)** — packages, systemd units, nftables, sshd, docker/podman, and every platform app service. `services.omahab.enable = true` is the only knob; a `.nix` file never contains a secret or per-household value.

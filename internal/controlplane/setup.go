@@ -1937,6 +1937,9 @@ func (b *Backend) setupPhaseOIDC(ctx context.Context) error {
 		if err := b.ensureOmahabBot(ctx, domainName); err != nil {
 			return fmt.Errorf("ensure omahab-bot: %w", err)
 		}
+		if err := b.ensureHermesForgejoToken(ctx, domainName); err != nil {
+			log.Printf("setup oidc: warn ensure hermes forgejo token: %s", health.RedactDetail(err.Error()))
+		}
 		// Resolve forgejo token and base
 		forgejoToken, err := b.secrets.RevealByName(ctx, "platform-app", "forgejo_token")
 		if err != nil || strings.TrimSpace(forgejoToken) == "" {

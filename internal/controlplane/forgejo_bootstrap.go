@@ -808,5 +808,96 @@ func (b *Backend) ensureWoodpeckerOAuthApp(ctx context.Context, baseURL, token, 
 // forgejoHTTPClientOverride and forgejoBaseURLOverride are test injectables.
 // They are set via Backend fields for tests.
 var _ = store.ErrNotFound
+// ensureHermesForgejoToken creates a limited Forgejo token for the Hermes MCP
+// server (platform-app/hermes_forgejo_token) with scopes
+// read:repository, write:repository, read:issue, write:issue. It reuses the
+// omahab-bot user to avoid creating a second automation account. Forgejo has
+// no delete-excluding scope, so destructive exclusion is enforced by the MCP
+// tool surface (no delete/force-push/branch-delete/pr-merge tools).
+func (b *Backend) ensureHermesForgejoToken(ctx context.Context, domain string) error {
+	if b.secrets == nil {
+		return fmt.Errorf("secrets not configured")
+	}
+	// Ensure omahab-bot exists first; token creation depends on the user.
+	if err := b.ensureOmahabBot(ctx, domain); err != nil {
+		return err
+	}
+	existing, err := b.secrets.RevealByName(ctx, "platform-app", "hermes_forgejo_token")
+	if err == nil && strings.TrimSpace(existing) != "" {
+		// Validate token still works before reusing.
+		if b.validateForgejoToken(ctx, strings.TrimSpace(existing), domain) == nil {
+			return nil
+		}
+	}
+	// Create via Forgejo admin CLI or API. Prefer forgejo API via internal client
+	// if available: use CreateAccessToken on a temporary client built from the
+	// admin token (forgejo_token). Fallback to admin CLI command.
+	baseURL := b.forgejoBaseURL(ctx, domain)
+	adminToken := ""
+	if v, err := b.secrets.RevealByName(ctx, "platform-app", "forgejo_token"); err == nil {
+		adminToken = strings.TrimSpace(v)
+	}
+	if adminToken == "" {
+		adminToken = strings.TrimSpace(os.Getenv("OMAHAB_FORGEJO_TOKEN"))
+	}
+	// Try API path if we have base+token and a forgejo client can be built.
+	// Use generic forgejo token creation path: POST /api/v1/users/omahab-bot/tokens
+	var hermesToken string
+	if baseURL != "" && adminToken != "" {
+		// Lightweight HTTP attempt using forgejo API directly without importing scm
+		// to avoid import cycle. Use the same forgejoAPIRequest helper.
+		body := map[string]any{"name": "hermes", "scopes": []string{"read:repository", "write:repository", "read:issue", "write:issue"}}
+		var out struct {
+			Token string `json:"token"`
+			Sha1  string `json:"sha1"`
+		}
+		_, apiErr := b.forgejoAPIRequest(ctx, baseURL, adminToken, http.MethodPost, "/api/v1/users/omahab-bot/tokens", body, &out)
+		if apiErr == nil {
+			if out.Token != "" {
+				hermesToken = strings.TrimSpace(out.Token)
+			} else if out.Sha1 != "" {
+				hermesToken = strings.TrimSpace(out.Sha1)
+			}
+		} else {
+			low := strings.ToLower(apiErr.Error())
+			if strings.Contains(low, "already exists") || strings.Contains(low, "duplicate") {
+				// Token already exists, list and reuse sha1
+				var list []struct {
+					Name string `json:"name"`
+					Sha1 string `json:"sha1"`
+				}
+				if _, lerr := b.forgejoAPIRequest(ctx, baseURL, adminToken, http.MethodGet, "/api/v1/users/omahab-bot/tokens", nil, &list); lerr == nil {
+					for _, t := range list {
+						if strings.TrimSpace(t.Name) == "hermes" && strings.TrimSpace(t.Sha1) != "" {
+							hermesToken = strings.TrimSpace(t.Sha1)
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+	if hermesToken == "" {
+		// Fallback: generate via CLI as admin user omahab-bot
+		out, err := b.runForgejoAdminCommand(ctx, "user", "generate-access-token", "--username", "omahab-bot", "--token-name", "hermes", "--scopes", "read:repository,write:repository,read:issue,write:issue", "--raw")
+		if err != nil {
+			// Try without --scopes flag (older gitea)
+			out2, err2 := b.runForgejoAdminCommand(ctx, "user", "generate-access-token", "--username", "omahab-bot", "--token-name", "hermes", "--raw")
+			if err2 != nil {
+				return fmt.Errorf("generate hermes forgejo token: %w", redactForgejoError(err))
+			}
+			out = out2
+		}
+		hermesToken = strings.TrimSpace(out)
+	}
+	if hermesToken == "" {
+		return fmt.Errorf("hermes forgejo token generation returned empty")
+	}
+	if err := upsertSecret(ctx, b.secrets, "platform-app", "hermes_forgejo_token", hermesToken); err != nil {
+		return fmt.Errorf("store hermes_forgejo_token: %w", err)
+	}
+	return nil
+}
+
 var _ = filepath.Join
 var _ = health.RedactDetail

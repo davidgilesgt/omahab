@@ -636,8 +636,19 @@ Model traffic goes through LiteLLM at `http://host.docker.internal:4000/v1` (`ht
 
 ### 13.2 Tools
 
-Hermes tools are provided via a streamable-HTTP MCP server inside omahabd at `http://host.docker.internal:8484/mcp` (Bearer `OMAHAB_MCP_TOKEN`). See Step 3b for the wire tool names (`repos_list`, `repo_archive`, `docs_search`, `projects_list`, `workspaces_list`, etc.) and the rule *archive, never delete; never merge*. Paperless and Forgejo destructive tools are not exposed.
+Hermes tools are provided via a streamable-HTTP MCP server inside omahabd at `http://host.docker.internal:8484/mcp` (Bearer `OMAHAB_MCP_TOKEN`, SHA-256 verified; admin and `oma_dev_` tokens are rejected with 403; the server is mounted at `POST/GET /mcp` outside `bearerAuth`). All tools return JSON text content.
 
+Wire names (36 tools):
+
+- Forgejo / repos: `repos_list`, `repo_get`, `repo_archive`, `repo_unarchive`, `branches_list`, `branch_create`, `file_get`, `file_put`, `issues_list`, `issue_get`, `issue_create`, `issue_comment`, `prs_list`, `pr_get`, `pr_diff`, `pr_create`, `pr_comment`
+- Paperless / docs: `docs_search`, `doc_get`, `docs_tags`, `docs_correspondents`, `docs_types`, `doc_add_tag`, `doc_upload`
+- Projects / CI: `projects_list`, `project_get`, `releases_list`, `ci_runs`, `ci_run_logs`
+- Workspaces: `workspaces_list`, `workspace_create`, `workspace_get`, `workspace_send`, `workspace_stop` (small `WorkspacesProvider` interface in `internal/mcp`; controlplane wires a stub returning unimplemented until Step 5; `workspace_delete` never exists)
+- Control plane: `events_recent`, `backup_status`
+
+Rules: archive, never delete; never merge; never force-push; never delete a branch. `repo_delete`, `doc_delete`, `pr_merge`, `workspace_delete`, branch delete and force-push tools do not exist and must not be emulated. The Forgejo token for Hermes is a dedicated `platform-app/hermes_forgejo_token` (created via `CreateAccessToken("omahab","hermes", ["read:repository","write:repository","read:issue","write:issue"])` in `forgejo_bootstrap.go`; destructive exclusion is enforced by the tool surface, not by scope). `file_get` returns base64 alongside text; `doc_upload` takes `filename, base64, tags`.
+
+Paperless and Forgejo destructive tools are not exposed.
 ### 13.3 Deleted
 
 Deleted. One `default` profile only; ONCE, SCIM, and workspace isolation are handled without per-project Hermes profiles.
@@ -670,32 +681,9 @@ The Omarchy companion can create an isolated remote runner for a project:
 4. install the selected coding agent, such as OMP or Codex;
 5. create a resumable terminal session;
 6. open the local terminal over Tailscale;
-7. attach using a short-lived capability;
-8. stop idle workspaces automatically.
-
-Use the Development Container specification. DevPod is a likely implementation primitive, but the product API remains Omahab's.
-
-Workspace containers do not receive the Docker socket or production secrets. A container is not a sufficient boundary for hostile external pull requests. Automated review of untrusted code runs in a dedicated worker VM or microVM; on Proxmox, a separate worker VM is the initial safe recommendation.
-
-Deployments use immutable image digests, never a mutable workspace checkout.
-
-## 15. Knowledge and documents
-
 ### 15.1 Paperless-ngx
 
-Paperless-ngx is the authoritative document-management application. Use its REST API for retrieval and document operations.
-
-Initial assistant tools should cover:
-
-- search documents;
-- retrieve metadata and extracted text;
-- list correspondents, document types, and tags;
-- upload a document;
-- add a tag;
-- return source IDs and deep links.
-
-Hermes retrieves relevant material instead of injecting the full archive into every conversation.
-
+Paperless-ngx is the authoritative document-management application. Use its REST API for retrieval and document operations. For the Hermes assistant, the Paperless tools are served via the MCP server described in §13.2 (`docs_search`, `doc_get`, `docs_tags`, `docs_correspondents`, `docs_types`, `doc_add_tag`, `doc_upload`), each returning source IDs and deep links. Hermes retrieves relevant material instead of injecting the full archive into every conversation.
 ### 15.2 Local semantic indexing
 
 Local semantic indexing is offered during setup:
