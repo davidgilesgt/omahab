@@ -79,7 +79,7 @@ EOF
           inherit version;
           src = ./third_party/once;
           subPackages = [ "cmd/once" ];
-          vendorHash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+          vendorHash = "sha256-g05AhTYiD+kP9j0hFeojneJ7G95B2KfKGqM+VfJOO7I=";
           env.CGO_ENABLED = "0";
           ldflags = [
             "-s"
