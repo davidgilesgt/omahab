@@ -69,7 +69,7 @@ export function DevicesPage() {
               const lastSeen = d.last_seen_at ?? d.last_sync_at ?? d.updated_at;
               const backupAge = d.backup_last_snapshot ? formatRelative(d.backup_last_snapshot) : "never";
               return (
-                <div key={d.id} style={{ display: "flex", gap: "1rem", justifyContent: "space-between", alignItems: "flex-start", padding: "0.75rem 0", borderBottom: "1px solid var(--border)" }}>
+                <div key={d.id} style={{ display: "flex", gap: "1rem", justifyContent: "space-between", alignItems: "flex-start", padding: "0.75rem 0", borderBottom: "var(--border) solid var(--line)" }}>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
                       <strong>{d.name || d.id}</strong>

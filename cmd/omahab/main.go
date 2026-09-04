@@ -98,6 +98,7 @@ Use --server to target a different control plane (env OMAHAB_SERVER, then ~/.con
 	root.AddCommand(newBackupCmd())
 	root.AddCommand(newBackupDriveCmd())
 	root.AddCommand(newEventCmd())
+	root.AddCommand(newSyncCmd())
 	root.AddCommand(newRunnerCmd())
 	root.AddCommand(newConsoleCmd())
 	root.AddCommand(newSetupCmd())
@@ -203,13 +204,6 @@ func resolveClient() (*apiclient.Client, error) {
 
 func clientd() *apiclient.ClientdClient {
 	return apiclient.NewClientdClient("")
-}
-
-func isColorEnabled() bool {
-	if os.Getenv("NO_COLOR") != "" {
-		return false
-	}
-	return true
 }
 
 func printJSON(v any) error {
@@ -363,14 +357,17 @@ func printWelcomeCard() {
 		})
 		return
 	}
-	fmt.Println("Omahab — the opinionated home server.")
+	fmt.Println(tui.Banner("the opinionated home server", tui.ResolveCaps(term.IsTerminal(os.Stdout.Fd()), os.Getenv("TERM"), os.Getenv("NO_COLOR"))))
 	fmt.Println()
-	fmt.Printf("  server: %s (%s)\n", server, serverSource)
+	caps := tui.ResolveCaps(term.IsTerminal(os.Stdout.Fd()), os.Getenv("TERM"), os.Getenv("NO_COLOR"))
+	tbl := tui.Table{Headers: nil}
+	serverRow := fmt.Sprintf("%s (%s)", server, serverSource)
+	tokenRow := tokenStatus
 	if hint != "" {
-		fmt.Printf("  token:  %s → %s\n", tokenStatus, hint)
-	} else {
-		fmt.Printf("  token:  %s\n", tokenStatus)
+		tokenRow = fmt.Sprintf("%s → %s", tokenStatus, hint)
 	}
+	tbl.Rows = [][]string{{"server", serverRow}, {"token", tokenRow}}
+	fmt.Println(tbl.Render(caps))
 	fmt.Println()
 	fmt.Println("Run `omahab --help` for commands.")
 	if tokenStatus == "not set" {
@@ -378,6 +375,7 @@ func printWelcomeCard() {
 	} else {
 		fmt.Println("Try `omahab status` to check the control plane.")
 	}
+	fmt.Println("Shell completions: omahab completion bash|zsh|fish")
 }
 
 func newLoginCmd() *cobra.Command {
@@ -494,10 +492,12 @@ func humanListApps(apps []domain.Application) {
 		fmt.Println("no applications")
 		return
 	}
-	fmt.Printf("%-20s %-12s %-10s %-30s %s\n", "ID", "NAME", "HEALTH", "HOSTNAME", "EXPOSURE")
+	caps := tui.ResolveCaps(term.IsTerminal(os.Stdout.Fd()), os.Getenv("TERM"), os.Getenv("NO_COLOR"))
+	tbl := tui.Table{Headers: []string{"ID", "NAME", "HEALTH", "HOSTNAME", "EXPOSURE"}}
 	for _, a := range apps {
-		fmt.Printf("%-20s %-12s %-10s %-30s %s\n", a.ID, a.Name, a.Health, a.Hostname, a.Exposure)
+		tbl.Rows = append(tbl.Rows, []string{string(a.ID), a.Name, string(a.Health), a.Hostname, string(a.Exposure)})
 	}
+	fmt.Print(tbl.Render(caps))
 }
 
 func humanListProjects(projs []domain.Project) {
@@ -509,10 +509,12 @@ func humanListProjects(projs []domain.Project) {
 		fmt.Println("no projects")
 		return
 	}
-	fmt.Printf("%-20s %-15s %-30s %-12s %s\n", "ID", "SLUG", "HOSTNAME", "EXPOSURE", "NAME")
+	caps := tui.ResolveCaps(term.IsTerminal(os.Stdout.Fd()), os.Getenv("TERM"), os.Getenv("NO_COLOR"))
+	tbl := tui.Table{Headers: []string{"ID", "SLUG", "HOSTNAME", "EXPOSURE", "NAME"}}
 	for _, p := range projs {
-		fmt.Printf("%-20s %-15s %-30s %-12s %s\n", p.ID, p.Slug, p.Hostname, p.Exposure, p.Name)
+		tbl.Rows = append(tbl.Rows, []string{string(p.ID), p.Slug, p.Hostname, string(p.Exposure), p.Name})
 	}
+	fmt.Print(tbl.Render(caps))
 }
 
 func humanListBackups(items []domain.Backup) {
@@ -524,15 +526,13 @@ func humanListBackups(items []domain.Backup) {
 		fmt.Println("no backups")
 		return
 	}
-	fmt.Printf("%-20s %-12s %-20s %-10s %s\n", "ID", "REPO", "STARTED", "STATUS", "ERROR")
+	caps := tui.ResolveCaps(term.IsTerminal(os.Stdout.Fd()), os.Getenv("TERM"), os.Getenv("NO_COLOR"))
+	tbl := tui.Table{Headers: []string{"ID", "REPO", "STARTED", "STATUS", "ERROR"}}
 	for _, b := range items {
 		started := b.StartedAt.Format("2006-01-02 15:04")
-		errStr := b.Error
-		if len(errStr) > 30 {
-			errStr = errStr[:30] + "…"
-		}
-		fmt.Printf("%-20s %-12s %-20s %-10s %s\n", b.ID, truncate(b.Repository, 12), started, b.Status, errStr)
+		tbl.Rows = append(tbl.Rows, []string{string(b.ID), b.Repository, started, b.Status, b.Error})
 	}
+	fmt.Print(tbl.Render(caps))
 }
 
 func humanListEvents(events []domain.Event) {
@@ -544,15 +544,17 @@ func humanListEvents(events []domain.Event) {
 		fmt.Println("no events")
 		return
 	}
+	caps := tui.ResolveCaps(term.IsTerminal(os.Stdout.Fd()), os.Getenv("TERM"), os.Getenv("NO_COLOR"))
+	tbl := tui.Table{Headers: []string{"READ", "TIME", "TYPE", "SEVERITY", "MESSAGE"}}
 	for _, e := range events {
 		read := " "
 		if e.ReadAt != nil {
 			read = "✓"
 		}
-		fmt.Printf("[%s] %s %-20s %s %s\n", read, e.CreatedAt.Format("2006-01-02 15:04"), e.Type, e.Severity, e.Message)
+		tbl.Rows = append(tbl.Rows, []string{read, e.CreatedAt.Format("2006-01-02 15:04"), e.Type, e.Severity, e.Message})
 	}
+	fmt.Print(tbl.Render(caps))
 }
-
 func humanListSync(folders []domain.SyncFolder) {
 	if flagJSON {
 		_ = printJSON(map[string]any{"items": folders})
@@ -562,14 +564,16 @@ func humanListSync(folders []domain.SyncFolder) {
 		fmt.Println("no sync folders")
 		return
 	}
-	fmt.Printf("%-20s %-15s %-30s %-5s %s\n", "ID", "NAME", "SERVER_PATH", "AI", "HEALTH")
+	caps := tui.ResolveCaps(term.IsTerminal(os.Stdout.Fd()), os.Getenv("TERM"), os.Getenv("NO_COLOR"))
+	tbl := tui.Table{Headers: []string{"ID", "NAME", "SERVER_PATH", "AI", "HEALTH"}}
 	for _, s := range folders {
 		ai := "no"
 		if s.ShareWithAI {
 			ai = "yes"
 		}
-		fmt.Printf("%-20s %-15s %-30s %-5s %s\n", s.ID, s.Name, truncate(s.ServerPath, 30), ai, s.Health)
+		tbl.Rows = append(tbl.Rows, []string{string(s.ID), s.Name, s.ServerPath, ai, string(s.Health)})
 	}
+	fmt.Print(tbl.Render(caps))
 }
 
 func humanListWorkspaces(ws []domain.Workspace) {
@@ -581,10 +585,12 @@ func humanListWorkspaces(ws []domain.Workspace) {
 		fmt.Println("no workspaces/runners")
 		return
 	}
-	fmt.Printf("%-20s %-20s %-10s %-12s %s\n", "ID", "PROJECT", "AGENT", "STATUS", "BRANCH")
+	caps := tui.ResolveCaps(term.IsTerminal(os.Stdout.Fd()), os.Getenv("TERM"), os.Getenv("NO_COLOR"))
+	tbl := tui.Table{Headers: []string{"ID", "PROJECT", "AGENT", "STATUS", "BRANCH"}}
 	for _, w := range ws {
-		fmt.Printf("%-20s %-20s %-10s %-12s %s\n", w.ID, w.ProjectID, w.Agent, w.Status, w.Branch)
+		tbl.Rows = append(tbl.Rows, []string{string(w.ID), string(w.ProjectID), w.Agent, w.Status, w.Branch})
 	}
+	fmt.Print(tbl.Render(caps))
 }
 
 func truncate(s string, n int) string {
@@ -672,58 +678,25 @@ func newDoctorCmd() *cobra.Command {
 			if flagJSON {
 				return printJSON(res)
 			}
-			// Preserve data content: overall healthy flag plus checklist rendering via tui.
 			caps := tui.ResolveCaps(term.IsTerminal(os.Stdout.Fd()), os.Getenv("TERM"), os.Getenv("NO_COLOR"))
-			if caps.IsTTY && caps.ColorEnabled {
-				// Use tui checklist component — same logic as PreflightChecklist but for health.
-				var views []tui.DoctorCheckView
-				for _, ch := range res.Checks {
-					views = append(views, tui.DoctorCheckView{Name: ch.Name, Status: ch.Status, Message: ch.Message, Detail: ch.Detail})
-				}
-				// Overall status as header
-				if res.Healthy {
-					fmt.Println(tui.PassChip.Render(" healthy "))
-				} else {
-					fmt.Println(tui.FailChip.Render(" unhealthy "))
-				}
-				fmt.Print(tui.RenderDoctorChecklist(views, caps))
-				return nil
+			var views []tui.DoctorCheckView
+			for _, ch := range res.Checks {
+				views = append(views, tui.DoctorCheckView{Name: ch.Name, Status: ch.Status, Message: ch.Message, Detail: ch.Detail})
 			}
-			// Fallback plain rendering (byte-stable, NO_COLOR/TERM=dumb)
-			if res.Healthy {
-				if isColorEnabled() {
-					fmt.Println("\x1b[32mhealthy\x1b[0m")
+			if caps.ColorEnabled {
+				if res.Healthy {
+					fmt.Println(tui.HealthChip("healthy"))
 				} else {
-					fmt.Println("healthy")
+					fmt.Println(tui.HealthChip("unhealthy"))
 				}
 			} else {
-				if isColorEnabled() {
-					fmt.Println("\x1b[31munhealthy\x1b[0m")
+				if res.Healthy {
+					fmt.Println("healthy")
 				} else {
 					fmt.Println("unhealthy")
 				}
 			}
-			for _, ch := range res.Checks {
-				status := ch.Status
-				if isColorEnabled() {
-					switch status {
-					case "healthy", "ok", "pass":
-						status = "\x1b[32m" + status + "\x1b[0m"
-					case "degraded", "warn":
-						status = "\x1b[33m" + status + "\x1b[0m"
-					case "unhealthy", "fail", "error":
-						status = "\x1b[31m" + status + "\x1b[0m"
-					}
-				}
-				line := fmt.Sprintf("  %-25s %s", ch.Name, status)
-				if ch.Message != "" {
-					line += " — " + ch.Message
-				}
-				fmt.Println(line)
-				if ch.Detail != "" {
-					fmt.Printf("    %s\n", ch.Detail)
-				}
-			}
+			fmt.Print(tui.RenderDoctorChecklist(views, caps))
 			return nil
 		},
 	}

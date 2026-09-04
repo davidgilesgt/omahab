@@ -24,7 +24,7 @@
           pname = "omahab";
           inherit version;
           src = lib.cleanSource ./.;
-          vendorHash = "sha256-cJECbocgfOBy4NTdsmOrYUjso1s3nvCGaeOua9hXszw=";
+          vendorHash = "sha256-FUZb9WWkYKQR+ZIxNvUmjJMw07LOZw66EhO7Z3XSdVo=";
           subPackages = [
             "cmd/omahab"
             "cmd/omahabd"
@@ -37,7 +37,7 @@
           pname = "omahab-web";
           inherit version;
           src = ./web;
-          npmDepsHash = "sha256-H5hGxM/GoR+xZPiVw8uCITiVXFa8WTyVCe/kovcPgXo=";
+          npmDepsHash = "sha256-5zyjKjzhJ6StbI7uP+FscGgKDC9IopIr6l0O1rxLWUY=";
           installPhase = ''
             runHook preInstall
             mkdir -p $out
@@ -101,7 +101,7 @@ EOF
           pname = "omahab-clientd-${goos}-${goarch}";
           inherit version;
           src = lib.cleanSource ./.;
-          vendorHash = "sha256-cJECbocgfOBy4NTdsmOrYUjso1s3nvCGaeOua9hXszw=";
+          vendorHash = "sha256-FUZb9WWkYKQR+ZIxNvUmjJMw07LOZw66EhO7Z3XSdVo=";
           subPackages = [ "cmd/omahab-clientd" ];
           env.CGO_ENABLED = "0";
           env.GOOS = goos;
@@ -147,8 +147,6 @@ EOF
           inherit omarchy-plugin omahab-dl;
           default = omahab;
           # Appliance images (nixos-rebuild build-image under the hood).
-          image-qcow = self.nixosConfigurations.omahab-appliance.config.system.build.vmware or
-            self.nixosConfigurations.omahab-appliance.config.system.build.vm;
           image-iso = self.nixosConfigurations.omahab-appliance.config.system.build.isoImage;
         };
         apps.vm = {

@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../auth";
 import type { Application, Backup, Exposure, Project, Release } from "../api/types";
 import { EmptyState, ErrorState, formatDate, LoadingState, PageHeader, Section, shortDigest, StatusPill } from "../components/ui";
+import { QRCode } from "../components/qr";
 import { useToast } from "../components/toast";
 import { CopyButton } from "../components/copyButton";
 
@@ -67,7 +68,7 @@ function DestructiveConfirm({
 
 export function OverviewPage() {
   const { client } = useAuth();
-  const status = useQuery({ queryKey: ["status"], queryFn: client.status, refetchInterval: 30_000 });
+  const status = useQuery({ queryKey: ["status"], queryFn: client.status });
   const applications = useQuery({ queryKey: ["applications"], queryFn: client.applications });
   const backups = useQuery({ queryKey: ["backups"], queryFn: client.backups });
   const events = useQuery({ queryKey: ["events"], queryFn: client.events });
@@ -121,7 +122,7 @@ export function OverviewPage() {
   return (
     <div className="page">
       {setup.data && setup.data.state !== "complete" && (
-        <div className="banner-card" style={{ background: "var(--warning-muted, #fff3cd)", border: "1px solid var(--warning, #f59e0b)", padding: 12, borderRadius: 8, marginBottom: 16 }}>
+        <div className="banner-card" style={{ background: "var(--warning-bg)", border: "1px solid var(--warning)", padding: 12, borderRadius: 8, marginBottom: 16 }}>
           <strong>Setup is not finished</strong> — <Link to="/setup">Continue setup</Link>
         </div>
       )}
@@ -129,8 +130,8 @@ export function OverviewPage() {
         className={trustAttention ? "banner-card" : "trust-sentence"}
         style={
           trustAttention
-            ? { background: "var(--warning-muted, #fff3cd)", border: "1px solid var(--warning, #f59e0b)", padding: 12, borderRadius: 8, marginBottom: 16 }
-            : { background: "var(--success-muted, #ecfdf5)", border: "1px solid var(--success, #10b981)", padding: 12, borderRadius: 8, marginBottom: 16 }
+            ? { background: "var(--warning-bg)", border: "1px solid var(--warning)", padding: 12, borderRadius: 8, marginBottom: 16 }
+            : { background: "var(--positive-bg)", border: "1px solid var(--positive)", padding: 12, borderRadius: 8, marginBottom: 16 }
         }
         role="status"
         aria-live="polite"
@@ -272,7 +273,7 @@ export function ApplicationsPage() {
             const running = application.observed_state === "running";
             return (
               <article className="resource-row" key={application.id}>
-                <div className="resource-main"><div className="resource-title"><h2>{application.name}</h2><StatusPill value={application.health} /><StatusPill value={application.exposure} /></div><p className="mono">{application.hostname || application.image} <CopyButton text={application.hostname || application.image} label="Copy" /></p><small>Digest <span className="mono">{shortDigest(application.digest)}</span> <CopyButton text={application.digest} label="Copy digest" /></small><small>Desired {application.desired_state} · observed {application.observed_state} · updated {formatDate(application.updated_at)}</small></div>
+                <div className="resource-main"><div className="resource-title"><h2>{application.name}</h2><StatusPill value={application.health} /><StatusPill value={application.exposure} /></div><p className="mono">{application.hostname || application.image} <CopyButton text={application.hostname || application.image} label="Copy" /></p><small>Version <span className="mono" title={application.digest}>{shortDigest(application.digest)}</span> <CopyButton text={application.digest} label="Copy digest" /></small><small>Desired {application.desired_state} · observed {application.observed_state} · updated {formatDate(application.updated_at)}</small></div>
                 <div className="row-actions">
                   <button className="button secondary" type="button" disabled={mutation.isPending} onClick={() => mutation.mutate({ id: application.id, action: running ? "restart" : "start" })}>{running ? "Restart" : "Start"}</button>
                   {running && <button className="button ghost" type="button" disabled={mutation.isPending} onClick={() => setPendingAction({ id: application.id, action: "stop", hostname: application.hostname || application.image, name: application.name })}>Stop</button>}
@@ -425,7 +426,6 @@ export function EventsPage() {
   const ntfy = ntfyQuery.data;
   const topic = ntfy?.topic ?? "";
   const ntfyUrl = topic ? `http://${typeof window !== "undefined" ? window.location.hostname : "omahab"}:2586/${topic}` : "";
-  const qrSrc = topic ? `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(ntfyUrl)}` : "";
   return (
     <div className="page">
       <PageHeader eyebrow="Operational inbox" title="Events" description="A live, durable record of health changes and actions across your server." />
@@ -449,10 +449,10 @@ export function EventsPage() {
               )}
               {toggleNtfy.error ? <p className="inline-error" role="alert">{toggleNtfy.error instanceof Error ? toggleNtfy.error.message : "Update failed"}</p> : null}
             </div>
-            {ntfy?.enabled && topic && qrSrc && (
-              <div style={{ border: "1px solid var(--border)", borderRadius: "0.5rem", padding: "0.5rem", background: "white" }}>
-                <img src={qrSrc} width={180} height={180} alt={`QR for ntfy topic ${topic}`} style={{ display: "block" }} />
-                <small className="muted" style={{ display: "block", textAlign: "center", marginTop: "0.25rem" }}>Scan to subscribe</small>
+            {ntfy?.enabled && topic && (
+              <div style={{ display: "grid", placeItems: "center", gap: "0.25rem" }}>
+                <QRCode value={ntfyUrl} label="ntfy topic QR" />
+                <small className="muted" style={{ display: "block", textAlign: "center" }}>Scan to subscribe</small>
               </div>
             )}
           </div>

@@ -8,7 +8,19 @@ on:
     tags: ["v*"]
 
 jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+      - run: nix build .#checks.x86_64-linux.go-vet --print-build-logs
+      - run: nix build .#checks.x86_64-linux.go-test --print-build-logs
+      - run: nix build .#packages.x86_64-linux.omahab-web --print-build-logs
+      - run: bash scripts/check.sh
   build:
+    needs: [checks]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,12 +38,6 @@ jobs:
           set -euo pipefail
           nix build .#image-iso -o result-iso --print-build-logs
           nix build .#packages.x86_64-linux.omahab-dl -o result-dl --print-build-logs
-          # image-qcow may be vmware or vm depending on nixpkgs version
-          if nix build .#image-qcow -o result-qcow --print-build-logs; then
-            echo "built image-qcow"
-          else
-            echo "image-qcow not available, skipping"
-          fi
           ls -lh result-iso result-dl || true
           ls -lh result-iso/iso/*.iso 2>/dev/null || ls -lh result-iso || true
           ls -lh result-dl/share/omahab/dl/ 2>/dev/null || true
@@ -59,16 +65,20 @@ jobs:
           else
             cp -r result-iso dist/image-iso 2>/dev/null || true
           fi
-          # QCOW if built
-          if [ -d result-qcow ] || [ -e result-qcow ]; then
-            cp -r result-qcow dist/ 2>/dev/null || true
-          fi
           # DL bundle for reference (optional)
           if [ -d result-dl/share/omahab/dl ]; then
             tar -czf "dist/omahab-dl-${TAG}.tar.gz" -C result-dl/share/omahab/dl .
             cp result-dl/share/omahab/dl/SHA256SUMS "dist/SHA256SUMS" 2>/dev/null || true
           fi
           ls -lh dist/
+          # Release manifest for omahab system check-update
+          ISO=$(ls dist/*.iso 2>/dev/null | head -n1 || true)
+          if [ -n "$ISO" ]; then
+            jq -n --arg v "${TAG#v}" --arg ref "github:davidgilesgt/omahab/${GITHUB_SHA}" --arg iso "$(basename "$ISO")" --arg sha "$(sha256sum "$ISO" | cut -d' ' -f1)" \
+              '{version:$v, flake_ref:$ref, iso:$iso, iso_sha256:$sha, published_at: (now|todate)}' > dist/manifest.json
+            ls -lh dist/manifest.json
+            cat dist/manifest.json
+          fi
           # Create release (if exists, upload)
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/* --clobber

@@ -78,6 +78,9 @@ fi
 
 # Web typecheck when node is present.
 if command -v npm >/dev/null 2>&1 && [[ -d web ]]; then
+  if [[ ! -d web/node_modules ]]; then
+    (cd web && npm ci --no-audit --no-fund >/dev/null 2>&1) || fail_check "web npm ci"
+  fi
   (cd web && npm run typecheck >/dev/null 2>&1) && pass "web typecheck" || fail_check "web typecheck"
 fi
 

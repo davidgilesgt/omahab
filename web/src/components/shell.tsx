@@ -1,24 +1,42 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
+import {
+  Archive,
+  FolderSync,
+  Home,
+  Inbox,
+  LayoutGrid,
+  ListChecks,
+  Plug,
+  Rocket,
+  Settings2,
+  Smartphone,
+  Sparkles,
+  Stethoscope,
+  TerminalSquare,
+  Users,
+} from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { useAuth } from "../auth";
 import { useEventStream } from "./useEventStream";
-const NAVIGATION = [
-  ["/", "Overview", "⌂", "Home overview"],
-  ["/setup", "Setup", "✓", "Continue setup"],
-  ["/applications", "Services", "▦", "Platform services"],
-  ["/projects", "Projects", "⌘", "ONCE projects"],
-  ["/backups", "Backups", "↺", "Backup status"],
-  ["/events", "Inbox", "●", "Event inbox"],
-  ["/sync", "Sync folders", "⇄", "Syncthing folders"],
-  ["/workspaces", "Workspaces", "◇", "Remote workspaces"],
-  ["/people", "People & access", "◎", "Users and access"],
-  ["/providers", "Providers", "◐", "External providers"],
-  ["/tool-environment", "Tool environment", "⚙", "Agent tool variables"],
-  ["/devices", "Devices", "◈", "Companion devices"],
-  ["/ai", "AI", "✦", "Assistant knowledge"],
-  ["/doctor", "Doctor", "⚑", "Diagnostics"],
-] as const;
+import { ThemePicker, THEMES } from "./themePicker";
+const NAVIGATION: ReadonlyArray<readonly [string, string, LucideIcon, string]> = [
+  ["/", "Overview", Home, "Home overview"],
+  ["/setup", "Setup", ListChecks, "Continue setup"],
+  ["/applications", "Services", LayoutGrid, "Platform services"],
+  ["/projects", "Projects", Rocket, "ONCE projects"],
+  ["/backups", "Backups", Archive, "Backup status"],
+  ["/events", "Inbox", Inbox, "Event inbox"],
+  ["/sync", "Sync folders", FolderSync, "Syncthing folders"],
+  ["/workspaces", "Workspaces", TerminalSquare, "Remote workspaces"],
+  ["/people", "People & access", Users, "Users and access"],
+  ["/providers", "Providers", Plug, "External providers"],
+  ["/tool-environment", "Tool environment", Settings2, "Agent tool variables"],
+  ["/devices", "Devices", Smartphone, "Companion devices"],
+  ["/ai", "AI", Sparkles, "Assistant knowledge"],
+  ["/doctor", "Doctor", Stethoscope, "Diagnostics"],
+];
 
 function aiDashboardUrl(): string {
   if (typeof window === "undefined") return "https://ai.example.com";
@@ -55,7 +73,7 @@ export function AppShell({ children, basePath = "" }: { children: ReactNode; bas
           const m = raw.match(/theme=([^&]+)/);
           if (m && m[1]) t = decodeURIComponent(m[1]);
         }
-        if (t && ["tokyo-night", "catppuccin", "everforest", "gruvbox", "kanagawa", "nord", "rose-pine", "matte-black", "osaka-jade", "ristretto", "light", "dark", "system"].includes(t)) {
+        if (t && (THEMES as readonly string[]).includes(t)) {
           try { localStorage.setItem("omahab.theme", t); } catch {}
           return t;
         }
@@ -72,9 +90,9 @@ export function AppShell({ children, basePath = "" }: { children: ReactNode; bas
     const state = setupQuery.data?.state;
     const baseList = !state || state === "complete" ? NAVIGATION.filter(([to]) => to !== "/setup") : [...NAVIGATION];
     if (!basePath) return baseList;
-    return baseList.map(([to, label, icon, title]) => {
+    return baseList.map(([to, label, Icon, title]) => {
       const prefixed = to === "/" ? `${basePath}/` : `${basePath}${to}`;
-      return [prefixed, label, icon, title] as const;
+      return [prefixed, label, Icon, title] as const;
     });
   }, [setupQuery.data, basePath]);
   useEventStream();
@@ -128,21 +146,21 @@ export function AppShell({ children, basePath = "" }: { children: ReactNode; bas
           <span><strong>Omahab</strong><small>Control plane</small></span>
         </NavLink>
         <nav aria-label="Primary navigation">
-          {visibleNavigation.map(([to, label, icon, title]) => (
+          {visibleNavigation.map(([to, label, Icon, title]) => (
             <NavLink key={to} to={to} end={to === "/" || to === `${basePath}/`} className={({ isActive }) => isActive ? "nav-link active" : "nav-link"} title={title}>
-              <span aria-hidden="true" className="nav-icon" title={title}>{icon}</span>
+              <Icon size={18} strokeWidth={1.75} aria-hidden className="nav-icon" />
               <span>{label}</span>
               {to.endsWith("/events") && unread > 0 && <span className="nav-badge" aria-label={`${unread} unread`}>{unread}</span>}
             </NavLink>
           ))}
           <a href={aiDashboardUrl()} target="_blank" rel="noreferrer" className="nav-link" title="AI assistant (upstream Hermes dashboard)">
-            <span aria-hidden="true" className="nav-icon" title="AI assistant (upstream Hermes dashboard)">✦</span>
+            <Sparkles size={18} strokeWidth={1.75} aria-hidden className="nav-icon" />
             <span>AI</span>
           </a>
         </nav>
         <div className="sidebar-footer">
           <span className="privacy-indicator" aria-live="polite" title={unread > 0 ? `${unread} unread events` : "Private by default"}>
-            <span aria-hidden="true" style={{ background: unread > 0 ? "var(--warning, #f59e0b)" : "var(--positive, #10b981)" }} />
+            <span aria-hidden="true" style={{ background: unread > 0 ? "var(--warning)" : "var(--positive)" }} />
             {unread > 0 ? `${unread} unread` : "Private by default"}
           </span>
           <button type="button" className="text-button" onClick={signOut}>Sign out</button>
@@ -174,33 +192,16 @@ export function AppShell({ children, basePath = "" }: { children: ReactNode; bas
             />
             <kbd>Ctrl K</kbd>
             {showResults && filtered.length > 0 && (
-              <ul id="quick-nav-listbox" role="listbox" style={{ position: "absolute", top: "100%", left: 0, right: 0, background: "var(--surface, #fff)", border: "1px solid var(--border)", borderRadius: 6, marginTop: 4, padding: 4, listStyle: "none", zIndex: 20 }}>
-                {filtered.map(([to, label, icon]) => (
-                  <li key={to} role="option" aria-selected={false} onMouseDown={(e) => { e.preventDefault(); chooseDestination(to); }} style={{ padding: "6px 8px", cursor: "pointer", display: "flex", gap: 8 }}>
-                    <span aria-hidden>{icon}</span> {label} <small style={{ marginLeft: "auto", opacity: 0.6 }}>{to}</small>
+              <ul id="quick-nav-listbox" role="listbox" style={{ position: "absolute", top: "100%", left: 0, right: 0, background: "var(--surface, #fff)", border: "var(--border) solid var(--line)", borderRadius: 6, marginTop: 4, padding: 4, listStyle: "none", zIndex: 20 }}>
+                {filtered.map(([to, label, Icon]) => (
+                  <li key={to} role="option" aria-selected={false} onMouseDown={(e) => { e.preventDefault(); chooseDestination(to); }} style={{ padding: "6px 8px", cursor: "pointer", display: "flex", gap: 8, alignItems: "center" }}>
+                    <Icon size={16} strokeWidth={1.75} aria-hidden className="nav-icon" /> {label} <small style={{ marginLeft: "auto", opacity: 0.6 }}>{to}</small>
                   </li>
                 ))}
               </ul>
             )}
           </div>
-          <label className="theme-control">
-            <span className="sr-only">Color theme</span>
-            <select value={theme} onChange={(event) => setTheme(event.currentTarget.value)} aria-label="Color theme">
-              <option value="system">System theme</option>
-              <option value="light">Light theme</option>
-              <option value="dark">Dark theme</option>
-              <option value="tokyo-night">Tokyo Night</option>
-              <option value="catppuccin">Catppuccin</option>
-              <option value="everforest">Everforest</option>
-              <option value="gruvbox">Gruvbox</option>
-              <option value="kanagawa">Kanagawa</option>
-              <option value="nord">Nord</option>
-              <option value="rose-pine">Rose Pine</option>
-              <option value="matte-black">Matte Black</option>
-              <option value="osaka-jade">Osaka Jade</option>
-              <option value="ristretto">Ristretto</option>
-            </select>
-          </label>
+          <ThemePicker value={theme} onChange={setTheme} />
         </header>
         <main id="main-content" tabIndex={-1}>{children}</main>
       </div>

@@ -4,6 +4,8 @@ import { useAuth } from "../auth";
 import type { Application, Backup, ControlEvent, Workspace } from "../api/types";
 
 function routeEvent(type: string): string[] {
+  if (type.startsWith("setup.")) return ["setup"];
+  if (type.startsWith("exposure.")) return ["applications", "status"];
   if (type.startsWith("backup.")) return ["backups"];
   if (type.startsWith("service.") || type.startsWith("health.") || type.startsWith("host.") || type === "applications.catalog_missing") return ["applications"];
   if (type.startsWith("deployment.") || type.startsWith("ci.")) return ["projects"];
@@ -152,7 +154,7 @@ export function useEventStream() {
               if (!tryPatchCache(ev, queryClient)) {
                 const keys = routeEvent(ev.type);
                 for (const key of keys) queryClient.invalidateQueries({ queryKey: [key] });
-                if (ev.type.startsWith("service.") || ev.type.startsWith("health.")) queryClient.invalidateQueries({ queryKey: ["status"] });
+                if (ev.type.startsWith("service.") || ev.type.startsWith("health.") || ev.type.startsWith("host.")) queryClient.invalidateQueries({ queryKey: ["status"] });
               }
             },
             lastIdRef.current ?? undefined,

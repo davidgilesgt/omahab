@@ -723,7 +723,7 @@ function submit(event: FormEvent<HTMLFormElement>) {
           ) : (
             <div className="compact-list">
               {credentials.map((credential) => (
-                <div key={credential.id} style={{ display: "flex", gap: "0.75rem", justifyContent: "space-between", alignItems: "flex-start", padding: "0.5rem 0", borderBottom: "1px solid var(--border)" }}>
+                <div key={credential.id} style={{ display: "flex", gap: "0.75rem", justifyContent: "space-between", alignItems: "flex-start", padding: "0.5rem 0", borderBottom: "var(--border) solid var(--line)" }}>
                   <div style={{ flex: 1 }}>
                     <strong>{credential.name || credential.provider}</strong>
                     <div className="muted" style={{ fontSize: "0.875rem" }}>
@@ -809,7 +809,7 @@ function submit(event: FormEvent<HTMLFormElement>) {
             const err = oauthError[provider];
             const isXai = provider === "xai";
             return (
-              <div key={provider} className="form-stack" style={{ border: "1px solid var(--border)", padding: "1rem", borderRadius: "8px" }}>
+              <div key={provider} className="form-stack" style={{ border: "var(--border) solid var(--line)", padding: "1rem", borderRadius: "8px" }}>
                 <h3 style={{ margin: 0 }}>{provider === "chatgpt" ? "ChatGPT" : "xAI Grok"} — {isXai ? "loopback" : "device_code"}</h3>
                 <button className="button secondary" type="button" disabled={isPolling} onClick={() => startOAuth(provider)}>
                   {isPolling ? "Authorizing…" : `Start ${provider} OAuth`}
@@ -917,13 +917,13 @@ function submit(event: FormEvent<HTMLFormElement>) {
             ) : (
               <div className="compact-list">
                 {keys.map((k: ModelKey) => (
-                  <div key={k.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "1rem", padding: "0.5rem 0", borderBottom: "1px solid var(--border)" }}>
+                  <div key={k.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "1rem", padding: "0.5rem 0", borderBottom: "var(--border) solid var(--line)" }}>
                     <div>
                       <strong>{k.name}</strong> <code className="mono">{k.key_prefix}…</code>
                       <div className="muted" style={{ fontSize: "0.8rem" }}>{k.owner_kind}/{k.owner_id} · created {formatDate(k.created_at)}</div>
                       <div style={{ display: "flex", gap: "0.25rem", flexWrap: "wrap", marginTop: "0.25rem" }}>
                         {(k.scopes ?? []).map((s) => (
-                          <span key={s} className="chip" style={{ border: "1px solid var(--border)", padding: "0.1rem 0.4rem", borderRadius: "4px", fontSize: "0.75rem" }}>
+                          <span key={s} className="chip" style={{ border: "var(--border) solid var(--line)", padding: "0.1rem 0.4rem", borderRadius: "4px", fontSize: "0.75rem" }}>
                             {s}
                           </span>
                         ))}

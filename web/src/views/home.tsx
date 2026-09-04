@@ -1,4 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
+import { Bookmark, FileText, FolderSync, GitBranch, Hammer, Image, Sparkles } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { useAuth } from "../auth";
 import { ErrorState, LoadingState, Section, StatusPill } from "../components/ui";
 
@@ -6,19 +8,19 @@ type TileDef = {
   id: string;
   name: string;
   purpose: string;
-  icon: string;
+  icon: LucideIcon;
   route: string;
   group: "everyday" | "build";
 };
 
 const TILES: TileDef[] = [
-  { id: "immich", name: "Photos", purpose: "Private photo library", icon: "◉", route: "photos", group: "everyday" },
-  { id: "paperless-ngx", name: "Docs", purpose: "Document archive", icon: "▭", route: "docs", group: "everyday" },
-  { id: "karakeep", name: "Save", purpose: "Bookmarks & saves", icon: "◆", route: "save", group: "everyday" },
-  { id: "syncthing", name: "Sync", purpose: "File sync", icon: "⇄", route: "sync", group: "everyday" },
-  { id: "hermes", name: "AI", purpose: "Your AI assistant", icon: "✦", route: "ai", group: "everyday" },
-  { id: "forgejo", name: "Git", purpose: "Code hosting", icon: "⌘", route: "git", group: "build" },
-  { id: "woodpecker", name: "CI", purpose: "Builds & deploys", icon: "⚙", route: "ci", group: "build" },
+  { id: "immich", name: "Photos", purpose: "Private photo library", icon: Image, route: "photos", group: "everyday" },
+  { id: "paperless-ngx", name: "Docs", purpose: "Document archive", icon: FileText, route: "docs", group: "everyday" },
+  { id: "karakeep", name: "Save", purpose: "Bookmarks & saves", icon: Bookmark, route: "save", group: "everyday" },
+  { id: "syncthing", name: "Sync", purpose: "File sync", icon: FolderSync, route: "sync", group: "everyday" },
+  { id: "hermes", name: "AI", purpose: "Your AI assistant", icon: Sparkles, route: "ai", group: "everyday" },
+  { id: "forgejo", name: "Git", purpose: "Code hosting", icon: GitBranch, route: "git", group: "build" },
+  { id: "woodpecker", name: "CI", purpose: "Builds & deploys", icon: Hammer, route: "ci", group: "build" },
 ];
 
 function getDomain(): string {
@@ -43,7 +45,7 @@ function tileHref(tile: TileDef): string {
 function HealthDot({ health }: { health: string }) {
   const normalized = health.toLowerCase();
   const color =
-    normalized === "healthy" ? "var(--success, #22c55e)" : normalized === "degraded" ? "var(--warning, #f59e0b)" : "var(--danger, #ef4444)";
+    normalized === "healthy" ? "var(--positive)" : normalized === "degraded" ? "var(--warning)" : "var(--negative)";
   return (
     <span
       aria-label={health}
@@ -104,11 +106,12 @@ export function HomePage() {
         <div className="tile-grid">
           {everyday.map((tile) => {
             const h = healthById.get(tile.id) ?? "unknown";
+            const Icon = tile.icon;
             return (
               <a key={tile.id} className="tile" href={tileHref(tile)} target="_blank" rel="noreferrer">
                 <div className="tile-head">
                   <span className="tile-icon" aria-hidden="true">
-                    {tile.icon}
+                    <Icon size={20} strokeWidth={1.75} />
                   </span>
                   <HealthDot health={h} />
                 </div>
@@ -127,11 +130,12 @@ export function HomePage() {
         <div className="tile-grid">
           {build.map((tile) => {
             const h = healthById.get(tile.id) ?? "unknown";
+            const Icon = tile.icon;
             return (
               <a key={tile.id} className="tile" href={tileHref(tile)} target="_blank" rel="noreferrer">
                 <div className="tile-head">
                   <span className="tile-icon" aria-hidden="true">
-                    {tile.icon}
+                    <Icon size={20} strokeWidth={1.75} />
                   </span>
                   <HealthDot health={h} />
                 </div>
@@ -145,6 +149,7 @@ export function HomePage() {
           })}
         </div>
       </Section>
+
 
       <p className="muted" style={{ marginTop: 16, fontSize: "0.875rem" }}>
         Health dots are live and refresh every 15 seconds. Access is controlled by Pocket ID — your tailnet membership is the gate.

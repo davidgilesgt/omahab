@@ -142,3 +142,11 @@ func TestHandleFailure_HintMapping_Table(t *testing.T) {
 		})
 	}
 }
+func TestRootRegistersAllTopLevel(t *testing.T) {
+	root := newRootCmd()
+	for _, name := range []string{"sync", "workspace", "backup", "backup-drive", "system", "doctor", "console", "setup"} {
+		if c, _, err := root.Find([]string{name}); err != nil || c == nil || c.Name() != name {
+			t.Fatalf("top-level %q not registered", name)
+		}
+	}
+}

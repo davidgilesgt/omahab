@@ -1,16 +1,32 @@
 import type { ReactNode } from "react";
 import { ApiError } from "../api/client";
 
+const STATUS_LABELS: Record<string, string> = {
+  waiting_for_cloudflare: "Waiting for domain",
+  reconciling: "Setting up",
+  attention: "Needs attention",
+  complete: "Complete",
+  ok: "Done",
+  pending: "Pending",
+  failed: "Failed",
+  healthy: "Healthy",
+  degraded: "Degraded",
+  unhealthy: "Unhealthy",
+};
+export function humanizeStatus(v: string): string {
+  return STATUS_LABELS[v] ?? v.replaceAll("_", " ");
+}
+
 export function StatusPill({ value }: { value: string }) {
   const normalized = value.toLowerCase().replaceAll("_", "-");
-  const tone = ["healthy", "running", "active", "complete", "completed", "verified", "private"].includes(normalized)
+  const tone = ["healthy", "running", "active", "complete", "completed", "verified", "private", "ok"].includes(normalized)
     ? "positive"
-    : ["degraded", "pending", "shared", "warning"].includes(normalized)
+    : ["degraded", "pending", "shared", "warning", "attention"].includes(normalized)
       ? "warning"
       : ["unhealthy", "failed", "error", "public", "stopped", "disabled"].includes(normalized)
         ? "negative"
         : "neutral";
-  return <span className={`status status-${tone}`}>{value.replaceAll("_", " ")}</span>;
+  return <span className={`status status-${tone}`}>{humanizeStatus(value)}</span>;
 }
 
 export function PageHeader({ eyebrow, title, description, actions }: { eyebrow?: string; title: string; description: string; actions?: ReactNode }) {
@@ -46,7 +62,10 @@ export function LoadingState({ label = "Loading" }: { label?: string }) {
 }
 
 export function ErrorState({ error, retry }: { error: unknown; retry?: () => void }) {
-  const message = error instanceof ApiError || error instanceof Error ? error.message : "An unexpected error occurred.";
+  let message = error instanceof ApiError || error instanceof Error ? error.message : "An unexpected error occurred.";
+  if (error instanceof ApiError && (error.status === 0 || error.code === "network_error")) {
+    message = "Can't reach the server. Check that this device is on the tailnet.";
+  }
   return (
     <div className="state-message error-state" role="alert">
       <div><strong>Couldn’t load this view</strong><p>{message}</p></div>

@@ -211,7 +211,6 @@ Repository layout:
 
 ```sh
 nix build .#image-iso    # bootable installer ISO (console wizard on first boot)
-nix build .#image-qcow   # qcow2 appliance disk
 ```
 
 ## Troubleshooting

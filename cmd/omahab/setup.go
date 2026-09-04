@@ -4,15 +4,16 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"net/http"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/x/term"
 	"github.com/spf13/cobra"
 
 	"github.com/omahab/omahab/internal/setupguide"
 	"github.com/omahab/omahab/internal/tailnet"
+	"github.com/omahab/omahab/internal/tui"
 )
 
 // newSetupCmd builds `omahab setup`: the SSH fallback for first-boot
@@ -29,12 +30,20 @@ func newSetupCmd() *cobra.Command {
 }
 
 func runSetup() error {
+	if isNonInteractive() {
+		return fmt.Errorf("omahab setup is interactive; use the dashboard at http://<tailscale-ip>:8484")
+	}
 	reader := bufio.NewReader(os.Stdin)
+	caps := tui.ResolveCaps(term.IsTerminal(os.Stdout.Fd()), os.Getenv("TERM"), os.Getenv("NO_COLOR"))
 	fmt.Println("Omahab first-run setup (SSH fallback)")
 	fmt.Println()
 
 	// --- Tailscale ---
-	fmt.Println("1) Tailscale — private mesh")
+	if caps.ColorEnabled {
+		fmt.Println(tui.InfoChip.Render(" 1 ") + " Tailscale — private mesh")
+	} else {
+		fmt.Println("1) Tailscale — private mesh")
+	}
 	st, _ := tailnet.Status(context.Background())
 	if st.Running && tailnet.IsTailscaleIPv4(st.IP) {
 		fmt.Printf("   ✓ already running — %s\n", st.IP)
@@ -67,7 +76,11 @@ func runSetup() error {
 
 	// --- Cloudflare ---
 	fmt.Println()
-	fmt.Println("2) Cloudflare — domain + tokens")
+	if caps.ColorEnabled {
+		fmt.Println(tui.InfoChip.Render(" 2 ") + " Cloudflare — domain + tokens")
+	} else {
+		fmt.Println("2) Cloudflare — domain + tokens")
+	}
 	fmt.Print("   Apex domain (e.g. example.com, blank to skip): ")
 	domain, _ := reader.ReadString('\n')
 	domain = strings.TrimSpace(domain)
@@ -76,7 +89,7 @@ func runSetup() error {
 			fmt.Printf("   ! %v — continuing anyway\n", err)
 		}
 		fmt.Print("   Cloudflare DNS token (Token A): ")
-		token, _ := reader.ReadString('\n')
+		token, _ := readTokenHidden()
 		token = strings.TrimSpace(token)
 		if token != "" {
 			if err := setupguide.ValidateCloudflareToken(token); err == nil {
@@ -101,6 +114,3 @@ func runSetup() error {
 	}
 	return nil
 }
-
-// ensure http is referenced (kept for future API calls from setup)
-var _ = http.DefaultClient
