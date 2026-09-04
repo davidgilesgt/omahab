@@ -93,13 +93,13 @@ in
 
     releaseRef = mkOption {
       type = types.str;
-      default = "github:davidgilesgt/omahab/master";
+      default = "github:davidgilesgt/omahab/${self.rev or self.dirtyRev or "master"}";
       description = "Flake ref `omahab system upgrade` switches to.";
     };
 
     releaseURL = mkOption {
       type = types.str;
-      default = "https://raw.githubusercontent.com/davidgilesgt/omahab/master/version";
+      default = "https://github.com/davidgilesgt/omahab/releases/latest/download/manifest.json";
       description = "Version manifest URL for update discovery.";
     };
   };

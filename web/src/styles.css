@@ -367,7 +367,7 @@ small { color: var(--ink-muted); }
 .nav-link { display: grid; grid-template-columns: 1.5rem 1fr auto; align-items: center; min-height: var(--control-height); padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); color: var(--ink-muted); text-decoration: none; transition: background var(--transition), color var(--transition); }
 .nav-link:hover { background: var(--surface-raised); color: var(--ink); }
 .nav-link.active { background: var(--surface-hover); color: var(--ink); font-weight: 700; }
-.nav-icon { color: var(--accent); text-align: center; }
+.nav-icon { color: var(--accent); flex: 0 0 auto; }
 .nav-badge { min-width: 1.25rem; padding-inline: var(--space-1); border-radius: var(--radius-lg); background: var(--negative); color: var(--accent-contrast); font-size: 0.75rem; text-align: center; }
 .sidebar-footer { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-2); margin-top: auto; padding: var(--space-4) var(--space-2) 0; border-top: var(--border) solid var(--line); }
 .privacy-indicator { display: flex; align-items: center; gap: var(--space-2); color: var(--ink-muted); font-size: 0.8125rem; }
@@ -528,7 +528,28 @@ td small, .cell-error { display: block; margin-top: var(--space-1); }
 .copy-button { display: inline-flex; align-items: center; justify-content: center; min-height: 2rem; padding: var(--space-1) var(--space-3); border: var(--border) solid var(--line); border-radius: var(--radius-sm); background: var(--surface); color: var(--ink-muted); font-family: var(--font-mono); font-size: 0.75rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; transition: background var(--transition), color var(--transition), border-color var(--transition); }
 .copy-button:hover { background: var(--surface-hover); color: var(--ink); border-color: var(--ink-muted); }
 .copy-button:active { transform: translateY(var(--border)); }
+.qr-frame { display: inline-grid; padding: var(--space-2); border: var(--border) solid var(--line); border-radius: var(--radius-md); background: #fff; }
 
+.stepper { display: flex; gap: var(--space-4); padding-bottom: var(--space-4); border-bottom: var(--border) solid var(--line); list-style: none; margin: 0; }
+.stepper li { display: flex; align-items: center; gap: var(--space-2); color: var(--ink-muted); font-size: 0.875rem; }
+.stepper li[data-state="current"] { color: var(--ink); font-weight: 700; }
+.stepper-dot { display: grid; place-items: center; width: 1.5rem; height: 1.5rem; border-radius: 50%; border: var(--border) solid var(--line); font-family: var(--font-mono); font-size: 0.75rem; }
+[data-state="done"] .stepper-dot { background: var(--accent); border-color: var(--accent); color: var(--accent-contrast); }
+[data-state="current"] .stepper-dot { border-color: var(--accent); color: var(--accent); }
+.finish-card { display: grid; justify-items: center; gap: var(--space-3); padding: var(--space-6); text-align: center; animation: rise 320ms var(--transition) both; }
+@keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+.theme-grid { position: absolute; right: 0; top: 100%; z-index: 20; display: grid; grid-template-columns: repeat(3, 6.5rem); gap: var(--space-2); margin-top: var(--space-2); padding: var(--space-3); background: var(--surface); border: var(--border) solid var(--line); border-radius: var(--radius-md); box-shadow: var(--shadow-popover); }
+.swatch { display: grid; grid-template-columns: 1fr 1fr 1fr; height: 1.5rem; border-radius: var(--radius-sm); overflow: hidden; border: var(--border) solid var(--line); }
+[aria-selected="true"] .swatch { outline: 2px solid var(--focus); }
+.theme-option { display: grid; gap: var(--space-1); padding: var(--space-1); border: var(--border) solid transparent; border-radius: var(--radius-sm); background: transparent; text-align: center; }
+.theme-option:hover { background: var(--surface-raised); }
+.theme-label { font-size: 0.75rem; color: var(--ink-muted); text-transform: capitalize; }
+.page > * { animation: rise 320ms var(--transition) both; }
+.page > :nth-child(2) { animation-delay: 40ms; }
+.page > :nth-child(3) { animation-delay: 80ms; }
+.page > :nth-child(4) { animation-delay: 120ms; }
+.page > :nth-child(5) { animation-delay: 160ms; }
+.modal[open] { animation: rise 220ms var(--transition) both; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
 

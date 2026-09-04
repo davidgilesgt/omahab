@@ -1,6 +1,22 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { CheckCircle2 } from "lucide-react";
 import { PageHeader, Section } from "../components/ui";
+import { Stepper, type StepDef } from "../components/stepper";
+import { CopyButton } from "../components/copyButton";
 import { useToast } from "../components/toast";
+
+const NEW_STEPS: StepDef[] = [
+  { id: "code", label: "Claim" },
+  { id: "ssh", label: "SSH keys" },
+  { id: "tailscale", label: "Tailnet" },
+  { id: "handoff", label: "Done" },
+];
+const RESTORE_STEPS: StepDef[] = [
+  { id: "code", label: "Claim" },
+  { id: "restore", label: "Backup" },
+  { id: "restore_running", label: "Restore" },
+  { id: "handoff", label: "Done" },
+];
 
 const BOOTSTRAP_POLL_MS = 3000;
 
@@ -260,8 +276,9 @@ export function BootstrapPage() {
         title="Omahab setup"
         description="Claim this server with the one-time code shown on its console, then enroll it in your tailnet."
       />
+      <Stepper steps={step === "restore" || step === "restore_running" ? RESTORE_STEPS : NEW_STEPS} current={step} />
       {step === "code" && (
-        <Section title="1 · Enter the one-time code" description="The code is displayed on the server's console (tty1) and rotates on repeated wrong attempts.">
+        <Section title="Enter the one-time code" description="Type the code shown on the server's screen.">
           <form className="form-grid" onSubmit={submitCode}>
             <label className="field">
               <span>One-time code</span>
@@ -274,11 +291,11 @@ export function BootstrapPage() {
         </Section>
       )}
       {step === "mode" && (
-        <Section title="2 · Choose setup mode" description="Set up a new server or restore from a Hetzner Storage Box backup.">
+        <Section title="Choose setup mode" description="Set up a new server or restore from a Hetzner Storage Box backup.">
           <div className="form-grid" style={{ gap: 12 }}>
             <button className="button primary" type="button" onClick={() => setStep("ssh")} disabled={busy}>Set up a new server</button>
             <button className="button secondary" type="button" onClick={() => setStep("restore")} disabled={busy}>Restore from backup</button>
-            <p className="muted" style={{ fontSize: "0.9em" }}>Restore collects Hetzner Storage Box username + host (or generic restic location), sub-account password once, and the 24-word recovery phrase. The phrase alone opens the repository.</p>
+            <p className="muted" style={{ fontSize: "0.9em" }}>You'll need your Hetzner Storage Box login and the 24-word recovery phrase. The phrase alone unlocks the backup.</p>
           </div>
         </Section>
       )}
@@ -320,11 +337,11 @@ export function BootstrapPage() {
               <button className="button primary" type="submit" disabled={busy || restorePhrase.trim().split(/\s+/).length < 24}>{busy ? "Connecting…" : "Connect and list snapshots"}</button>
             </div>
             {restoreSnapshots.length > 0 && (
-              <div style={{ border: "1px solid var(--border)", borderRadius: 6, padding: 12 }}>
+              <div style={{ border: "var(--border) solid var(--line)", borderRadius: 6, padding: 12 }}>
                 <p><strong>Available snapshots (latest 10):</strong></p>
                 <ul style={{ listStyle: "none", padding: 0, display: "grid", gap: 6 }}>
                   {restoreSnapshots.map((s) => (
-                    <li key={s.id} style={{ display: "flex", gap: 8, alignItems: "center", padding: 6, border: restoreSelected === s.id ? "2px solid var(--primary)" : "1px solid var(--border)", borderRadius: 4 }}>
+                    <li key={s.id} style={{ display: "flex", gap: 8, alignItems: "center", padding: 6, border: restoreSelected === s.id ? "2px solid var(--accent)" : "var(--border) solid var(--line)", borderRadius: 4 }}>
                       <input type="radio" name="snapshot" checked={restoreSelected === s.id} onChange={() => setRestoreSelected(s.id)} />
                       <span className="mono" style={{ fontSize: "0.85em" }}>{s.id.slice(0, 8)}</span>
                       <span style={{ opacity: 0.8 }}>{s.hostname}</span>
@@ -342,14 +359,14 @@ export function BootstrapPage() {
       )}
       {step === "restore_running" && (
         <Section title="Restoring…" description="Restoring snapshot to / (includes /var/lib/omahab, /var/lib/tailscale, app data). Never writes under /nix or /etc.">
-          <div style={{ background: "var(--surface-muted)", padding: 12, borderRadius: 6, maxHeight: 300, overflowY: "auto", fontFamily: "monospace", fontSize: "0.85em" }}>
+          <div style={{ background: "var(--surface-raised)", padding: 12, borderRadius: 6, maxHeight: 300, overflowY: "auto", fontFamily: "monospace", fontSize: "0.85em" }}>
             {restoreLogs.length === 0 ? <p className="muted">Starting…</p> : restoreLogs.map((l, i) => <div key={i}>{l}</div>)}
           </div>
           <p className="muted" style={{ marginTop: 8 }}>After restore the Tailscale identity (/var/lib/tailscale) is kept; if the coordination server rejects it, you will be returned to the Tailscale step.</p>
         </Section>
       )}
       {step === "ssh" && (
-        <Section title="2 · Administrator SSH keys" description="Import keys from GitHub or paste public keys. Skipping is allowed — console access remains the recovery path.">
+        <Section title="Administrator SSH keys" description="Import keys from GitHub or paste public keys. Skipping is allowed — console access remains the recovery path.">
           <form className="form-grid" onSubmit={submitKeys}>
             <label className="field">
               <span>GitHub username</span>
@@ -367,7 +384,7 @@ export function BootstrapPage() {
         </Section>
       )}
       {step === "tailscale" && (
-        <Section title="3 · Tailscale" description="Approve this server from any device signed into your tailnet. The dashboard is reachable only over the tailnet.">
+        <Section title="Tailscale" description="Approve this server from any device signed into your tailnet. The dashboard is reachable only over the tailnet.">
           {authUrl ? (
             <div className="callout">
               <p>Open this URL to authorize the server:</p>
@@ -381,10 +398,13 @@ export function BootstrapPage() {
       )}
       {step === "handoff" && (
         <Section title="Setup complete" description="The rest of enrollment (domain, Cloudflare, recovery key, storage, backups) happens on the authenticated dashboard over Tailscale — secrets never transit this LAN page.">
-          <div className="callout">
-            <p>Your dashboard: <span className="mono">http://{tsIp}:8484</span></p>
-          </div>
-          <div className="form-actions">
+          <div className="finish-card">
+            <CheckCircle2 size={48} strokeWidth={1.75} style={{ color: "var(--positive)" }} aria-hidden />
+            <h3>Your server is on the tailnet</h3>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
+              <span className="mono">http://{tsIp}:8484</span>
+              <CopyButton text={`http://${tsIp}:8484`} label="Copy" />
+            </div>
             <button className="button primary" type="button" onClick={complete}>Open dashboard</button>
           </div>
         </Section>

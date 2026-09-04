@@ -326,7 +326,7 @@ function HermesTokenBlock() {
         </button>
       </div>
       {rotate.data?.token ? (
-        <div className="banner-card" style={{ background: "var(--warning-muted, #fff3cd)", border: "1px solid var(--warning, #f59e0b)", padding: 12, borderRadius: 8 }}>
+        <div className="banner-card" style={{ background: "var(--warning-bg)", border: "1px solid var(--warning)", padding: 12, borderRadius: 8 }}>
           <strong>New token (copy now — shown once):</strong>
           <p className="mono" style={{ wordBreak: "break-all" }}>{rotate.data.token}</p>
           <CopyButton text={rotate.data.token} label="Copy new token" />

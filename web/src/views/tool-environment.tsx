@@ -99,7 +99,7 @@ export function ToolEnvironmentPage() {
           {varsQuery.isLoading ? <LoadingState label="Loading variables" /> : varsQuery.isError ? <ErrorState error={varsQuery.error} retry={() => void varsQuery.refetch()} /> : !variables.length ? <EmptyState title="No variables" description="Create a variable; it will be delivered to granted companion devices on next sync." /> : (
             <div className="compact-list">
               {variables.map((v) => (
-                <div key={v.name} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0.5rem 0", borderBottom: "1px solid var(--border)" }}>
+                <div key={v.name} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0.5rem 0", borderBottom: "var(--border) solid var(--line)" }}>
                   <div>
                     <strong className="mono">{v.name}</strong> <span className="muted">v{v.version}</span>
                     <div className="muted" style={{ fontSize: "0.8rem" }}>updated {formatDate(v.updated_at)}</div>
@@ -135,7 +135,7 @@ export function ToolEnvironmentPage() {
               </div>
             )}
             {enrollCode && (
-              <div className="callout" role="status" style={{ border: "1px solid var(--border)", borderRadius: "0.5rem", padding: "0.75rem", background: "var(--surface-raised, #f8f8f4)" }}>
+              <div className="callout" role="status" style={{ border: "var(--border) solid var(--line)", borderRadius: "0.5rem", padding: "0.75rem", background: "var(--surface-raised)" }}>
                 <strong>One-liner (Omarchy) — paste on the device</strong>
                 <pre className="mono" style={{ whiteSpace: "pre-wrap", wordBreak: "break-all", margin: "0.5rem 0", padding: "0.5rem", background: "var(--surface)", borderRadius: "0.25rem", fontSize: "0.85rem" }}>{`curl -fsSL ${typeof window !== "undefined" ? window.location.origin : ""}/install.sh?code=${encodeURIComponent(enrollCode)} | sh`}</pre>
                 <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>

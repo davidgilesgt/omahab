@@ -51,11 +51,11 @@ func newBackupDriveEnableCmd() *cobra.Command {
 			if err := client.EnableBackupDrive(paths); err != nil {
 				return handleFailure(err)
 			}
-			fmt.Println("Machine backup enabled. Paths written to", client.BackupPathsFile())
-			fmt.Println("Timer: omahab-machine-backup.timer (daily, Persistent)")
 			if flagJSON {
 				return printJSON(map[string]string{"result": "enabled", "paths_file": client.BackupPathsFile()})
 			}
+			fmt.Println("Machine backup enabled. Paths written to", client.BackupPathsFile())
+			fmt.Println("Timer: omahab-machine-backup.timer (daily, Persistent)")
 			return nil
 		},
 	}
@@ -77,6 +77,9 @@ func newBackupDriveRunCmd() *cobra.Command {
 			if err := client.RunBackupDrive(ctx, ks); err != nil {
 				return handleFailure(err)
 			}
+			if flagJSON {
+				return printJSON(map[string]string{"result": "completed"})
+			}
 			fmt.Println("Machine backup completed (restic backup + forget)")
 			return nil
 		},
@@ -94,6 +97,9 @@ func newBackupDriveStatusCmd() *cobra.Command {
 			ks := client.NewKeyringStore()
 			// Allow override for tests via env.
 			if os.Getenv("OMAHAB_BACKUP_STATUS_MOCK") != "" {
+				if flagJSON {
+					return printJSON(map[string]string{"result": "mock"})
+				}
 				fmt.Println("mock status")
 				return nil
 			}

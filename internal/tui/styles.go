@@ -28,6 +28,10 @@ var (
 	NeutralFG  = lipgloss.Color("#525252")
 	NeutralBG  = lipgloss.Color("#f5f5f5")
 
+	Accent         = lipgloss.Color("#4c5b36")
+	AccentDark     = lipgloss.Color("#b2c27d")
+	AccentAdaptive = lipgloss.AdaptiveColor{Light: "#4c5b36", Dark: "#b2c27d"}
+
 	PassChip = lipgloss.NewStyle().Foreground(PositiveFG).Background(PositiveBG).Padding(0, 1).Bold(true)
 	FailChip = lipgloss.NewStyle().Foreground(NegativeFG).Background(NegativeBG).Padding(0, 1).Bold(true)
 	WarnChip = lipgloss.NewStyle().Foreground(WarnFG).Background(WarnBG).Padding(0, 1).Bold(true)
@@ -86,7 +90,6 @@ func RenderDoctorChecklist(checks []DoctorCheckView, caps Caps) string {
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
-
 // ResolveCaps computes capabilities from stdio state and env.
 func ResolveCaps(isTTY bool, term, noColorEnv string) Caps {
 	caps := Caps{IsTTY: isTTY}
@@ -96,4 +99,35 @@ func ResolveCaps(isTTY bool, term, noColorEnv string) Caps {
 		}
 	}
 	return caps
+}
+
+// Banner renders the OMAHAB title banner. When color is disabled it falls
+// back to the legacy ASCII box (byte-identical for TERM=dumb / NO_COLOR).
+func Banner(title string, caps Caps) string {
+	if !caps.ColorEnabled {
+		// Legacy ASCII fallback — keep byte-identical width (45 inner dashes).
+		const innerWidth = 45
+		inner := "OMAHAB  \u00b7  " + title
+		// Center inner within innerWidth.
+		padTotal := innerWidth - len([]rune(inner))
+		if padTotal < 0 {
+			padTotal = 0
+		}
+		left := (padTotal + 1) / 2
+		right := padTotal - left
+		line := strings.Repeat(" ", left) + inner + strings.Repeat(" ", right)
+		// Preserve the two-space indent used by the original console.
+		return "  \u250c" + strings.Repeat("\u2500", innerWidth) + "\u2510\n" +
+			"  \u2502" + line + "\u2502\n" +
+			"  \u2514" + strings.Repeat("\u2500", innerWidth) + "\u2518"
+	}
+	style := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(AccentAdaptive).
+		Padding(0, 2)
+	rendered := style.Render("OMAHAB  \u00b7  " + title)
+	if caps.ColorEnabled && !strings.Contains(rendered, "\x1b") {
+		rendered = "\x1b[38;2;76;91;54m" + rendered + "\x1b[0m"
+	}
+	return rendered
 }

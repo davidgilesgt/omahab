@@ -95,7 +95,7 @@ func TestHassRunnerInstallSkill(t *testing.T) {
 		if err := r.InstallSkill(context.Background()); err != nil {
 			t.Fatalf("unexpected %v", err)
 		}
-		path := filepath.Join(dir, "hass-cli.md")
+		path := filepath.Join(dir, "SKILL.md")
 		data, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("read skill %v", err)

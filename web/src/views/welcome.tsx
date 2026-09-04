@@ -1,4 +1,5 @@
 import { useParams } from "react-router-dom";
+import { QRCode } from "../components/qr";
 import { PageHeader, Section } from "../components/ui";
 
 function getDomain(): string {
@@ -74,17 +75,7 @@ export function WelcomePage() {
                   <p style={{ fontSize: "0.875rem" }}>
                     <strong>QR for your phone:</strong>
                   </p>
-                  {/* Simple QR via Google chart API fallback — if offline, token text remains usable */}
-                  <img
-                    alt="QR code for enrollment"
-                    src={`https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(qrData)}`}
-                    width={180}
-                    height={180}
-                    style={{ border: "1px solid var(--line)", borderRadius: 8, background: "#fff", padding: 6 }}
-                    onError={(e) => {
-                      (e.currentTarget as HTMLImageElement).style.display = "none";
-                    }}
-                  />
+                  <QRCode value={qrData} label="QR code for enrollment" />
                   <p className="mono" style={{ fontSize: "0.75rem", wordBreak: "break-all", marginTop: 6 }}>
                     {qrData}
                   </p>

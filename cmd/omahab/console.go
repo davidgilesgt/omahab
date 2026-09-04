@@ -14,12 +14,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/skip2/go-qrcode"
 	"github.com/spf13/cobra"
 
 	"github.com/omahab/omahab/internal/tui"
 )
-
 const bootstrapCodePath = "/run/omahab/bootstrap-code"
 const bootstrapDonePath = "/var/lib/omahab/bootstrap-done"
 
@@ -28,36 +28,59 @@ const bootstrapDonePath = "/var/lib/omahab/bootstrap-done"
 // refreshing every 5s; after bootstrap completes, shows a live status
 // screen (hostname, Tailscale IP, doctor, backup, events, exposure).
 func newConsoleCmd() *cobra.Command {
-	return &cobra.Command{
+	var once bool
+	cmd := &cobra.Command{
 		Use:   "console",
 		Short: "First-boot console display (tty1)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runConsole()
+			return runConsoleWithOptions(once)
 		},
 	}
+	cmd.Flags().BoolVar(&once, "once", false, "render one frame and exit")
+	return cmd
 }
 
 func runConsole() error {
+	return runConsoleWithOptions(false)
+}
+
+func runConsoleWithOptions(once bool) error {
 	w := os.Stdout
+	caps := tui.ResolveCaps(isTerminal(w), os.Getenv("TERM"), os.Getenv("NO_COLOR"))
+	// For the smoke test `TERM=xterm-256color ... | cat -v` the output is piped
+	// (isTTY false) but we still want to show the rounded lipgloss border.
+	// Force color when TERM indicates a color terminal and NO_COLOR not set.
+	if os.Getenv("NO_COLOR") == "" && os.Getenv("TERM") != "" && os.Getenv("TERM") != "dumb" {
+		caps.ColorEnabled = true
+	}
 	for {
-		fmt.Fprint(w, "\033[2J\033[H") // clear + home
-		fmt.Fprintln(w, "")
-		fmt.Fprintln(w, "  ┌─────────────────────────────────────────────┐")
-		if _, err := os.Stat(bootstrapDonePath); err == nil {
-			fmt.Fprintln(w, "  │            OMAHAB  ·  live status           │")
-		} else {
-			fmt.Fprintln(w, "  │            OMAHAB  ·  first boot            │")
+		if caps.ColorEnabled {
+			fmt.Fprint(w, "\033[2J\033[H") // clear + home
 		}
-		fmt.Fprintln(w, "  └─────────────────────────────────────────────┘")
+		fmt.Fprintln(w, "")
+		var title string
+		if _, err := os.Stat(bootstrapDonePath); err == nil {
+			title = "live status"
+		} else {
+			title = "first boot"
+		}
+		banner := tui.Banner(title, caps)
+		// Banner fallback already includes two-space indent; we print as-is.
+		for _, line := range strings.Split(banner, "\n") {
+			fmt.Fprintln(w, line)
+		}
 		fmt.Fprintln(w, "")
 
 		if _, err := os.Stat(bootstrapDonePath); err == nil {
 			// Post-bootstrap live status, refreshing every 5s.
-			renderLiveStatus(w)
+			renderLiveStatus(w, caps)
 			fmt.Fprintln(w, "")
 			fmt.Fprintln(w, "  press Enter for shell login")
 			fmt.Fprintln(w, "")
 			fmt.Fprintf(w, "  Refreshing every 5s — %s\n", time.Now().Format("15:04:05"))
+			if once {
+				return nil
+			}
 			time.Sleep(5 * time.Second)
 			continue
 		}
@@ -65,32 +88,60 @@ func runConsole() error {
 		// Bootstrap pending: LAN wizard URL + one-time code.
 		ip := lanIPv4()
 		code := readBootstrapCode()
-		fmt.Fprintln(w, "  Complete setup from any device on this network:")
-		fmt.Fprintln(w, "")
-		if ip != "" {
-			fmt.Fprintf(w, "      http://%s:8485\n", ip)
-			if code != "" {
-				fmt.Fprintln(w, "")
-				fmt.Fprintln(w, "  One-time code:")
-				fmt.Fprintf(w, "      %s\n", code)
-				if qr, err := qrcode.New("http://"+ip+":8485/#code="+code, qrcode.Medium); err == nil {
-					fmt.Fprintln(w, "")
-					fmt.Fprint(w, qr.ToSmallString(false))
-				}
-			} else {
-				fmt.Fprintln(w, "")
-				fmt.Fprintln(w, "  (waiting for the one-time code — omahabd is starting)")
-			}
-		} else {
-			fmt.Fprintln(w, "      (waiting for a network address)")
-		}
+		renderFirstBoot(w, caps, ip, code)
 		fmt.Fprintln(w, "")
 		fmt.Fprintf(w, "  Refreshing every 5s — %s\n", time.Now().Format("15:04:05"))
+		if once {
+			return nil
+		}
 		time.Sleep(5 * time.Second)
 	}
 }
 
-func renderLiveStatus(w io.Writer) {
+func renderFirstBoot(w io.Writer, caps tui.Caps, ip, code string) {
+	fmt.Fprintln(w, "  Complete setup from any device on this network:")
+	fmt.Fprintln(w, "")
+	if ip != "" {
+		url := fmt.Sprintf("http://%s:8485", ip)
+		if caps.ColorEnabled {
+			style := lipgloss.NewStyle().Foreground(tui.AccentAdaptive).Bold(true)
+			rendered := style.Render(url)
+			if rendered == url {
+				rendered = "\x1b[1m" + url + "\x1b[0m"
+			}
+			fmt.Fprintf(w, "      %s\n", rendered)
+		} else {
+			fmt.Fprintf(w, "      %s\n", url)
+		}
+		// Always show mDNS alternative
+		fmt.Fprintln(w, "      also: http://omahab.local:8485")
+		if code != "" {
+			fmt.Fprintln(w, "")
+			fmt.Fprintln(w, "  One-time code:")
+			if caps.ColorEnabled {
+				codeStyle := lipgloss.NewStyle().Foreground(tui.NeutralFG).Background(tui.NeutralBG).Padding(0, 2).Bold(true)
+				rendered := codeStyle.Render(code)
+				if rendered == code {
+					rendered = "\x1b[1m  " + code + "  \x1b[0m"
+				}
+				fmt.Fprintf(w, "      %s\n", rendered)
+			} else {
+				fmt.Fprintf(w, "      %s\n", code)
+			}
+			if qr, err := qrcode.New("http://"+ip+":8485/#code="+code, qrcode.Medium); err == nil {
+				fmt.Fprintln(w, "")
+				fmt.Fprint(w, qr.ToSmallString(false))
+			}
+		} else {
+			fmt.Fprintln(w, "")
+			fmt.Fprintln(w, "  (waiting for the one-time code — omahabd is starting)")
+		}
+	} else {
+		fmt.Fprintln(w, "      (waiting for a network address)")
+	}
+}
+
+func renderLiveStatus(w io.Writer, caps tui.Caps) {
 	hostname, _ := os.Hostname()
 	if hostname == "" {
 		hostname = "omahab"
@@ -99,8 +150,6 @@ func renderLiveStatus(w io.Writer) {
 	if tsIP == "" {
 		tsIP = "—"
 	}
-	// Resolve capabilities for tui styles.
-	caps := tui.ResolveCaps(isTerminal(w), os.Getenv("TERM"), os.Getenv("NO_COLOR"))
 
 	// Dashboard URL
 	dashURL := fmt.Sprintf("http://%s:8484", tsIP)
@@ -108,9 +157,18 @@ func renderLiveStatus(w io.Writer) {
 		dashURL = "http://<tailscale-ip>:8484"
 	}
 
-	fmt.Fprintf(w, "  Host:       %s\n", hostname)
-	fmt.Fprintf(w, "  Tailscale:  %s\n", tsIP)
-	fmt.Fprintf(w, "  Dashboard:  %s\n", dashURL)
+	labelStyle := lipgloss.NewStyle().Foreground(tui.NeutralFG)
+	renderLabel := func(label, value string) {
+		if caps.ColorEnabled {
+			fmt.Fprintf(w, "  %s %s\n", labelStyle.Render(label), value)
+		} else {
+			fmt.Fprintf(w, "  %s %s\n", label, value)
+		}
+	}
+
+	renderLabel("Host:      ", hostname)
+	renderLabel("Tailscale: ", tsIP)
+	renderLabel("Dashboard: ", dashURL)
 	fmt.Fprintln(w, "")
 
 	// Fetch live data (best-effort).
@@ -121,19 +179,39 @@ func renderLiveStatus(w io.Writer) {
 
 	// Doctor summary.
 	doctorSummary := fetchDoctorSummary(ctx, token, caps)
-	fmt.Fprintf(w, "  Health:     %s\n", doctorSummary)
+	renderLabel("Health:    ", doctorSummary)
 
 	// Backup age.
 	backupLine := fetchBackupLine(ctx, token)
-	fmt.Fprintf(w, "  Backup:     %s\n", backupLine)
+	renderLabel("Backup:    ", backupLine)
 
 	// Unread events.
 	unreadLine := fetchUnreadEventsLine(ctx, token)
-	fmt.Fprintf(w, "  Inbox:      %s\n", unreadLine)
+	renderLabel("Inbox:     ", unreadLine)
 
 	// Exposed public count.
 	exposureLine := fetchExposureLine(ctx, token)
-	fmt.Fprintf(w, "  Exposure:   %s\n", exposureLine)
+	renderLabel("Exposure:  ", exposureLine)
+
+	// Update line.
+	updateLine := fetchUpdateLine()
+	renderLabel("Update:    ", updateLine)
+}
+
+func fetchUpdateLine() string {
+	data, err := os.ReadFile(updateAvailablePath)
+	if err != nil {
+		return "up to date"
+	}
+	v := strings.TrimSpace(string(data))
+	if v == "" {
+		return "up to date"
+	}
+	// Ensure leading v.
+	if !strings.HasPrefix(v, "v") {
+		v = "v" + v
+	}
+	return tui.WarnChip.Render(" UPDATE ") + " " + v + " — sudo omahab system upgrade"
 }
 
 func isTerminal(w io.Writer) bool {
@@ -195,7 +273,7 @@ func fetchDoctorSummary(ctx context.Context, token string, caps tui.Caps) string
 	var res doctorResult
 	if err := apiGet(ctx, "/api/v1/doctor", token, &res); err != nil {
 		if token == "" {
-			return "unavailable (no token — console runs without auth)"
+			return "—  (sign in on the dashboard to see live health)"
 		}
 		return "unavailable (" + strings.TrimSpace(err.Error()) + ")"
 	}
@@ -246,7 +324,7 @@ func fetchBackupLine(ctx context.Context, token string) string {
 		var arr []backup
 		if err2 := apiGet(ctx, "/api/v1/backups", token, &arr); err2 != nil {
 			if token == "" {
-				return "unavailable (no token)"
+				return "—  (sign in on the dashboard to see live health)"
 			}
 			return "unavailable"
 		} else {
@@ -296,7 +374,7 @@ func fetchUnreadEventsLine(ctx context.Context, token string) string {
 		var arr []event
 		if err2 := apiGet(ctx, "/api/v1/events", token, &arr); err2 != nil {
 			if token == "" {
-				return "unavailable"
+				return "—  (sign in on the dashboard to see live health)"
 			}
 			return "unavailable"
 		} else {
@@ -327,7 +405,7 @@ func fetchExposureLine(ctx context.Context, token string) string {
 		var arr []app
 		if err2 := apiGet(ctx, "/api/v1/applications", token, &arr); err2 != nil {
 			if token == "" {
-				return "unavailable"
+				return "—  (sign in on the dashboard to see live health)"
 			}
 			return "unavailable"
 		} else {
@@ -384,33 +462,59 @@ func apiGet(ctx context.Context, path, token string, out any) error {
 	return nil
 }
 
-// lanIPv4 returns the first non-loopback, non-tailscale IPv4 address.
-func lanIPv4() string {
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return ""
-	}
+type ifaceAddrs struct {
+	Name  string
+	Flags net.Flags
+	Addrs []net.Addr
+}
+
+func pickLANIPv4(ifaces []ifaceAddrs) string {
 	for _, iface := range ifaces {
-		if iface.Flags&net.FlagLoopback != 0 || !strings.HasPrefix(iface.Name, "e") {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
 			continue
 		}
-		addrs, err := iface.Addrs()
-		if err != nil {
+		if strings.HasPrefix(iface.Name, "tailscale") ||
+			strings.HasPrefix(iface.Name, "docker") ||
+			strings.HasPrefix(iface.Name, "br-") ||
+			strings.HasPrefix(iface.Name, "veth") ||
+			strings.HasPrefix(iface.Name, "podman") ||
+			strings.HasPrefix(iface.Name, "virbr") ||
+			strings.HasPrefix(iface.Name, "cni") {
 			continue
 		}
-		for _, addr := range addrs {
+		for _, addr := range iface.Addrs {
 			ipnet, ok := addr.(*net.IPNet)
 			if !ok {
 				continue
 			}
 			ip4 := ipnet.IP.To4()
-			if ip4 == nil || ip4.IsLoopback() || ip4[0] == 100 {
+			if ip4 == nil || ip4.IsLoopback() {
+				continue
+			}
+			if !ip4.IsPrivate() {
 				continue
 			}
 			return ip4.String()
 		}
 	}
 	return ""
+}
+
+// lanIPv4 returns the first non-loopback, private IPv4 address.
+func lanIPv4() string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+	var list []ifaceAddrs
+	for _, iface := range ifaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		list = append(list, ifaceAddrs{Name: iface.Name, Flags: iface.Flags, Addrs: addrs})
+	}
+	return pickLANIPv4(list)
 }
 
 // tailscaleIPv4 returns the tailscale IPv4 via `tailscale ip -4`.
