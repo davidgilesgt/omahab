@@ -24,7 +24,7 @@
           pname = "omahab";
           inherit version;
           src = lib.cleanSource ./.;
-          vendorHash = "sha256-cJECbocgfOBy4NTdsmOrYUjso1s3nvCGaeOua9hXszw=";
+          vendorHash = "sha256-FUZb9WWkYKQR+ZIxNvUmjJMw07LOZw66EhO7Z3XSdVo=";
           subPackages = [
             "cmd/omahab"
             "cmd/omahabd"
@@ -101,7 +101,7 @@ EOF
           pname = "omahab-clientd-${goos}-${goarch}";
           inherit version;
           src = lib.cleanSource ./.;
-          vendorHash = "sha256-cJECbocgfOBy4NTdsmOrYUjso1s3nvCGaeOua9hXszw=";
+          vendorHash = "sha256-FUZb9WWkYKQR+ZIxNvUmjJMw07LOZw66EhO7Z3XSdVo=";
           subPackages = [ "cmd/omahab-clientd" ];
           env.CGO_ENABLED = "0";
           env.GOOS = goos;
