@@ -179,6 +179,7 @@ in
         "network-online.target"
         "docker.service"
       ];
+      wantedBy = [ "multi-user.target" ];
       # docker is a runtime dependency (project deploys), not a hard one:
       # omahabd must serve /up and reconcile even while docker restarts.
       requires = [ ];
