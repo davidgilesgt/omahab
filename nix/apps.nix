@@ -99,6 +99,8 @@ in
       enable = true;
       database.type = "postgres";
       database.createDatabase = true;
+      # New repos (incl. omahabd-provisioned mirrors) default to `master`.
+      settings.repository.DEFAULT_BRANCH = "master";
     };
     systemd.services.forgejo = {
       serviceConfig = {
