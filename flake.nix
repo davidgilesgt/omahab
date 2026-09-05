@@ -175,6 +175,7 @@ EOF
             installPhase = "touch $out";
           });
           integration = pkgs.testers.nixosTest (import ./nix/tests/install.nix { inherit self pkgs; });
+          installer-disk = pkgs.testers.nixosTest (import ./nix/tests/installer-disk.nix { inherit self pkgs; });
           image = self.nixosConfigurations.omahab-appliance.config.system.build.isoImage;
         };
       }
@@ -192,6 +193,20 @@ EOF
           ./nix/vm.nix
         ];
       };
+      # Installed-system template for scripts/install-disk.sh: the installer
+      # overwrites nix/installed-hardware.nix (real hardware scan) and
+      # nix/install-local.nix (hostname, bootloader, stateVersion) in the
+      # on-disk flake copy, then runs
+      # nixos-install --flake ...#omahab-installed.
+      nixosConfigurations.omahab-installed = nixpkgs.lib.nixosSystem {
+        system = "x86_64-linux";
+        specialArgs = { inherit self; };
+        modules = [
+          self.nixosModules.omahab
+          ./nix/installed-hardware.nix
+          ./nix/install-local.nix
+        ];
+      };
       # Appliance: single-disk ext4 image, console wizard, no password
       # (SSH-key-only after bootstrap).
       nixosConfigurations.omahab-appliance = nixpkgs.lib.nixosSystem {
@@ -200,7 +215,7 @@ EOF
         modules = [
           self.nixosModules.omahab
           "${nixpkgs}/nixos/modules/installer/cd-dvd/installation-cd-minimal.nix"
-          {
+          ({ self, pkgs, ... }: {
             services.openssh.settings.PasswordAuthentication = false;
             users.users.root.initialHashedPassword = "";
             users.users.omahab = {
@@ -210,10 +225,17 @@ EOF
             };
             # The appliance boots straight into first-boot setup.
             services.omahab.enable = true;
+            # Disk installer: the exact flake source this ISO was built
+            # from, plus the installer script itself.
+            environment.etc."omahab-installer/flake".source = self;
+            environment.systemPackages = [
+              (pkgs.writeShellScriptBin "omahab-install-disk"
+                (builtins.readFile ./scripts/install-disk.sh))
+            ];
             # redis + the installer profile both set this; ours wins.
             boot.kernel.sysctl."vm.overcommit_memory" = nixpkgs.lib.mkForce "1";
             system.stateVersion = "25.05";
-          }
+          })
         ];
       };
     };

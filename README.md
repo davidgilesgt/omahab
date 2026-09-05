@@ -204,7 +204,7 @@ Repository layout:
 | `companion/omarchy/` | Omarchy shell plugin |
 | `third_party/once` | ONCE fork for project deploys (patch list in `PATCHES.md`) |
 | `api/openapi.yaml` | API specification |
-| `scripts/` | `build.sh` (nix wrapper), `check.sh` |
+| `scripts/` | `build.sh` (nix wrapper), `check.sh`, `install-disk.sh` (ISO disk installer) |
 
 
 ## Building images
@@ -212,6 +212,31 @@ Repository layout:
 ```sh
 nix build .#image-iso    # bootable installer ISO (console wizard on first boot)
 ```
+
+## Installing to disk
+
+Boot the ISO and run as root (the script is also on the ISO as
+`omahab-install-disk`):
+
+```sh
+sudo omahab-install-disk --disk /dev/disk/by-id/ata-SSD --yes
+sudo omahab-install-disk --disk /dev/sda --disk /dev/sdb --hostname haven --yes
+```
+
+The first `--disk` is the system disk (GPT: 1 GiB ESP + rest root ext4);
+every further disk becomes a data disk (one ext4 partition, mounted at
+`/srv/omahab/dataN`, labeled `OMAHAB-DATAN`). UEFI uses systemd-boot,
+BIOS boot uses GRUB. The installer refuses mounted disks and the device
+the ISO booted from, requires confirmation (or `--yes`), and supports
+`--dry-run` (preview) and `--no-install` (partition + config only).
+
+The installed config enables the Omahab stack via the flake source
+vendored on the ISO (`nixos-install --flake ...#omahab-installed`, with
+the machine's hardware scan and hostname baked in at install time).
+Rebuild later with `nixos-rebuild switch --flake /etc/omahab/flake#omahab-installed`.
+Note: `omahab system upgrade` switches to the upstream flake ref without an
+attribute, so it resolves `nixosConfigurations.<hostname>` — today that
+only matches if the hostname names an upstream output.
 
 ## Troubleshooting
 
