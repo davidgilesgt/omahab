@@ -17,3 +17,5 @@ internal/installer/assets/root/*
 /omahabd
 /omahab-install
 /omahab-cataloggen
+# Local-only docs (this Mac's build setup, not for the repo)
+/ISO-BUILD-LOCAL.md
