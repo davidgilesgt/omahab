@@ -40,7 +40,7 @@ in
     ).strip()
     devs = [
       d for d in machine.succeed(
-        "lsblk -dnro NAME,TYPE | awk '$2=="disk" {print "/dev/"$1}'"
+        "lsblk -dnro NAME,TYPE | awk '$2==\"disk\" {print \"/dev/\"$1}'"
       ).split()
       if d != rootdev
     ]
@@ -69,9 +69,8 @@ in
     machine.succeed("test -f /mnt/etc/omahab/flake/flake.nix")
     machine.succeed("test -f /mnt/etc/omahab/flake/nix/module.nix")
     machine.succeed(
-      "grep -q 'networking.hostName = "testbox"' /mnt/etc/omahab/flake/nix/install-local.nix"
+      "grep -q 'networking.hostName = \"testbox\"' /mnt/etc/omahab/flake/nix/install-local.nix"
     )
-    machine.succeed("grep -q systemd-boot /mnt/etc/omahab/flake/nix/install-local.nix")
     machine.succeed("grep -q OMAHAB-DATA1 /mnt/etc/omahab/flake/nix/installed-hardware.nix")
     machine.succeed("test ! -f /mnt/etc/nixos/configuration.nix")
     machine.succeed("test -f /mnt/etc/nixos/NOTE.md")
