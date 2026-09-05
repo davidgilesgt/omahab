@@ -28,8 +28,8 @@ in
         e2fsprogs
         gptfdisk
         efibootmgr
-        nixos-install
-        nixos-generate-config
+        pkgs."nixos-install"
+        pkgs."nixos-generate-config"
       ];
     };
 
