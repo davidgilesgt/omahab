@@ -9,7 +9,9 @@ import (
 	"github.com/omahab/omahab/internal/identity"
 	"github.com/omahab/omahab/internal/knowledge"
 	"github.com/omahab/omahab/internal/scm"
+	"github.com/omahab/omahab/internal/sshkeys"
 )
+
 
 // Pagination controls list endpoints.
 type Pagination struct {
@@ -482,6 +484,10 @@ type BootstrapGate interface {
 	Claim(code, sourceIP string) error
 	// SSHKeys installs keys for the admin user.
 	SSHKeys(githubUser string, pastedKeys []string) (int, error)
+	// ListSSHKeys lists installed SSH keys for the admin user.
+	ListSSHKeys(ctx context.Context) ([]sshkeys.SSHKey, error)
+	// AdminUsername returns the configured Linux admin username.
+	AdminUsername() string
 	// TailscaleUp starts enrollment, returning the auth URL.
 	TailscaleUp() (string, error)
 	// TailscaleStatus polls enrollment state.
@@ -498,6 +504,7 @@ type BootstrapGate interface {
 	// RestoreEvents streams progress events for the running restore.
 	RestoreEvents(ctx context.Context) <-chan BootstrapRestoreEvent
 }
+
 
 // BootstrapRestoreConnectRequest is the body for POST /api/bootstrap/restore/connect.
 type BootstrapRestoreConnectRequest struct {

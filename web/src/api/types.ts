@@ -322,3 +322,31 @@ export interface DoctorReport {
   checks: DoctorCheck[];
   generated_at: string;
 }
+export interface SSHKey {
+  raw: string;
+  type: string;
+  base64: string;
+  comment?: string;
+  source: string;
+  fingerprint: string;
+}
+
+export interface SystemSSHKeysResponse {
+  username: string;
+  items: SSHKey[];
+}
+
+export interface AddSSHKeysRequest {
+  github_user?: string;
+  keys?: string[];
+}
+
+export interface AddSSHKeysResponse {
+  added: number;
+}
+
+export interface DeleteSSHKeyRequest {
+  fingerprint: string;
+  confirm_last?: boolean;
+}
+

@@ -122,6 +122,11 @@ func New(ctx context.Context, st *store.Store, opts Options) (*Backend, error) {
 	if st == nil {
 		return nil, errors.New("controlplane: store is required")
 	}
+	if strings.TrimSpace(opts.Config.AdminUser) == "" {
+		opts.Config.AdminUser = "omahab"
+	} else {
+		opts.Config.AdminUser = strings.TrimSpace(opts.Config.AdminUser)
+	}
 	// Migrate
 	if err := st.Migrate(ctx, AllMigrations()...); err != nil {
 		return nil, fmt.Errorf("migrate: %w", err)
@@ -633,6 +638,12 @@ func (b *Backend) refreshExposure(ctx context.Context) error {
 		zoneID = secret("cloudflare_zone")
 	}
 	accountID := secretOrEnv("cloudflare_account_id", "OMAHAB_CF_ACCOUNT_ID")
+	if accountID != "" {
+		if err := secrets.ValidateCloudflareAccountID(accountID); err != nil {
+			log.Printf("refreshExposure: invalid cloudflare_account_id %q: %v", accountID, err)
+			accountID = ""
+		}
+	}
 	tunnelID := secretOrEnv("cloudflare_tunnel_id", "OMAHAB_CF_TUNNEL_ID")
 	dnsToken := secretOrEnv("cloudflare_dns", "OMAHAB_CF_TOKEN_DNS")
 	if dnsToken == "" {

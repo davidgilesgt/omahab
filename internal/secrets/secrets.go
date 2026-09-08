@@ -63,6 +63,33 @@ var allowedScopes = map[string]bool{
 	"environment":  true,
 }
 var nameRe = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._\-]*$`)
+var cloudflareAccountIDRe = regexp.MustCompile(`^[0-9a-fA-F]{32}$`)
+
+// ValidateCloudflareAccountID checks that v is a 32-hex Account ID from the
+// Cloudflare dashboard sidebar. It rejects email addresses and any non-hex
+// formatting, returning a Validation error that points at the sidebar.
+func ValidateCloudflareAccountID(v string) error {
+	t := strings.TrimSpace(v)
+	if t == "" {
+		return store.Validation("cloudflare_account_id is required")
+	}
+	if strings.Contains(t, "@") {
+		return store.Validation("cloudflare_account_id must be 32 hex characters from Cloudflare dashboard sidebar — open dash.cloudflare.com, sidebar shows Account ID (32 hex, not an email); got value containing '@'")
+	}
+	if !cloudflareAccountIDRe.MatchString(t) {
+		return store.Validation("cloudflare_account_id must be 32 hex characters (0-9, a-f, case-insensitive) from Cloudflare dashboard sidebar — open dash.cloudflare.com, sidebar shows Account ID; got invalid format")
+	}
+	return nil
+}
+
+func validateSecretValueForName(name, value string) error {
+	if strings.TrimSpace(name) == "cloudflare_account_id" {
+		if err := ValidateCloudflareAccountID(value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // Sentinel re-exports for callers that reference secrets package directly.
 // Underlying values are store sentinels so errors.Is works.
@@ -130,8 +157,11 @@ func (s *Service) decrypt(nonce, ciphertext []byte) (string, error) {
 	return string(plain), nil
 }
 
-// Put creates a new secret at scope/name with value.
-// It fails with ErrConflict if scope/name already exists. Use Rotate for updates.
+// Put creates or atomically upserts a secret at scope/name with value.
+// It overwrites an existing value (incrementing version) so setup can be
+// retried without manual delete. Previously it failed with ErrConflict;
+// now it upserts for re-entry support while Rotate remains for explicit
+// versioned updates.
 func (s *Service) Put(ctx context.Context, scope, name, value string) (*domain.Secret, error) {
 	if err := validateScope(scope); err != nil {
 		return nil, err
@@ -142,30 +172,31 @@ func (s *Service) Put(ctx context.Context, scope, name, value string) (*domain.S
 	if err := validateValue(value); err != nil {
 		return nil, err
 	}
+	if err := validateSecretValueForName(name, value); err != nil {
+		return nil, err
+	}
 	nonce, ct, err := s.encrypt(value)
 	if err != nil {
 		return nil, err
 	}
 	id := store.NewID()
 	now := time.Now().UTC()
+	scopeTrim := strings.TrimSpace(scope)
+	nameTrim := strings.TrimSpace(name)
+	nowStr := now.Format(time.RFC3339Nano)
 	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO secrets (id, scope, name, version, nonce, ciphertext, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, strings.TrimSpace(scope), strings.TrimSpace(name), 1, nonce, ct, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
+		`INSERT INTO secrets (id, scope, name, version, nonce, ciphertext, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(scope, name) DO UPDATE SET nonce=excluded.nonce, ciphertext=excluded.ciphertext, version=secrets.version+1, updated_at=excluded.updated_at`,
+		id, scopeTrim, nameTrim, 1, nonce, ct, nowStr, nowStr,
 	)
 	if err != nil {
-		if isUniqueViolation(err) {
-			return nil, store.Conflictf("secret %s/%s already exists", scope, name)
-		}
 		return nil, fmt.Errorf("put secret: %w", err)
 	}
-	return &domain.Secret{
-		ID:        domain.ID(id),
-		Scope:     strings.TrimSpace(scope),
-		Name:      strings.TrimSpace(name),
-		Version:   1,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}, nil
+	sec, err := s.GetByName(ctx, scopeTrim, nameTrim)
+	if err != nil {
+		return nil, fmt.Errorf("put secret fetch: %w", err)
+	}
+	return sec, nil
 }
 
 // Get returns redacted metadata for the secret with id.
@@ -280,10 +311,6 @@ func (s *Service) Rotate(ctx context.Context, id domain.ID, newValue string) (*d
 	if err := validateValue(newValue); err != nil {
 		return nil, err
 	}
-	nonce, ct, err := s.encrypt(newValue)
-	if err != nil {
-		return nil, err
-	}
 	now := time.Now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -301,6 +328,13 @@ func (s *Service) Rotate(ctx context.Context, id domain.ID, newValue string) (*d
 			return nil, store.NotFoundf("secret %s not found", id)
 		}
 		return nil, fmt.Errorf("rotate select: %w", err)
+	}
+	if err := validateSecretValueForName(name, newValue); err != nil {
+		return nil, err
+	}
+	nonce, ct, err := s.encrypt(newValue)
+	if err != nil {
+		return nil, err
 	}
 	res, err := tx.ExecContext(ctx,
 		`UPDATE secrets SET nonce = ?, ciphertext = ?, version = ?, updated_at = ? WHERE id = ?`,
@@ -325,8 +359,6 @@ func (s *Service) Rotate(ctx context.Context, id domain.ID, newValue string) (*d
 		UpdatedAt: now,
 	}, nil
 }
-
-// RotateByName rotates by scope/name.
 func (s *Service) RotateByName(ctx context.Context, scope, name, newValue string) (*domain.Secret, error) {
 	sec, err := s.GetByName(ctx, scope, name)
 	if err != nil {

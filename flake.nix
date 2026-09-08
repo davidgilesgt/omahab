@@ -159,6 +159,7 @@ EOF
             (if pkgs ? go_1_25 then pkgs.go_1_25 else pkgs.go)
             nodejs
             sqlc
+            jq
           ];
         };
         checks = {
@@ -174,8 +175,8 @@ EOF
             checkPhase = "go test ./...";
             installPhase = "touch $out";
           });
-          integration = pkgs.testers.nixosTest (import ./nix/tests/install.nix { inherit self pkgs; });
-          installer-disk = pkgs.testers.nixosTest (import ./nix/tests/installer-disk.nix { inherit self pkgs; });
+          integration = pkgs.testers.runNixOSTest (import ./nix/tests/install.nix { inherit self; });
+          installer-disk = pkgs.testers.runNixOSTest (import ./nix/tests/installer-disk.nix { inherit self; });
           image = self.nixosConfigurations.omahab-appliance.config.system.build.isoImage;
         };
       }
@@ -205,37 +206,26 @@ EOF
           self.nixosModules.omahab
           ./nix/installed-hardware.nix
           ./nix/install-local.nix
+          ({ lib, ... }: {
+            # Enabled by the backend-generated install-local; this
+            # explicit module ensures `nix eval ...#omahab-installed`
+            # evaluates with the service on even with the committed
+            # template (which omits the flag for pre-install eval).
+            services.omahab.enable = true;
+            networking.networkmanager.enable = true;
+            networking.wireless.enable = lib.mkForce false;
+          })
         ];
       };
-      # Appliance: single-disk ext4 image, console wizard, no password
-      # (SSH-key-only after bootstrap).
+      # Installer ISO: minimal boot + explicit installer module.
+      # Does NOT import self.nixosModules.omahab — live media must
+      # not run omahabd/database/Tailscale/WebUI bootstrap.
       nixosConfigurations.omahab-appliance = nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";
         specialArgs = { inherit self; };
         modules = [
-          self.nixosModules.omahab
           "${nixpkgs}/nixos/modules/installer/cd-dvd/installation-cd-minimal.nix"
-          ({ self, pkgs, ... }: {
-            services.openssh.settings.PasswordAuthentication = false;
-            users.users.root.initialHashedPassword = "";
-            users.users.omahab = {
-              isNormalUser = true;
-              extraGroups = [ "wheel" ];
-              openssh.authorizedKeys.keys = [ ];
-            };
-            # The appliance boots straight into first-boot setup.
-            services.omahab.enable = true;
-            # Disk installer: the exact flake source this ISO was built
-            # from, plus the installer script itself.
-            environment.etc."omahab-installer/flake".source = self;
-            environment.systemPackages = [
-              (pkgs.writeShellScriptBin "omahab-install-disk"
-                (builtins.readFile ./scripts/install-disk.sh))
-            ];
-            # redis + the installer profile both set this; ours wins.
-            boot.kernel.sysctl."vm.overcommit_memory" = nixpkgs.lib.mkForce "1";
-            system.stateVersion = "25.05";
-          })
+          ./nix/installer.nix
         ];
       };
     };

@@ -3,6 +3,9 @@ package api
 // Bootstrap handlers: unauthenticated, first-boot only route group
 // (/api/bootstrap/*) served on the LAN listener (:8485). The listener and
 // routes exist only while /var/lib/omahab/bootstrap-done is absent.
+// Token timing: token file provisioned only at handleBootstrapComplete
+// (controlplane finalizeBootstrap); see controlplane/bootstrap_api.go
+// decision: keep-at-Complete with explicit messaging at account-creation.
 import (
 	"encoding/json"
 	"net/http"
@@ -76,7 +79,11 @@ func (s *Server) handleBootstrapSSHKeys(w http.ResponseWriter, r *http.Request) 
 	}
 	added, err := s.bootstrap.SSHKeys(strings.TrimSpace(req.GitHubUser), req.Keys)
 	if err != nil {
-		writeError(w, r, newAPIError(http.StatusBadRequest, CodeUnprocessable, err.Error()))
+		msg := err.Error()
+		if strings.Contains(strings.ToLower(msg), "private key") {
+			msg = "private key not allowed"
+		}
+		writeError(w, r, newAPIError(http.StatusBadRequest, CodeUnprocessable, msg))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]int{"added": added})

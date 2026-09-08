@@ -205,6 +205,7 @@ func (s *Server) buildRouter() chi.Router {
 		r.Post("/api/bootstrap/claim", s.withBodyLimit(defaultBodyLimit, s.handleBootstrapClaim))
 		r.Group(func(r chi.Router) {
 			r.Use(s.bootstrapGateActive)
+			r.Get("/api/bootstrap/ssh-keys", s.handleBootstrapListSSHKeys)
 			r.Post("/api/bootstrap/ssh-keys", s.withBodyLimit(64<<10, s.handleBootstrapSSHKeys))
 			r.Post("/api/bootstrap/tailscale/up", s.handleBootstrapTailscaleUp)
 			r.Get("/api/bootstrap/tailscale/status", s.handleBootstrapTailscaleStatus)
@@ -214,6 +215,7 @@ func (s *Server) buildRouter() chi.Router {
 			r.Get("/api/bootstrap/restore/events", s.handleBootstrapRestoreEvents)
 		})
 	})
+
 
 
 	// Authenticated API group.
@@ -325,11 +327,13 @@ func (s *Server) buildRouter() chi.Router {
 
 		// Setup (first-run provisioning)
 		r.Get("/api/v1/setup", s.handleGetSetup)
-		r.Post("/api/v1/setup/verify-cloudflare", s.withBodyLimit(defaultBodyLimit, s.handleVerifyCloudflareToken))
 		r.Post("/api/v1/recovery/generate", s.handleGenerateRecoveryKey)
 		r.Post("/api/v1/recovery/confirm", s.withBodyLimit(defaultBodyLimit, s.handleConfirmRecoveryKey))
 		r.Get("/api/v1/system/disks", s.handleListDisks)
 		r.Put("/api/v1/system/storage", s.withBodyLimit(defaultBodyLimit, s.handleConfigureStorage))
+		r.Get("/api/v1/system/ssh-keys", s.handleListSystemSSHKeys)
+		r.Post("/api/v1/system/ssh-keys", s.withBodyLimit(64<<10, s.handleAddSystemSSHKeys))
+		r.Delete("/api/v1/system/ssh-keys", s.withBodyLimit(64<<10, s.handleDeleteSystemSSHKeys))
 		r.Get("/api/v1/backup-repositories", s.handleListBackupRepositories)
 		r.Post("/api/v1/backup-repositories", s.withBodyLimit(defaultBodyLimit, s.handleCreateBackupRepository))
 		r.Delete("/api/v1/backup-repositories/{id}", s.handleDeleteBackupRepository)

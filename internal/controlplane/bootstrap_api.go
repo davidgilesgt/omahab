@@ -10,13 +10,8 @@ import (
 	"strings"
 
 	"github.com/omahab/omahab/internal/events"
-	"github.com/omahab/omahab/internal/sshkeys"
 	"github.com/omahab/omahab/internal/tailnet"
 )
-
-// BootstrapAdminUser is the appliance admin account the wizard provisions
-// SSH keys and the CLI token for.
-const BootstrapAdminUser = "omahab"
 
 // bootstrapGate returns the gate, lazily initialized on first boot.
 func (b *Backend) bootstrapGate() *BootstrapGate {
@@ -45,27 +40,19 @@ func (b *Backend) Claim(code, sourceIP string) error {
 // BootstrapSSHKeys installs SSH keys for the admin user via GitHub import
 // or pasted keys. Both may be empty (skip step).
 func (b *Backend) SSHKeys(githubUser string, pastedKeys []string) (int, error) {
-	var keys []sshkeys.SSHKey
-	if githubUser != "" {
-		imported, err := sshkeys.ImportKeysFromGitHub(context.Background(), githubUser)
-		if err != nil {
-			return 0, fmt.Errorf("import github keys: %w", err)
+	githubUser = strings.TrimSpace(githubUser)
+	var filtered []string
+	for _, k := range pastedKeys {
+		if strings.TrimSpace(k) != "" {
+			filtered = append(filtered, k)
 		}
-		keys = append(keys, imported...)
 	}
-	for _, raw := range pastedKeys {
-		parsed, err := sshkeys.ParsePastedKeys(raw)
-		if err != nil {
-			return 0, fmt.Errorf("parse pasted key: %w", err)
-		}
-		keys = append(keys, parsed...)
-	}
-	if len(keys) == 0 {
+	if githubUser == "" && len(filtered) == 0 {
 		return 0, nil
 	}
-	added, _, err := sshkeys.EnsureAuthorizedKeys(BootstrapAdminUser, keys)
-	return added, err
+	return b.AddSSHKeys(context.Background(), githubUser, filtered)
 }
+
 
 // BootstrapTailscaleUp starts enrollment, returning the auth URL.
 func (b *Backend) TailscaleUp() (string, error) {
@@ -84,14 +71,7 @@ func (b *Backend) TailscaleStatus() (bool, string, string, error) {
 // Complete writes the sentinel and provisions the admin token. The
 // onClose hook (set by cmd/omahabd) shuts the LAN listener down.
 func (b *Backend) Complete() error {
-	if err := CompleteBootstrap(); err != nil {
-		return err
-	}
-	b.ensureAdminUserToken()
-	if b.onBootstrapClose != nil {
-		go b.onBootstrapClose()
-	}
-	return nil
+	return b.finalizeBootstrap(b.apiToken)
 }
 
 // BootstrapActive reports whether first-boot bootstrap is pending.
@@ -99,14 +79,52 @@ func (b *Backend) Active() bool {
 	return BootstrapActive()
 }
 
-// ensureAdminUserToken provisions ~omahab/.config/omahab/token (0600,
-// owned omahab) when the user exists and the file is absent — the
+// ensureAdminUserToken provisions ~<admin>/.config/omahab/token (0600,
+// owned admin) when the user exists and the file is absent — the
 // installer's provisionUserToken role, now owned by the daemon.
-func (b *Backend) ensureAdminUserToken() {
-	_ = ProvisionUserToken(BootstrapAdminUser, b.apiToken)
+func (b *Backend) ensureAdminUserToken() error {
+	return ProvisionUserToken(b.cfg.AdminUser, b.apiToken)
 }
 
-
+// finalizeBootstrap provisions the admin token and writes the sentinel.
+// Token write failures are returned before the sentinel/close.
+//
+// Token timing decision (DISTRO-FIX-PLAN P1 — token timing, 2026-09-07):
+// --------------------------------------------------------------------
+// The API token (32 random bytes, hex64) is created early at daemon
+// startup via EnsureAPIToken and stored at /var/lib/omahab/api.token
+// (root 0600). The per-user CLI token file ~/.config/omahab/token is
+// intentionally NOT provisioned at account-creation / backend New() time,
+// but only here at Complete. Reason:
+//   - Smaller safe change: moving provisioning earlier is trivial (add
+//     ProvisionUserToken to backend.New) but widens the window where a
+//     local user could bypass the one-time code claim by reading the
+//     file before the LAN wizard completes.
+//   - ProvisionUserToken requires the admin Linux user to exist and
+//     correct ownership/chown; failures before Complete would be
+//     retried anyway, but keeping it at Complete ensures the file
+//     appears atomically with bootstrap-done, and the dashboard handoff
+//     (#token=…) remains the single source of truth.
+//   - Instead we add explicit messaging at account-creation time:
+//     console renderFirstBoot, bootstrap.tsx SSH/handoff steps, and
+//     CLI printWelcomeCard/newLoginCmd all state "Token will be
+//     provisioned to ~/.config/omahab/token (XDG-aware: $XDG_CONFIG_HOME/omahab/token
+//     else $HOME/.config/omahab/token) after Complete." If trivial early
+//     provisioning is later desired, change is one line in backend.New:
+//     ` _ = ProvisionUserToken(cfg.AdminUser, tok)` after EnsureAPIToken
+//     (ignore lookup error for not-yet-created user).
+func (b *Backend) finalizeBootstrap(token string) error {
+	if err := ProvisionUserToken(b.cfg.AdminUser, token); err != nil {
+		return err
+	}
+	if err := CompleteBootstrap(); err != nil {
+		return err
+	}
+	if b.onBootstrapClose != nil {
+		go b.onBootstrapClose()
+	}
+	return nil
+}
 // ProvisionUserToken writes the admin API token to
 // <home>/.config/omahab/token (0600, correct ownership) when the user
 // exists and the file is absent. Idempotent.
@@ -146,11 +164,19 @@ func ProvisionUserToken(username, token string) error {
 		_ = os.Remove(tmpName)
 		return err
 	}
-	if uid, e1 := strconv.Atoi(u.Uid); e1 == nil {
-		if gid, e2 := strconv.Atoi(u.Gid); e2 == nil {
-			_ = os.Chown(tmpName, uid, gid)
-			_ = os.Chown(dir, uid, gid)
-		}
+	uid, err1 := strconv.Atoi(u.Uid)
+	gid, err2 := strconv.Atoi(u.Gid)
+	if err1 != nil || err2 != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("invalid uid/gid for %q: %q/%q", username, u.Uid, u.Gid)
+	}
+	if err := os.Chown(tmpName, uid, gid); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("chown token temp: %w", err)
+	}
+	if err := os.Chown(dir, uid, gid); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("chown config dir: %w", err)
 	}
 	if err := os.Rename(tmpName, path); err != nil {
 		_ = os.Remove(tmpName)

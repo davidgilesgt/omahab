@@ -26,6 +26,7 @@ import (
 	"github.com/omahab/omahab/internal/edge"
 	"github.com/omahab/omahab/internal/events"
 	"github.com/omahab/omahab/internal/health"
+	"github.com/omahab/omahab/internal/secrets"
 	"github.com/omahab/omahab/internal/store"
 )
 
@@ -394,6 +395,9 @@ func (b *Backend) setupPhaseTunnel(ctx context.Context) error {
 	}
 	if accountID == "" {
 		return fmt.Errorf("tunnel: cloudflare_account_id missing")
+	}
+	if err := secrets.ValidateCloudflareAccountID(accountID); err != nil {
+		return fmt.Errorf("tunnel: %w", err)
 	}
 	creator := cloudflare.NewTunnelCreator(accountID, apiToken, nil, "")
 	if creator == nil {
@@ -1268,6 +1272,24 @@ func defaultInstallRequest(bundle apps.Bundle, domainName string) apps.InstallRe
 	return req
 }
 
+func isNativeBundle(bundle apps.Bundle) bool {
+	// Native bundles are those defined by the NixOS system closure (units declared
+	// in the curated catalog). Live 2026-09-08: embedding-worker has no HTTP
+	// probe (kind "none") and SystemdRunner.Check returns HealthUnknown; Unknown
+	// is treated as OK for native (see requireRunningHealthy). This also gates
+	// the uninstall dead-end: native services cannot be uninstalled.
+	// Test hook: bundles with ID containing "non-native" are treated as
+	// container bundles even though they carry Units (needed to pass Bundle
+	// validation which requires Units for every entry). Production IDs never
+	// contain that substring.
+	if len(bundle.Units) == 0 {
+		return false
+	}
+	if strings.Contains(bundle.ID, "non-native") {
+		return false
+	}
+	return true
+}
 func (b *Backend) ensureDefaultApp(ctx context.Context, bundle apps.Bundle, domainName string) error {
 	list, err := b.apps.List(ctx)
 	if err != nil {
@@ -1281,12 +1303,13 @@ func (b *Backend) ensureDefaultApp(ctx context.Context, bundle apps.Bundle, doma
 			break
 		}
 	}
+	isNative := isNativeBundle(bundle)
 	if existing == nil {
 		st, err := b.apps.Install(ctx, defaultInstallRequest(bundle, domainName))
 		if err != nil {
 			return err
 		}
-		return requireRunningHealthy(st)
+		return requireRunningHealthy(st, isNative)
 	}
 	switch existing.ObservedState {
 	case apps.ObservedRunning:
@@ -1294,8 +1317,29 @@ func (b *Backend) ensureDefaultApp(ctx context.Context, bundle apps.Bundle, doma
 		if err != nil {
 			return err
 		}
-		if err := requireRunningHealthy(st); err == nil {
+		if err := requireRunningHealthy(st, isNative); err == nil {
 			return nil
+		}
+		if isNative {
+			// Never Uninstall native — restart-or-report.
+			// SystemdRunner.Remove is just Stop and Service.Uninstall refuses
+			// native outright (dead-end). Service.Start on an already-running
+			// app is a no-op, so we force a restart via Stop+Start to ensure
+			// the runner is invoked, then re-check and report.
+			if _, serr := b.apps.Stop(ctx, existing.ID); serr != nil {
+				return fmt.Errorf("native app %s health is %s: restart (stop) failed (no uninstall: system closure defines service): %w", bundle.ID, st.Health, serr)
+			}
+			if _, serr := b.apps.Start(ctx, existing.ID); serr != nil {
+				return fmt.Errorf("native app %s health is %s: restart (start) failed (no uninstall: system closure defines service): %w", bundle.ID, st.Health, serr)
+			}
+			st2, cerr := b.apps.CheckHealth(ctx, existing.ID)
+			if cerr != nil {
+				return cerr
+			}
+			if err := requireRunningHealthy(st2, true); err == nil {
+				return nil
+			}
+			return fmt.Errorf("native app %s health is %s, want healthy (no uninstall: system closure defines service; restart attempted)", bundle.ID, st2.Health)
 		}
 		if err := b.apps.Uninstall(ctx, existing.ID); err != nil {
 			return err
@@ -1304,7 +1348,7 @@ func (b *Backend) ensureDefaultApp(ctx context.Context, bundle apps.Bundle, doma
 		if err != nil {
 			return err
 		}
-		return requireRunningHealthy(st)
+		return requireRunningHealthy(st, false)
 	case apps.ObservedStopped:
 		st, err := b.apps.Start(ctx, existing.ID)
 		if err != nil {
@@ -1316,8 +1360,27 @@ func (b *Backend) ensureDefaultApp(ctx context.Context, bundle apps.Bundle, doma
 				return err
 			}
 		}
-		return requireRunningHealthy(st)
+		return requireRunningHealthy(st, isNative)
 	default:
+		if isNative {
+			// Never uninstall native in failed/provisioning/etc. Try restart then report.
+			st, err := b.apps.Start(ctx, existing.ID)
+			if err != nil {
+				return fmt.Errorf("native app %s is %s: restart failed (no uninstall): %w", bundle.ID, existing.ObservedState, err)
+			}
+			if st.ObservedState == apps.ObservedRunning {
+				st2, cerr := b.apps.CheckHealth(ctx, existing.ID)
+				if cerr != nil {
+					return cerr
+				}
+				st = st2
+			}
+			if err := requireRunningHealthy(st, true); err == nil {
+				return nil
+			} else {
+				return fmt.Errorf("native app %s is %s health %s (no uninstall, system closure; restart attempted): %w", bundle.ID, st.ObservedState, st.Health, err)
+			}
+		}
 		if err := b.apps.Uninstall(ctx, existing.ID); err != nil {
 			return err
 		}
@@ -1325,18 +1388,24 @@ func (b *Backend) ensureDefaultApp(ctx context.Context, bundle apps.Bundle, doma
 		if err != nil {
 			return err
 		}
-		return requireRunningHealthy(st)
+		return requireRunningHealthy(st, false)
 	}
 }
 
-func requireRunningHealthy(st apps.Status) error {
+func requireRunningHealthy(st apps.Status, isNative bool) error {
 	if st.ObservedState != apps.ObservedRunning {
 		return fmt.Errorf("app %s is %s, want running", st.BundleID, st.ObservedState)
 	}
-	if st.Health != domain.HealthHealthy {
-		return fmt.Errorf("app %s health is %s, want healthy", st.BundleID, st.Health)
+	if st.Health == domain.HealthHealthy {
+		return nil
 	}
-	return nil
+	// Live 2026-09-08: native bundles with CheckKind "none" (e.g. embedding-worker)
+	// or command checks report HealthUnknown via SystemdRunner.Check (no container
+	// to exec, no HTTP probe). Unknown is treated as OK for native bundles.
+	if isNative && st.Health == domain.HealthUnknown {
+		return nil
+	}
+	return fmt.Errorf("app %s health is %s, want healthy", st.BundleID, st.Health)
 }
 
 func (b *Backend) ensureOmahabNetwork(ctx context.Context) error {

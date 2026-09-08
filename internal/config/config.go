@@ -6,10 +6,13 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 )
+
+var adminUserRe = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 
 const (
 	DefaultStateDir    = "/var/lib/omahab"
@@ -24,6 +27,10 @@ type Config struct {
 	Listen        string
 	DatabasePath  string
 	MasterKeyPath string
+	// APITokenPath is /var/lib/omahab/api.token (root 0600, created early via
+	// EnsureAPIToken). The per-user CLI token ~/.config/omahab/token is NOT
+	// created here; see controlplane/bootstrap_api.go token timing decision
+	// (keep-at-Complete with messaging, provision only at finalizeBootstrap).
 	APITokenPath  string
 	ShutdownGrace time.Duration
 	CatalogPath   string
@@ -34,6 +41,9 @@ type Config struct {
 
 	// CloudflaredDir holds the cloudflared tunnel token env file.
 	CloudflaredDir string
+
+	// AdminUser is the Linux administrator account name. Default "omahab".
+	AdminUser string
 }
 
 func Load() (Config, error) {
@@ -43,12 +53,18 @@ func Load() (Config, error) {
 		Listen:        envOr("OMAHAB_LISTEN", DefaultListen),
 		ShutdownGrace: 15 * time.Second,
 		CatalogPath:   envOr("OMAHAB_CATALOG", DefaultCatalogPath),
+		AdminUser:     envOr("OMAHAB_ADMIN_USER", "omahab"),
 	}
 	cfg.DatabasePath = envOr("OMAHAB_DATABASE", filepath.Join(cfg.StateDir, "control.db"))
 	cfg.MasterKeyPath = envOr("OMAHAB_MASTER_KEY", filepath.Join(cfg.StateDir, "master.key"))
 	cfg.APITokenPath = envOr("OMAHAB_API_TOKEN_FILE", filepath.Join(cfg.StateDir, "api.token"))
 	cfg.CaddyConfigPath = envOr("OMAHAB_CADDY_CONFIG", filepath.Join(cfg.StateDir, "caddy", "caddy.json"))
 	cfg.CloudflaredDir = envOr("OMAHAB_CLOUDFLARED_DIR", filepath.Join(cfg.StateDir, "cloudflared"))
+	if v := strings.TrimSpace(os.Getenv("OMAHAB_ADMIN_USER")); v != "" {
+		if !adminUserRe.MatchString(v) {
+			return Config{}, fmt.Errorf("OMAHAB_ADMIN_USER %q must match %s", v, adminUserRe.String())
+		}
+	}
 	if raw := os.Getenv("OMAHAB_SHUTDOWN_GRACE_SECONDS"); raw != "" {
 		seconds, err := strconv.Atoi(raw)
 		if err != nil || seconds < 1 || seconds > 300 {
@@ -75,6 +91,9 @@ func (c Config) Validate() error {
 		if strings.ContainsRune(value, '\x00') {
 			return fmt.Errorf("%s contains NUL", name)
 		}
+	}
+	if c.AdminUser != "" && !adminUserRe.MatchString(c.AdminUser) {
+		return fmt.Errorf("admin user %q must match %s", c.AdminUser, adminUserRe.String())
 	}
 	host, port, err := net.SplitHostPort(c.Listen)
 	if err != nil {

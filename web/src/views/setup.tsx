@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../auth";
-import type { SetupCheck, SetupStatus } from "../api/types";
+import type { Secret, SetupCheck, SetupStatus } from "../api/types";
 import { ErrorState, LoadingState, PageHeader, Section, StatusPill } from "../components/ui";
 import { Stepper, type StepDef } from "../components/stepper";
 import { useToast } from "../components/toast";
@@ -89,12 +89,29 @@ export function SetupPage() {
 
   const usersQuery = useQuery({ queryKey: ["users"], queryFn: client.users });
   const instanceQuery = useQuery({ queryKey: ["instance"], queryFn: client.instance });
+  const secretsQuery = useQuery<Secret[]>({
+    queryKey: ["secrets", "platform-app"],
+    queryFn: () => client.listSecrets("platform-app"),
+  });
 
   const [domain, setDomain] = useState("");
   const [dnsToken, setDnsToken] = useState("");
   const [tunnelToken, setTunnelToken] = useState("");
   const [zoneId, setZoneId] = useState("");
   const [accountId, setAccountId] = useState("");
+
+  // Pre-fill domain from instance and hint existing secrets for re-entry (upsert).
+  useEffect(() => {
+    const d = instanceQuery.data?.domain;
+    if (d && d !== "example.com" && d !== "not-configured.invalid" && !domain) {
+      setDomain(d);
+    }
+  }, [instanceQuery.data?.domain]);
+
+  const existingSecrets: Record<string, true> = {};
+  for (const s of secretsQuery.data ?? []) {
+    existingSecrets[s.name] = true;
+  }
 
   const [inviteName, setInviteName] = useState("");
   const [inviteEmail, setInviteEmail] = useState("");
@@ -358,28 +375,36 @@ export function SetupPage() {
       {(showAll || currentStep === "connect") && (
         <>
           {setup.state === "waiting_for_cloudflare" && (
-            <Section title="Cloudflare" description="Enter your domain and scoped API tokens to enable DNS and tunnel.">
+            <Section title="Cloudflare" description="Enter your domain and scoped API tokens to enable DNS and tunnel. Secrets can be corrected later — saved values are overwritten (re-validated) on retry.">
               <div className="form-stack">
                 <label className="field">
                   <span>Domain</span>
                   <input value={domain} onChange={(e) => setDomain(e.target.value)} placeholder="example.com" />
+                  {instanceQuery.data?.domain && instanceQuery.data.domain !== "example.com" && instanceQuery.data.domain !== "not-configured.invalid" && (
+                    <small className="muted">Current: {instanceQuery.data.domain} — edit to change</small>
+                  )}
                 </label>
                 <label className="field">
                   <span>DNS token</span>
                   <small className="muted">Cloudflare API token with Zone:Read + DNS:Edit</small>
                   <input type="password" value={dnsToken} onChange={(e) => setDnsToken(e.target.value)} placeholder="dns token" />
+                  {existingSecrets["cloudflare_dns"] && <small className="muted">Already set — leave blank to keep, or enter new value to overwrite.</small>}
                 </label>
                 <label className="field">
                   <span>Tunnel token (optional)</span>
                   <input type="password" value={tunnelToken} onChange={(e) => setTunnelToken(e.target.value)} placeholder="tunnel token (optional)" />
+                  {existingSecrets["cloudflare_tunnel"] && <small className="muted">Already set — leave blank to keep, or enter new value to overwrite.</small>}
                 </label>
                 <label className="field">
                   <span>Zone ID (optional)</span>
                   <input value={zoneId} onChange={(e) => setZoneId(e.target.value)} placeholder="zone id" />
+                  {existingSecrets["cloudflare_zone_id"] && <small className="muted">Already set — leave blank to keep, or enter new value to overwrite.</small>}
                 </label>
                 <label className="field">
-                  <span>Account ID (optional)</span>
-                  <input value={accountId} onChange={(e) => setAccountId(e.target.value)} placeholder="account id" />
+                  <span>Cloudflare Account ID (32-hex, sidebar, optional)</span>
+                  <small className="muted">From Cloudflare dashboard sidebar — 32 hex characters (a-f, 0-9), not an email. Open dash.cloudflare.com → sidebar shows Account ID.</small>
+                  <input value={accountId} onChange={(e) => setAccountId(e.target.value)} placeholder="e.g. 9b1a2c3d4e5f6a7b8c9d0e1f2a3b4c5d" />
+                  {existingSecrets["cloudflare_account_id"] && <small className="muted">Already set — leave blank to keep, or enter new value to overwrite (32-hex, re-validated on save).</small>}
                 </label>
                 <div style={{ display: "flex", gap: 8 }}>
                   <button className="button secondary" type="button" onClick={() => void verifyTokenMutation.mutate()} disabled={verifyTokenMutation.isPending || !dnsToken.trim()}>

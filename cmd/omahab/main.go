@@ -59,8 +59,8 @@ func newRootCmd() *cobra.Command {
 		Long: `Omahab CLI — control plane for the Omahab home server.
 
 Every operation has a JSON equivalent via --json.
-Credentials are never passed as arguments; set OMAHAB_TOKEN or use the credential store.
-Use --server to target a different control plane (env OMAHAB_SERVER, then ~/.config/omahab/client.json).`,
+Credentials are never passed as arguments; set OMAHAB_TOKEN or ~/.config/omahab/token (XDG-aware: $XDG_CONFIG_HOME/omahab/token or $HOME/.config/omahab/token).
+Use --server to target a different control plane (env OMAHAB_SERVER, then ~/.config/omahab/client.json, then LAN IP / <hostname>.local fallback).`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
@@ -79,8 +79,7 @@ Use --server to target a different control plane (env OMAHAB_SERVER, then ~/.con
 		},
 	}
 	// Persistent flags (structured output, server selection, interactivity, timeouts)
-	root.PersistentFlags().StringVar(&flagServer, "server", "", "control plane URL (env OMAHAB_SERVER, then ~/.config/omahab/client.json, default http://127.0.0.1:8484)")
-	root.PersistentFlags().BoolVar(&flagJSON, "json", false, "output JSON (structured, stable for agents)")
+	root.PersistentFlags().StringVar(&flagServer, "server", "", "control plane URL (env OMAHAB_SERVER, then ~/.config/omahab/client.json, default LAN IP / <hostname>.local:8484)")
 	root.PersistentFlags().BoolVar(&flagNonInteractive, "non-interactive", false, "disable prompts; destructive/public operations require --force")
 	root.PersistentFlags().DurationVar(&flagTimeout, "timeout", 30*time.Second, "per-request timeout")
 	// NO_COLOR is env-driven; no flag needed but we respect it
@@ -101,6 +100,7 @@ Use --server to target a different control plane (env OMAHAB_SERVER, then ~/.con
 	root.AddCommand(newSyncCmd())
 	root.AddCommand(newRunnerCmd())
 	root.AddCommand(newConsoleCmd())
+	root.AddCommand(newInstallCmd())
 	root.AddCommand(newSetupCmd())
 	root.AddCommand(newSystemCmd())
 	root.AddCommand(newWorkspaceCmd()) // alias
@@ -182,7 +182,16 @@ func resolveClient() (*apiclient.Client, error) {
 		c.HTTPClient.Timeout = flagTimeout
 		return c, nil
 	}
+	// Primary: current user's ~/.config/omahab/token (XDG-aware)
+	// Matches FileCredentialStore: $XDG_CONFIG_HOME/omahab/token else $HOME/.config/omahab/token.
+	// See console.go readAdminToken for full candidate list.
+	if tok, _ := (apiclient.FileCredentialStore{}).Token(); strings.TrimSpace(tok) != "" {
+		c := apiclient.New(server, tok)
+		c.HTTPClient.Timeout = flagTimeout
+		return c, nil
+	}
 	if tok := tokenFromClientJSON(); tok != "" {
+		// Legacy fallback: token stored in client.json by older login
 		c := apiclient.New(server, tok)
 		c.HTTPClient.Timeout = flagTimeout
 		return c, nil
@@ -265,10 +274,21 @@ func hintForError(err error) string {
 	if err == nil {
 		return ""
 	}
+	// Pre-setup: bootstrap not yet complete -> guide to WebUI claim URL at LAN IP
+	// instead of dead-ending at login. Reuses console.go lanIPv4() pattern.
+	bootstrapHint := ""
+	if isBootstrapPending() {
+		if url := bootstrapClaimURL(); url != "" {
+			bootstrapHint = fmt.Sprintf(" — claim this device at %s", url)
+		}
+	}
 	if apiErr, ok := err.(*apiclient.APIError); ok {
 		switch apiErr.StatusCode {
 		case http.StatusUnauthorized, http.StatusForbidden:
-			return "hint: authentication failed (401) — set OMAHAB_TOKEN or run `omahab login`"
+			if bootstrapHint != "" {
+				return "hint: authentication failed (401)" + bootstrapHint + " (code on console) or set OMAHAB_TOKEN / ~/.config/omahab/token or run `omahab login`"
+			}
+			return "hint: authentication failed (401) — set OMAHAB_TOKEN or ~/.config/omahab/token or run `omahab login`"
 		case http.StatusNotFound:
 			return "hint: not found (404) — run `omahab <resource> list` to see available resources"
 		}
@@ -281,14 +301,16 @@ func hintForError(err error) string {
 		return "hint: check --server / OMAHAB_SERVER and Tailscale connectivity"
 	}
 	if strings.Contains(msg, "401") || strings.Contains(msg, "unauthorized") || strings.Contains(msg, "unauthenticated") {
-		return "hint: set OMAHAB_TOKEN or run `omahab login`"
+		if bootstrapHint != "" {
+			return "hint: set OMAHAB_TOKEN or ~/.config/omahab/token" + bootstrapHint + " (code on console) or run `omahab login`"
+		}
+		return "hint: set OMAHAB_TOKEN or ~/.config/omahab/token or run `omahab login`"
 	}
 	if strings.Contains(msg, "404") || strings.Contains(msg, "not found") {
 		return "hint: run `omahab <resource> list`"
 	}
 	return ""
 }
-
 func handleFailure(err error) error {
 	if err == nil {
 		return nil
@@ -328,7 +350,7 @@ func readTokenHidden() (string, error) {
 func printWelcomeCard() {
 	cfg, _ := apiclient.LoadClientConfig("")
 	server := apiclient.ResolveServer(flagServer, cfg)
-	serverSource := "default"
+	serverSource := "default (LAN IP / <hostname>.local)"
 	if strings.TrimSpace(flagServer) != "" {
 		serverSource = "--server flag"
 	} else if strings.TrimSpace(os.Getenv("OMAHAB_SERVER")) != "" {
@@ -336,16 +358,29 @@ func printWelcomeCard() {
 	} else if strings.TrimSpace(cfg.Server) != "" {
 		serverSource = "~/.config/omahab/client.json"
 	}
+	// Token resolution: XDG-aware current user's ~/.config/omahab/token,
+	// matching FileCredentialStore (XDG_CONFIG_HOME or $HOME) and console.go readAdminToken.
 	tokenStatus := "not set"
-	hint := "export OMAHAB_TOKEN or run `omahab login`"
+	hint := ""
+	if isBootstrapPending() {
+		if url := bootstrapClaimURL(); url != "" {
+			hint = fmt.Sprintf("open %s (code on console) to claim", url)
+		} else {
+			hint = "open http://<device-ip>:8485 (code on console) to claim"
+		}
+	} else {
+		hint = "export OMAHAB_TOKEN or ~/.config/omahab/token (XDG-aware) or run `omahab login`"
+	}
 	if tok := strings.TrimSpace(os.Getenv("OMAHAB_TOKEN")); tok != "" {
 		tokenStatus = "set (via OMAHAB_TOKEN)"
 		hint = ""
-	} else if tok := tokenFromClientJSON(); tok != "" {
-		tokenStatus = "set (via ~/.config/omahab/client.json)"
-		hint = ""
 	} else if tok, _ := (apiclient.FileCredentialStore{}).Token(); strings.TrimSpace(tok) != "" {
-		tokenStatus = "set (via credentials file)"
+		// Primary: current user's ~/.config/omahab/token (XDG-aware)
+		tokenStatus = "set (via ~/.config/omahab/token)"
+		hint = ""
+	} else if tok := tokenFromClientJSON(); tok != "" {
+		// Legacy: ~/.config/omahab/client.json token field (kept for compat)
+		tokenStatus = "set (via ~/.config/omahab/client.json)"
 		hint = ""
 	}
 	if flagJSON {
@@ -371,11 +406,54 @@ func printWelcomeCard() {
 	fmt.Println()
 	fmt.Println("Run `omahab --help` for commands.")
 	if tokenStatus == "not set" {
-		fmt.Println("First run?  `omahab login [--server <url>]` to authenticate.")
+		if isBootstrapPending() {
+			if url := bootstrapClaimURL(); url != "" {
+				fmt.Printf("First boot: claim at %s (one-time code on console).\n", url)
+				hostname, _ := os.Hostname()
+				if hostname != "" {
+					if idx := strings.Index(hostname, "."); idx != -1 {
+						hostname = hostname[:idx]
+					}
+					fmt.Printf("Also try http://%s.local:8485\n", hostname)
+				}
+				fmt.Println("Token will be provisioned to ~/.config/omahab/token after Complete.")
+			} else {
+				fmt.Println("First boot: open http://<device-ip>:8485 (code on console) to claim.")
+			}
+		} else {
+			fmt.Println("First run?  `omahab login [--server <url>]` to authenticate.")
+		}
 	} else {
 		fmt.Println("Try `omahab status` to check the control plane.")
 	}
 	fmt.Println("Shell completions: omahab completion bash|zsh|fish")
+}
+
+// isBootstrapPending reports whether first-boot bootstrap is still pending.
+// Sentinel is /var/lib/omahab/bootstrap-done (same as console.go and controlplane).
+func isBootstrapPending() bool {
+	_, err := os.Stat(bootstrapDonePath)
+	return os.IsNotExist(err)
+}
+
+// bootstrapClaimURL returns the WebUI claim URL at the device LAN IP
+// (http://<lan-ip>:8485) for first-boot guidance, falling back to
+// http://<hostname>.local:8485 or empty when no address available.
+// Reuses console.go lanIPv4() pattern; never returns 127.0.0.1.
+func bootstrapClaimURL() string {
+	if ip := lanIPv4(); ip != "" {
+		return fmt.Sprintf("http://%s:8485", ip)
+	}
+	if h, err := os.Hostname(); err == nil && strings.TrimSpace(h) != "" {
+		hostname := strings.TrimSpace(h)
+		if idx := strings.Index(hostname, "."); idx != -1 {
+			hostname = hostname[:idx]
+		}
+		if hostname != "" {
+			return fmt.Sprintf("http://%s.local:8485", hostname)
+		}
+	}
+	return ""
 }
 
 func newLoginCmd() *cobra.Command {
@@ -383,11 +461,29 @@ func newLoginCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "login",
 		Short: "Authenticate with the control plane",
-		Long: `Prompt for a bearer token (input hidden), verify it, and save to ~/.config/omahab/client.json.
+		Long: `Prompt for a bearer token (input hidden), verify it, and save credentials.
 
-The token is stored with 0600 permissions. OMAHAB_TOKEN env var takes precedence at runtime.
-Use --server to set the control plane URL.`,
+Pre-setup (bootstrap pending): the token does not exist yet — claim the device
+at the WebUI URL shown on the console (http://<lan-ip>:8485 or http://<hostname>.local:8485
+with the one-time code) to obtain the token. The daemon provisions
+~/.config/omahab/token (XDG-aware: $XDG_CONFIG_HOME/omahab/token else $HOME/.config/omahab/token, 0600)
+only at bootstrap Complete (see controlplane/bootstrap_api.go decision).
+
+After bootstrap, the token is stored with 0600 permissions to ~/.config/omahab/token
+(XDG-aware) and OMAHAB_TOKEN env var takes precedence at runtime. Use --server to set the
+control plane URL (LAN IP / <hostname>.local fallback).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Pre-setup guidance: if bootstrap still pending and no token, point to WebUI.
+			if isBootstrapPending() {
+				if tok, _ := (apiclient.FileCredentialStore{}).Token(); strings.TrimSpace(tok) == "" {
+					if url := bootstrapClaimURL(); url != "" {
+						fmt.Fprintf(os.Stderr, "Bootstrap pending — claim this device at %s (code on console) to obtain a token.\n", url)
+					} else {
+						fmt.Fprintf(os.Stderr, "Bootstrap pending — claim at http://<device-ip>:8485 (code on console)\n")
+					}
+					fmt.Fprintf(os.Stderr, "Token will be provisioned to ~/.config/omahab/token after Complete.\n")
+				}
+			}
 			server := strings.TrimSpace(loginServer)
 			if server == "" {
 				server = strings.TrimSpace(flagServer)
@@ -397,6 +493,7 @@ Use --server to set the control plane URL.`,
 				server = apiclient.ResolveServer("", cfg)
 			}
 			if server == "" {
+				// ResolveServer already prefers LAN IP/hostname.local; final fallback.
 				server = "http://127.0.0.1:8484"
 			}
 			fmt.Fprint(os.Stderr, "Token: ")
@@ -416,30 +513,37 @@ Use --server to set the control plane URL.`,
 			if _, err := c.Status(ctx); err != nil {
 				return handleFailure(fmt.Errorf("verify token: %w", err))
 			}
-			path, err := apiclient.DefaultClientConfigPath()
+			// Save to XDG-aware token file (~/.config/omahab/token) — primary store.
+			// Also update legacy client.json for backwards compat (server only, token kept in file).
+			fileStore := apiclient.FileCredentialStore{}
+			if err := fileStore.SetToken(tok); err != nil {
+				return handleFailure(fmt.Errorf("save token to %s: %w", "~/.config/omahab/token", err))
+			}
+			credPath, _ := apiclient.DefaultCredentialsPath()
+			// Keep client.json server entry for ResolveServer precedence.
+			cfgPath, err := apiclient.DefaultClientConfigPath()
 			if err != nil {
 				return handleFailure(err)
 			}
-			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
 				return handleFailure(err)
 			}
-			data := map[string]string{
-				"server": server,
-				"token":  tok,
-			}
-			b, _ := json.MarshalIndent(data, "", "  ")
-			if err := os.WriteFile(path, append(b, '\n'), 0o600); err != nil {
+			// Store server in client.json without token (token in file store).
+			cfgData := map[string]string{"server": server}
+			b, _ := json.MarshalIndent(cfgData, "", "  ")
+			if err := os.WriteFile(cfgPath, append(b, '\n'), 0o600); err != nil {
 				return handleFailure(err)
 			}
 			if flagJSON {
-				return printJSON(map[string]string{"server": server, "saved": path})
+				return printJSON(map[string]string{"server": server, "saved": credPath})
 			}
-			fmt.Printf("Saved to %s\n", path)
+			fmt.Printf("Saved token to %s (0600)\n", credPath)
+			fmt.Printf("Saved server to %s\n", cfgPath)
 			fmt.Println("Token verified and saved.")
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&loginServer, "server", "", "control plane URL (default http://127.0.0.1:8484)")
+	cmd.Flags().StringVar(&loginServer, "server", "", "control plane URL (default LAN IP / <hostname>.local:8484)")
 	return cmd
 }
 

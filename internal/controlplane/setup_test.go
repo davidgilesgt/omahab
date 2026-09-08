@@ -673,3 +673,121 @@ func assertNoEventType(t *testing.T, ev *events.Service, typ string) {
 		t.Fatalf("unexpected %s events: %v", typ, got)
 	}
 }
+
+func TestEnsureDefaultAppNativeUnhealthyDoesNotUninstall(t *testing.T) {
+	ctx := context.Background()
+	digest := "sha256:" + strings.Repeat("a", 64)
+	runner := &scriptedRunner{health: domain.HealthHealthy}
+	b := newAppsBackend(t, runner, digest)
+	caddy := testSetupBundle("caddy", digest, domain.ExposurePublic, "", nil)
+	if err := b.ensureDefaultApp(ctx, caddy, "omahab.com"); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	// Simulate unhealthy native after successful install
+	runner.health = domain.HealthUnhealthy
+	runner.removeCount = 0
+	err := b.ensureDefaultApp(ctx, caddy, "omahab.com")
+	if err == nil {
+		t.Fatal("native unhealthy should return error")
+	}
+	if !strings.Contains(err.Error(), "no uninstall") {
+		t.Fatalf("native unhealthy error should mention no uninstall, got %v", err)
+	}
+	if runner.removeCount != 0 {
+		t.Fatalf("native unhealthy must not call Uninstall/Remove, removeCount=%d", runner.removeCount)
+	}
+	if runner.startCount == 0 {
+		t.Fatalf("native unhealthy should have attempted restart via Start, startCount=%d", runner.startCount)
+	}
+}
+
+func TestRequireRunningHealthyUnknownNativeVsNonNative(t *testing.T) {
+	stNative := apps.Status{BundleID: "embedding-worker", Application: domain.Application{ObservedState: apps.ObservedRunning, Health: domain.HealthUnknown}}
+	if err := requireRunningHealthy(stNative, true); err != nil {
+		t.Fatalf("native Unknown should be OK (live 2026-09-08): %v", err)
+	}
+	if err := requireRunningHealthy(stNative, false); err == nil {
+		t.Fatal("non-native Unknown should fail")
+	}
+	stHealthy := apps.Status{BundleID: "caddy", Application: domain.Application{ObservedState: apps.ObservedRunning, Health: domain.HealthHealthy}}
+	if err := requireRunningHealthy(stHealthy, false); err != nil {
+		t.Fatalf("healthy should pass for non-native: %v", err)
+	}
+	if err := requireRunningHealthy(stHealthy, true); err != nil {
+		t.Fatalf("healthy should pass for native: %v", err)
+	}
+	stUnhealthy := apps.Status{BundleID: "caddy", Application: domain.Application{ObservedState: apps.ObservedRunning, Health: domain.HealthUnhealthy}}
+	if err := requireRunningHealthy(stUnhealthy, true); err == nil {
+		t.Fatal("native unhealthy should still fail")
+	}
+	if err := requireRunningHealthy(stUnhealthy, false); err == nil {
+		t.Fatal("non-native unhealthy should fail")
+	}
+}
+
+func TestEnsureDefaultAppNativeUnknownPasses(t *testing.T) {
+	ctx := context.Background()
+	digest := "sha256:" + strings.Repeat("a", 64)
+	// Native bundle (caddy has Units) with Unknown health should be treated as healthy.
+	runner := &scriptedRunner{health: domain.HealthUnknown}
+	b := newAppsBackend(t, runner, digest)
+	caddy := testSetupBundle("caddy", digest, domain.ExposurePublic, "", nil)
+	if err := b.ensureDefaultApp(ctx, caddy, "omahab.com"); err != nil {
+		t.Fatalf("install native Unknown should pass (Unknown as OK): %v", err)
+	}
+	// Second call should not trigger uninstall: Unknown remains OK
+	runner.removeCount = 0
+	runner.deployCount = 1 // reset tracker after install
+	if err := b.ensureDefaultApp(ctx, caddy, "omahab.com"); err != nil {
+		t.Fatalf("native Unknown on running should be considered healthy: %v", err)
+	}
+	if runner.removeCount != 0 {
+		t.Fatalf("native Unknown should not call Uninstall, removeCount=%d", runner.removeCount)
+	}
+}
+
+func TestEnsureDefaultAppNonNativeUnknownFails(t *testing.T) {
+	ctx := context.Background()
+	digest := "sha256:" + strings.Repeat("b", 64)
+	_ = digest
+	// Non-native bundle: ID contains "non-native" so isNativeBundle treats it as
+	// container even though it carries Units (required for validation). Unknown
+	// must still fail and trigger uninstall path.
+	nonNativeBundle := apps.Bundle{
+		ID:              "demo-non-native",
+		Name:            "demo-non-native",
+		DefaultExposure: domain.ExposurePrivate,
+		MaxExposure:     domain.ExposurePrivate,
+		HealthCheck:     apps.HealthCheck{Kind: apps.CheckNone},
+		Units:           []string{"demo-non-native.service"},
+		Default:         true,
+	}
+	// Build a backend with a catalog containing the non-native bundle.
+	b, _ := newSetupBackend(t, nil)
+	runner := &scriptedRunner{health: domain.HealthUnknown}
+	cat, err := apps.NewCatalog(nonNativeBundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := apps.NewService(b.db, apps.Options{Catalog: cat, Runner: runner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.apps = svc
+	// Install with Unknown health should fail require (non-native Unknown not OK)
+	err = b.ensureDefaultApp(ctx, nonNativeBundle, "omahab.com")
+	if err == nil || !strings.Contains(err.Error(), "want healthy") {
+		t.Fatalf("non-native Unknown should fail healthy check, got %v", err)
+	}
+	// Now make it running Unknown and ensure second call attempts uninstall
+	// The install above left the app as running Unknown (health stored), so ensureDefaultApp will go to ObservedRunning branch.
+	runner.removeCount = 0
+	runner.deployCount = 1
+	err = b.ensureDefaultApp(ctx, nonNativeBundle, "omahab.com")
+	if err == nil {
+		t.Fatal("non-native Unknown on running should still be unhealthy")
+	}
+	if runner.removeCount == 0 {
+		t.Fatalf("non-native Unknown should have triggered Uninstall/Remove, removeCount=%d", runner.removeCount)
+	}
+}

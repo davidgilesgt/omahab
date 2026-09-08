@@ -102,6 +102,12 @@ in
       default = "https://github.com/davidgilesgt/omahab/releases/latest/download/manifest.json";
       description = "Version manifest URL for update discovery.";
     };
+
+    adminUser = mkOption {
+      type = types.strMatching "^[a-z_][a-z0-9_-]{0,31}$";
+      default = "omahab";
+      description = "Linux administrator username for the personal admin account.";
+    };
   };
 
   imports = [ ./apps.nix ];
@@ -161,7 +167,8 @@ in
       "d /var/lib/cloudflared 0700 cloudflared cloudflared - -"
       "d /var/lib/omahab-builder 0700 omahab-builder omahab-builder - -"
       "d /run/omahab 0700 root root - -"
-      "d /home/omahab/.ssh 0700 omahab omahab - -"
+      "d /home/${cfg.adminUser}/.ssh 0700 ${cfg.adminUser} ${config.users.users.${cfg.adminUser}.group} - -"
+      "d /home/${cfg.adminUser}/.config/omahab 0700 ${cfg.adminUser} ${config.users.users.${cfg.adminUser}.group} - -"
     ];
 
     # ------------------------------------------------------------------
@@ -212,7 +219,15 @@ in
           stateDir
           dataDir
           "/run/omahab"
+          "/run/omahab-embedding"
+          "/home/${cfg.adminUser}/.ssh"
+          "/home/${cfg.adminUser}/.config/omahab"
         ];
+        BindPaths = [
+          "/home/${cfg.adminUser}/.ssh"
+          "/home/${cfg.adminUser}/.config/omahab"
+        ];
+        ProtectHome = "tmpfs";
         PrivateDevices = false;
         PrivateMounts = false;
         ProtectHostname = false;
@@ -244,6 +259,7 @@ in
         OMAHAB_DL_DIR = let dl = flakePkgs.omahab-dl or null; in if dl != null then "${dl}/share/omahab/dl" else "";
         # First-boot LAN wizard listener; inert once bootstrap-done exists.
         OMAHAB_BOOTSTRAP_LISTEN = "0.0.0.0:8485";
+        OMAHAB_ADMIN_USER = cfg.adminUser;
         DEVPOD_HOME = "${stateDir}/devpod";
         HOME = "${stateDir}/devpod";
       };
@@ -574,15 +590,19 @@ in
     # ------------------------------------------------------------------
     # First-boot console on tty1 (replaces getty@tty1).
     # ------------------------------------------------------------------
-    users.users.omahab = {
+    users.users.${cfg.adminUser} = {
       isNormalUser = true;
+      description = "Omahab administrator";
+      home = "/home/${cfg.adminUser}";
+      shell = pkgs.bash;
+      createHome = true;
       extraGroups = [ "wheel" ];
-      # runtime-writable authorized_keys (bootstrap wizard writes it)
       openssh.authorizedKeys.keys = [ ];
     };
+    users.users.root.hashedPassword = "!";
     security.sudo.extraRules = [
       {
-        users = [ "omahab" ];
+        users = [ cfg.adminUser ];
         commands = [
           {
             command = "${cfg.package}/bin/omahab runner attach *";
@@ -591,8 +611,7 @@ in
         ];
       }
     ];
-    # Authorized keys file is runtime state, not declarative.
-    services.getty.autologinUser = lib.mkForce "omahab";
+    # Local shell access must authenticate — no global autologin.
     systemd.services."getty@tty1".serviceConfig.ExecStart = lib.mkForce [
       ""
       "-${cfg.package}/bin/omahab console"
@@ -600,6 +619,9 @@ in
     systemd.services."getty@tty1".unitConfig = {
       After = [ "omahabd.service" ];
       Wants = [ "omahabd.service" ];
+    };
+    systemd.services."getty@tty1".environment = {
+      OMAHAB_ADMIN_USER = cfg.adminUser;
     };
 
     # ------------------------------------------------------------------
@@ -699,6 +721,6 @@ in
       devpod
       tmux
     ];
-    systemd.services.omahabd.path = [ omahabOncePkg ];
+    systemd.services.omahabd.path = [ omahabOncePkg pkgs.tailscale pkgs.docker pkgs.systemd pkgs.restic ];
   };
 }

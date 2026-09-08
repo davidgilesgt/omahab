@@ -10,6 +10,9 @@ import (
 // CredentialStore abstracts bearer credential retrieval.
 // The CLI config file (~/.config/omahab/client.json) MUST NOT store secrets.
 // Tokens come from this interface or the OMAHAB_TOKEN environment variable.
+// FileCredentialStore resolves the current user's ~/.config/omahab/token
+// XDG-aware: $XDG_CONFIG_HOME/omahab/token when set, otherwise $HOME/.config/omahab/token.
+// See console.go readAdminToken for the matching server-side search order.
 type CredentialStore interface {
 	// Token returns the bearer token or empty string if not configured.
 	Token() (string, error)
@@ -30,9 +33,9 @@ func (EnvCredentialStore) Clear() error            { return errors.New("env stor
 
 // FileCredentialStore reads a token from a file on disk (fallback for
 // environments without a desktop keyring). The default path is
-// ~/.config/omahab/credentials.json or a plain token file, but the file
-// itself is distinct from client.json. This is intentionally separate to
-// uphold "never that file" for credentials.
+// $XDG_CONFIG_HOME/omahab/token or ~/.config/omahab/token (XDG-aware),
+// distinct from client.json. Mirrors cmd/omahab/console.go readAdminToken
+// candidate order for the current user. Upholds "never that file" for credentials.
 type FileCredentialStore struct {
 	Path string
 }
@@ -84,9 +87,11 @@ func (f FileCredentialStore) Clear() error {
 	}
 	return err
 }
-
 // DefaultCredentialsPath returns the fallback token file path.
-// Prefer XDG_CONFIG_HOME, then ~/.config.
+// XDG-aware: uses $XDG_CONFIG_HOME/omahab/token when XDG_CONFIG_HOME is set,
+// otherwise $HOME/.config/omahab/token. This matches console.go
+// readAdminToken's current-user candidates and the DISTRO fix requirement
+// "resolve current user's ~/.config/omahab/token XDG-aware (HOME, then XDG_CONFIG_HOME)".
 func DefaultCredentialsPath() (string, error) {
 	dir := os.Getenv("XDG_CONFIG_HOME")
 	if dir == "" {

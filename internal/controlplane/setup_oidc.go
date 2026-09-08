@@ -477,11 +477,28 @@ func (b *Backend) waitAppHealthy(ctx context.Context, appID domain.ID, timeout t
 			return err
 		}
 		last = st
-		if st.ObservedState == apps.ObservedRunning && st.Health == domain.HealthHealthy {
+		isNative := false
+		if cat := b.apps.CatalogSnapshot(); cat != nil {
+			if bundle, ok := cat.Get(st.BundleID); ok {
+				isNative = len(bundle.Units) > 0
+			}
+		}
+		if err := requireRunningHealthy(st, isNative); err == nil {
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return requireRunningHealthy(last)
+			// Recompute for last in case BundleID differs (should not), but keep consistent.
+			isNativeLast := isNative
+			if last.BundleID != st.BundleID {
+				if cat := b.apps.CatalogSnapshot(); cat != nil {
+					if bundle, ok := cat.Get(last.BundleID); ok {
+						isNativeLast = len(bundle.Units) > 0
+					} else {
+						isNativeLast = false
+					}
+				}
+			}
+			return requireRunningHealthy(last, isNativeLast)
 		}
 		timer := time.NewTimer(2 * time.Second)
 		select {

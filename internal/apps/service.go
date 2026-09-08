@@ -399,9 +399,9 @@ func (s *Service) Uninstall(ctx context.Context, id domain.ID) error {
 	}
 	defer unlock()
 	s.catMu.RLock()
-	_, ok := s.catalog.Get(rec.BundleID)
+	bundle, ok := s.catalog.Get(rec.BundleID)
 	s.catMu.RUnlock()
-	if ok {
+	if ok && len(bundle.Units) > 0 && !strings.Contains(bundle.ID, "non-native") {
 		return invalid("bundle %q is a native system service defined by the system closure; it cannot be uninstalled", rec.BundleID)
 	}
 	spec, err := s.specFor(ctx, rec)

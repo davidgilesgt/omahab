@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/skip2/go-qrcode"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/omahab/omahab/internal/tui"
 )
@@ -53,6 +55,25 @@ func runConsoleWithOptions(once bool) error {
 	if os.Getenv("NO_COLOR") == "" && os.Getenv("TERM") != "" && os.Getenv("TERM") != "dumb" {
 		caps.ColorEnabled = true
 	}
+	// Enter handling: wait for Enter or 5s on a real tty.
+	var enterCh <-chan struct{}
+	if !once && isRealTTY(w) {
+		ch := make(chan struct{}, 1)
+		go func() {
+			r := bufio.NewReader(os.Stdin)
+			for {
+				_, err := r.ReadString('\n')
+				if err != nil {
+					return
+				}
+				select {
+				case ch <- struct{}{}:
+				default:
+				}
+			}
+		}()
+		enterCh = ch
+	}
 	for {
 		if caps.ColorEnabled {
 			fmt.Fprint(w, "\033[2J\033[H") // clear + home
@@ -81,7 +102,15 @@ func runConsoleWithOptions(once bool) error {
 			if once {
 				return nil
 			}
-			time.Sleep(5 * time.Second)
+			if enterCh != nil {
+				select {
+				case <-enterCh:
+					runLogin()
+				case <-time.After(5 * time.Second):
+				}
+			} else {
+				time.Sleep(5 * time.Second)
+			}
 			continue
 		}
 
@@ -90,12 +119,51 @@ func runConsoleWithOptions(once bool) error {
 		code := readBootstrapCode()
 		renderFirstBoot(w, caps, ip, code)
 		fmt.Fprintln(w, "")
+		fmt.Fprintln(w, "  press Enter for shell login")
+		fmt.Fprintln(w, "")
 		fmt.Fprintf(w, "  Refreshing every 5s — %s\n", time.Now().Format("15:04:05"))
 		if once {
 			return nil
 		}
-		time.Sleep(5 * time.Second)
+		if enterCh != nil {
+			select {
+			case <-enterCh:
+				runLogin()
+			case <-time.After(5 * time.Second):
+			}
+		} else {
+			time.Sleep(5 * time.Second)
+		}
 	}
+}
+
+func isRealTTY(w io.Writer) bool {
+	if term.IsTerminal(int(os.Stdout.Fd())) {
+		return true
+	}
+	return isTerminal(w)
+}
+
+func runLogin() {
+	path := findLoginPath()
+	cmd := exec.Command(path)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	_ = cmd.Run()
+}
+
+func findLoginPath() string {
+	candidates := []string{"/bin/login", "/run/wrappers/bin/login", "/run/current-system/sw/bin/login"}
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	if p, err := exec.LookPath("login"); err == nil && filepath.IsAbs(p) {
+		return p
+	}
+	return "/bin/login"
 }
 
 func renderFirstBoot(w io.Writer, caps tui.Caps, ip, code string) {
@@ -113,8 +181,16 @@ func renderFirstBoot(w io.Writer, caps tui.Caps, ip, code string) {
 		} else {
 			fmt.Fprintf(w, "      %s\n", url)
 		}
-		// Always show mDNS alternative
-		fmt.Fprintln(w, "      also: http://omahab.local:8485")
+		// Always show mDNS alternative with actual hostname
+		hostname, _ := os.Hostname()
+		if hostname == "" {
+			hostname = "omahab"
+		}
+		// Use short hostname before first dot for mDNS.
+		if idx := strings.Index(hostname, "."); idx != -1 {
+			hostname = hostname[:idx]
+		}
+		fmt.Fprintf(w, "      also: http://%s.local:8485\n", hostname)
 		if code != "" {
 			fmt.Fprintln(w, "")
 			fmt.Fprintln(w, "  One-time code:")
@@ -132,6 +208,8 @@ func renderFirstBoot(w io.Writer, caps tui.Caps, ip, code string) {
 				fmt.Fprintln(w, "")
 				fmt.Fprint(w, qr.ToSmallString(false))
 			}
+			fmt.Fprintln(w, "")
+			fmt.Fprintln(w, "  After Complete, CLI token at ~/.config/omahab/token (XDG-aware, 0600)")
 		} else {
 			fmt.Fprintln(w, "")
 			fmt.Fprintln(w, "  (waiting for the one-time code — omahabd is starting)")
@@ -147,14 +225,24 @@ func renderLiveStatus(w io.Writer, caps tui.Caps) {
 		hostname = "omahab"
 	}
 	tsIP := tailscaleIPv4()
+	lanIP := lanIPv4()
+	// Dashboard URL: prefer Tailscale, then LAN IP / mDNS, never 127.0.0.1.
+	// Reuses lanIPv4() pattern per DISTRO-FIX-PLAN FIRST-BOOT surfaces.
+	dashURL := ""
+	shortHost := hostname
+	if idx := strings.Index(shortHost, "."); idx != -1 {
+		shortHost = shortHost[:idx]
+	}
+	mdnsURL := fmt.Sprintf("http://%s.local:8484", shortHost)
+	if tsIP != "" {
+		dashURL = fmt.Sprintf("http://%s:8484", tsIP)
+	} else if lanIP != "" {
+		dashURL = fmt.Sprintf("http://%s:8484 (also %s)", lanIP, mdnsURL)
+	} else {
+		dashURL = mdnsURL
+	}
 	if tsIP == "" {
 		tsIP = "—"
-	}
-
-	// Dashboard URL
-	dashURL := fmt.Sprintf("http://%s:8484", tsIP)
-	if tsIP == "—" {
-		dashURL = "http://<tailscale-ip>:8484"
 	}
 
 	labelStyle := lipgloss.NewStyle().Foreground(tui.NeutralFG)
@@ -238,11 +326,10 @@ func readAdminToken() string {
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		candidates = append(candidates, filepath.Join(home, ".config", "omahab", "token"))
 	}
-	// Explicit omahab user path (daemon provisions there; console runs as root)
-	candidates = append(candidates, "/home/omahab/.config/omahab/token")
+	adminUser := consoleAdminUser()
+	candidates = append(candidates, filepath.Join("/home", adminUser, ".config", "omahab", "token"))
 	candidates = append(candidates, "/root/.config/omahab/token")
-	// Also check via user lookup for omahab
-	if u, err := user.Lookup("omahab"); err == nil && u.HomeDir != "" {
+	if u, err := user.Lookup(adminUser); err == nil && u.HomeDir != "" {
 		candidates = append(candidates, filepath.Join(u.HomeDir, ".config", "omahab", "token"))
 	}
 	for _, p := range candidates {
@@ -256,6 +343,13 @@ func readAdminToken() string {
 		}
 	}
 	return ""
+}
+
+func consoleAdminUser() string {
+	if v := strings.TrimSpace(os.Getenv("OMAHAB_ADMIN_USER")); v != "" {
+		return v
+	}
+	return "omahab"
 }
 
 type doctorCheck struct {

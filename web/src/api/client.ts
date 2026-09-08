@@ -1,4 +1,6 @@
 import type {
+  AddSSHKeysRequest,
+  AddSSHKeysResponse,
   ApiErrorEnvelope,
   Application,
   Backup,
@@ -7,6 +9,7 @@ import type {
   ControlEvent,
   CreateCompanionEnrollmentResponse,
   CreateModelKeyResponse,
+  DeleteSSHKeyRequest,
   DoctorReport,
   Exposure,
   ExposureState,
@@ -27,12 +30,18 @@ import type {
   Release,
   Secret,
   SetupStatus,
+  SSHKey,
   Status,
   SyncFolder,
+  SystemSSHKeysResponse,
   ToolVariableMeta,
   User,
   Workspace,
 } from "./types";
+// API base is relative: fetch("/api/v1/...") resolves to the same host the user
+// loaded the WebUI from (e.g. http://192.168.1.12:8485 or http://omahab.local:8485).
+// This ensures first-boot surfaces render the device LAN IP / <hostname>.local
+// and never 127.0.0.1. See console.go lanIPv4() / bootstrapClaimURL() pattern.
 const API_ROOT = "/api/v1";
 
 export class ApiError extends Error {
@@ -150,6 +159,10 @@ export class ApiClient {
     this.request<Instance>("/instance", { method: "PUT", body: JSON.stringify(input) });
   createSecret = (input: { scope: string; name: string; value: string }) =>
     this.request<Secret>("/secrets", { method: "POST", body: JSON.stringify(input) });
+  listSecrets = (scope?: string) => {
+    const q = scope ? `?scope=${encodeURIComponent(scope)}` : "";
+    return this.list<Secret>(`/secrets${q}`);
+  };
 
   setup = () => this.request<SetupStatus>("/setup");
   reconcileSetup = () => this.request<void>("/setup/reconcile", { method: "POST", body: JSON.stringify({}) });
@@ -220,6 +233,31 @@ export class ApiClient {
   hermesMCPToken = () => this.request<{ token: string }>("/hermes/mcp-token");
 
   rotateHermesMCPToken = () => this.request<{ token: string }>("/hermes/mcp-token/rotate", { method: "POST", body: JSON.stringify({}) });
+
+  // Server SSH access (admin user authorized_keys)
+  systemSSHKeys = () => this.request<SystemSSHKeysResponse>("/system/ssh-keys");
+  addSystemSSHKeys = (input: AddSSHKeysRequest) =>
+    this.request<AddSSHKeysResponse>("/system/ssh-keys", { method: "POST", body: JSON.stringify(input) });
+  deleteSystemSSHKey = (input: DeleteSSHKeyRequest) =>
+    this.request<void>("/system/ssh-keys", { method: "DELETE", body: JSON.stringify(input) });
+
+  // Bootstrap SSH keys (LAN, token from claim)
+  bootstrapSSHKeys = (token: string | null) => {
+    const headers: Record<string, string> = { Accept: "application/json" };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    return fetch("/api/bootstrap/ssh-keys", { headers }).then(async (response) => {
+      if (!response.ok) {
+        let detail: ApiErrorEnvelope | undefined;
+        try {
+          detail = (await response.json()) as ApiErrorEnvelope;
+        } catch {
+          // ignore
+        }
+        throw new ApiError(detail?.error.message ?? response.statusText ?? "Request failed", detail?.error.code ?? "request_failed", response.status);
+      }
+      return (await response.json()) as SystemSSHKeysResponse;
+    });
+  };
 
 
   knowledgePinnedModels = () => this.list<ModelInfo>("/knowledge/pinned-models");

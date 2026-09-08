@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -276,8 +277,28 @@ func (b *Backend) runRestore(ctx context.Context, ch chan apitypes.BootstrapRest
 	// For stub, just sleep
 	time.Sleep(300 * time.Millisecond)
 	send("finalize", "Writing bootstrap-done and restarting", false, "")
-	if err := CompleteBootstrap(); err != nil {
-		// Already done or error
+	// Reread the restored API token from disk; reject empty/malformed.
+	tokData, err := os.ReadFile(b.cfg.APITokenPath)
+	if err != nil {
+		send("finalize", "Failed to read API token: "+err.Error(), true, err.Error())
+		return
+	}
+	tok := strings.TrimSpace(string(tokData))
+	if tok == "" {
+		send("finalize", "API token is empty after restore", true, "api token is empty")
+		return
+	}
+	if len(tok) != 64 {
+		send("finalize", "API token malformed after restore: wrong length", true, "api token malformed: wrong length")
+		return
+	}
+	if _, err := hex.DecodeString(tok); err != nil {
+		send("finalize", "API token malformed after restore: "+err.Error(), true, err.Error())
+		return
+	}
+	if err := b.finalizeBootstrap(tok); err != nil {
+		send("finalize", "Failed to provision token/complete bootstrap: "+err.Error(), true, err.Error())
+		return
 	}
 	// Restart omahabd via systemctl (best-effort)
 	_ = exec.CommandContext(ctx, "systemctl", "restart", "omahabd").Run()

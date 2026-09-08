@@ -37,10 +37,13 @@ async function bootstrapFetch(path: string, token: string | null, body?: unknown
   });
   const data = (await resp.json().catch(() => ({}))) as Record<string, unknown>;
   if (!resp.ok) {
-    throw new Error(typeof data.message === "string" ? data.message : `HTTP ${resp.status}`);
+    const nested = (data as unknown as { error?: { message?: string } })?.error?.message;
+    const msg = typeof nested === "string" && nested ? nested : typeof (data as unknown as { message?: string })?.message === "string" ? (data as unknown as { message?: string })?.message : `HTTP ${resp.status}`;
+    throw new Error(msg);
   }
   return data as BootstrapResponse & Record<string, unknown>;
 }
+
 
 export function BootstrapPage() {
   const toast = useToast();
@@ -54,6 +57,12 @@ export function BootstrapPage() {
   const [tsIp, setTsIp] = useState("");
   const [busy, setBusy] = useState(false);
   const pollRef = useRef<number | null>(null);
+  // Preinstalled SSH keys (from installer)
+  const [installedKeys, setInstalledKeys] = useState<Array<{ fingerprint: string; type: string; comment: string }>>([]);
+  const [installedUsername, setInstalledUsername] = useState<string>("");
+  const [sshListLoading, setSshListLoading] = useState(false);
+  const [sshListError, setSshListError] = useState<string | null>(null);
+  const [showAddForm, setShowAddForm] = useState(false);
   // Restore state
   const [restoreKind, setRestoreKind] = useState<"hetzner_storagebox" | "generic">("hetzner_storagebox");
   const [restoreUsername, setRestoreUsername] = useState("");
@@ -119,13 +128,49 @@ export function BootstrapPage() {
     return () => { cancelled = true; };
   }, []);
 
+  // Fetch preinstalled SSH keys when entering ssh step.
+  useEffect(() => {
+    if (step !== "ssh" || !token) return;
+    let cancelled = false;
+    setSshListLoading(true);
+    setSshListError(null);
+    (async () => {
+      try {
+        const data = await bootstrapFetch("ssh-keys", token);
+        if (cancelled) return;
+        const itemsRaw = (data as unknown as { items?: unknown }).items;
+        const items = Array.isArray(itemsRaw) ? itemsRaw : [];
+        const usernameRaw = (data as unknown as { username?: unknown }).username;
+        const username = typeof usernameRaw === "string" ? usernameRaw : "";
+        const mapped = items
+          .filter((it): it is Record<string, unknown> => typeof it === "object" && it !== null)
+          .map((it) => {
+            const fp = typeof (it as Record<string, unknown>).fingerprint === "string" ? String((it as Record<string, unknown>).fingerprint) : "";
+            const tp = typeof (it as Record<string, unknown>).type === "string" ? String((it as Record<string, unknown>).type) : "";
+            const cm = typeof (it as Record<string, unknown>).comment === "string" ? String((it as Record<string, unknown>).comment) : "";
+            return { fingerprint: fp, type: tp, comment: cm };
+          })
+          .filter((k) => k.fingerprint);
+        setInstalledKeys(mapped);
+        setInstalledUsername(username);
+        setShowAddForm(mapped.length === 0);
+      } catch (err) {
+        if (cancelled) return;
+        setSshListError(err instanceof Error ? err.message : "failed to load keys");
+      } finally {
+        if (!cancelled) setSshListLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [step, token]);
 
   async function submitCode(e: FormEvent) {
     e.preventDefault();
     setBusy(true);
     try {
       const data = await bootstrapFetch("claim", null, { code: code.trim() });
-      const t = typeof data.token === "string" ? data.token : null;
+      const tokenVal = (data as unknown as { token?: unknown }).token;
+      const t = typeof tokenVal === "string" ? tokenVal : null;
       if (!t) throw new Error("no token in response");
       setToken(t);
       setStep("mode");
@@ -144,14 +189,38 @@ export function BootstrapPage() {
         github_user: githubUser.trim() || undefined,
         keys: pastedKeys.trim() ? pastedKeys.trim().split("\n").map((k) => k.trim()).filter(Boolean) : [],
       });
-      setStep("tailscale");
-      await startTailscale();
+      // Refresh installed list but do not re-import already installed keys; just continue.
+      try {
+        const data = await bootstrapFetch("ssh-keys", token);
+        const itemsRaw = (data as unknown as { items?: unknown }).items;
+        const items = Array.isArray(itemsRaw) ? itemsRaw : [];
+        const mapped = items
+          .filter((it): it is Record<string, unknown> => typeof it === "object" && it !== null)
+          .map((it) => {
+            const fp = typeof (it as Record<string, unknown>).fingerprint === "string" ? String((it as Record<string, unknown>).fingerprint) : "";
+            const tp = typeof (it as Record<string, unknown>).type === "string" ? String((it as Record<string, unknown>).type) : "";
+            const cm = typeof (it as Record<string, unknown>).comment === "string" ? String((it as Record<string, unknown>).comment) : "";
+            return { fingerprint: fp, type: tp, comment: cm };
+          })
+          .filter((k) => k.fingerprint);
+        setInstalledKeys(mapped);
+      } catch {}
+      setGithubUser("");
+      setPastedKeys("");
+      toast.success("Keys installed");
+      setShowAddForm(false);
+      // If we came from empty state, proceed to tailscale; if from "add another", stay with updated list and offer Continue.
+      if (installedKeys.length === 0) {
+        setStep("tailscale");
+        await startTailscale();
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "failed to install keys");
     } finally {
       setBusy(false);
     }
   }
+
 
   function skipKeys() {
     setStep("tailscale");
@@ -367,20 +436,80 @@ export function BootstrapPage() {
       )}
       {step === "ssh" && (
         <Section title="Administrator SSH keys" description="Import keys from GitHub or paste public keys. Skipping is allowed — console access remains the recovery path.">
-          <form className="form-grid" onSubmit={submitKeys}>
-            <label className="field">
-              <span>GitHub username</span>
-              <input value={githubUser} onChange={(e) => setGithubUser(e.target.value)} placeholder="your-github-username" autoComplete="off" />
-            </label>
-            <label className="field">
-              <span>…or paste public keys (one per line)</span>
-              <textarea value={pastedKeys} onChange={(e) => setPastedKeys(e.target.value)} rows={4} placeholder="ssh-ed25519 AAAA…" className="mono" />
-            </label>
-            <div className="form-actions">
-              <button className="button ghost" type="button" onClick={skipKeys} disabled={busy}>Skip</button>
-              <button className="button primary" type="submit" disabled={busy || (!githubUser.trim() && !pastedKeys.trim())}>{busy ? "Installing…" : "Install keys"}</button>
+          <p className="muted" style={{ fontSize: "0.85em", marginBottom: 8 }}>
+            Token note: the administrator API token will be provisioned to <code className="mono">~/.config/omahab/token</code> (XDG-aware: <code className="mono">$XDG_CONFIG_HOME/omahab/token</code> or <code className="mono">$HOME/.config/omahab/token</code>, 0600) only after you click <em>Complete</em> on the final step. Until then, use the one-time claim code and this browser session.
+          </p>
+          {sshListLoading ? (
+            <p className="muted">Loading installed keys…</p>
+          ) : sshListError ? (
+            <div>
+              <p className="inline-error" role="alert">{sshListError}</p>
+              <button className="button ghost" type="button" onClick={() => { setSshListLoading(true); setSshListError(null); void bootstrapFetch("ssh-keys", token).then((data) => {
+                const itemsRaw = (data as unknown as { items?: unknown }).items;
+                const items = Array.isArray(itemsRaw) ? itemsRaw : [];
+                const usernameRaw = (data as unknown as { username?: unknown }).username;
+                const username = typeof usernameRaw === "string" ? usernameRaw : "";
+                const mapped = items.filter((it): it is Record<string, unknown> => typeof it === "object" && it !== null).map((it) => {
+                  const fp = typeof (it as Record<string, unknown>).fingerprint === "string" ? String((it as Record<string, unknown>).fingerprint) : "";
+                  const tp = typeof (it as Record<string, unknown>).type === "string" ? String((it as Record<string, unknown>).type) : "";
+                  const cm = typeof (it as Record<string, unknown>).comment === "string" ? String((it as Record<string, unknown>).comment) : "";
+                  return { fingerprint: fp, type: tp, comment: cm };
+                }).filter((k) => k.fingerprint);
+                setInstalledKeys(mapped);
+                setInstalledUsername(username);
+                setShowAddForm(mapped.length === 0);
+              }).catch((err) => setSshListError(err instanceof Error ? err.message : "failed to load keys")).finally(() => setSshListLoading(false)); }}>Retry</button>
             </div>
-          </form>
+          ) : installedKeys.length > 0 ? (
+            <>
+              <p className="muted">Already installed for <strong className="mono">{installedUsername || "administrator"}</strong>:</p>
+              <ul style={{ listStyle: "none", padding: 0, display: "grid", gap: 6, marginTop: 8 }}>
+                {installedKeys.map((k) => (
+                  <li key={k.fingerprint} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: "0.9em", wordBreak: "break-all" }}>
+                    <span className="mono">{k.type}</span>
+                    <span className="mono">{k.fingerprint}</span>
+                    <span style={{ opacity: 0.7 }}>{k.comment || "no comment"}</span>
+                    <CopyButton text={k.fingerprint} label="Copy fingerprint" />
+                  </li>
+                ))}
+              </ul>
+              <div className="form-actions" style={{ marginTop: 12 }}>
+                <button className="button primary" type="button" onClick={() => { setStep("tailscale"); void startTailscale(); }}>Continue</button>
+                <button className="button ghost" type="button" onClick={() => setShowAddForm((v) => !v)}>{showAddForm ? "Hide" : "Add another key"}</button>
+              </div>
+              {showAddForm && (
+                <form className="form-grid" onSubmit={submitKeys} style={{ marginTop: 12 }}>
+                  <label className="field">
+                    <span>GitHub username</span>
+                    <input value={githubUser} onChange={(e) => setGithubUser(e.target.value)} placeholder="your-github-username" autoComplete="off" />
+                  </label>
+                  <label className="field">
+                    <span>…or paste public keys (one per line)</span>
+                    <textarea value={pastedKeys} onChange={(e) => setPastedKeys(e.target.value)} rows={4} placeholder="ssh-ed25519 AAAA…" className="mono" />
+                  </label>
+                  <div className="form-actions">
+                    <button className="button primary" type="submit" disabled={busy || (!githubUser.trim() && !pastedKeys.trim())}>{busy ? "Adding…" : "Add keys"}</button>
+                  </div>
+                </form>
+              )}
+            </>
+          ) : (
+            <form className="form-grid" onSubmit={submitKeys}>
+              <label className="field">
+                <span>GitHub username</span>
+                <input value={githubUser} onChange={(e) => setGithubUser(e.target.value)} placeholder="your-github-username" autoComplete="off" />
+              </label>
+              <label className="field">
+                <span>…or paste public keys (one per line, end with blank line)</span>
+                <textarea value={pastedKeys} onChange={(e) => setPastedKeys(e.target.value)} rows={4} placeholder="ssh-ed25519 AAAA…" className="mono" />
+              </label>
+              <div className="form-actions">
+                <button className="button ghost" type="button" onClick={skipKeys} disabled={busy}>Set up later in WebUI</button>
+                <button className="button primary" type="submit" disabled={busy || (!githubUser.trim() && !pastedKeys.trim())}>{busy ? "Installing…" : "Install keys"}</button>
+              </div>
+              <p className="muted" style={{ fontSize: "0.85em" }}>Remote SSH stays unavailable until you add a key. Your local username and password still work.</p>
+            </form>
+          )}
         </Section>
       )}
       {step === "tailscale" && (
@@ -406,6 +535,9 @@ export function BootstrapPage() {
               <CopyButton text={`http://${tsIp}:8484`} label="Copy" />
             </div>
             <button className="button primary" type="button" onClick={complete}>Open dashboard</button>
+            <p className="muted" style={{ fontSize: "0.85em", marginTop: 8 }}>
+              On <em>Open dashboard</em> the admin token is provisioned to <code className="mono">~/.config/omahab/token</code> (XDG-aware, 0600) for the CLI. Use <code className="mono">omahab status</code> locally afterwards.
+            </p>
           </div>
         </Section>
       )}

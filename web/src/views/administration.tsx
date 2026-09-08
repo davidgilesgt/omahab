@@ -7,7 +7,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../auth";
-import type { CreateModelKeyResponse, ModelAlias, ModelAliasName, ModelKey, OAuthSession, ProviderCredential, RecoverySession, User, Workspace } from "../api/types";
+import type { CreateModelKeyResponse, ModelAlias, ModelAliasName, ModelKey, OAuthSession, ProviderCredential, RecoverySession, SSHKey, User, Workspace } from "../api/types";
 import { EmptyState, ErrorState, formatDate, LoadingState, PageHeader, Section, StatusPill } from "../components/ui";
 import { useToast } from "../components/toast";
 import { CopyButton } from "../components/copyButton";
@@ -343,6 +343,43 @@ export function PeoplePage() {
   });
   const users = query.data ?? [];
 
+  // Server SSH access - independent of Pocket ID user queries
+  const sshQuery = useQuery({ queryKey: ["system-ssh-keys"], queryFn: client.systemSSHKeys });
+  const [sshGithubUser, setSshGithubUser] = useState("");
+  const [sshPaste, setSshPaste] = useState("");
+  const [sshDeleteTarget, setSshDeleteTarget] = useState<SSHKey | null>(null);
+  const sshAdd = useMutation({
+    mutationFn: (input: { github_user?: string; keys?: string[] }) => client.addSystemSSHKeys(input),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["system-ssh-keys"] });
+      toast.success(data.added === 0 ? "No new keys added (already present)" : `Added ${data.added} key(s)`);
+      setSshGithubUser("");
+      setSshPaste("");
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Failed to add keys"),
+  });
+  const sshDelete = useMutation({
+    mutationFn: (input: { fingerprint: string; confirm_last?: boolean }) => client.deleteSystemSSHKey(input),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["system-ssh-keys"] });
+      toast.success("Key revoked");
+      setSshDeleteTarget(null);
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Failed to revoke key"),
+  });
+
+  function submitSSH(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const github = sshGithubUser.trim();
+    const paste = sshPaste.trim();
+    const keys = paste ? paste.split("\n").map((k) => k.trim()).filter(Boolean) : undefined;
+    if (!github && (!keys || keys.length === 0)) {
+      toast.error("Enter a GitHub username or paste at least one public key");
+      return;
+    }
+    sshAdd.mutate({ github_user: github || undefined, keys });
+  }
+
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const formElement = event.currentTarget;
@@ -398,6 +435,40 @@ export function PeoplePage() {
           </form>
         </Section>
       </div>
+      <Section title="Server SSH access" description="These public keys grant Linux administrator SSH access. Private keys stay on the client and its password manager. You can reuse GitHub keys but Git-service authorization stays independent. Revoking a key blocks future SSH authentication, not already-open sessions. The WebUI and local password login remain usable after deleting the last key.">
+        {sshQuery.isLoading ? <LoadingState label="Loading SSH keys" /> : sshQuery.isError ? <ErrorState error={sshQuery.error} retry={() => void sshQuery.refetch()} /> : (
+          <>
+            {sshQuery.data && (
+              <p className="muted" style={{ marginBottom: 8 }}>Administrator username: <strong className="mono">{sshQuery.data.username}</strong> <CopyButton text={sshQuery.data.username} label="Copy username" /></p>
+            )}
+            {!sshQuery.data?.items.length ? (
+              <EmptyState title="No SSH keys" description="Remote SSH stays unavailable until you add a key. Your local username and password still work." />
+            ) : (
+              <div className="compact-list">
+                {sshQuery.data!.items.map((k) => (
+                  <div key={k.fingerprint} style={{ display: "flex", flexDirection: "column", gap: 4, padding: "6px 0", borderBottom: "1px solid var(--line)" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <span className="mono" style={{ fontSize: "0.9em" }}>{k.type}</span>
+                      <span className="mono" style={{ fontSize: "0.85em", wordBreak: "break-all" }}>{k.fingerprint}</span>
+                      <CopyButton text={k.fingerprint} label="Copy fingerprint" />
+                      <span style={{ opacity: 0.7, fontSize: "0.85em" }}>{k.comment || "no comment"}</span>
+                    </div>
+                    <div className="row-actions">
+                      <button className="button ghost" type="button" onClick={() => setSshDeleteTarget(k)}>Revoke</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            <form className="form-stack" onSubmit={submitSSH} style={{ marginTop: 16 }}>
+              <label>GitHub username<input value={sshGithubUser} onChange={(e) => setSshGithubUser(e.target.value)} placeholder="your-github-username" autoComplete="off" /></label>
+              <label>…or paste public keys (one per line, end with blank line)<textarea value={sshPaste} onChange={(e) => setSshPaste(e.target.value)} rows={4} placeholder="ssh-ed25519 AAAA…" className="mono" /></label>
+              <button className="button primary" type="submit" disabled={sshAdd.isPending}>{sshAdd.isPending ? "Adding…" : "Add keys"}</button>
+              <OperationError error={sshAdd.error} />
+            </form>
+          </>
+        )}
+      </Section>
       {editingUser && (
         <EditGroupsDialog
           user={editingUser}
@@ -419,6 +490,18 @@ export function PeoplePage() {
           onConfirm={() => update.mutate({ id: toggleTarget.id, disabled: !toggleTarget.disabled })}
           pending={update.isPending}
           error={update.error}
+        />
+      )}
+      {sshDeleteTarget && (
+        <DestructiveConfirm
+          title={`Revoke SSH key`}
+          description={sshQuery.data && sshQuery.data.items.length === 1 ? "This is the last SSH key. Confirm removal to disable remote SSH access. Revoking blocks future SSH authentication, not already-open sessions. The WebUI and local password login remain usable." : "Revoking blocks future SSH authentication, not already-open sessions."}
+          confirmValue={sshDeleteTarget.fingerprint}
+          confirmLabel="Type the fingerprint to confirm"
+          onClose={() => setSshDeleteTarget(null)}
+          onConfirm={() => sshDelete.mutate({ fingerprint: sshDeleteTarget.fingerprint, confirm_last: sshQuery.data?.items.length === 1 })}
+          pending={sshDelete.isPending}
+          error={sshDelete.error}
         />
       )}
     </div>

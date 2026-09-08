@@ -1,20 +1,20 @@
 package controlplane
 
 import (
-	"github.com/omahab/omahab/internal/apitypes"
-	"github.com/omahab/omahab/internal/backups"
 	"context"
-	"github.com/omahab/omahab/internal/domain"
-	"github.com/omahab/omahab/internal/emailing"
-	"errors"
-	"github.com/omahab/omahab/internal/events"
-
-	"fmt"
-
 	"database/sql"
-	"github.com/omahab/omahab/internal/store"
+	"errors"
+	"fmt"
 	"strings"
 	"time"
+
+	"github.com/omahab/omahab/internal/apitypes"
+	"github.com/omahab/omahab/internal/backups"
+	"github.com/omahab/omahab/internal/domain"
+	"github.com/omahab/omahab/internal/emailing"
+	"github.com/omahab/omahab/internal/events"
+	"github.com/omahab/omahab/internal/secrets"
+	"github.com/omahab/omahab/internal/store"
 )
 
 func (b *Backend) ListSecrets(ctx context.Context, scope string, p apitypes.Pagination) ([]domain.Secret, error) {
@@ -43,6 +43,11 @@ func (b *Backend) GetSecret(ctx context.Context, id domain.ID) (domain.Secret, e
 func (b *Backend) CreateSecret(ctx context.Context, req apitypes.CreateSecretRequest) (domain.Secret, error) {
 	if strings.TrimSpace(req.Value) == "" {
 		return domain.Secret{}, translateError(fmt.Errorf("%w: value is required", store.ErrValidation))
+	}
+	if strings.TrimSpace(req.Name) == "cloudflare_account_id" {
+		if err := secrets.ValidateCloudflareAccountID(req.Value); err != nil {
+			return domain.Secret{}, translateError(err)
+		}
 	}
 	if err := upsertSecret(ctx, b.secrets, req.Scope, req.Name, req.Value); err != nil {
 		return domain.Secret{}, translateError(err)

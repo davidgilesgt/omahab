@@ -9,7 +9,7 @@ fail=0
 pass() { echo "PASS: $*"; }
 fail_check() { echo "FAIL: $*" >&2; fail=1; }
 
-bash -n scripts/build.sh scripts/check.sh && pass "bash syntax" || fail_check "bash syntax"
+bash -n scripts/build.sh scripts/check.sh scripts/install-disk.sh && pass "bash syntax" || fail_check "bash syntax"
 
 # Config defaults: loopback standalone, wildcard via the NixOS module.
 grep -q 'DefaultListen.*127\.0\.0\.1' internal/config/config.go && pass "loopback API default" || fail_check "loopback API default"
@@ -38,8 +38,11 @@ test ! -f "$ROOT/.dockerignore" && pass ".dockerignore deleted" || fail_check ".
 # Gated native units: every appenv consumer has a condition.
 grep -q 'ConditionPathExists = "${appEnv}/${bundle}.env"' nix/apps.nix && pass "appenv gating present" || fail_check "appenv gating missing"
 
-# No runtime writes to /etc from the daemon.
-! grep -rn '"/etc/omahab' internal/ cmd/ --include='*.go' | grep -v _test | grep -v "config.go:.*DefaultEtcDir" | grep -v "system.go:.*releaseFile" && pass "daemon never writes /etc" || fail_check "daemon /etc write"
+# No runtime writes to /etc from the daemon (internal/ + cmd/omahabd).
+# CLI-only /etc paths are out of scope: `omahab install` looks up the live
+# backend on the ISO, and `omahab system upgrade` promotes the machine-local
+# flake source as root — both mandated, neither is daemon runtime state.
+! grep -rn '"/etc/omahab' internal/ cmd/omahabd/ --include='*.go' | grep -v _test | grep -v "config.go:.*DefaultEtcDir" | grep -v "system.go:.*releaseFile" && pass "daemon never writes /etc" || fail_check "daemon /etc write"
 # Catalog: single-source runtime, no legacy references.
 pat="apps-catalog"; pat+=".json"
 ! grep -rn "$pat" --include="*.go" --include="*.nix" --include="*.sh" --include="*.md" --include="*.json" . 2>/dev/null | grep -q . && pass "no apps-catalog ref" || fail_check "apps-catalog ref present"
