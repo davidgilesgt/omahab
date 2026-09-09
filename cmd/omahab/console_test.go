@@ -105,7 +105,7 @@ func TestRenderFirstBoot_NoColorContainsURLAndCode(t *testing.T) {
 	caps := tui.Caps{IsTTY: false, ColorEnabled: false}
 	renderFirstBoot(&buf, caps, "192.168.1.42", "ABCD1234")
 	out := buf.String()
-	if !strings.Contains(out, "http://192.168.1.42:8485") {
+	if !strings.Contains(out, "http://192.168.1.42:8484") {
 		t.Fatalf("expected URL, got %q", out)
 	}
 	if !strings.Contains(out, "ABCD1234") {
@@ -124,7 +124,7 @@ func TestRenderFirstBoot_ColorContainsEscape(t *testing.T) {
 	if !strings.Contains(out, "\x1b[") {
 		t.Fatalf("color output should contain escape, got %q", out)
 	}
-	if !strings.Contains(out, "http://192.168.1.42:8485") {
+	if !strings.Contains(out, "http://192.168.1.42:8484") {
 		t.Fatalf("expected URL even in color, got %q", out)
 	}
 }

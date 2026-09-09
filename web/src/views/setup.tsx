@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../auth";
 import type { Secret, SetupCheck, SetupStatus } from "../api/types";
@@ -32,9 +33,16 @@ function CheckRow({ check }: { check: SetupCheck }) {
       {check.id === "core_apps" && check.apps && check.apps.length > 0 && (
         <ul style={{ marginLeft: 16, listStyle: "none", padding: 0, width: "100%" }}>
           {check.apps.map((app) => (
-            <li key={app.bundle_id} style={{ display: "flex", gap: 8, alignItems: "center", padding: "4px 0" }}>
+            <li key={app.bundle_id} style={{ display: "flex", gap: 8, alignItems: "center", padding: "4px 0", flexWrap: "wrap" }}>
               <StatusPill value={app.status} />
               <span>{app.bundle_id}</span>
+              {app.detail && <span style={{ opacity: 0.7, fontSize: "0.9em" }}>{app.detail}</span>}
+              {app.detail === "Not configured — connect domain and HTTPS" && (
+                <Link to="/setup" style={{ fontSize: "0.85em" }}>Connect domain and HTTPS</Link>
+              )}
+              {app.status === "failed" && app.detail && app.detail !== "Not configured — connect domain and HTTPS" && (
+                <span style={{ fontSize: "0.85em", color: "var(--negative)" }}>{app.detail}</span>
+              )}
             </li>
           ))}
         </ul>
@@ -353,8 +361,8 @@ export function SetupPage() {
     <div className="page">
       <PageHeader
         eyebrow="Setup"
-        title="Continue setup"
-        description="Complete Cloudflare, app provisioning, and passkey enrollment."
+        title="Connect your services"
+        description="Your local control panel is ready. Connect domain/HTTPS, identity, recovery, and backups as explicit next steps when you're ready."
         actions={
           <button className="button secondary" type="button" onClick={() => void reconcileMutation.mutate()} disabled={reconcileMutation.isPending}>
             {reconcileMutation.isPending ? "Retrying…" : "Retry automatic setup"}
@@ -362,8 +370,17 @@ export function SetupPage() {
         }
       />
 
-      <Checklist setup={setup} />
+      {setup.local_ready ? (
+        <div className="banner-card" style={{ background: "var(--positive-bg)", border: "1px solid var(--positive)", padding: 12, borderRadius: 8, marginBottom: 16 }} role="status">
+          <strong>Local control panel ready</strong> — connect your services below. The dashboard is available on the LAN without a domain. Next actions: domain/HTTPS, identity (passkeys), recovery phrase, and backups. Failures below are genuine and will remain visible until resolved.
+        </div>
+      ) : (
+        <div className="banner-card" style={{ background: "var(--warning-bg)", border: "1px solid var(--warning)", padding: 12, borderRadius: 8, marginBottom: 16 }}>
+          <strong>Complete owner setup to activate the local panel</strong> — finish the claim step, then this page will show the same service connections as next actions.
+        </div>
+      )}
 
+      <Checklist setup={setup} />
       <Stepper steps={SETUP_STEPS} current={currentStep} />
 
       <div style={{ display: "flex", justifyContent: "flex-end" }}>

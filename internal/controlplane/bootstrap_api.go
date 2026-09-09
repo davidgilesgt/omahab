@@ -68,8 +68,7 @@ func (b *Backend) TailscaleStatus() (bool, string, string, error) {
 	return st.Running, st.IP, st.State, nil
 }
 
-// Complete writes the sentinel and provisions the admin token. The
-// onClose hook (set by cmd/omahabd) shuts the LAN listener down.
+// Complete writes the sentinel and provisions the admin token.
 func (b *Backend) Complete() error {
 	return b.finalizeBootstrap(b.apiToken)
 }
@@ -87,7 +86,7 @@ func (b *Backend) ensureAdminUserToken() error {
 }
 
 // finalizeBootstrap provisions the admin token and writes the sentinel.
-// Token write failures are returned before the sentinel/close.
+// Token write failures are returned before the sentinel.
 //
 // Token timing decision (DISTRO-FIX-PLAN P1 — token timing, 2026-09-07):
 // --------------------------------------------------------------------
@@ -119,9 +118,6 @@ func (b *Backend) finalizeBootstrap(token string) error {
 	}
 	if err := CompleteBootstrap(); err != nil {
 		return err
-	}
-	if b.onBootstrapClose != nil {
-		go b.onBootstrapClose()
 	}
 	return nil
 }
@@ -185,10 +181,3 @@ func ProvisionUserToken(username, token string) error {
 	return nil
 }
 
-// SetBootstrapClose registers the callback invoked when bootstrap
-// completes (used by cmd/omahabd to close the LAN listener).
-func (b *Backend) SetBootstrapClose(fn func()) {
-	b.bsMu.Lock()
-	defer b.bsMu.Unlock()
-	b.onBootstrapClose = fn
-}

@@ -21,7 +21,7 @@ func TestDL_ServesBinariesAndSHA(t *testing.T) {
 		"omahab-clientd-darwin-arm64": []byte("darwin-arm64-binary"),
 		"omahab-clientd-darwin-amd64": []byte("darwin-amd64-binary"),
 		"omarchy-plugin.tar.gz":       []byte("fake-tar-gz"),
-		"install.sh":                  []byte("#!/bin/sh\necho __CODE__ __SERVER__\n"),
+		"install.sh":                  []byte("#!/bin/sh\necho static-installer\n"),
 	}
 	for name, data := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), data, 0o644); err != nil {
@@ -75,24 +75,24 @@ func TestDL_ServesBinariesAndSHA(t *testing.T) {
 			t.Fatalf("SHA256SUMS missing %s %s", name, hexHash)
 		}
 	}
-	// Check install.sh templating with ?code=
-	resp, err = http.Get(ts.URL + "/install.sh?code=testcode123")
+	// Check install.sh is static: ?code= and Host headers do not inject.
+	resp, err = http.Get(ts.URL + "/install.sh?code=do-not-echo-this")
 	if err != nil {
-		t.Fatalf("GET install.sh: %v", err)
+		t.Fatalf("GET install.sh?code: %v", err)
 	}
 	if resp.StatusCode != 200 {
-		t.Fatalf("install.sh status %d", resp.StatusCode)
+		t.Fatalf("install.sh?code status %d", resp.StatusCode)
 	}
 	instBytes, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	inst := string(instBytes)
-	if !strings.Contains(inst, "testcode123") {
-		t.Fatalf("install.sh should contain injected code, got %q", inst[:200])
+	if strings.Contains(inst, "do-not-echo-this") {
+		t.Fatalf("install.sh should not contain injected code, got %q", inst[:200])
 	}
-	if strings.Contains(inst, "__CODE__") {
-		t.Fatalf("install.sh should have replaced __CODE__")
+	if strings.Contains(inst, "__CODE__") || strings.Contains(inst, "__SERVER__") {
+		t.Fatalf("install.sh should not contain templating placeholders, got %q", inst[:200])
 	}
-	// Without code, should still serve.
+	// Without code, should be byte-identical.
 	resp, err = http.Get(ts.URL + "/install.sh")
 	if err != nil {
 		t.Fatalf("GET install.sh no code: %v", err)
@@ -100,8 +100,31 @@ func TestDL_ServesBinariesAndSHA(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("install.sh no code status %d", resp.StatusCode)
 	}
+	plainBytes, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	// Also check /dl/install.sh path delegates to install.sh templating.
+	if string(plainBytes) != inst {
+		t.Fatalf("install.sh with ?code should be byte-identical to without")
+	}
+	// Vary Host/forwarded headers and confirm no injection.
+	for _, host := range []string{"evil.example.com", "1.2.3.4:9999"} {
+		req, _ := http.NewRequest("GET", ts.URL+"/install.sh?code=xx", nil)
+		req.Host = host
+		req.Header.Set("X-Forwarded-Host", host)
+		req.Header.Set("X-Forwarded-Proto", "https")
+		resp, err = http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET install.sh with host %q: %v", host, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if string(body) != inst {
+			t.Fatalf("install.sh with Host %q should be byte-identical", host)
+		}
+		if strings.Contains(string(body), host) {
+			t.Fatalf("install.sh should not contain injected host %q", host)
+		}
+	}
+	// Also check /dl/install.sh path delegates to static handler and is identical.
 	resp, err = http.Get(ts.URL + "/dl/install.sh?code=othercode")
 	if err != nil {
 		t.Fatalf("GET dl/install.sh: %v", err)
@@ -111,8 +134,11 @@ func TestDL_ServesBinariesAndSHA(t *testing.T) {
 	}
 	body2, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if !strings.Contains(string(body2), "othercode") {
-		t.Fatalf("dl/install.sh should inject code")
+	if string(body2) != inst {
+		t.Fatalf("dl/install.sh should be byte-identical to /install.sh")
+	}
+	if strings.Contains(string(body2), "othercode") {
+		t.Fatalf("dl/install.sh should not inject code")
 	}
 	// Check unknown file rejected.
 	resp, err = http.Get(ts.URL + "/dl/evil.txt")

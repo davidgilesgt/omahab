@@ -1,3 +1,4 @@
+import { useCallback, useEffect, useState } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { LoginPage, ProtectedRoute } from "./auth";
 import { AppShell } from "./components/shell";
@@ -11,6 +12,7 @@ import { HomePage } from "./views/home";
 import { WelcomePage } from "./views/welcome";
 import { BootstrapPage } from "./views/bootstrap";
 import { SetupPage } from "./views/setup";
+import { ApiClient } from "./api/client";
 
 function isHomeHost(): boolean {
   if (typeof window === "undefined") return false;
@@ -100,12 +102,78 @@ function HomeHostRedirects() {
 }
 
 export default function App() {
+  const [active, setActive] = useState<boolean | null>(null);
+  const [bootstrapError, setBootstrapError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const fetchStatus = useCallback(async () => {
+    setLoading(true);
+    setBootstrapError(null);
+    try {
+      const client = new ApiClient(() => null);
+      const data = await client.bootstrapStatus();
+      setActive(data.active);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Failed to reach server";
+      setBootstrapError(msg);
+      setActive(null);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void fetchStatus();
+  }, [fetchStatus]);
+
+  if (loading) {
+    return (
+      <div className="state-message" role="status" style={{ minHeight: "60vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <span className="spinner" aria-hidden="true" /> Checking setup status…
+      </div>
+    );
+  }
+
+  if (bootstrapError !== null) {
+    return (
+      <div
+        className="state-message error-state"
+        role="alert"
+        style={{ minHeight: "60vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 12, padding: 24, textAlign: "center" }}
+      >
+        <div>
+          <strong>Can't reach the server</strong>
+          <p>{bootstrapError}</p>
+          <p className="muted" style={{ fontSize: "0.9em" }}>Check that the server is on and on the same network, then retry.</p>
+        </div>
+        <button className="button primary" type="button" onClick={() => void fetchStatus()}>
+          Retry
+        </button>
+      </div>
+    );
+  }
+
+  if (active === true) {
+    // Bootstrap still pending: onboarding from / on any host
+    return (
+      <Routes>
+        <Route path="/" element={<BootstrapPage />} />
+        <Route path="/bootstrap" element={<BootstrapPage />} />
+        <Route path="/welcome/:token" element={<Navigate to="/" replace />} />
+        <Route path="/login" element={<Navigate to="/" replace />} />
+        <Route path="/admin/*" element={<Navigate to="/" replace />} />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    );
+  }
+
+  // Bootstrap complete: resume host-aware dashboard routing, redirect deep link
   const isHome = isHomeHost();
   if (isHome) {
     return (
       <Routes>
         <Route path="/login" element={<LoginPage />} />
-        <Route path="/bootstrap" element={<BootstrapPage />} />
+        <Route path="/bootstrap" element={<Navigate to="/" replace />} />
         <Route path="/welcome/:token" element={<WelcomePage />} />
         <Route path="/admin/*" element={<AdminDashboardRoutes />} />
         <Route path="/admin" element={<Navigate to="/admin/" replace />} />
@@ -117,7 +185,7 @@ export default function App() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
-      <Route path="/bootstrap" element={<BootstrapPage />} />
+      <Route path="/bootstrap" element={<Navigate to="/" replace />} />
       <Route path="/welcome/:token" element={<WelcomePage />} />
       <Route path="/admin/*" element={<AdminDashboardRoutes />} />
       <Route path="/*" element={<DashboardRoutes />} />

@@ -106,33 +106,7 @@ func run() error {
 		return fmt.Errorf("create server: %w", err)
 	}
 
-	// First-boot bootstrap listener (LAN wizard, :8485). Serves the same
-	// handler; only active while bootstrap-done is absent, and closed on
-	// bootstrap completion.
-	var bootSrv *http.Server
-	if addr := strings.TrimSpace(os.Getenv("OMAHAB_BOOTSTRAP_LISTEN")); addr != "" && backend.Active() {
-		bootSrv = &http.Server{
-			Addr:         addr,
-			Handler:      buildHandler(srv, logger),
-			ReadTimeout:  10 * time.Second,
-			WriteTimeout: 60 * time.Second,
-			IdleTimeout:  120 * time.Second,
-		}
-		backend.SetBootstrapClose(func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_ = bootSrv.Shutdown(ctx)
-			logger.Info("bootstrap listener closed")
-		})
-		go func() {
-			logger.Info("bootstrap listener active", "addr", addr)
-			if err := bootSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				logger.Error("bootstrap listener failed", "error", err)
-			}
-		}()
-	}
-
-	// Build handler with static serving + API
+	// Build handler with static serving + API (single permanent listener on cfg.Listen).
 	handler := buildHandler(srv, logger)
 
 	httpSrv := &http.Server{
@@ -185,8 +159,8 @@ func buildHandler(apiSrv *api.Server, logger *slog.Logger) http.Handler {
 	// Use file server with SPA fallback
 	fileServer := http.FileServer(http.Dir(staticDir))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// API and health always go to router
-		if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/up" || strings.HasPrefix(r.URL.Path, "/up/") {
+		// API, health, and distribution always go to router before SPA fallback.
+		if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/up" || strings.HasPrefix(r.URL.Path, "/up/") || r.URL.Path == "/mcp" || strings.HasPrefix(r.URL.Path, "/mcp/") || strings.HasPrefix(r.URL.Path, "/dl/") || r.URL.Path == "/install.sh" || r.URL.Path == "/api/openapi.yaml" {
 			apiRouter.ServeHTTP(w, r)
 			return
 		}

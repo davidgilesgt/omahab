@@ -268,13 +268,23 @@ func newSystemCmd() *cobra.Command {
 }
 
 func newSystemUpgradeCmd() *cobra.Command {
-	return &cobra.Command{
+	var flakeRef string
+	cmd := &cobra.Command{
 		Use:   "upgrade",
 		Short: "Switch to the pinned system generation (with rollback on failure)",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if cmd.Flags().Changed("flake") {
+				trimmed := strings.TrimSpace(flakeRef)
+				if trimmed == "" {
+					return fmt.Errorf("flake ref required for --flake")
+				}
+				return runSystemUpgradeRef(trimmed)
+			}
 			return runSystemUpgrade()
 		},
 	}
+	cmd.Flags().StringVar(&flakeRef, "flake", "", "nix flake ref or local path to use instead of pending release candidate")
+	return cmd
 }
 
 func runSystemUpgrade() error {
@@ -429,6 +439,120 @@ func runSystemUpgrade() error {
 	fmt.Println("Upgrade healthy.")
 	return nil
 }
+func runSystemUpgradeRef(ref string) error {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return fmt.Errorf("flake ref required for --flake")
+	}
+	if _, err := fsStat(canonicalFlakeDir); err != nil {
+		return fmt.Errorf("canonical flake %s missing: %w", canonicalFlakeDir, err)
+	}
+	if _, err := fsStat(filepath.Join(canonicalFlakeDir, "flake.nix")); err != nil {
+		return fmt.Errorf("canonical flake %s/flake.nix missing: %w", canonicalFlakeDir, err)
+	}
+	for _, rel := range []string{installedHardwareRel, installLocalRel} {
+		p := filepath.Join(canonicalFlakeDir, rel)
+		if _, err := fsStat(p); err != nil {
+			return fmt.Errorf("required %s missing: %w", p, err)
+		}
+	}
+	storePath, err := runNixMetadataFunc(ref)
+	if err != nil {
+		return fmt.Errorf("resolve %q: %w", ref, err)
+	}
+	storePath = strings.TrimSpace(storePath)
+	if storePath == "" {
+		return fmt.Errorf("resolved store path empty for %q", ref)
+	}
+	if _, err := fsStat(storePath); err != nil {
+		return fmt.Errorf("resolved store path %s missing: %w", storePath, err)
+	}
+	parentDir := filepath.Dir(canonicalFlakeDir)
+	stagingDir, err := fsMkdirTemp(parentDir, ".flake-staging-*")
+	if err != nil {
+		return fmt.Errorf("create staging: %w", err)
+	}
+	defer func() {
+		_ = fsRemoveAll(stagingDir)
+	}()
+	if err := copyDirFunc(storePath, stagingDir); err != nil {
+		return fmt.Errorf("copy store %s to staging: %w", storePath, err)
+	}
+	for _, rel := range []string{installedHardwareRel, installLocalRel} {
+		src := filepath.Join(canonicalFlakeDir, rel)
+		dst := filepath.Join(stagingDir, rel)
+		data, err := fsReadFile(src)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", src, err)
+		}
+		if err := fsMkdirAll(filepath.Dir(dst), 0755); err != nil {
+			return fmt.Errorf("mkdir %s: %w", filepath.Dir(dst), err)
+		}
+		if err := fsWriteFile(dst, data, 0644); err != nil {
+			return fmt.Errorf("write %s: %w", dst, err)
+		}
+	}
+	flakeArg := "path:" + stagingDir + "#omahab-installed"
+	if !flagJSON {
+		fmt.Printf("Switching to %s (resolved %s) …\n", ref, storePath)
+	}
+	out, err := runNixosRebuildSwitchFunc(flakeArg)
+	if err != nil {
+		return fmt.Errorf("nixos-rebuild switch: %w: %s", err, lastLines(string(out), 5))
+	}
+	deadline := nowFunc().Add(healthTimeout)
+	healthOK := false
+	for nowFunc().Before(deadline) {
+		if err := probeUpFunc(); err == nil {
+			healthOK = true
+			break
+		}
+		sleepFunc(healthInterval)
+	}
+	if !healthOK {
+		if !flagJSON {
+			fmt.Println("Health check failed — rolling back.")
+		}
+		out, err := runNixosRebuildRollbackFunc()
+		if err != nil {
+			if flagJSON {
+				_ = printJSON(upgradeResult{Ref: ref, Result: "rolled_back", RolledBack: true, Error: "health check failed"})
+				return handleFailure(fmt.Errorf("rollback failed: %w: %s", err, lastLines(string(out), 5)))
+			}
+			return fmt.Errorf("rollback failed: %w: %s", err, lastLines(string(out), 5))
+		}
+		if flagJSON {
+			_ = printJSON(upgradeResult{Ref: ref, Result: "rolled_back", RolledBack: true, Error: "health check failed"})
+			return handleFailure(fmt.Errorf("upgrade failed health check; rolled back"))
+		}
+		fmt.Println("Rolled back to the previous generation.")
+		return fmt.Errorf("upgrade failed health check; rolled back")
+	}
+	if err := exchangeDirsFunc(stagingDir, canonicalFlakeDir); err != nil {
+		if !flagJSON {
+			fmt.Printf("Promotion failed (%v) — rolling back.\n", err)
+		}
+		out, rbErr := runNixosRebuildRollbackFunc()
+		if rbErr != nil {
+			if flagJSON {
+				_ = printJSON(upgradeResult{Ref: ref, Result: "rolled_back", RolledBack: true, Error: fmt.Sprintf("promotion failed: %v", err)})
+				return handleFailure(fmt.Errorf("rollback failed after promotion failure: %w: %s", rbErr, lastLines(string(out), 5)))
+			}
+			return fmt.Errorf("promotion failed: %v; rollback failed: %w: %s", err, rbErr, lastLines(string(out), 5))
+		}
+		if flagJSON {
+			_ = printJSON(upgradeResult{Ref: ref, Result: "rolled_back", RolledBack: true, Error: fmt.Sprintf("promotion failed: %v", err)})
+			return handleFailure(fmt.Errorf("promotion failed: %v; rolled back", err))
+		}
+		return fmt.Errorf("promotion failed: %v; rolled back", err)
+	}
+	if flagJSON {
+		return printJSON(upgradeResult{Ref: ref, Result: "healthy"})
+	}
+	fmt.Println("Upgrade healthy.")
+	return nil
+}
+
 
 func newSystemCheckUpdateCmd() *cobra.Command {
 	return &cobra.Command{
@@ -509,8 +633,14 @@ func probeUp() error {
 	if err != nil {
 		return err
 	}
-	if !strings.Contains(string(out), "up") {
-		return fmt.Errorf("unexpected /up body: %s", out)
+	var resp struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(out, &resp); err != nil {
+		return fmt.Errorf("unexpected /up body: %w: %s", err, string(out))
+	}
+	if resp.Status != "up" {
+		return fmt.Errorf("unexpected /up body: %s", string(out))
 	}
 	return nil
 }

@@ -99,6 +99,9 @@ func TestTailscaleEnrollmentStatesSuppressFailure(t *testing.T) {
 			if _, err := b.store.SaveInstance(ctx, inst); err != nil {
 				t.Fatal(err)
 			}
+			if _, err := b.secrets.Put(ctx, "platform-app", "cloudflare_dns", "dns-token"); err != nil {
+				t.Fatal(err)
+			}
 			b.tailscaleIPv4 = func(context.Context) ([]byte, error) {
 				return []byte(state + "\n"), errors.New("exit status 1")
 			}
@@ -121,6 +124,9 @@ func TestTailscaleTransientErrorReportsFailure(t *testing.T) {
 	inst.TailscaleIP = ""
 	inst.Domain = "omahab.com"
 	if _, err := b.store.SaveInstance(ctx, inst); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.secrets.Put(ctx, "platform-app", "cloudflare_dns", "dns-token"); err != nil {
 		t.Fatal(err)
 	}
 	var calls int

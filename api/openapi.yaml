@@ -25,7 +25,7 @@ paths:
     post:
       summary: Claim the appliance with the one-time bootstrap code
       description: |
-        First-boot only (served on the LAN listener, port 8485). Exchanges the
+        First-boot only (served on LAN, port 8484). Exchanges the
         one-time code shown on the tty1 console for the administrator API
         token. Single-use; 5 attempts/min per host and 20 total, after which
         the code rotates. Inert once bootstrap is complete.
@@ -51,6 +51,24 @@ paths:
                   token: { type: string }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '429': { $ref: '#/components/responses/Error' }
+
+  /api/bootstrap/status:
+    get:
+      summary: Bootstrap active status
+      description: Public (no auth), always available. Returns whether first-boot bootstrap is still active. Cache-Control no-store.
+      operationId: bootstrapStatus
+      security: []
+      responses:
+        '200':
+          description: Status
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [active]
+                properties:
+                  active: { type: boolean }
+
 
   /api/bootstrap/ssh-keys:
     get:
@@ -142,7 +160,7 @@ paths:
   /api/bootstrap/complete:
     post:
       summary: Finish first-boot bootstrap
-      description: Writes /var/lib/omahab/bootstrap-done and closes the LAN listener. Further enrollment happens on the authenticated dashboard.
+      description: Writes /var/lib/omahab/bootstrap-done. Further enrollment happens on the authenticated dashboard at the same origin.
       operationId: bootstrapComplete
       security: [{ bearerAuth: [] }]
       responses:
@@ -154,76 +172,6 @@ paths:
                 type: object
                 properties:
                   complete: { type: boolean }
-
-  /api/bootstrap/restore/connect:
-    post:
-      summary: Connect to Hetzner/generic restic repo for restore (first-boot)
-      description: |
-        First-boot only (LAN bootstrap, requires claim token). Derives the restic password from the 24-word recovery phrase (`HKDF-SHA256(seed, salt "omahab-recovery-v1", info "restic-password")`), uploads the ed25519 SSH key to Hetzner via SFTP:23 if needed, and runs `restic snapshots --json --latest 10`.
-      operationId: bootstrapRestoreConnect
-      security: [{ bearerAuth: [] }]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [phrase]
-              properties:
-                kind: { type: string, enum: [hetzner_storagebox], description: "Hetzner when set" }
-                username: { type: string, example: "u123456" }
-                host: { type: string, example: "u123456.your-storagebox.de" }
-                sub_account_password: { type: string, format: password }
-                location: { type: string, example: "sftp:user@host:restic-repo" }
-                phrase: { type: string, description: "24-word recovery phrase (space-separated)" }
-      responses:
-        '200':
-          description: Snapshots
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  snapshots:
-                    type: array
-                    items:
-                      type: object
-                      properties:
-                        id: { type: string }
-                        time: { type: string, format: date-time }
-                        hostname: { type: string }
-        '400': { $ref: '#/components/responses/Error' }
-        '502': { $ref: '#/components/responses/Error' }
-
-  /api/bootstrap/restore/run:
-    post:
-      summary: Start restore of a snapshot (first-boot)
-      description: Restores `restic restore <id> --target /` with `--include` per DefaultPaths (including /var/lib/tailscale), unwraps master.key from recovery.kit, runs post_restore hooks, writes bootstrap-done and restarts omahabd. Streams progress via GET /api/bootstrap/restore/events (SSE).
-      operationId: bootstrapRestoreRun
-      security: [{ bearerAuth: [] }]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [snapshot_id]
-              properties:
-                snapshot_id: { type: string }
-      responses:
-        '202': { description: Started }
-        '400': { $ref: '#/components/responses/Error' }
-
-  /api/bootstrap/restore/events:
-    get:
-      summary: Stream restore progress (SSE)
-      operationId: bootstrapRestoreEvents
-      security: [{ bearerAuth: [] }]
-      responses:
-        '200':
-          description: SSE stream of {stage, message, done, error}
-          content:
-            text/event-stream: {}
 
   /api/v1/setup/verify-cloudflare:
     post:
@@ -2395,9 +2343,10 @@ components:
 
     SetupStatus:
       type: object
-      required: [state, checks]
+      required: [state, local_ready, checks]
       properties:
         state: { type: string, enum: [waiting_for_cloudflare, reconciling, attention, complete] }
+        local_ready: { type: boolean, description: "true when owner setup (bootstrap) is complete; local control panel is ready independent of integration health" }
         checks: { type: array, items: { $ref: '#/components/schemas/SetupCheck' } }
 
     SetupCheck:

@@ -294,11 +294,10 @@ func (b *Backend) emitSetupFailed(ctx context.Context, phase string, err error) 
 }
 
 // Phase 1: Preconditions
-
+// Checks real domain and DNS credentials BEFORE ensureTailscaleIP to avoid
+// 90s Tailscale poll when prerequisites are absent. Returns waiting sentinel
+// immediately when domain is placeholder or DNS not configured.
 func (b *Backend) setupPhasePreconditions(ctx context.Context) error {
-	if err := b.ensureTailscaleIP(ctx); err != nil {
-		return err
-	}
 	inst, err := b.store.Instance(ctx)
 	if err != nil {
 		return fmt.Errorf("load instance: %w", err)
@@ -310,16 +309,21 @@ func (b *Backend) setupPhasePreconditions(ctx context.Context) error {
 	if b.secrets == nil {
 		return fmt.Errorf("%w: secrets not configured", errWaitingForEnrollment)
 	}
+	hasDNS := false
 	if v, err := b.secrets.RevealByName(ctx, "platform-app", "cloudflare_dns"); err == nil && strings.TrimSpace(v) != "" {
-		return nil
+		hasDNS = true
+	} else if v, err := b.secrets.RevealByName(ctx, "platform-app", "cloudflare_token_dns"); err == nil && strings.TrimSpace(v) != "" {
+		hasDNS = true
+	} else if strings.TrimSpace(os.Getenv("OMAHAB_CF_TOKEN_DNS")) != "" || strings.TrimSpace(os.Getenv("OMAHAB_CF_API_TOKEN")) != "" {
+		hasDNS = true
 	}
-	if v, err := b.secrets.RevealByName(ctx, "platform-app", "cloudflare_token_dns"); err == nil && strings.TrimSpace(v) != "" {
-		return nil
+	if !hasDNS {
+		return fmt.Errorf("%w: cloudflare_dns secret missing", errWaitingForEnrollment)
 	}
-	if strings.TrimSpace(os.Getenv("OMAHAB_CF_TOKEN_DNS")) != "" || strings.TrimSpace(os.Getenv("OMAHAB_CF_API_TOKEN")) != "" {
-		return nil
+	if err := b.ensureTailscaleIP(ctx); err != nil {
+		return err
 	}
-	return fmt.Errorf("%w: cloudflare_dns secret missing", errWaitingForEnrollment)
+	return nil
 }
 
 // Phase 2: Tunnel

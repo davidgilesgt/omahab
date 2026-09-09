@@ -12,7 +12,6 @@ import (
 )
 
 // bootstrapDonePath is the sentinel file whose absence marks first boot.
-// While absent, omahabd serves the LAN bootstrap listener (:8485).
 const bootstrapDonePath = "/var/lib/omahab/bootstrap-done"
 
 // bootstrapCodePath is where the one-time claim code plaintext lives for
@@ -45,15 +44,22 @@ func NewBootstrapGate() *BootstrapGate {
 }
 
 // BootstrapActive reports whether bootstrap has not been completed.
+// Fail-closed: any error other than not-exist is treated as active.
 func BootstrapActive() bool {
 	_, err := os.Stat(bootstrapDonePath)
-	return os.IsNotExist(err)
+	if err == nil {
+		return false
+	}
+	if os.IsNotExist(err) {
+		return true
+	}
+	return true
 }
 
 // EnsureCode generates and persists a fresh 10-char Crockford-base32 code
 // (~50 bits) when no active code exists. Returns the plaintext for the
-// console. Best-effort: on write failure the in-memory code still works
-// for API claims but the console cannot display it.
+// console. Fail-closed: persistence errors are propagated and in-memory
+// state is only committed after successful file write.
 func (g *BootstrapGate) EnsureCode() (string, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -76,15 +82,18 @@ func (g *BootstrapGate) issueLocked() (string, error) {
 	}
 	code := encodeCrockford(raw[:])
 	sum := sha256.Sum256([]byte(code))
-	g.codeHash = sum[:]
-	g.perIP = make(map[string][]time.Time)
-	g.total = 0
+	stagedHash := sum[:]
+	// Stage persistence before committing in-memory state.
 	if err := os.MkdirAll(filepath.Dir(bootstrapCodePath), 0o700); err != nil {
-		return code, fmt.Errorf("mkdir bootstrap code dir: %w", err)
+		return "", fmt.Errorf("mkdir bootstrap code dir: %w", err)
 	}
 	if err := os.WriteFile(bootstrapCodePath, []byte(code+"\n"), 0o600); err != nil {
-		return code, fmt.Errorf("write bootstrap code: %w", err)
+		return "", fmt.Errorf("write bootstrap code: %w", err)
 	}
+	// Commit staged state only after successful write.
+	g.codeHash = stagedHash
+	g.perIP = make(map[string][]time.Time)
+	g.total = 0
 	return code, nil
 }
 
@@ -97,8 +106,9 @@ func (g *BootstrapGate) Regenerate() (string, error) {
 }
 
 // Claim validates a code with constant-time comparison. On success the
-// code is consumed (single-use). On rate-limit exhaustion the code is
-// rotated and an error naming the limit is returned.
+// code is consumed (single-use). On per-IP rate-limit exhaustion it
+// returns a cooldown error without rotating the code; on global
+// exhaustion it rotates and propagates persistence failures.
 func (g *BootstrapGate) Claim(code, sourceIP string) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -114,13 +124,15 @@ func (g *BootstrapGate) Claim(code, sourceIP string) error {
 		}
 	}
 	if len(kept) >= g.maxPerIP {
-		return fmt.Errorf("too many attempts from this host; a new code has been generated")
+		return fmt.Errorf("too many attempts from this host; retry in one minute")
 	}
 	kept = append(kept, now)
 	g.perIP[sourceIP] = kept
 	g.total++
 	if g.total > g.maxTotal {
-		_, _ = g.issueLocked()
+		if _, err := g.issueLocked(); err != nil {
+			return fmt.Errorf("too many attempts; failed to generate new code: %w", err)
+		}
 		return fmt.Errorf("too many attempts; a new code has been generated")
 	}
 	sum := sha256.Sum256([]byte(trimNewline(code)))

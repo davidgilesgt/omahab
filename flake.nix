@@ -120,7 +120,7 @@ EOF
         '';
 
         # Download bundle: the 4 clientd binaries + plugin + install.sh + SHA256SUMS.
-        # Served by omahabd at GET /dl/* and GET /install.sh (tailnet-only, no auth).
+        # Served by omahabd at GET /dl/* and GET /install.sh (public on LAN, no auth).
         # Version skew disappears: device always installs the exact build of the server it talks to.
         omahab-dl = pkgs.runCommand "omahab-dl" {
           nativeBuildInputs = [ pkgs.coreutils ];

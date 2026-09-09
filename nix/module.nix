@@ -148,17 +148,14 @@ in
     # the caddy/cloudflared dirs).
     # ------------------------------------------------------------------
     systemd.tmpfiles.rules = [
-      "d ${stateDir} 0700 root root - -"
       "d ${secretsDir} 0700 root root - -"
       "d ${stateDir}/dumps 0700 root root - -"
       "d ${appEnvDir} 0700 root root - -"
-      "d ${stateDir}/caddy 0755 root root - -"
       "d ${stateDir}/cloudflared 0700 cloudflared cloudflared - -"
       "d ${stateDir}/devpod 0700 root root - -"
       "d ${dataDir} 0755 root root - -"
       "d ${dataDir}/apps 0755 root root - -"
       "d ${dataDir}/projects 0755 root root - -"
-      "d ${dataDir}/sync 0755 root root - -"
       "d ${dataDir}/workspaces 0755 root root - -"
       "d ${dataDir}/backups 0755 root root - -"
       "d ${dataDir}/derived-indexes 0755 root root - -"
@@ -168,6 +165,7 @@ in
       "d /var/lib/omahab-builder 0700 omahab-builder omahab-builder - -"
       "d /run/omahab 0700 root root - -"
       "d /home/${cfg.adminUser}/.ssh 0700 ${cfg.adminUser} ${config.users.users.${cfg.adminUser}.group} - -"
+      "d /home/${cfg.adminUser}/.config 0700 ${cfg.adminUser} ${config.users.users.${cfg.adminUser}.group} - -"
       "d /home/${cfg.adminUser}/.config/omahab 0700 ${cfg.adminUser} ${config.users.users.${cfg.adminUser}.group} - -"
     ];
 
@@ -181,6 +179,7 @@ in
         "network-online.target"
         "docker.service"
         "tailscaled.service"
+        "systemd-tmpfiles-setup.service"
       ];
       wants = [
         "network-online.target"
@@ -189,7 +188,7 @@ in
       wantedBy = [ "multi-user.target" ];
       # docker is a runtime dependency (project deploys), not a hard one:
       # omahabd must serve /up and reconcile even while docker restarts.
-      requires = [ ];
+      requires = [ "systemd-tmpfiles-setup.service" ];
       unitConfig = {
         RequiresMountsFor = [ dataDir ];
         StartLimitIntervalSec = 60;
@@ -254,11 +253,9 @@ in
         OMAHAB_LISTEN = cfg.listen;
         OMAHAB_CATALOG = "${cfg.catalogPackage}/catalog.json";
         OMAHAB_WEB_DIR = "${cfg.webPackage}";
-        # B2: distribution bundle for /dl/* and /install.sh (tailnet-only, no auth).
+        # B2: distribution bundle for /dl/* and /install.sh (public on LAN, no auth).
         # Only set if dlPackage is available (flake provides omahab-dl; fallback for standalone use).
         OMAHAB_DL_DIR = let dl = flakePkgs.omahab-dl or null; in if dl != null then "${dl}/share/omahab/dl" else "";
-        # First-boot LAN wizard listener; inert once bootstrap-done exists.
-        OMAHAB_BOOTSTRAP_LISTEN = "0.0.0.0:8485";
         OMAHAB_ADMIN_USER = cfg.adminUser;
         DEVPOD_HOME = "${stateDir}/devpod";
         HOME = "${stateDir}/devpod";
@@ -588,7 +585,7 @@ in
     };
 
     # ------------------------------------------------------------------
-    # First-boot console on tty1 (replaces getty@tty1).
+    # First-boot console on tty1 (dedicated service owning tty1).
     # ------------------------------------------------------------------
     users.users.${cfg.adminUser} = {
       isNormalUser = true;
@@ -612,17 +609,42 @@ in
       }
     ];
     # Local shell access must authenticate — no global autologin.
-    systemd.services."getty@tty1".serviceConfig.ExecStart = lib.mkForce [
-      ""
-      "-${cfg.package}/bin/omahab console"
-    ];
-    systemd.services."getty@tty1".unitConfig = {
-      After = [ "omahabd.service" ];
-      Wants = [ "omahabd.service" ];
+    systemd.services.omahab-console = {
+      description = "Omahab console on tty1";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "systemd-user-sessions.service" "getty-pre.target" "omahabd.service" ];
+      wants = [ "omahabd.service" ];
+      unitConfig = {
+        ConditionPathExists = "/dev/tty0";
+      };
+      serviceConfig = {
+        Type = "idle";
+        ExecStart = "${cfg.package}/bin/omahab console";
+        Restart = "always";
+        RestartSec = 1;
+        StandardInput = "tty";
+        StandardOutput = "tty";
+        StandardError = "journal";
+        TTYPath = "/dev/tty1";
+        TTYReset = true;
+        TTYVHangup = true;
+        TTYVTDisallocate = false;
+      };
+      environment = {
+        TERM = "linux";
+        OMAHAB_ADMIN_USER = cfg.adminUser;
+      };
     };
-    systemd.services."getty@tty1".environment = {
-      OMAHAB_ADMIN_USER = cfg.adminUser;
-    };
+    systemd.services."getty@tty1".enable = lib.mkForce false;
+    systemd.services."autovt@tty1".enable = lib.mkForce false;
+    systemd.targets.getty.wants = lib.mkForce [ "getty@tty2.service" ];
+    services.getty.greetingLine = "Omahab";
+    services.getty.helpLine = lib.mkForce "Sign in, then run omahab for setup and status. Local dashboard: http://${config.networking.hostName}.local:8484 (if mDNS is available).";
+    programs.bash.interactiveShellInit = ''
+      if [[ -n "$SSH_CONNECTION" ]] && shopt -q login_shell && [[ -t 1 ]] && [[ "$(whoami)" == "${cfg.adminUser}" ]]; then
+        ${cfg.package}/bin/omahab welcome
+      fi
+    '';
 
     # ------------------------------------------------------------------
     # Docker (project deploys + ONCE) & podman (CI builder)
@@ -649,8 +671,9 @@ in
           iifname "tailscale0" tcp dport 8484 accept comment "omahab dashboard via tailscale"
           iifname "br-*" ip saddr 172.30.0.2 tcp dport 8484 accept comment "caddy dashboard upstream"
           iifname "tailscale0" tcp dport { 80, 443 } accept comment "caddy https via tailscale"
-          tcp dport 8485 ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } accept comment "first-boot bootstrap wizard (LAN only)"
-          ip6 saddr fe80::/10 tcp dport 8485 accept comment "first-boot bootstrap wizard (link-local)"
+          tcp dport 8484 ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } accept comment "omahab dashboard LAN"
+          ip6 saddr fc00::/7 tcp dport 8484 accept comment "omahab dashboard ULA"
+          ip6 saddr fe80::/10 tcp dport 8484 accept comment "omahab dashboard link-local"
           icmp type { destination-unreachable, time-exceeded, parameter-problem, echo-request } limit rate 10/second accept
           ip6 nexthdr ipv6-icmp icmpv6 type { destination-unreachable, time-exceeded, parameter-problem, echo-request, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } limit rate 20/second accept
         }

@@ -121,9 +121,14 @@ export function OverviewPage() {
 
   return (
     <div className="page">
-      {setup.data && setup.data.state !== "complete" && (
+      {setup.data && !setup.data.local_ready && (
         <div className="banner-card" style={{ background: "var(--warning-bg)", border: "1px solid var(--warning)", padding: 12, borderRadius: 8, marginBottom: 16 }}>
           <strong>Setup is not finished</strong> — <Link to="/setup">Continue setup</Link>
+        </div>
+      )}
+      {setup.data && setup.data.local_ready && setup.data.state !== "complete" && (
+        <div className="banner-card" style={{ background: "var(--positive-bg)", border: "1px solid var(--positive)", padding: 12, borderRadius: 8, marginBottom: 16 }} role="status">
+          <strong>Local control panel ready</strong> — <Link to="/setup">Connect your services</Link>: domain/HTTPS, identity (passkeys), recovery phrase, and backups are explicit next steps. Failures below are genuine.
         </div>
       )}
       <div

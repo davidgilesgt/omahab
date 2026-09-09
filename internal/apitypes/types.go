@@ -454,11 +454,13 @@ type SetupWoodpeckerRequest struct {
 
 // SetupStatus is the aggregated first-run setup checklist state.
 // State is one of waiting_for_cloudflare, reconciling, attention, complete.
+// LocalReady is true when owner bootstrap is complete (local control panel ready),
+// independent of optional integration health (domain, Tailscale, backups, etc.).
 type SetupStatus struct {
-	State  string       `json:"state"`
-	Checks []SetupCheck `json:"checks"`
+	State      string       `json:"state"`
+	LocalReady bool         `json:"local_ready"`
+	Checks     []SetupCheck `json:"checks"`
 }
-
 // SetupCheck is one checklist entry. Status is ok|pending|failed|skipped.
 type SetupCheck struct {
 	ID           string           `json:"id"`
@@ -496,46 +498,8 @@ type BootstrapGate interface {
 	Complete() error
 	// Active reports whether bootstrap is still pending.
 	Active() bool
-	// RestoreConnect verifies Hetzner/generic repo + phrase, uploads SSH key,
-	// and lists snapshots. Returns up to 10 latest.
-	RestoreConnect(ctx context.Context, req BootstrapRestoreConnectRequest) ([]BootstrapRestoreSnapshot, error)
-	// RestoreRun starts the restore of snapshotID in background.
-	RestoreRun(ctx context.Context, snapshotID string) error
-	// RestoreEvents streams progress events for the running restore.
-	RestoreEvents(ctx context.Context) <-chan BootstrapRestoreEvent
 }
 
-
-// BootstrapRestoreConnectRequest is the body for POST /api/bootstrap/restore/connect.
-type BootstrapRestoreConnectRequest struct {
-	Kind               string `json:"kind,omitempty"`
-	Username           string `json:"username,omitempty"`
-	Host               string `json:"host,omitempty"`
-	SubAccountPassword string `json:"sub_account_password,omitempty"`
-	Location           string `json:"location,omitempty"`
-	Phrase             string `json:"phrase,omitempty"`
-	PhraseWords        []string `json:"phrase_words,omitempty"`
-}
-
-// BootstrapRestoreSnapshot is one snapshot returned by restore/connect.
-type BootstrapRestoreSnapshot struct {
-	ID       string `json:"id"`
-	Time     string `json:"time"`
-	Hostname string `json:"hostname"`
-}
-
-// BootstrapRestoreRunRequest is the body for POST /api/bootstrap/restore/run.
-type BootstrapRestoreRunRequest struct {
-	SnapshotID string `json:"snapshot_id"`
-}
-
-// BootstrapRestoreEvent is one SSE event during restore.
-type BootstrapRestoreEvent struct {
-	Stage   string `json:"stage"`
-	Message string `json:"message"`
-	Done    bool   `json:"done"`
-	Error   string `json:"error,omitempty"`
-}
 
 // HealthReport aliases for convenience.
 type HealthReport = health.Report

@@ -1,38 +1,17 @@
 #!/bin/sh
 # Omahab companion installer — Linux (Omarchy) and macOS.
-# Tailnet-only, no extra auth. Enrollment code via ?code= is single-use 10-min.
 # Installs:
 #   binary -> ~/.local/bin/omahab-clientd
 #   user unit -> ~/.config/systemd/user/omahab-clientd.service (ExecStart %h/.local/bin/omahab-clientd)
 #   Quickshell plugin -> Omarchy plugin dir (best-effort, tries common Quickshell locations)
-#   then runs `omahab-clientd enroll` (non-interactive if OMAHAB_CODE or templated __CODE__ is set)
+#   then runs `omahab-clientd enroll` with hidden prompt (stdin from /dev/tty).
 set -eu
 
-# Templated by omahabd when served with ?code= — replaced server-side with actual values.
-# When fetched without ?code= these remain literal __CODE__ / __SERVER__ and the script falls back to interactive prompts.
-TEMPLATED_CODE="__CODE__"
-TEMPLATED_SERVER="__SERVER__"
-
-# Allow explicit env overrides: OMAHAB_SERVER, OMAHAB_CODE, or first arg.
+# Allow explicit server override: OMAHAB_SERVER env or first arg.
 SERVER="${OMAHAB_SERVER:-${1:-}}"
-CODE="${OMAHAB_CODE:-}"
 
-# If CODE not in env but templated code was injected, use it.
-if [ -z "$CODE" ] && [ "$TEMPLATED_CODE" != "__CODE__" ] && [ -n "$TEMPLATED_CODE" ]; then
-  CODE="$TEMPLATED_CODE"
-fi
-
-# If SERVER not set but templated server was injected, use it.
-if [ -z "$SERVER" ] && [ "$TEMPLATED_SERVER" != "__SERVER__" ] && [ -n "$TEMPLATED_SERVER" ]; then
-  SERVER="$TEMPLATED_SERVER"
-fi
-
-# Fallback: if SERVER still empty and the script was fetched via curl from the server,
-# the user likely used the one-liner `curl http://HOST:8484/install.sh?code=... | sh`
-# The server handler injects the correct host into TEMPLATED_SERVER, so this prompt only appears
-# when the script is run standalone without templating.
 if [ -z "$SERVER" ]; then
-  printf "Enter Omahab server URL (e.g. http://100.x.y.z:8484): " >&2
+  printf "Enter Omahab server URL (e.g. http://192.168.1.42:8484): " >&2
   read -r SERVER || true
 fi
 if [ -z "$SERVER" ]; then
@@ -88,7 +67,7 @@ trap 'rm -f "$TMP_BIN" "$TMP_SUMS" "$TMP_PLUGIN"' EXIT INT TERM
 
 echo "Downloading $SERVER/dl/$FILE ..." >&2
 if ! curl -fsSL "$SERVER/dl/$FILE" -o "$TMP_BIN"; then
-  echo "error: failed to download $SERVER/dl/$FILE (is the server reachable on the tailnet?)" >&2
+  echo "error: failed to download $SERVER/dl/$FILE (is the server reachable?)" >&2
   exit 1
 fi
 echo "Downloading $SERVER/dl/SHA256SUMS ..." >&2
@@ -207,22 +186,14 @@ fi
 
 # Enroll (stores device token in Secret Service via go-keyring).
 echo "" >&2
-if [ -n "$CODE" ]; then
-  echo "Enrolling device non-interactively with provided code..." >&2
-  # Enroll reads code from stdin (hidden prompt); pipe it.
-  if printf "%s\n" "$CODE" | "$BIN_DST" enroll; then
-    echo "Enrolled successfully (token in Secret Service)." >&2
-  else
-    echo "error: enroll failed — code may be expired/single-use (10m) or Secret Service unavailable" >&2
-    echo "  try: $BIN_DST enroll (interactive)" >&2
-    exit 1
-  fi
-else
-  echo "Running $BIN_DST enroll (enter code when prompted)..." >&2
-  if ! "$BIN_DST" enroll; then
-    echo "error: enroll failed" >&2
-    exit 1
-  fi
+echo "Running $BIN_DST enroll (enter code when prompted)..." >&2
+if [ ! -e /dev/tty ]; then
+  echo "error: no TTY available for enrollment — run '$BIN_DST enroll' interactively and paste the code at the hidden prompt" >&2
+  exit 1
+fi
+if ! "$BIN_DST" enroll < /dev/tty; then
+  echo "error: enroll failed" >&2
+  exit 1
 fi
 
 echo "" >&2

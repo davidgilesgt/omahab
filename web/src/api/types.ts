@@ -216,13 +216,14 @@ export interface SetupCheck {
   status: "ok" | "pending" | "failed" | "skipped";
   detail?: string;
   action?: string;
-  apps?: { bundle_id: string; status: string }[];
+  apps?: { bundle_id: string; status: string; detail?: string }[];
   passkey_count?: number;
   target?: number;
 }
 
 export interface SetupStatus {
   state: "waiting_for_cloudflare" | "reconciling" | "attention" | "complete";
+  local_ready: boolean;
   checks: SetupCheck[];
 }
 

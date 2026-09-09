@@ -64,7 +64,7 @@ export function LoadingState({ label = "Loading" }: { label?: string }) {
 export function ErrorState({ error, retry }: { error: unknown; retry?: () => void }) {
   let message = error instanceof ApiError || error instanceof Error ? error.message : "An unexpected error occurred.";
   if (error instanceof ApiError && (error.status === 0 || error.code === "network_error")) {
-    message = "Can't reach the server. Check that this device is on the tailnet.";
+    message = "Can't reach the server. Check that the server is running and your network connection is working.";
   }
   return (
     <div className="state-message error-state" role="alert">

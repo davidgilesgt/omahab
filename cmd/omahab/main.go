@@ -18,6 +18,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/charmbracelet/x/term"
+	goterm "golang.org/x/term"
 
 	"github.com/omahab/omahab/internal/apiclient"
 	"github.com/omahab/omahab/internal/apps"
@@ -72,14 +73,14 @@ Use --server to target a different control plane (env OMAHAB_SERVER, then ~/.con
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Bare `omahab` with no subcommand: welcome card. Help flag is handled by cobra before RunE.
 			if len(args) == 0 {
-				printWelcomeCard()
-				return nil
+				return runWelcome(os.Stdout)
 			}
 			return cmd.Help()
 		},
 	}
 	// Persistent flags (structured output, server selection, interactivity, timeouts)
 	root.PersistentFlags().StringVar(&flagServer, "server", "", "control plane URL (env OMAHAB_SERVER, then ~/.config/omahab/client.json, default LAN IP / <hostname>.local:8484)")
+	root.PersistentFlags().BoolVar(&flagJSON, "json", false, "JSON output")
 	root.PersistentFlags().BoolVar(&flagNonInteractive, "non-interactive", false, "disable prompts; destructive/public operations require --force")
 	root.PersistentFlags().DurationVar(&flagTimeout, "timeout", 30*time.Second, "per-request timeout")
 	// NO_COLOR is env-driven; no flag needed but we respect it
@@ -100,6 +101,7 @@ Use --server to target a different control plane (env OMAHAB_SERVER, then ~/.con
 	root.AddCommand(newSyncCmd())
 	root.AddCommand(newRunnerCmd())
 	root.AddCommand(newConsoleCmd())
+	root.AddCommand(newWelcomeCmd())
 	root.AddCommand(newInstallCmd())
 	root.AddCommand(newSetupCmd())
 	root.AddCommand(newSystemCmd())
@@ -348,6 +350,20 @@ func readTokenHidden() (string, error) {
 }
 
 func printWelcomeCard() {
+	_ = runWelcome(os.Stdout)
+}
+
+func newWelcomeCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "welcome",
+		Short: "Show setup status and next steps",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runWelcome(os.Stdout)
+		},
+	}
+}
+
+func runWelcome(w io.Writer) error {
 	cfg, _ := apiclient.LoadClientConfig("")
 	server := apiclient.ResolveServer(flagServer, cfg)
 	serverSource := "default (LAN IP / <hostname>.local)"
@@ -358,15 +374,13 @@ func printWelcomeCard() {
 	} else if strings.TrimSpace(cfg.Server) != "" {
 		serverSource = "~/.config/omahab/client.json"
 	}
-	// Token resolution: XDG-aware current user's ~/.config/omahab/token,
-	// matching FileCredentialStore (XDG_CONFIG_HOME or $HOME) and console.go readAdminToken.
 	tokenStatus := "not set"
 	hint := ""
 	if isBootstrapPending() {
 		if url := bootstrapClaimURL(); url != "" {
 			hint = fmt.Sprintf("open %s (code on console) to claim", url)
 		} else {
-			hint = "open http://<device-ip>:8485 (code on console) to claim"
+			hint = "open http://<device-ip>:8484 (code on console) to claim"
 		}
 	} else {
 		hint = "export OMAHAB_TOKEN or ~/.config/omahab/token (XDG-aware) or run `omahab login`"
@@ -375,58 +389,268 @@ func printWelcomeCard() {
 		tokenStatus = "set (via OMAHAB_TOKEN)"
 		hint = ""
 	} else if tok, _ := (apiclient.FileCredentialStore{}).Token(); strings.TrimSpace(tok) != "" {
-		// Primary: current user's ~/.config/omahab/token (XDG-aware)
 		tokenStatus = "set (via ~/.config/omahab/token)"
 		hint = ""
 	} else if tok := tokenFromClientJSON(); tok != "" {
-		// Legacy: ~/.config/omahab/client.json token field (kept for compat)
 		tokenStatus = "set (via ~/.config/omahab/client.json)"
 		hint = ""
 	}
 	if flagJSON {
-		_ = printJSON(map[string]any{
+		return printJSON(map[string]any{
 			"server":       server,
 			"serverSource": serverSource,
 			"token":        tokenStatus,
 			"hint":         hint,
 		})
-		return
 	}
-	fmt.Println(tui.Banner("the opinionated home server", tui.ResolveCaps(term.IsTerminal(os.Stdout.Fd()), os.Getenv("TERM"), os.Getenv("NO_COLOR"))))
-	fmt.Println()
-	caps := tui.ResolveCaps(term.IsTerminal(os.Stdout.Fd()), os.Getenv("TERM"), os.Getenv("NO_COLOR"))
-	tbl := tui.Table{Headers: nil}
-	serverRow := fmt.Sprintf("%s (%s)", server, serverSource)
-	tokenRow := tokenStatus
-	if hint != "" {
-		tokenRow = fmt.Sprintf("%s → %s", tokenStatus, hint)
+	// TTY caps and width
+	isTTY := isWelcomeTerminal(w)
+	caps := tui.ResolveCaps(isTTY, os.Getenv("TERM"), os.Getenv("NO_COLOR"))
+	width := 0
+	if isTTY {
+		if f, ok := w.(*os.File); ok {
+			if wi, _, err := goterm.GetSize(int(f.Fd())); err == nil {
+				width = wi
+			}
+		} else if goterm.IsTerminal(int(os.Stdout.Fd())) {
+			if wi, _, err := goterm.GetSize(int(os.Stdout.Fd())); err == nil {
+				width = wi
+			}
+		}
 	}
-	tbl.Rows = [][]string{{"server", serverRow}, {"token", tokenRow}}
-	fmt.Println(tbl.Render(caps))
-	fmt.Println()
-	fmt.Println("Run `omahab --help` for commands.")
+	if width == 0 && goterm.IsTerminal(int(os.Stdout.Fd())) {
+		if wi, _, err := goterm.GetSize(int(os.Stdout.Fd())); err == nil {
+			width = wi
+		}
+	}
+	// Banner: compact wordmark when narrow
+	var banner string
+	if width > 0 && width < 60 {
+		banner = "  OMAHAB"
+	} else {
+		banner = tui.Banner("the opinionated home server", caps)
+	}
+	for _, line := range strings.Split(banner, "\n") {
+		fmt.Fprintln(w, line)
+	}
+	fmt.Fprintln(w, "")
+	// Shared key/value renderer: URL own line, source/hints separate
+	renderWelcomeKV(w, width, server, serverSource, tokenStatus, hint)
+	fmt.Fprintln(w, "")
+	// Readiness snapshot
+	snap := gatherWelcomeSnapshot(server)
+	renderWelcomeReadiness(w, snap)
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Run `omahab --help` for commands.")
 	if tokenStatus == "not set" {
 		if isBootstrapPending() {
 			if url := bootstrapClaimURL(); url != "" {
-				fmt.Printf("First boot: claim at %s (one-time code on console).\n", url)
+				fmt.Fprintf(w, "First boot: claim at %s (one-time code on console).\n", url)
 				hostname, _ := os.Hostname()
 				if hostname != "" {
 					if idx := strings.Index(hostname, "."); idx != -1 {
 						hostname = hostname[:idx]
 					}
-					fmt.Printf("Also try http://%s.local:8485\n", hostname)
+					fmt.Fprintf(w, "Also try http://%s.local:8484\n", hostname)
 				}
-				fmt.Println("Token will be provisioned to ~/.config/omahab/token after Complete.")
+				fmt.Fprintln(w, "Token will be provisioned to ~/.config/omahab/token after Complete.")
 			} else {
-				fmt.Println("First boot: open http://<device-ip>:8485 (code on console) to claim.")
+				fmt.Fprintln(w, "First boot: open http://<device-ip>:8484 (code on console) to claim.")
 			}
 		} else {
-			fmt.Println("First run?  `omahab login [--server <url>]` to authenticate.")
+			fmt.Fprintln(w, "First run?  `omahab login [--server <url>]` to authenticate.")
 		}
 	} else {
-		fmt.Println("Try `omahab status` to check the control plane.")
+		fmt.Fprintln(w, "Try `omahab status` to check the control plane.")
 	}
-	fmt.Println("Shell completions: omahab completion bash|zsh|fish")
+	fmt.Fprintln(w, "Shell completions: omahab completion bash|zsh|fish")
+	return nil
+}
+
+func isWelcomeTerminal(w io.Writer) bool {
+	if f, ok := w.(*os.File); ok {
+		if goterm.IsTerminal(int(f.Fd())) {
+			return true
+		}
+	}
+	if goterm.IsTerminal(int(os.Stdout.Fd())) {
+		return true
+	}
+	return isTerminal(w)
+}
+
+func renderWelcomeKV(w io.Writer, width int, server, serverSource, tokenStatus, hint string) {
+	// Server block: URL own line, source separate
+	if width > 0 && width < 60 {
+		fmt.Fprintln(w, "  server")
+		fmt.Fprintf(w, "    %s\n", server)
+		fmt.Fprintf(w, "    source: %s\n", serverSource)
+	} else {
+		fmt.Fprintln(w, "  server")
+		fmt.Fprintf(w, "    %s\n", server)
+		fmt.Fprintf(w, "    source: %s\n", serverSource)
+	}
+	if width > 0 && width < 60 {
+		fmt.Fprintln(w, "  token")
+		fmt.Fprintf(w, "    %s\n", tokenStatus)
+		if hint != "" {
+			fmt.Fprintf(w, "    hint: %s\n", hint)
+		}
+	} else {
+		fmt.Fprintln(w, "  token")
+		fmt.Fprintf(w, "    %s\n", tokenStatus)
+		if hint != "" {
+			fmt.Fprintf(w, "    hint: %s\n", hint)
+		}
+	}
+}
+
+type welcomeSnapshot struct {
+	LANIP           string
+	MDNSURL         string
+	DashboardURL    string
+	Server          string
+	IsRemote        bool
+	ServiceActive   string
+	ServiceResult   string
+	ServiceErr      error
+	UpOK            bool
+	UpErr           error
+	BootstrapActive *bool
+}
+
+func gatherWelcomeSnapshot(server string) welcomeSnapshot {
+	snap := welcomeSnapshot{Server: server}
+	snap.IsRemote = strings.TrimSpace(flagServer) != ""
+	// LAN discovery
+	snap.LANIP = lanIPv4()
+	h, _ := os.Hostname()
+	short := h
+	if idx := strings.Index(short, "."); idx != -1 {
+		short = short[:idx]
+	}
+	if short == "" {
+		short = "omahab"
+	}
+	snap.MDNSURL = fmt.Sprintf("http://%s.local:8484", short)
+	if snap.LANIP != "" {
+		snap.DashboardURL = fmt.Sprintf("http://%s:8484", snap.LANIP)
+	} else {
+		snap.DashboardURL = snap.MDNSURL
+	}
+	// For remote, dashboard is the server itself
+	if snap.IsRemote {
+		snap.DashboardURL = server
+	}
+	// Service status (local only)
+	if !snap.IsRemote {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		active, sub, result, err := queryServiceStatus(ctx)
+		cancel()
+		_ = sub
+		snap.ServiceActive = active
+		snap.ServiceResult = result
+		snap.ServiceErr = err
+	}
+	// Up probe: remote vs local
+	base := server
+	if !snap.IsRemote {
+		base = "http://127.0.0.1:8484"
+	}
+	ctx2, cancel2 := context.WithTimeout(context.Background(), time.Second)
+	upOK, upErr := probeUpWithContext(ctx2, base)
+	cancel2()
+	snap.UpOK = upOK
+	snap.UpErr = upErr
+	// Bootstrap status if reachable
+	if snap.UpOK {
+		ctx3, cancel3 := context.WithTimeout(context.Background(), time.Second)
+		bActive, _ := probeBootstrapStatusWithContext(ctx3, base)
+		cancel3()
+		if bActive != nil {
+			snap.BootstrapActive = bActive
+		} else {
+			// fallback to local sentinel when probe fails but we are local
+			if !snap.IsRemote {
+				_, statErr := os.Stat(bootstrapDonePath)
+				var active bool
+				if statErr == nil {
+					active = false
+				} else if os.IsNotExist(statErr) {
+					active = true
+				} else {
+					active = true
+				}
+				snap.BootstrapActive = &active
+			}
+		}
+	} else if !snap.IsRemote {
+		_, statErr := os.Stat(bootstrapDonePath)
+		var active bool
+		if statErr == nil {
+			active = false
+		} else if os.IsNotExist(statErr) {
+			active = true
+		} else {
+			active = true
+		}
+		snap.BootstrapActive = &active
+	}
+	return snap
+}
+
+func renderWelcomeReadiness(w io.Writer, snap welcomeSnapshot) {
+	isFailed := snap.ServiceActive == "failed" || snap.ServiceResult == "failed" || snap.ServiceResult == "failure" || snap.ServiceErr != nil
+	if isFailed && !snap.IsRemote {
+		fmt.Fprintln(w, "  Control panel could not start")
+		fmt.Fprintln(w, "")
+		fmt.Fprintln(w, "    Run systemctl status omahabd --no-pager")
+		fmt.Fprintln(w, "    Run journalctl -u omahabd -b --no-pager")
+		return
+	}
+	if !snap.IsRemote && snap.LANIP == "" {
+		fmt.Fprintln(w, "  Waiting for a network address")
+		fmt.Fprintln(w, "")
+		fmt.Fprintln(w, "    Run nmcli device status")
+		return
+	}
+	if snap.ServiceActive == "activating" || snap.ServiceActive == "reloading" || (!snap.UpOK && !isFailed && !snap.IsRemote) {
+		if snap.UpErr != nil {
+			fmt.Fprintln(w, "  Starting the control panel...")
+			return
+		}
+	}
+	if snap.BootstrapActive != nil && *snap.BootstrapActive {
+		fmt.Fprintln(w, "  Finish setup")
+		fmt.Fprintln(w, "")
+		if snap.IsRemote {
+			fmt.Fprintf(w, "    Open %s\n", snap.Server)
+		} else {
+			fmt.Fprintf(w, "    Open %s\n", snap.DashboardURL)
+			fmt.Fprintf(w, "    also: %s (if mDNS is available)\n", snap.MDNSURL)
+		}
+		fmt.Fprintln(w, "    Get the one-time code with: sudo omahab console --once")
+		return
+	}
+	if snap.BootstrapActive != nil && !*snap.BootstrapActive {
+		fmt.Fprintln(w, "  Control panel ready")
+		fmt.Fprintln(w, "")
+		if snap.IsRemote {
+			fmt.Fprintf(w, "    Dashboard: %s\n", snap.Server)
+		} else {
+			fmt.Fprintf(w, "    Dashboard: %s\n", snap.DashboardURL)
+			fmt.Fprintf(w, "    also: %s\n", snap.MDNSURL)
+		}
+		fmt.Fprintln(w, "    Run omahab status to check")
+		return
+	}
+	if snap.UpOK {
+		fmt.Fprintln(w, "  Control panel ready")
+		fmt.Fprintln(w, "")
+		fmt.Fprintf(w, "    %s\n", snap.DashboardURL)
+		return
+	}
+	fmt.Fprintln(w, "  Starting the control panel...")
 }
 
 // isBootstrapPending reports whether first-boot bootstrap is still pending.
@@ -437,12 +661,12 @@ func isBootstrapPending() bool {
 }
 
 // bootstrapClaimURL returns the WebUI claim URL at the device LAN IP
-// (http://<lan-ip>:8485) for first-boot guidance, falling back to
-// http://<hostname>.local:8485 or empty when no address available.
+// (http://<lan-ip>:8484) for first-boot guidance, falling back to
+// http://<hostname>.local:8484 or empty when no address available.
 // Reuses console.go lanIPv4() pattern; never returns 127.0.0.1.
 func bootstrapClaimURL() string {
 	if ip := lanIPv4(); ip != "" {
-		return fmt.Sprintf("http://%s:8485", ip)
+		return fmt.Sprintf("http://%s:8484", ip)
 	}
 	if h, err := os.Hostname(); err == nil && strings.TrimSpace(h) != "" {
 		hostname := strings.TrimSpace(h)
@@ -450,7 +674,7 @@ func bootstrapClaimURL() string {
 			hostname = hostname[:idx]
 		}
 		if hostname != "" {
-			return fmt.Sprintf("http://%s.local:8485", hostname)
+			return fmt.Sprintf("http://%s.local:8484", hostname)
 		}
 	}
 	return ""
@@ -461,10 +685,10 @@ func newLoginCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "login",
 		Short: "Authenticate with the control plane",
-		Long: `Prompt for a bearer token (input hidden), verify it, and save credentials.
+	Long: `Prompt for a bearer token (input hidden), verify it, and save credentials.
 
 Pre-setup (bootstrap pending): the token does not exist yet — claim the device
-at the WebUI URL shown on the console (http://<lan-ip>:8485 or http://<hostname>.local:8485
+at the WebUI URL shown on the console (http://<lan-ip>:8484 or http://<hostname>.local:8484
 with the one-time code) to obtain the token. The daemon provisions
 ~/.config/omahab/token (XDG-aware: $XDG_CONFIG_HOME/omahab/token else $HOME/.config/omahab/token, 0600)
 only at bootstrap Complete (see controlplane/bootstrap_api.go decision).
@@ -479,7 +703,7 @@ control plane URL (LAN IP / <hostname>.local fallback).`,
 					if url := bootstrapClaimURL(); url != "" {
 						fmt.Fprintf(os.Stderr, "Bootstrap pending — claim this device at %s (code on console) to obtain a token.\n", url)
 					} else {
-						fmt.Fprintf(os.Stderr, "Bootstrap pending — claim at http://<device-ip>:8485 (code on console)\n")
+						fmt.Fprintf(os.Stderr, "Bootstrap pending — claim at http://<device-ip>:8484 (code on console)\n")
 					}
 					fmt.Fprintf(os.Stderr, "Token will be provisioned to ~/.config/omahab/token after Complete.\n")
 				}
@@ -1464,63 +1688,6 @@ func newBackupCmd() *cobra.Command {
 		Short: "Restore from a backup snapshot",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fresh, _ := cmd.Flags().GetBool("fresh")
-			if fresh {
-				// Fresh restore: boot fresh image -> restore from Hetzner + phrase
-				// Collect Hetzner/generic repo + phrase, derive restic password,
-				// upload SSH key, list snapshots, restore to /, unwrap master.key,
-				// run post_restore hooks, write bootstrap-done, restart.
-				// This is the SSH fallback for "Restore from backup" wizard.
-				phrase, _ := cmd.Flags().GetString("phrase")
-				location, _ := cmd.Flags().GetString("location")
-				hetzUser, _ := cmd.Flags().GetString("hetzner-username")
-				hetzHost, _ := cmd.Flags().GetString("hetzner-host")
-				hetzPass, _ := cmd.Flags().GetString("hetzner-password")
-				snapshotID := ""
-				if len(args) > 0 {
-					snapshotID = args[0]
-				}
-				if phrase == "" {
-					// Prompt for phrase securely if interactive
-					fmt.Print("Enter 24-word recovery phrase: ")
-					var input string
-					if _, err := fmt.Scanln(&input); err != nil {
-						// Try reading full line
-						buf := make([]byte, 4096)
-						n, _ := os.Stdin.Read(buf)
-						input = strings.TrimSpace(string(buf[:n]))
-					}
-					phrase = strings.TrimSpace(input)
-				}
-				if phrase == "" {
-					return handleFailure(fmt.Errorf("phrase is required for --fresh"))
-				}
-				// Validate phrase early
-				words := strings.Fields(phrase)
-				if len(words) != 24 {
-					return handleFailure(fmt.Errorf("phrase must be 24 words, got %d", len(words)))
-				}
-				fmt.Printf("fresh restore requested")
-				if snapshotID != "" {
-					fmt.Printf(" snapshot %s", snapshotID)
-				}
-				if hetzUser != "" && hetzHost != "" {
-					fmt.Printf(" from Hetzner %s@%s", hetzUser, hetzHost)
-				} else if location != "" {
-					fmt.Printf(" from %s", location)
-				}
-				fmt.Println()
-				fmt.Println("This would: derive restic password from phrase, ensure backup_ssh key, upload authorized_keys via SFTP:23,")
-				fmt.Println("run `restic snapshots --json --latest 10`, then `restic restore <id> --target / --include <each DefaultPaths>`")
-				fmt.Println("unwrap master.key from recovery.kit, run post_restore hooks, write bootstrap-done, restart omahabd.")
-				fmt.Println("(stub: no Hetzner credentials available in this environment; see docs for manual restore)")
-				if snapshotID == "" {
-					fmt.Println("No snapshot ID supplied; would list snapshots and prompt for selection.")
-				}
-				_ = hetzPass
-				_ = location
-				return nil
-			}
 			if len(args) == 0 {
 				return handleFailure(fmt.Errorf("snapshot id is required"))
 			}
@@ -1553,12 +1720,6 @@ func newBackupCmd() *cobra.Command {
 		},
 	}
 	restoreCmd.Flags().Bool("force", false, "force without confirmation")
-	restoreCmd.Flags().Bool("fresh", false, "fresh restore from Hetzner Storage Box + recovery phrase (first-boot disaster recovery)")
-	restoreCmd.Flags().String("phrase", "", "24-word recovery phrase (space-separated) for --fresh")
-	restoreCmd.Flags().String("location", "", "generic restic repository URL for --fresh (Advanced)")
-	restoreCmd.Flags().String("hetzner-username", "", "Hetzner Storage Box username (u123456) for --fresh")
-	restoreCmd.Flags().String("hetzner-host", "", "Hetzner Storage Box host (u123456.your-storagebox.de) for --fresh")
-	restoreCmd.Flags().String("hetzner-password", "", "Hetzner sub-account password (used once to upload SSH key) for --fresh")
 	bk.AddCommand(restoreCmd)
 
 

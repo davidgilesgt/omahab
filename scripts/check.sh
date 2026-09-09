@@ -16,15 +16,18 @@ grep -q 'DefaultListen.*127\.0\.0\.1' internal/config/config.go && pass "loopbac
 grep -q 'OMAHAB_LISTEN' nix/module.nix && pass "module sets listen env" || fail_check "module listen env"
 ! grep -rn 'OMAHAB_ETC_DIR' internal/ cmd/ --include='*.go' | grep -qv _test && pass "no /etc config writes" || fail_check "/etc config writes"
 
-# Firewall: nftables table in the module, 8484 gated to tailscale, 8485 LAN-only.
+# Firewall: nftables table in the module, 8484 gated to tailscale + LAN RFC1918 + ULA/link-local, no 8485.
 grep -q 'iifname "tailscale0" tcp dport 8484' nix/module.nix && pass "nftables tailscale gate for 8484" || fail_check "nftables tailscale gate for 8484"
 grep -q 'iifname "lo" accept' nix/module.nix && pass "nftables loopback accept" || fail_check "nftables loopback accept"
-grep -q 'tcp dport 8485 ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 }' nix/module.nix && pass "bootstrap 8485 LAN-only" || fail_check "bootstrap 8485 LAN-only"
+grep -q 'tcp dport 8484 ip saddr { 10\.0\.0\.0/8' nix/module.nix && pass "nftables LAN RFC1918 gate for 8484" || fail_check "nftables LAN RFC1918 gate for 8484"
+grep -q 'ip6 saddr fc00::/7 tcp dport 8484' nix/module.nix && pass "nftables ULA gate for 8484" || fail_check "nftables ULA gate for 8484"
+grep -q 'ip6 saddr fe80::/10 tcp dport 8484' nix/module.nix && pass "nftables link-local gate for 8484" || fail_check "nftables link-local gate for 8484"
+! grep -q 'tcp dport 8485' nix/module.nix && pass "no 8485 listener" || fail_check "8485 still present (should be removed)"
 
 # No Debian path remnants.
 ! grep -rn "internal/installer" --include="*.go" cmd/ internal/ && pass "installer package deleted" || fail_check "installer package still referenced"
 test ! -d packaging/deb && pass "no deb packaging" || fail_check "deb packaging present"
-grep -q 'd ${stateDir} 0700 root root' nix/module.nix && pass "private state directory" || fail_check "private state directory"
+grep -q 'd ${stateDir} 0711 root root' nix/apps.nix && pass "state directory 0711" || fail_check "state directory 0711"
 grep -q 'd ${dataDir} 0755 root root' nix/module.nix && pass "data directory exists" || fail_check "data directory"
 
 # Root binaries must not be checked in (use nix build).
@@ -54,7 +57,7 @@ if command -v jq >/dev/null 2>&1; then
     case "$unit" in
       woodpecker-agent-docker.service) pattern="woodpecker-agents.agents.docker" ;;
       immich-machine-learning.service) pattern="services.immich" ;;
-      paperless-consumer.service|paperless-scheduler.service|paperless-tika.service|paperless-gotenberg.service) pattern="services.paperless" ;;
+      paperless-web.service|paperless-consumer.service|paperless-scheduler.service|paperless-task-queue.service|tika.service|gotenberg.service) pattern="services.paperless" ;;
       restic-rest-server.service) pattern="services.restic.server" ;;
       *) pattern="${unit%.service}" ;;
     esac

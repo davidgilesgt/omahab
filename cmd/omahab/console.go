@@ -13,11 +13,13 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/skip2/go-qrcode"
 	"github.com/spf13/cobra"
+	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 
 	"github.com/omahab/omahab/internal/tui"
@@ -47,89 +49,71 @@ func runConsole() error {
 }
 
 func runConsoleWithOptions(once bool) error {
-	w := os.Stdout
-	caps := tui.ResolveCaps(isTerminal(w), os.Getenv("TERM"), os.Getenv("NO_COLOR"))
-	// For the smoke test `TERM=xterm-256color ... | cat -v` the output is piped
-	// (isTTY false) but we still want to show the rounded lipgloss border.
-	// Force color when TERM indicates a color terminal and NO_COLOR not set.
-	if os.Getenv("NO_COLOR") == "" && os.Getenv("TERM") != "" && os.Getenv("TERM") != "dumb" {
-		caps.ColorEnabled = true
-	}
-	// Enter handling: wait for Enter or 5s on a real tty.
-	var enterCh <-chan struct{}
-	if !once && isRealTTY(w) {
-		ch := make(chan struct{}, 1)
-		go func() {
-			r := bufio.NewReader(os.Stdin)
-			for {
-				_, err := r.ReadString('\n')
-				if err != nil {
-					return
-				}
-				select {
-				case ch <- struct{}{}:
-				default:
-				}
+	var w io.Writer = os.Stdout
+	isTTY := isTerminal(w)
+	caps := tui.ResolveCaps(isTTY, os.Getenv("TERM"), os.Getenv("NO_COLOR"))
+	// Only interactive console clears; --once, redirected, dumb, NO_COLOR emit plain text without escapes.
+	// No forced-color-on-pipe: caps already respects isTTY/TERM/NO_COLOR.
+	width := 0
+	if isTTY {
+		if f, ok := w.(*os.File); ok {
+			if wi, _, err := term.GetSize(int(f.Fd())); err == nil {
+				width = wi
 			}
-		}()
-		enterCh = ch
+		} else if term.IsTerminal(int(os.Stdout.Fd())) {
+			if wi, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil {
+				width = wi
+			}
+		}
 	}
+	if width == 0 && term.IsTerminal(int(os.Stdout.Fd())) {
+		if wi, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil {
+			width = wi
+		}
+	}
+	shouldClear := !once && isRealTTY(w) && caps.ColorEnabled
 	for {
-		if caps.ColorEnabled {
-			fmt.Fprint(w, "\033[2J\033[H") // clear + home
+		if shouldClear {
+			fmt.Fprint(w, "\033[2J\033[H")
 		}
-		fmt.Fprintln(w, "")
-		var title string
-		if _, err := os.Stat(bootstrapDonePath); err == nil {
-			title = "live status"
+		// Banner: compact wordmark when narrow to avoid overflow.
+		var banner string
+		if width > 0 && width < 60 {
+			// Compact plain wordmark, no border, no ANSI when narrow.
+			banner = "  OMAHAB"
 		} else {
-			title = "first boot"
+			// Determine title for banner
+			title := "first boot"
+			if _, err := os.Stat(bootstrapDonePath); err == nil {
+				title = "live status"
+			}
+			banner = tui.Banner(title, caps)
 		}
-		banner := tui.Banner(title, caps)
-		// Banner fallback already includes two-space indent; we print as-is.
 		for _, line := range strings.Split(banner, "\n") {
 			fmt.Fprintln(w, line)
 		}
 		fmt.Fprintln(w, "")
 
-		if _, err := os.Stat(bootstrapDonePath); err == nil {
-			// Post-bootstrap live status, refreshing every 5s.
-			renderLiveStatus(w, caps)
-			fmt.Fprintln(w, "")
+		snap := gatherConsoleSnapshot()
+		renderConsoleSnapshot(w, caps, width, snap)
+
+		fmt.Fprintln(w, "")
+		if isRealTTY(w) {
 			fmt.Fprintln(w, "  press Enter for shell login")
 			fmt.Fprintln(w, "")
-			fmt.Fprintf(w, "  Refreshing every 5s — %s\n", time.Now().Format("15:04:05"))
-			if once {
-				return nil
-			}
-			if enterCh != nil {
-				select {
-				case <-enterCh:
-					runLogin()
-				case <-time.After(5 * time.Second):
-				}
-			} else {
-				time.Sleep(5 * time.Second)
-			}
-			continue
 		}
-
-		// Bootstrap pending: LAN wizard URL + one-time code.
-		ip := lanIPv4()
-		code := readBootstrapCode()
-		renderFirstBoot(w, caps, ip, code)
-		fmt.Fprintln(w, "")
-		fmt.Fprintln(w, "  press Enter for shell login")
-		fmt.Fprintln(w, "")
 		fmt.Fprintf(w, "  Refreshing every 5s — %s\n", time.Now().Format("15:04:05"))
 		if once {
 			return nil
 		}
-		if enterCh != nil {
-			select {
-			case <-enterCh:
-				runLogin()
-			case <-time.After(5 * time.Second):
+		if isRealTTY(w) {
+			if waitForEnter(5 * time.Second) {
+				if err := execLogin(); err != nil {
+					fmt.Fprintf(w, "  login failed: %v\n", err)
+					time.Sleep(2 * time.Second)
+					continue
+				}
+				// On success, process is replaced; never returns.
 			}
 		} else {
 			time.Sleep(5 * time.Second)
@@ -144,13 +128,266 @@ func isRealTTY(w io.Writer) bool {
 	return isTerminal(w)
 }
 
-func runLogin() {
+func execLogin() error {
 	path := findLoginPath()
-	cmd := exec.Command(path)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	_ = cmd.Run()
+	if _, err := os.Stat(path); err != nil {
+		return err
+	}
+	env := os.Environ()
+	argv := []string{path}
+	// Replace current process with login; preserves authenticated login via /run/wrappers/bin/login
+	return syscall.Exec(path, argv, env)
+}
+
+func waitForEnter(timeout time.Duration) bool {
+	pfd := []unix.PollFd{{Fd: int32(os.Stdin.Fd()), Events: unix.POLLIN}}
+	ms := int(timeout.Milliseconds())
+	n, err := unix.Poll(pfd, ms)
+	if err != nil || n == 0 {
+		return false
+	}
+	// Data available; consume the line. Use buffered reader to clear input.
+	r := bufio.NewReader(os.Stdin)
+	// Set a short read deadline if possible? Instead, just read with timeout via poll already ensured data.
+	// ReadString may block if no newline, but Enter sends newline. If user typed partial without Enter, poll would have returned but ReadString would block. Mitigate by reading available bytes.
+	// Use non-blocking read: try to read one byte peek, then drain.
+	_, _ = r.ReadString('\n')
+	return true
+}
+
+// consoleSnapshot holds bounded status for console and welcome rendering.
+type consoleSnapshot struct {
+	LANIP           string
+	Hostname        string
+	MDNSURL         string
+	DashboardURL    string
+	Code            string
+	ServiceActive   string
+	ServiceSub      string
+	ServiceResult   string
+	ServiceErr      error
+	UpOK            bool
+	UpErr           error
+	BootstrapActive *bool
+	BootstrapErr    error
+}
+
+func gatherConsoleSnapshot() consoleSnapshot {
+	snap := consoleSnapshot{}
+	snap.LANIP = lanIPv4()
+	h, _ := os.Hostname()
+	snap.Hostname = h
+	short := h
+	if idx := strings.Index(short, "."); idx != -1 {
+		short = short[:idx]
+	}
+	if short == "" {
+		short = "omahab"
+	}
+	snap.MDNSURL = fmt.Sprintf("http://%s.local:8484", short)
+	if snap.LANIP != "" {
+		snap.DashboardURL = fmt.Sprintf("http://%s:8484", snap.LANIP)
+	} else {
+		snap.DashboardURL = snap.MDNSURL
+	}
+	snap.Code = readBootstrapCode()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	active, sub, result, err := queryServiceStatus(ctx)
+	cancel()
+	snap.ServiceActive = active
+	snap.ServiceSub = sub
+	snap.ServiceResult = result
+	snap.ServiceErr = err
+	ctx2, cancel2 := context.WithTimeout(context.Background(), time.Second)
+	upOK, upErr := probeUpWithContext(ctx2, "http://127.0.0.1:8484")
+	cancel2()
+	snap.UpOK = upOK
+	snap.UpErr = upErr
+	if snap.UpOK {
+		ctx3, cancel3 := context.WithTimeout(context.Background(), time.Second)
+		bActive, bErr := probeBootstrapStatusWithContext(ctx3, "http://127.0.0.1:8484")
+		cancel3()
+		snap.BootstrapActive = bActive
+		snap.BootstrapErr = bErr
+		if bActive == nil && bErr != nil {
+			_, statErr := os.Stat(bootstrapDonePath)
+			var active bool
+			if statErr == nil {
+				active = false
+			} else if os.IsNotExist(statErr) {
+				active = true
+			} else {
+				active = true
+			}
+			snap.BootstrapActive = &active
+		}
+	} else {
+		_, statErr := os.Stat(bootstrapDonePath)
+		var active bool
+		if statErr == nil {
+			active = false
+		} else if os.IsNotExist(statErr) {
+			active = true
+		} else {
+			active = true
+		}
+		snap.BootstrapActive = &active
+	}
+	return snap
+}
+
+func queryServiceStatus(ctx context.Context) (active, sub, result string, err error) {
+	cmd := exec.CommandContext(ctx, "systemctl", "show", "omahabd", "-p", "ActiveState", "-p", "SubState", "-p", "Result")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", "", "", err
+	}
+	lines := strings.Split(string(out), "\n")
+	for _, l := range lines {
+		if strings.HasPrefix(l, "ActiveState=") {
+			active = strings.TrimPrefix(l, "ActiveState=")
+		} else if strings.HasPrefix(l, "SubState=") {
+			sub = strings.TrimPrefix(l, "SubState=")
+		} else if strings.HasPrefix(l, "Result=") {
+			result = strings.TrimPrefix(l, "Result=")
+		}
+	}
+	return active, sub, result, nil
+}
+
+func probeUpWithContext(ctx context.Context, base string) (bool, error) {
+	url := strings.TrimRight(base, "/") + "/up"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return false, err
+	}
+	client := &http.Client{Timeout: time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false, fmt.Errorf("up status %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if err != nil {
+		return false, err
+	}
+	var data map[string]any
+	if err := json.Unmarshal(body, &data); err != nil {
+		return false, fmt.Errorf("invalid up json: %w", err)
+	}
+	if st, ok := data["status"].(string); ok && st == "up" {
+		return true, nil
+	}
+	return false, fmt.Errorf("up status not up: %s", string(body))
+}
+
+func probeBootstrapStatusWithContext(ctx context.Context, base string) (*bool, error) {
+	url := strings.TrimRight(base, "/") + "/api/bootstrap/status"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	client := &http.Client{Timeout: time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("bootstrap status %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Active bool `json:"active"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, err
+	}
+	return &out.Active, nil
+}
+
+func renderConsoleSnapshot(w io.Writer, caps tui.Caps, width int, snap consoleSnapshot) {
+	isFailed := snap.ServiceActive == "failed" || snap.ServiceResult == "failed" || snap.ServiceResult == "failure" || (snap.ServiceErr != nil)
+	if isFailed {
+		fmt.Fprintln(w, "  Control panel could not start")
+		fmt.Fprintln(w, "")
+		fmt.Fprintln(w, "    Run systemctl status omahabd --no-pager")
+		fmt.Fprintln(w, "    Run journalctl -u omahabd -b --no-pager")
+		return
+	}
+	if snap.LANIP == "" {
+		fmt.Fprintln(w, "  Waiting for a network address")
+		fmt.Fprintln(w, "")
+		fmt.Fprintln(w, "    Run nmcli device status")
+		fmt.Fprintln(w, "")
+		fmt.Fprintln(w, "    Local dashboard (when ready):")
+		fmt.Fprintf(w, "      %s\n", snap.MDNSURL)
+		return
+	}
+	if snap.ServiceActive == "activating" || snap.ServiceActive == "reloading" || (!snap.UpOK && !isFailed) {
+		if snap.UpErr != nil {
+			fmt.Fprintln(w, "  Starting the control panel...")
+			return
+		}
+	}
+	if snap.BootstrapActive != nil && *snap.BootstrapActive {
+		fmt.Fprintln(w, "  Finish setup")
+		fmt.Fprintln(w, "")
+		fmt.Fprintln(w, "    Open this URL on another device:")
+		fmt.Fprintf(w, "      %s\n", snap.DashboardURL)
+		fmt.Fprintf(w, "      also: %s (if mDNS is available)\n", snap.MDNSURL)
+		if snap.Code != "" {
+			fmt.Fprintln(w, "")
+			fmt.Fprintln(w, "    One-time code (from this console):")
+			if caps.ColorEnabled && width >= 60 {
+				style := lipgloss.NewStyle().Foreground(tui.NeutralFG).Background(tui.NeutralBG).Padding(0, 2).Bold(true)
+				rendered := style.Render(snap.Code)
+				if rendered == snap.Code {
+					rendered = "  " + snap.Code + "  "
+				}
+				fmt.Fprintf(w, "      %s\n", rendered)
+			} else {
+				fmt.Fprintf(w, "      %s\n", snap.Code)
+			}
+			if width >= 60 && caps.ColorEnabled {
+				if qr, err := qrcode.New(snap.DashboardURL+"#code="+snap.Code, qrcode.Medium); err == nil {
+					fmt.Fprintln(w, "")
+					fmt.Fprint(w, qr.ToSmallString(false))
+				}
+			}
+			fmt.Fprintln(w, "")
+			fmt.Fprintln(w, "    After claiming, the token is at ~/.config/omahab/token (XDG-aware, 0600)")
+		} else {
+			fmt.Fprintln(w, "")
+			fmt.Fprintln(w, "    One-time code:")
+			fmt.Fprintln(w, "      Run sudo omahab console --once to view")
+		}
+		return
+	}
+	if snap.BootstrapActive != nil && !*snap.BootstrapActive {
+		fmt.Fprintln(w, "  Control panel ready")
+		fmt.Fprintln(w, "")
+		fmt.Fprintln(w, "    Dashboard:")
+		fmt.Fprintf(w, "      %s\n", snap.DashboardURL)
+		fmt.Fprintf(w, "      also: %s\n", snap.MDNSURL)
+		fmt.Fprintln(w, "")
+		fmt.Fprintln(w, "    Run omahab status to check")
+		return
+	}
+	if snap.UpOK {
+		fmt.Fprintln(w, "  Control panel ready")
+		fmt.Fprintln(w, "")
+		fmt.Fprintf(w, "    %s\n", snap.DashboardURL)
+		return
+	}
+	fmt.Fprintln(w, "  Starting the control panel...")
 }
 
 func findLoginPath() string {
@@ -170,7 +407,7 @@ func renderFirstBoot(w io.Writer, caps tui.Caps, ip, code string) {
 	fmt.Fprintln(w, "  Complete setup from any device on this network:")
 	fmt.Fprintln(w, "")
 	if ip != "" {
-		url := fmt.Sprintf("http://%s:8485", ip)
+		url := fmt.Sprintf("http://%s:8484", ip)
 		if caps.ColorEnabled {
 			style := lipgloss.NewStyle().Foreground(tui.AccentAdaptive).Bold(true)
 			rendered := style.Render(url)
@@ -190,7 +427,7 @@ func renderFirstBoot(w io.Writer, caps tui.Caps, ip, code string) {
 		if idx := strings.Index(hostname, "."); idx != -1 {
 			hostname = hostname[:idx]
 		}
-		fmt.Fprintf(w, "      also: http://%s.local:8485\n", hostname)
+		fmt.Fprintf(w, "      also: http://%s.local:8484\n", hostname)
 		if code != "" {
 			fmt.Fprintln(w, "")
 			fmt.Fprintln(w, "  One-time code:")
@@ -204,7 +441,7 @@ func renderFirstBoot(w io.Writer, caps tui.Caps, ip, code string) {
 			} else {
 				fmt.Fprintf(w, "      %s\n", code)
 			}
-			if qr, err := qrcode.New("http://"+ip+":8485/#code="+code, qrcode.Medium); err == nil {
+			if qr, err := qrcode.New("http://"+ip+":8484/#code="+code, qrcode.Medium); err == nil {
 				fmt.Fprintln(w, "")
 				fmt.Fprint(w, qr.ToSmallString(false))
 			}

@@ -5,6 +5,24 @@ import { EmptyState, ErrorState, formatDate, LoadingState, PageHeader, Section }
 import { useToast } from "../components/toast";
 import { CopyButton } from "../components/copyButton";
 
+function shellQuote(s: string): string {
+  return "'" + s.replace(/'/g, "'\\''") + "'";
+}
+
+function validatedOrigin(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    const o = window.location.origin;
+    if (!o) return "";
+    const u = new URL(o);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return "";
+    if (!u.host) return "";
+    return u.origin;
+  } catch {
+    return "";
+  }
+}
+
 const RESERVED_NAMES: Record<string, true> = {
   OPENAI_BASE_URL: true,
   OPENAI_API_KEY: true,
@@ -129,21 +147,28 @@ export function ToolEnvironmentPage() {
                   <strong>Enrollment code — copy now (single-use)</strong>
                   <p><code className="mono">{enrollCode}</code> <CopyButton text={enrollCode} label="Copy" /></p>
                   {enrollExpires && <small>Expires {formatDate(enrollExpires)} (10m)</small>}
-                  <p><small className="muted">Device runs <code>omahab-clientd enroll</code> with hidden prompt; token stored only in Secret Service (go-keyring service omahab, account device-token). Per-device Forgejo token <code>device-&lt;id&gt;</code> and restic credentials are issued automatically.</small></p>
+                  <p><small className="muted">Paste this at the hidden enrollment prompt after running the installer. Device runs <code>omahab-clientd enroll</code> with hidden prompt; token stored only in Secret Service (go-keyring service omahab, account device-token). Per-device Forgejo token <code>device-&lt;id&gt;</code> and restic credentials are issued automatically.</small></p>
                 </div>
                 <button className="icon-button" type="button" onClick={() => setEnrollCode(null)} aria-label="Dismiss">×</button>
               </div>
             )}
-            {enrollCode && (
-              <div className="callout" role="status" style={{ border: "var(--border) solid var(--line)", borderRadius: "0.5rem", padding: "0.75rem", background: "var(--surface-raised)" }}>
-                <strong>One-liner (Omarchy) — paste on the device</strong>
-                <pre className="mono" style={{ whiteSpace: "pre-wrap", wordBreak: "break-all", margin: "0.5rem 0", padding: "0.5rem", background: "var(--surface)", borderRadius: "0.25rem", fontSize: "0.85rem" }}>{`curl -fsSL ${typeof window !== "undefined" ? window.location.origin : ""}/install.sh?code=${encodeURIComponent(enrollCode)} | sh`}</pre>
-                <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
-                  <CopyButton text={`curl -fsSL ${typeof window !== "undefined" ? window.location.origin : ""}/install.sh?code=${encodeURIComponent(enrollCode)} | sh`} label="Copy one-liner" />
-                  <small className="muted">Installs binary to ~/.local/bin, unit to ~/.config/systemd/user/omahab-clientd.service (ExecStart %h/.local/bin/omahab-clientd), Quickshell plugin to Omarchy plugin dir, then enrolls. Code single-use, 10m.</small>
+            {enrollCode && (() => {
+              const origin = validatedOrigin();
+              const quotedOrigin = origin ? shellQuote(origin) : "''";
+              const quotedInstall = origin ? shellQuote(origin + "/install.sh") : "'/install.sh'";
+              const oneLiner = `curl -fsSL ${quotedInstall} | OMAHAB_SERVER=${quotedOrigin} sh`;
+              return (
+                <div className="callout" role="status" style={{ border: "var(--border) solid var(--line)", borderRadius: "0.5rem", padding: "0.75rem", background: "var(--surface-raised)" }}>
+                  <strong>One-liner (Omarchy) — paste on the device</strong>
+                  <pre className="mono" style={{ whiteSpace: "pre-wrap", wordBreak: "break-all", margin: "0.5rem 0", padding: "0.5rem", background: "var(--surface)", borderRadius: "0.25rem", fontSize: "0.85rem" }}>{oneLiner}</pre>
+                  <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
+                    <CopyButton text={oneLiner} label="Copy one-liner" />
+                    <small className="muted">Installs binary to ~/.local/bin, unit to ~/.config/systemd/user/omahab-clientd.service (ExecStart %h/.local/bin/omahab-clientd), Quickshell plugin to Omarchy plugin dir, then prompts for the enrollment code. Code single-use, 10m. Paste the code at the hidden prompt.</small>
+                  </div>
+                  <p><small className="muted">Plain HTTP on untrusted networks cannot protect script integrity or the enrollment POST. Use an encrypted tunnel, Tailnet, or HTTPS on untrusted networks.</small></p>
                 </div>
-              </div>
-            )}
+              );
+            })()}
             <small className="muted">If Secret Service is unavailable, enrollment/sync fails with diagnostic — never falls back to plaintext.</small>
             <p className="muted" style={{ fontSize: "0.85rem" }}><a href="/devices">View Devices →</a> to see enrolled companions, version skew, env revision, and PC backup age.</p>
           </div>

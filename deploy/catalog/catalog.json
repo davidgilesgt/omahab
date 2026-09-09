@@ -331,8 +331,9 @@
         "paperless-web.service",
         "paperless-consumer.service",
         "paperless-scheduler.service",
-        "paperless-tika.service",
-        "paperless-gotenberg.service"
+        "paperless-task-queue.service",
+        "tika.service",
+        "gotenberg.service"
       ],
       "groups": [
         "members",
@@ -373,7 +374,7 @@
         "post_restore": [
           "/bin/sh",
           "-c",
-          "pg_restore --clean --if-exists -d karakeep /var/lib/omahab/dumps/karakeep.pgdump && systemctl restart karakeep.service"
+          "pg_restore --clean --if-exists -d karakeep /var/lib/omahab/dumps/karakeep.pgdump && systemctl restart karakeep-web.service karakeep-workers.service karakeep-browser.service"
         ]
       },
       "oidc": {
@@ -396,7 +397,9 @@
         "karakeep_meili_master_key"
       ],
       "units": [
-        "karakeep.service"
+        "karakeep-web.service",
+        "karakeep-workers.service",
+        "karakeep-browser.service"
       ],
       "groups": [
         "members",

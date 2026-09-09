@@ -75,9 +75,8 @@ type Backend struct {
 	apiToken  string
 
 	// first-boot bootstrap gate (lazily initialized)
-	bsMu             sync.Mutex
-	bsGate           *BootstrapGate
-	onBootstrapClose func()
+	bsMu   sync.Mutex
+	bsGate *BootstrapGate
 
 	// extended integrations for dashboard-triggered actions
 	emailRouter     *cloudflare.EmailClient

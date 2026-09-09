@@ -205,7 +205,11 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (apitypes.SetupStatus, err
 				as := apitypes.SetupAppStatus{BundleID: bnd.ID}
 				if !ok {
 					as.Status = "pending"
-					as.Detail = "not installed"
+					if domainSentinel {
+						as.Detail = "Not configured — connect domain and HTTPS"
+					} else {
+						as.Detail = "not installed"
+					}
 					anyPending = true
 				} else {
 					as = classifyCoreApp(st)
@@ -473,7 +477,21 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (apitypes.SetupStatus, err
 		state = "reconciling"
 	}
 
-	return apitypes.SetupStatus{State: state, Checks: checks}, nil
+	localReady := b.isLocalReady()
+
+	return apitypes.SetupStatus{State: state, LocalReady: localReady, Checks: checks}, nil
+}
+
+func (b *Backend) isLocalReady() bool {
+	if !BootstrapActive() {
+		return true
+	}
+	if b.cfg.StateDir != "" {
+		if _, err := os.Stat(filepath.Join(b.cfg.StateDir, "bootstrap-done")); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func deriveSetupState(checks []apitypes.SetupCheck, domainSentinel bool, cfDNSPresent bool) string {

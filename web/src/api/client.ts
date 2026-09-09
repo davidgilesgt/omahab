@@ -39,7 +39,7 @@ import type {
   Workspace,
 } from "./types";
 // API base is relative: fetch("/api/v1/...") resolves to the same host the user
-// loaded the WebUI from (e.g. http://192.168.1.12:8485 or http://omahab.local:8485).
+// loaded the WebUI from (e.g. http://192.168.1.12:8484 or http://omahab.local:8484).
 // This ensures first-boot surfaces render the device LAN IP / <hostname>.local
 // and never 127.0.0.1. See console.go lanIPv4() / bootstrapClaimURL() pattern.
 const API_ROOT = "/api/v1";
@@ -229,6 +229,26 @@ export class ApiClient {
   publicStatus = () => this.request<PublicStatusResponse>("/public/status");
 
   doctor = () => this.request<DoctorReport>("/doctor");
+
+  bootstrapStatus = async (): Promise<{ active: boolean }> => {
+    let response: Response;
+    try {
+      response = await fetch("/api/bootstrap/status", { headers: { "Cache-Control": "no-store" } });
+    } catch (error) {
+      throw new ApiError(error instanceof Error ? error.message : "The server could not be reached.", "network_error", 0);
+    }
+    if (!response.ok) {
+      let detail: ApiErrorEnvelope | undefined;
+      try {
+        detail = (await response.json()) as ApiErrorEnvelope;
+      } catch {
+        // ignore
+      }
+      throw new ApiError(detail?.error.message ?? response.statusText ?? "Request failed", detail?.error.code ?? "request_failed", response.status);
+    }
+    return (await response.json()) as { active: boolean };
+  };
+
 
   hermesMCPToken = () => this.request<{ token: string }>("/hermes/mcp-token");
 

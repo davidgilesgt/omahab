@@ -181,12 +181,12 @@ func (s *Server) buildRouter() chi.Router {
 	// Companion enrollment: device claim with single-use code, no bearer (open). Code in JSON body {code}.
 	r.Post("/api/v1/companion/enroll", s.withBodyLimit(defaultBodyLimit, s.handleEnrollCompanion))
 
-	// B2: distribution — prebuilt client binaries, plugin, install.sh, checksums (tailnet-only, no auth; binaries public).
+	// B2: distribution — prebuilt client binaries, plugin, install.sh, checksums (public on LAN, no auth; binaries public).
 	r.Get("/dl/SHA256SUMS", s.handleDLSHA256)
 	r.Get("/dl/{file}", s.handleDL)
 	r.Get("/install.sh", s.handleInstallSh)
 
-	// OpenAPI spec — tailnet-only (no auth, like /dl), served from embedded api/openapi.yaml.
+	// OpenAPI spec — public (no auth, like /dl), served from embedded api/openapi.yaml.
 	r.Get("/api/openapi.yaml", s.handleOpenAPI)
 
 	// MCP server for Hermes (outside bearerAuth, behind dedicated mcpAuth).
@@ -199,8 +199,10 @@ func (s *Server) buildRouter() chi.Router {
 		})
 	}
 
-	// First-boot bootstrap (LAN listener only; group is inert when the
-	// gate is nil or bootstrap already completed).
+	// Bootstrap status: public, always available (outside gate).
+	r.Get("/api/bootstrap/status", s.handleBootstrapStatus)
+
+	// First-boot bootstrap (gate is inert when nil or bootstrap already completed).
 	r.Group(func(r chi.Router) {
 		r.Post("/api/bootstrap/claim", s.withBodyLimit(defaultBodyLimit, s.handleBootstrapClaim))
 		r.Group(func(r chi.Router) {
@@ -210,12 +212,8 @@ func (s *Server) buildRouter() chi.Router {
 			r.Post("/api/bootstrap/tailscale/up", s.handleBootstrapTailscaleUp)
 			r.Get("/api/bootstrap/tailscale/status", s.handleBootstrapTailscaleStatus)
 			r.Post("/api/bootstrap/complete", s.handleBootstrapComplete)
-			r.Post("/api/bootstrap/restore/connect", s.withBodyLimit(defaultBodyLimit, s.handleBootstrapRestoreConnect))
-			r.Post("/api/bootstrap/restore/run", s.withBodyLimit(defaultBodyLimit, s.handleBootstrapRestoreRun))
-			r.Get("/api/bootstrap/restore/events", s.handleBootstrapRestoreEvents)
 		})
 	})
-
 
 
 	// Authenticated API group.
@@ -526,34 +524,6 @@ func (s *Server) handleInstallSh(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// Templating: if ?code= is present, inject into script's __CODE__ placeholder and server into __SERVER__.
-	code := strings.TrimSpace(r.URL.Query().Get("code"))
-	if code != "" {
-		// Validate code shape: enrollment codes are 32 chars base64url raw (A-Za-z0-9_-). Be permissive but reject NUL/newline and overly long.
-		if len(code) > 128 || strings.Contains(code, "\x00") || strings.Contains(code, "\n") || strings.Contains(code, "\r") {
-			code = ""
-		} else {
-			// Replace first occurrence of __CODE__ with code (script has TEMPLATED_CODE="__CODE__").
-			data = []byte(strings.Replace(string(data), "__CODE__", code, 1))
-		}
-	}
-	// Inject server host: use request host (tailnet IP/host) as SERVER if templated.
-	// Prefer X-Forwarded-Proto / X-Forwarded-Host if behind Caddy, else r.Host.
-	host := r.Host
-	if fwd := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); fwd != "" {
-		host = fwd
-	}
-	scheme := "http"
-	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") || strings.EqualFold(r.Header.Get("X-Forwarded-Ssl"), "on") {
-		scheme = "https"
-	}
-	// For install.sh, server is http://host (port already in host if non-standard like 8484).
-	// The one-liner uses http://<tailscale-ip>:8484/install.sh — so host includes port.
-	serverURL := scheme + "://" + host
-	// If request came via localhost without port, try to preserve port from Host header; otherwise use host as-is.
-	if serverURL != "" {
-		data = []byte(strings.Replace(string(data), "__SERVER__", serverURL, 1))
-	}
 	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
@@ -562,7 +532,7 @@ func (s *Server) handleInstallSh(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleOpenAPI serves the embedded OpenAPI spec (api/openapi.yaml) with no auth.
-// It is tailnet-only via nftables (same as /dl/* and /up).
+// It is public via nftables (same as /dl/* and /up).
 func (s *Server) handleOpenAPI(w http.ResponseWriter, r *http.Request) {
 	if len(openAPISpec) == 0 {
 		writeError(w, r, errNotFound("not found"))
@@ -631,7 +601,7 @@ func safeRecovery(next http.Handler) http.Handler {
 func (s *Server) timeoutMiddleware(d time.Duration) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/api/v1/events/stream" || r.URL.Path == "/api/v1/companion/events/stream" || strings.HasPrefix(r.URL.Path, "/dl/") || r.URL.Path == "/install.sh" || strings.HasPrefix(r.URL.Path, "/api/bootstrap/restore/events") {
+			if r.URL.Path == "/api/v1/events/stream" || r.URL.Path == "/api/v1/companion/events/stream" || strings.HasPrefix(r.URL.Path, "/dl/") || r.URL.Path == "/install.sh" {
 				next.ServeHTTP(w, r)
 				return
 			}

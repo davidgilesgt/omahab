@@ -129,6 +129,7 @@ in
       environmentFile = [ "${appEnv}/woodpecker.env" ];
       extraGroups = [ "omahab-builder" ];
     };
+    systemd.services."woodpecker-agent-docker" = gate "woodpecker";
 
     # ----------------------------------------------------------------
     # Immich — photos. OAuth config file written by omahabd.
@@ -150,9 +151,13 @@ in
       database.createLocally = true;
       configureTika = true;
       dataDir = "${dataDir}/apps/paperless";
-      environmentFile = "${appEnv}/paperless.env";
+      environmentFile = "${appEnv}/paperless-ngx.env";
     };
+    systemd.services."paperless-secret-key" = gate "paperless-ngx";
     systemd.services.paperless-web = gate "paperless-ngx";
+    systemd.services.paperless-consumer = gate "paperless-ngx";
+    systemd.services.paperless-scheduler = gate "paperless-ngx";
+    systemd.services."paperless-task-queue" = gate "paperless-ngx";
 
     # ----------------------------------------------------------------
     # Karakeep — bookmarks. Domain-gated (NextAuth + OIDC).
@@ -161,7 +166,15 @@ in
       enable = true;
       environmentFile = "${appEnv}/karakeep.env";
     };
-    systemd.services.karakeep = gate "karakeep";
+    systemd.services.karakeep-web = {
+      partOf = lib.mkForce [ ];
+    } // gate "karakeep";
+    systemd.services.karakeep-workers = {
+      partOf = lib.mkForce [ ];
+    } // gate "karakeep";
+    # Remove obsolete PartOf (phantom aggregate).
+    systemd.services.karakeep-init.partOf = lib.mkForce [ ];
+    systemd.services.karakeep-browser.partOf = lib.mkForce [ ];
 
     # ----------------------------------------------------------------
     # Syncthing — no domain dependency, starts at boot.
@@ -364,5 +377,8 @@ in
       privateRepos = true;
       htpasswd-file = "/var/lib/omahab/machine-backups.htpasswd";
     };
+    # Gate on htpasswd existence: missing = not configured (clean skip),
+    # malformed file remains a real error. Socket activation retained.
+    systemd.services.restic-rest-server.unitConfig.ConditionPathExists = "/var/lib/omahab/machine-backups.htpasswd";
   };
 }
