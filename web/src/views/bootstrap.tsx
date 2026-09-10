@@ -23,13 +23,14 @@ interface BootstrapResponse {
   error?: string;
 }
 
-async function bootstrapFetch(path: string, token: string | null, body?: unknown): Promise<BootstrapResponse & Record<string, unknown>> {
+async function bootstrapFetch(path: string, token: string | null, body?: unknown, signal?: AbortSignal): Promise<BootstrapResponse & Record<string, unknown>> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (token) headers.Authorization = `Bearer ${token}`;
   const resp = await fetch(`/api/bootstrap/${path}`, {
     method: body !== undefined ? "POST" : "GET",
     headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
+    signal,
   });
   const data = (await resp.json().catch(() => ({}))) as Record<string, unknown>;
   if (!resp.ok) {
@@ -73,11 +74,15 @@ export function BootstrapPage() {
   const [tsState, setTsState] = useState<string>("");
   const [tsError, setTsError] = useState<string | null>(null);
   const [tsOptIn, setTsOptIn] = useState(false);
+  const [tsStarting, setTsStarting] = useState(false);
+  const tsAbortRef = useRef<AbortController | null>(null);
+  const tsReqRef = useRef(0);
 
   const token = auth.token;
 
   useEffect(() => () => {
     if (pollRef.current) window.clearInterval(pollRef.current);
+    tsAbortRef.current?.abort();
   }, []);
 
   // Prefill from URL fragment only, strip fragment, require Claim click (no auto-claim)
@@ -255,37 +260,72 @@ export function BootstrapPage() {
   }
 
   async function startTailscale() {
-    if (!token) return;
+    if (!token || tsStarting) return;
+    const req = ++tsReqRef.current;
+    const ctrl = new AbortController();
+    tsAbortRef.current?.abort();
+    tsAbortRef.current = ctrl;
+    const timer = window.setTimeout(() => ctrl.abort(), 35000);
     setTsOptIn(true);
+    setTsStarting(true);
     setTsError(null);
     try {
-      const data = await bootstrapFetch("tailscale/up", token);
+      const data = await bootstrapFetch("tailscale/up", token, undefined, ctrl.signal);
+      if (tsReqRef.current !== req) return; // superseded by "Set up later"
       const url = typeof data.auth_url === "string" ? data.auth_url : "";
       setTsAuthUrl(url || null);
+      if (!url) {
+        // Already enrolled (or nothing to do): confirm via one status poll.
+        try {
+          const st = await bootstrapFetch("tailscale/status", token);
+          if (tsReqRef.current !== req) return;
+          setTsRunning(st.running === true);
+          if (typeof st.ip === "string") setTsIp(st.ip);
+          if (typeof st.state === "string") setTsState(st.state);
+        } catch {}
+      }
       if (pollRef.current) window.clearInterval(pollRef.current);
       pollRef.current = window.setInterval(async () => {
         try {
           const st = await bootstrapFetch("tailscale/status", token);
+          if (tsReqRef.current !== req) return;
           const running = st.running === true;
           const ip = typeof st.ip === "string" ? st.ip : "";
           const state = typeof st.state === "string" ? st.state : "";
           setTsRunning(running);
           setTsIp(ip);
           setTsState(state);
+          if (running && ip && pollRef.current) {
+            window.clearInterval(pollRef.current);
+            pollRef.current = null;
+          }
         } catch (err) {
+          if (tsReqRef.current !== req) return;
           setTsError(err instanceof Error ? err.message : "status failed");
         }
       }, BOOTSTRAP_POLL_MS);
     } catch (err) {
-      setTsError(err instanceof Error ? err.message : "tailscale up failed");
+      if (tsReqRef.current !== req) return;
+      if (err instanceof DOMException && err.name === "AbortError") {
+        setTsError("Timed out waiting for Tailscale — check the server can reach login.tailscale.com, then retry.");
+      } else {
+        setTsError(err instanceof Error ? err.message : "tailscale up failed");
+      }
+    } finally {
+      window.clearTimeout(timer);
+      if (tsReqRef.current === req) setTsStarting(false);
     }
   }
 
   function stopTailscalePoll() {
+    tsReqRef.current++;
+    tsAbortRef.current?.abort();
+    tsAbortRef.current = null;
     if (pollRef.current) {
       window.clearInterval(pollRef.current);
       pollRef.current = null;
     }
+    setTsStarting(false);
     setTsOptIn(false);
   }
 
@@ -332,9 +372,9 @@ export function BootstrapPage() {
           color: var(--ink);
           min-height: 100vh;
         }
-        .bootstrap-onboarding .page-header h1 { font-size: 1.75rem; max-width: 44rem; color: var(--ink); }
+        .bootstrap-onboarding .page-header h1 { font-size: 1.75rem; color: var(--ink); }
         .bootstrap-onboarding .page-header p { color: var(--ink-muted); }
-        .bootstrap-onboarding .section { background: var(--surface); border: 1px solid var(--line); max-width: 44rem; }
+        .bootstrap-onboarding .section { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 20px; max-width: 100%; }
         .bootstrap-onboarding .field input, .bootstrap-onboarding .field textarea { background: var(--paper); color: var(--ink); border-color: var(--line); font-family: "IBM Plex Mono", monospace; }
         .bootstrap-onboarding .button.primary { background: var(--accent); color: #181a1b; border-color: var(--accent); }
         .bootstrap-onboarding .inline-error { color: #e8a0a0; display:flex; gap:6px; align-items:center; font-size:0.9em; }
@@ -354,8 +394,17 @@ export function BootstrapPage() {
         }
         .bootstrap-onboarding .mono { font-family: "IBM Plex Mono", monospace; }
         .bootstrap-onboarding a.mono { overflow-wrap: anywhere; word-break: break-all; }
+        .bootstrap-onboarding .bootstrap-wrap { width: min(100%, 48rem); margin-inline: auto; padding: 24px 20px 48px; display: grid; gap: 20px; }
+        .bootstrap-onboarding .page-header { flex-wrap: wrap; }
+        .bootstrap-onboarding .form-grid { display: grid; gap: 16px; }
+        .bootstrap-onboarding .field { display: grid; gap: 6px; }
+        .bootstrap-onboarding .field > span { color: var(--ink-muted); font-size: 0.875rem; }
+        .bootstrap-onboarding .form-actions { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+        .bootstrap-onboarding .callout { border: 1px solid var(--line); border-radius: 6px; padding: 12px; background: var(--paper); display: grid; gap: 8px; }
+        .bootstrap-onboarding .token-box { display: grid; gap: 8px; padding: 12px; border: 1px dashed var(--line); border-radius: 6px; background: var(--paper); }
       `}</style>
       <div className="onboarding-grid-bg" aria-hidden />
+      <div className="bootstrap-wrap">
       <PageHeader
         eyebrow="Omahab"
         title={step === "claim" ? "Claim your server" : step === "access" ? "Secure access" : "Ready"}
@@ -510,8 +559,8 @@ export function BootstrapPage() {
               <h3 style={{ margin: 0, fontSize: "1rem" }}>Tailscale (optional)</h3>
               {!tsOptIn ? (
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                  <button className="button secondary" type="button" onClick={() => void startTailscale()} disabled={busy}>
-                    Connect Tailscale
+                  <button className="button secondary" type="button" onClick={() => void startTailscale()} disabled={busy || tsStarting}>
+                    {tsStarting ? "Starting…" : "Connect Tailscale"}
                   </button>
                   <span className="muted" style={{ fontSize: "0.85em" }}>Optional — you can connect your tailnet now or later from the dashboard.</span>
                 </div>
@@ -526,8 +575,10 @@ export function BootstrapPage() {
                         </a>
                       </p>
                     </div>
+                  ) : tsStarting ? (
+                    <p className="muted">Contacting the server…</p>
                   ) : (
-                    <p className="muted">Starting tailscale…</p>
+                    <p className="muted">No login URL was needed — checking status…</p>
                   )}
                   <p className="muted">
                     Status: {tsRunning ? "running" : "waiting for approval"}
@@ -577,6 +628,19 @@ export function BootstrapPage() {
               </span>
               <CopyButton text={origin} label="Copy" />
             </div>
+            {token ? (
+              <div className="token-box" style={{ textAlign: "left", maxWidth: "36rem", width: "100%" }}>
+                <strong style={{ fontSize: "0.9em" }}>Sign-in token (save it)</strong>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                  <span className="mono" style={{ overflowWrap: "anywhere", wordBreak: "break-all" }}>{token}</span>
+                  <CopyButton text={token} label="Copy token" />
+                </div>
+                <p className="muted" style={{ fontSize: "0.85em", margin: 0 }}>
+                  This tab stays signed in. Other browsers need this token on the Sign in page. It is also saved on the server
+                  at <code className="mono">~/.config/omahab/token</code>.
+                </p>
+              </div>
+            ) : null}
             <p className="muted" style={{ fontSize: "0.9em", maxWidth: "36rem", overflowWrap: "anywhere" }}>
               Bundled apps can require domain/HTTPS configuration — check the dashboard for “Not configured” hints. Backups are not configured yet; set them up next.
             </p>
@@ -586,6 +650,7 @@ export function BootstrapPage() {
           </div>
         </Section>
       )}
+      </div>
     </div>
   );
 }

@@ -4,30 +4,114 @@
 package tailnet
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
 
+// upMu serializes concurrent `tailscale up` runs: the CLI mints one auth
+// URL per run and concurrent runs race for the login session.
+var upMu sync.Mutex
+
+// urlWait bounds how long Up waits for the auth URL. `tailscale up`
+// --timeout=110s prints the URL within seconds but the process only exits
+// on login or timeout; waiting for exit would hang the bootstrap wizard
+// for ~110s looking dead.
+const urlWait = 30 * time.Second
+
 // Up runs `tailscale up --timeout=110s`, returning the printed auth URL
-// (empty when already enrolled).
+// (empty when already enrolled). It returns as soon as the URL appears
+// instead of waiting for login/timeout; the child keeps running in the
+// background so the pending login stays valid, and is reaped on exit.
 func Up(ctx context.Context) (authURL string, err error) {
-	cctx, cancel := context.WithTimeout(ctx, 110*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(cctx, "tailscale", "up", "--timeout=110s").CombinedOutput()
-	combined := string(out)
-	if u := extractAuthURL(combined); u != "" {
+	if st, serr := Status(ctx); serr == nil && st.Running {
+		return "", nil
+	}
+	upMu.Lock()
+	defer upMu.Unlock()
+	pr, pw, perr := os.Pipe()
+	if perr != nil {
+		return "", fmt.Errorf("tailscale up: pipe: %w", perr)
+	}
+	cmd := exec.Command("tailscale", "up", "--timeout=110s")
+	cmd.Stdout = pw
+	cmd.Stderr = pw
+	if err := cmd.Start(); err != nil {
+		_ = pw.Close()
+		_ = pr.Close()
+		return "", fmt.Errorf("tailscale up: %w", err)
+	}
+	_ = pw.Close() // child holds its own copy; EOF arrives on exit/kill
+	urlCh := make(chan string, 1)
+	doneCh := make(chan struct{})
+	var sb strings.Builder
+	go func() {
+		defer close(doneCh)
+		sc := bufio.NewScanner(pr)
+		for sc.Scan() {
+			line := sc.Text()
+			if sb.Len() < 4096 {
+				sb.WriteString(line)
+				sb.WriteByte('\n')
+			}
+			if u := extractAuthURL(line); u != "" {
+				select {
+				case urlCh <- u:
+				default:
+				}
+			}
+		}
+	}()
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+	timer := time.NewTimer(urlWait)
+	defer timer.Stop()
+	select {
+	case u := <-urlCh:
+		// Leave the child running so the pending login stays valid;
+		// reap it when it exits on its own.
+		go func() {
+			<-waitCh
+			<-doneCh
+			_ = pr.Close()
+		}()
 		return u, nil
+	case err := <-waitCh:
+		<-doneCh
+		_ = pr.Close()
+		out := strings.TrimSpace(sb.String())
+		if err != nil {
+			return "", fmt.Errorf("tailscale up: %v: %s", err, out)
+		}
+		// Clean exit with no URL: already enrolled (or nothing to do).
+		if u := extractAuthURL(out); u != "" {
+			return u, nil
+		}
+		return "", nil
+	case <-timer.C:
+		_ = cmd.Process.Kill()
+		<-waitCh
+		<-doneCh
+		_ = pr.Close()
+		out := strings.TrimSpace(sb.String())
+		if u := extractAuthURL(out); u != "" {
+			return u, nil
+		}
+		return "", fmt.Errorf("tailscale up: timed out waiting for auth URL: %s", truncate(out, 300))
+	case <-ctx.Done():
+		_ = cmd.Process.Kill()
+		<-waitCh
+		<-doneCh
+		_ = pr.Close()
+		return "", fmt.Errorf("tailscale up: %w", ctx.Err())
 	}
-	if err != nil {
-		return "", fmt.Errorf("tailscale up: %v: %s", err, strings.TrimSpace(combined))
-	}
-	// No URL and no error: likely already logged in.
-	return "", nil
 }
 
 // extractAuthURL finds the login.tailscale.com URL in command output.
