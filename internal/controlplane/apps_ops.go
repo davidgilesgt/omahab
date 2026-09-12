@@ -59,6 +59,9 @@ func (b *Backend) UpdateInstance(ctx context.Context, domainName string, assista
 	if domainName == "" {
 		return domain.Instance{}, translateError(store.Validation("domain is required"))
 	}
+	if err := validateInstanceDomain(domainName); err != nil {
+		return domain.Instance{}, translateError(err)
+	}
 	inst, err := b.store.Instance(ctx)
 	if err != nil {
 		return domain.Instance{}, translateError(err)
@@ -82,6 +85,41 @@ func (b *Backend) UpdateInstance(ctx context.Context, domainName string, assista
 		b.publishExposureRefreshIssue(ctx, "after UpdateInstance", err)
 	}
 	return saved, nil
+}
+
+// validateInstanceDomain mirrors internal/exposure validateHostname: lowercase
+// DNS hostname with at least two labels. Single-label and malformed names
+// fail with store.ErrValidation. (exposure.go is read-only here, so the
+// rules are mirrored rather than imported.)
+func validateInstanceDomain(name string) error {
+	if len(name) > 253 {
+		return store.Validationf("domain %q is longer than 253 characters", name)
+	}
+	if strings.ToLower(name) != name {
+		return store.Validationf("domain %q must be lowercase", name)
+	}
+	labels := strings.Split(name, ".")
+	if len(labels) < 2 {
+		return store.Validationf("domain %q needs at least two labels", name)
+	}
+	for _, label := range labels {
+		if label == "" {
+			return store.Validationf("domain %q has an empty label", name)
+		}
+		if len(label) > 63 {
+			return store.Validationf("domain label %q is longer than 63 characters", label)
+		}
+		for i := range len(label) {
+			c := label[i]
+			switch {
+			case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+			case c == '-' && i > 0 && i < len(label)-1:
+			default:
+				return store.Validationf("domain label %q contains invalid character %q", label, string(rune(c)))
+			}
+		}
+	}
+	return nil
 }
 
 func (b *Backend) GetDoctor(ctx context.Context) (*health.Report, error) {

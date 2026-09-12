@@ -87,6 +87,14 @@ func (b *Backend) setupPhaseOIDC(ctx context.Context) error {
 		}
 	}
 	needForgejo := bundleRunning("forgejo")
+	if !needForgejo && b.apps != nil {
+		for _, bd := range b.apps.CatalogBundles() {
+			if bd.ID == "forgejo" && bd.Default {
+				needForgejo = true
+				break
+			}
+		}
+	}
 	needPaperless := bundleRunning("paperless-ngx")
 	needKarakeep := bundleRunning("karakeep")
 	if !needImmich && !needHermes && !needForgejo && !needPaperless && !needKarakeep {

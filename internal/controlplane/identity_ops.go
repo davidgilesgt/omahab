@@ -1,14 +1,14 @@
 package controlplane
 
 import (
-	"github.com/omahab/omahab/internal/apitypes"
-	"github.com/omahab/omahab/internal/companion"
 	"context"
-	"github.com/omahab/omahab/internal/domain"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/omahab/omahab/internal/apitypes"
+	"github.com/omahab/omahab/internal/companion"
+	"github.com/omahab/omahab/internal/domain"
 	"github.com/omahab/omahab/internal/identity"
-	"encoding/json"
 	"github.com/omahab/omahab/internal/providers"
 
 	"database/sql"
@@ -673,6 +673,7 @@ func (b *Backend) DeleteProviderCredential(ctx context.Context, id domain.ID) er
 	}
 	return nil
 }
+
 // reloadLiteLLMGateway restarts the litellm app so a freshly reconciled config
 // file goes live (the gateway never reloads its static config on its own).
 // It is a no-op when the apps service is unavailable (unit tests) or litellm is
@@ -705,6 +706,7 @@ func (b *Backend) reloadLiteLLMGateway(ctx context.Context) error {
 	}
 	return nil
 }
+
 // Model gateway — alias and virtual-key management via providers.Service and GatewayAdmin.
 
 func (b *Backend) ListModelAliases(ctx context.Context) ([]apitypes.ModelAlias, error) {
@@ -1142,10 +1144,17 @@ func (b *Backend) probeAndMarkHealthy(ctx context.Context, provider string) erro
 // Companion / enrollment (Phase 6) — delegating to environments service when available.
 
 func (b *Backend) GetEnrollmentState(ctx context.Context, userID string) (identity.EnrollmentState, error) {
+	u, err := b.GetUser(ctx, domain.ID(strings.TrimSpace(userID)))
+	if err != nil {
+		return identity.EnrollmentState{}, err
+	}
+	if strings.TrimSpace(u.PocketUserID) == "" {
+		return identity.EnrollmentState{}, translateError(store.Validation("user has no linked Pocket ID account"))
+	}
 	if b.pocketClient == nil {
 		return identity.EnrollmentState{}, translateError(fmt.Errorf("%w: identity not configured", ErrNotConfigured))
 	}
-	st, err := b.pocketClient.GetEnrollmentState(ctx, userID)
+	st, err := b.pocketClient.GetEnrollmentState(ctx, u.PocketUserID)
 	if err != nil {
 		return identity.EnrollmentState{}, translateError(err)
 	}

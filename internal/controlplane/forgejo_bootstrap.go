@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -111,15 +112,16 @@ func (b *Backend) runForgejoAdminCommand(ctx context.Context, args ...string) (s
 }
 
 // runNativeForgejoAdmin runs `gitea admin <args>` as the forgejo service
-// user via runuser. Returns an error when the native forgejo binary or
-// user is absent (compose-placed deployments).
+// user via runuser. The server binary is resolved from
+// `systemctl show forgejo.service -p ExecStart` so runuser receives an
+// absolute path (runuser does not search PATH for the target user).
+// Fallbacks are the NixOS wrappers under /run/current-system/sw/bin, with
+// exec.LookPath only as a last resort. An error is returned when no binary
+// or the forgejo user is absent (compose-placed deployments).
 func (b *Backend) runNativeForgejoAdmin(ctx context.Context, args ...string) (string, error) {
-	gitea, err := exec.LookPath("gitea")
+	gitea, err := resolveNativeForgejoBinary(ctx)
 	if err != nil {
-		if _, serr := exec.LookPath("forgejo"); serr != nil {
-			return "", fmt.Errorf("native forgejo binary not found: %w", err)
-		}
-		gitea = "forgejo"
+		return "", err
 	}
 	if _, uerr := user.Lookup("forgejo"); uerr != nil {
 		return "", fmt.Errorf("native forgejo user not found: %w", uerr)
@@ -141,6 +143,74 @@ func (b *Backend) runNativeForgejoAdmin(ctx context.Context, args ...string) (st
 		out = strings.TrimSpace(stderr.String())
 	}
 	return out, nil
+}
+
+// resolveNativeForgejoBinary returns the absolute path of the native forgejo
+// (gitea) server binary, preferring the ExecStart of forgejo.service.
+func resolveNativeForgejoBinary(ctx context.Context) (string, error) {
+	if p := parseForgejoExecStart(forgejoServiceExecStart(ctx)); p != "" {
+		return p, nil
+	}
+	for _, p := range []string{"/run/current-system/sw/bin/gitea", "/run/current-system/sw/bin/forgejo"} {
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p, nil
+		}
+	}
+	if p, err := exec.LookPath("gitea"); err == nil {
+		return p, nil
+	}
+	if p, err := exec.LookPath("forgejo"); err == nil {
+		return p, nil
+	}
+	return "", fmt.Errorf("native forgejo binary not found")
+}
+
+// forgejoServiceExecStart reports the raw ExecStart property of
+// forgejo.service, or "" when systemctl is unavailable.
+func forgejoServiceExecStart(ctx context.Context) string {
+	cmd := exec.CommandContext(ctx, "systemctl", "show", "forgejo.service", "-p", "ExecStart")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		return ""
+	}
+	return out.String()
+}
+
+// parseForgejoExecStart extracts the server binary path from
+// `systemctl show -p ExecStart` output (e.g.
+// "ExecStart={ path=/nix/store/…/bin/gitea ; argv[]=… }").
+// It prefers a binary named gitea/forgejo, else the first absolute path.
+func parseForgejoExecStart(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\n' || r == ';' || r == '{' || r == '}' || r == '='
+	})
+	fallback := ""
+	for _, f := range fields {
+		f = strings.Trim(f, `"'`)
+		if !strings.HasPrefix(f, "/") {
+			continue
+		}
+		// Strip trailing punctuation from argv rendering.
+		f = strings.TrimRight(f, ",;")
+		base := path.Base(f)
+		if base == "gitea" || base == "forgejo" {
+			if st, err := os.Stat(f); err == nil && !st.IsDir() {
+				return f
+			}
+			// Keep the name match even when Stat fails (unit-test
+			// fixtures reference paths that do not exist on disk).
+			return f
+		}
+		if fallback == "" {
+			fallback = f
+		}
+	}
+	return fallback
 }
 
 func redactArgsForLog(args []string) string {
@@ -808,6 +878,7 @@ func (b *Backend) ensureWoodpeckerOAuthApp(ctx context.Context, baseURL, token, 
 // forgejoHTTPClientOverride and forgejoBaseURLOverride are test injectables.
 // They are set via Backend fields for tests.
 var _ = store.ErrNotFound
+
 // ensureHermesForgejoToken creates a limited Forgejo token for the Hermes MCP
 // server (platform-app/hermes_forgejo_token) with scopes
 // read:repository, write:repository, read:issue, write:issue. It reuses the

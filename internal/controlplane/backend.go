@@ -10,22 +10,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
-	"log"
-	"net/http"
-	"net/url"
-	"os"
-	"strings"
-	"sync"
-	"time"
 	"github.com/omahab/omahab/internal/apitypes"
 	"github.com/omahab/omahab/internal/apps"
 	"github.com/omahab/omahab/internal/backups"
 	"github.com/omahab/omahab/internal/cloudflare"
+	"github.com/omahab/omahab/internal/companion"
 	"github.com/omahab/omahab/internal/config"
 	"github.com/omahab/omahab/internal/domain"
 	"github.com/omahab/omahab/internal/emailing"
-	"github.com/omahab/omahab/internal/companion"
 	"github.com/omahab/omahab/internal/events"
 	"github.com/omahab/omahab/internal/exposure"
 	"github.com/omahab/omahab/internal/health"
@@ -41,6 +33,14 @@ import (
 	"github.com/omahab/omahab/internal/store"
 	"github.com/omahab/omahab/internal/syncer"
 	"github.com/omahab/omahab/internal/workspaces"
+	"io/fs"
+	"log"
+	"net/http"
+	"net/url"
+	"os"
+	"strings"
+	"sync"
+	"time"
 )
 
 type Backend struct {
@@ -75,10 +75,10 @@ type Backend struct {
 	apiToken  string
 
 	// extended integrations for dashboard-triggered actions
-	emailRouter     *cloudflare.EmailClient
-	emailPrimary    string
-	emailAlias      string
-	pocketClient    *identity.PocketIDClient
+	emailRouter  *cloudflare.EmailClient
+	emailPrimary string
+	emailAlias   string
+	pocketClient *identity.PocketIDClient
 
 	// setup reconciler single-flight state
 	setupMu      sync.Mutex
@@ -99,9 +99,9 @@ type Backend struct {
 	podmanSocketPath          string
 	woodpeckerHTTPClient      *http.Client
 	woodpeckerBaseURLOverride string
-	forgejoExec                func(context.Context, ...string) (string, error)
-	forgejoBaseURLOverride     string
-	forgejoHTTPClientOverride  *http.Client
+	forgejoExec               func(context.Context, ...string) (string, error)
+	forgejoBaseURLOverride    string
+	forgejoHTTPClientOverride *http.Client
 }
 
 // Options for New
@@ -150,13 +150,13 @@ func New(ctx context.Context, st *store.Store, opts Options) (*Backend, error) {
 		log.Printf("backend: ensure backup.env: %v", err)
 	}
 	b := &Backend{
-		cfg:       opts.Config,
-		store:     st,
-		db:        st.DB(),
-		version:   opts.Version,
-		startedAt: opts.StartedAt,
-		masterKey: mk,
-		apiToken:  tok,
+		cfg:        opts.Config,
+		store:      st,
+		db:         st.DB(),
+		version:    opts.Version,
+		startedAt:  opts.StartedAt,
+		masterKey:  mk,
+		apiToken:   tok,
 		appsRunner: opts.AppsRunner,
 	}
 	if b.startedAt.IsZero() {
@@ -282,8 +282,8 @@ func (b *Backend) initServices(ctx context.Context) error {
 	}
 	appSvc, err := apps.NewService(b.db, apps.Options{
 		Catalog: catalog, Runner: systemdRunner,
-		Events:  newAppsSink(b.events),
-		Env:     domainEnv,
+		Events: newAppsSink(b.events),
+		Env:    domainEnv,
 	})
 	if err != nil {
 		return fmt.Errorf("apps: %w", err)
@@ -941,6 +941,9 @@ func translateError(err error) error {
 	}
 	if errors.Is(err, providers.ErrValidation) {
 		return fmt.Errorf("%w: %v", apitypes.ErrValidation, err)
+	}
+	if errors.Is(err, workspaces.ErrRunnerUnavailable) {
+		return fmt.Errorf("%w: %v", apitypes.ErrServiceUnavailable, err)
 	}
 	msg := strings.ToLower(err.Error())
 	if strings.Contains(msg, "not found") {

@@ -42,6 +42,7 @@ const (
 	DefaultIdleTimeout   = 30 * time.Minute
 	DefaultCapabilityTTL = 5 * time.Minute
 )
+
 // Allowed agents for a workspace.
 // Only omp is supported.
 var allowedAgents = map[string]bool{
@@ -87,7 +88,6 @@ func (s *Service) populateWaitingLine(ctx context.Context, ws *domain.Workspace)
 	}
 	ws.WaitingLine = redactWaitingLine(raw)
 }
-
 
 // BranchCreator is the Forgejo branch creation surface needed by Service.
 type BranchCreator interface {
@@ -157,14 +157,15 @@ type NoopRunner struct{}
 func (NoopRunner) Up(_ context.Context, _ string, _ domain.ID, _, _ string, _ RunnerOpts) error {
 	return nil
 }
-func (NoopRunner) Stop(_ context.Context, _ string) error                              { return nil }
-func (NoopRunner) Delete(_ context.Context, _ string) error                            { return nil }
-func (NoopRunner) Attach(_ context.Context, _ string) error                            { return nil }
-func (NoopRunner) IsRunning(_ context.Context, _ string) (bool, error)                 { return true, nil }
-func (NoopRunner) Send(_ context.Context, _, _ string) error                           { return nil }
-func (NoopRunner) RunPrint(_ context.Context, _, _ string) ([]byte, error)             { return []byte("{}"), nil }
-func (NoopRunner) CapturePane(_ context.Context, _ string) (string, error)             { return "", nil }
-func (NoopRunner) SSHProxy(_ context.Context, _ string) error                          { return nil }
+func (NoopRunner) Stop(_ context.Context, _ string) error                  { return nil }
+func (NoopRunner) Delete(_ context.Context, _ string) error                { return nil }
+func (NoopRunner) Attach(_ context.Context, _ string) error                { return nil }
+func (NoopRunner) IsRunning(_ context.Context, _ string) (bool, error)     { return true, nil }
+func (NoopRunner) Send(_ context.Context, _, _ string) error               { return nil }
+func (NoopRunner) RunPrint(_ context.Context, _, _ string) ([]byte, error) { return []byte("{}"), nil }
+func (NoopRunner) CapturePane(_ context.Context, _ string) (string, error) { return "", nil }
+func (NoopRunner) SSHProxy(_ context.Context, _ string) error              { return nil }
+
 // Service owns workspace lifecycle.
 type Service struct {
 	db     *sql.DB
@@ -212,10 +213,10 @@ var branchRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/\-]*$`)
 
 // CreateInput holds fields for workspace creation.
 type CreateInput struct {
-	ProjectID domain.ID
-	Title     string
+	ProjectID    domain.ID
+	Title        string
 	Instructions string
-	Agent     string
+	Agent        string
 	// DevcontainerSource is "devcontainer" or "default". Empty defaults to "default".
 	DevcontainerSource string
 	// SkipBranchCreate indicates the branch already exists (Step6 PR review).
@@ -296,83 +297,90 @@ func parseRepoRef(cloneURL string) (scm.RepoRef, string, error) {
 // Creation is atomic: if branch creation or Runner.Up fails, the pending row
 // (and any issued credentials) is rolled back and nil is returned with the error.
 func (s *Service) Create(ctx context.Context, in CreateInput) (*domain.Workspace, error) {
+	title := strings.TrimSpace(in.Title)
+	instructions := in.Instructions // preserve as-is, but trim leading/trailing whitespace for empty check?
+	// Validate title (+slug) before project_id so callers get the
+	// field error for the title they typed, not a downstream missing ref.
+	legacyBranch := title == "" && strings.TrimSpace(in.Branch) != "" && !in.SkipBranchCreate
+	if !legacyBranch {
+		if title == "" {
+			return nil, fmt.Errorf("%w: title is required", ErrValidation)
+		}
+		if slugify(title) == "" {
+			return nil, fmt.Errorf("%w: title must contain alphanumeric characters", ErrValidation)
+		}
+	}
 	if strings.TrimSpace(string(in.ProjectID)) == "" {
 		return nil, fmt.Errorf("%w: project_id is required", ErrValidation)
 	}
-	title := strings.TrimSpace(in.Title)
-	instructions := in.Instructions // preserve as-is, but trim leading/trailing whitespace for empty check?
-	// For backward compat, if Title empty but Branch provided (old tests), use Branch as title-derived slug fallback
-	if title == "" {
-		if strings.TrimSpace(in.Branch) != "" && !in.SkipBranchCreate {
-			// Old API using Branch directly: treat Branch as the desired branch and bypass slug generation.
-			// Validate branch directly.
-			branch := strings.TrimSpace(in.Branch)
-			if branch == "." || branch == ".." || strings.Contains(branch, "..") {
-				return nil, fmt.Errorf("%w: branch contains path traversal", ErrValidation)
-			}
-			if !branchRe.MatchString(branch) {
-				return nil, fmt.Errorf("%w: invalid branch name", ErrValidation)
-			}
-			agent := strings.TrimSpace(in.Agent)
-			if agent == "" {
-				agent = "omp"
-			}
-			if !allowedAgents[agent] {
-				return nil, fmt.Errorf("%w: unsupported agent %q", ErrValidation, agent)
-			}
-			devcontainerSource := strings.TrimSpace(in.DevcontainerSource)
-			if devcontainerSource == "" {
-				devcontainerSource = "default"
-			}
-			if devcontainerSource != "default" && devcontainerSource != "devcontainer" {
-				return nil, fmt.Errorf("%w: devcontainer source must be 'default' or 'devcontainer'", ErrValidation)
-			}
-			// Check existing
-			var existingID string
-			err := s.db.QueryRowContext(ctx,
-				`SELECT id FROM workspaces WHERE project_id = ? AND branch = ? AND status IN (?, ?)`,
-				string(in.ProjectID), branch, StatusPending, StatusRunning).Scan(&existingID)
-			if err == nil {
+	if legacyBranch {
+		// Old API using Branch directly: treat Branch as the desired branch and bypass slug generation.
+		// Validate branch directly.
+		branch := strings.TrimSpace(in.Branch)
+		if branch == "." || branch == ".." || strings.Contains(branch, "..") {
+			return nil, fmt.Errorf("%w: branch contains path traversal", ErrValidation)
+		}
+		if !branchRe.MatchString(branch) {
+			return nil, fmt.Errorf("%w: invalid branch name", ErrValidation)
+		}
+		agent := strings.TrimSpace(in.Agent)
+		if agent == "" {
+			agent = "omp"
+		}
+		if !allowedAgents[agent] {
+			return nil, fmt.Errorf("%w: unsupported agent %q", ErrValidation, agent)
+		}
+		devcontainerSource := strings.TrimSpace(in.DevcontainerSource)
+		if devcontainerSource == "" {
+			devcontainerSource = "default"
+		}
+		if devcontainerSource != "default" && devcontainerSource != "devcontainer" {
+			return nil, fmt.Errorf("%w: devcontainer source must be 'default' or 'devcontainer'", ErrValidation)
+		}
+		// Check existing
+		var existingID string
+		err := s.db.QueryRowContext(ctx,
+			`SELECT id FROM workspaces WHERE project_id = ? AND branch = ? AND status IN (?, ?)`,
+			string(in.ProjectID), branch, StatusPending, StatusRunning).Scan(&existingID)
+		if err == nil {
+			return nil, ErrAlreadyExists
+		}
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("check existing workspace: %w", err)
+		}
+		id := newID()
+		now := time.Now().UTC()
+		// Insert with title empty, instructions
+		_, err = s.db.ExecContext(ctx,
+			`INSERT INTO workspaces (id, project_id, branch, title, instructions, agent, devcontainer_source, status, last_active_at, created_at, updated_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, string(in.ProjectID), branch, title, instructions, agent, devcontainerSource, StatusPending,
+			now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
+		)
+		if err != nil {
+			if isUniqueViolation(err) {
 				return nil, ErrAlreadyExists
 			}
-			if err != nil && !errors.Is(err, sql.ErrNoRows) {
-				return nil, fmt.Errorf("check existing workspace: %w", err)
-			}
-			id := newID()
-			now := time.Now().UTC()
-			// Insert with title empty, instructions
-			_, err = s.db.ExecContext(ctx,
-				`INSERT INTO workspaces (id, project_id, branch, title, instructions, agent, devcontainer_source, status, last_active_at, created_at, updated_at)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-				id, string(in.ProjectID), branch, title, instructions, agent, devcontainerSource, StatusPending,
-				now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
-			)
-			if err != nil {
-				if isUniqueViolation(err) {
-					return nil, ErrAlreadyExists
-				}
-				return nil, fmt.Errorf("insert workspace: %w", err)
-			}
-			ws := &domain.Workspace{
-				ID:           domain.ID(id),
-				ProjectID:    in.ProjectID,
-				Branch:       branch,
-				Title:        title,
-				Instructions: instructions,
-				Agent:        agent,
-				Status:       StatusPending,
-				LastActiveAt: now,
-				CreatedAt:    now,
-			}
-			if err := s.runner.Up(ctx, id, in.ProjectID, branch, agent, RunnerOpts{DevcontainerSource: devcontainerSource}); err != nil {
-				return s.rollbackCreate(ctx, id, "", "", fmt.Errorf("runner up: %w", err))
-			}
-			_, _ = s.db.ExecContext(ctx, `UPDATE workspaces SET status = ?, updated_at = ? WHERE id = ?`,
-				StatusRunning, now.Format(time.RFC3339Nano), id)
-			ws.Status = StatusRunning
-			return ws, nil
+			return nil, fmt.Errorf("insert workspace: %w", err)
 		}
-		return nil, fmt.Errorf("%w: title is required", ErrValidation)
+		ws := &domain.Workspace{
+			ID:           domain.ID(id),
+			ProjectID:    in.ProjectID,
+			Branch:       branch,
+			Title:        title,
+			Instructions: instructions,
+			Agent:        agent,
+			Status:       StatusPending,
+			LastActiveAt: now,
+			CreatedAt:    now,
+		}
+		if err := s.runner.Up(ctx, id, in.ProjectID, branch, agent, RunnerOpts{DevcontainerSource: devcontainerSource}); err != nil {
+			return s.rollbackCreate(ctx, id, "", "", fmt.Errorf("runner up: %w", err))
+		}
+		_, _ = s.db.ExecContext(ctx, `UPDATE workspaces SET status = ?, updated_at = ? WHERE id = ?`,
+			StatusRunning, now.Format(time.RFC3339Nano), id)
+		ws.Status = StatusRunning
+		return ws, nil
 	}
 	// Slugify title
 	slug := slugify(title)
@@ -634,6 +642,7 @@ func (s *Service) Get(ctx context.Context, id string) (*domain.Workspace, error)
 	s.populateWaitingLine(ctx, ws)
 	return ws, nil
 }
+
 // List returns all workspaces ordered by creation time.
 func (s *Service) List(ctx context.Context) ([]*domain.Workspace, error) {
 	rows, err := s.db.QueryContext(ctx,
@@ -761,6 +770,7 @@ func (s *Service) SSHProxy(ctx context.Context, id string) error {
 	}
 	return nil
 }
+
 // Send sends a message to the workspace tmux session via the Runner.
 func (s *Service) Send(ctx context.Context, id string, message string) error {
 	ws, err := s.Get(ctx, id)
@@ -994,12 +1004,13 @@ func hashToken(token string) string {
 type wsScanner interface {
 	Scan(dest ...any) error
 }
+
 func scanWorkspace(row wsScanner) (*domain.Workspace, error) {
 	var (
 		id, projectID, branch, title, instructions, agent, status string
-		lastActiveAt, createdAt, updatedAt                         string
-		expiresAt                                                  sql.NullString
-		gatewayKeyID                                               sql.NullString
+		lastActiveAt, createdAt, updatedAt                        string
+		expiresAt                                                 sql.NullString
+		gatewayKeyID                                              sql.NullString
 	)
 	err := row.Scan(&id, &projectID, &branch, &title, &instructions, &agent, &status, &lastActiveAt, &expiresAt, &createdAt, &updatedAt, &gatewayKeyID)
 	if errors.Is(err, sql.ErrNoRows) {

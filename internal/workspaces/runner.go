@@ -3,6 +3,7 @@ package workspaces
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -167,9 +168,15 @@ func (r *DevPodRunner) withDevPodEnv(fn func() error) error {
 }
 
 func (r *DevPodRunner) run(ctx context.Context, name string, args ...string) error {
-	return r.withDevPodEnv(func() error {
+	if err := r.withDevPodEnv(func() error {
 		return r.exec.Run(ctx, name, args...)
-	})
+	}); err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			return fmt.Errorf("%w: %s not found: %v", ErrRunnerUnavailable, name, err)
+		}
+		return err
+	}
+	return nil
 }
 
 func (r *DevPodRunner) output(ctx context.Context, name string, args ...string) ([]byte, error) {
@@ -179,6 +186,9 @@ func (r *DevPodRunner) output(ctx context.Context, name string, args ...string) 
 		out, err = r.exec.Output(ctx, name, args...)
 		return nil
 	})
+	if err != nil && errors.Is(err, exec.ErrNotFound) {
+		return out, fmt.Errorf("%w: %s not found: %v", ErrRunnerUnavailable, name, err)
+	}
 	return out, err
 }
 
@@ -449,7 +459,6 @@ func (r *DevPodRunner) CapturePane(ctx context.Context, workspaceID string) (str
 	}
 	return last, nil
 }
-
 
 // IsRunning reports whether the workspace is running via `devpod status --output json`.
 func (r *DevPodRunner) IsRunning(ctx context.Context, workspaceID string) (bool, error) {
