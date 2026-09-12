@@ -297,7 +297,10 @@ in
       (gate "litellm")
       {
         serviceConfig = {
-          Group = "litellm";
+          # DynamicUser allocates an ephemeral UID and refuses a static
+          # Group= ("already exists"); a static *supplementary* group is
+          # the supported combination for group-readable files.
+          SupplementaryGroups = [ "litellm" ];
           ReadOnlyPaths = [ litellmConfigDir ];
           ExecStartPre = pkgs.writeShellScript "litellm-config-seed" ''
             if [ ! -f "${litellmConfig}" ]; then
