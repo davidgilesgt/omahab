@@ -15,6 +15,15 @@ function sessionToken(): string {
   return sessionStorage.getItem("omahab.session") ?? "";
 }
 
+// Origin handoff: sessionStorage does not cross origins (LAN IP -> tailnet IP
+// -> HTTPS), so carry the panel token in the fragment for auto-auth. Only
+// when a token exists (WAN/VPS or a previously signed-in browser) — in LAN
+// bypass mode there is nothing to carry and the bare URL keeps working.
+function withSessionToken(base: string): string {
+  const t = sessionToken().trim();
+  return t ? `${base}#token=${encodeURIComponent(t)}` : base;
+}
+
 async function copyText(text: string): Promise<boolean> {
   try {
     await navigator.clipboard.writeText(text);
@@ -220,7 +229,7 @@ export function SetupPage() {
       const res = await fetch(`http://${ip}:8484/up`, { cache: "no-store" });
       if (!res.ok) throw new Error(`Tailnet path check failed: HTTP ${res.status}`);
       tailscaleRedirected.current = true;
-      window.location.href = `http://${ip}:8484/#token=${encodeURIComponent(sessionToken())}`;
+      window.location.href = withSessionToken(`http://${ip}:8484/`);
     } catch (err) {
       toast.error(tailnetErrorMessage(err));
     } finally {
@@ -273,7 +282,7 @@ export function SetupPage() {
         if (!res.ok) return;
         if (cancelled || cfRedirected.current) return;
         cfRedirected.current = true;
-        window.location.href = `https://${cfPending}/#token=${encodeURIComponent(sessionToken())}`;
+        window.location.href = withSessionToken(`https://${cfPending}/`);
       } catch {
         // Keep polling until the certificate and DNS settle.
       }
@@ -395,7 +404,7 @@ export function SetupPage() {
       const ip = tailscaleQuery.data?.ip ?? "";
       const host = window.location.hostname;
       if (ip !== "" && host !== ip && window.location.protocol !== "https:") {
-        window.location.href = `http://${ip}:8484/#token=${encodeURIComponent(sessionToken())}`;
+        window.location.href = withSessionToken(`http://${ip}:8484/`);
         return;
       }
       toast.success("LAN dashboard closed — this window should already be on the tailnet address or HTTPS");

@@ -186,8 +186,23 @@ export function LoginPage() {
   const [validating, setValidating] = useState(false);
   const displayError = submitError ?? authError;
 
-  // LAN bypass: no token needed when the server trusts this address.
+  // LAN bypass: no token needed when the server trusts this address. While the
+  // probe is in flight there is nothing to sign into yet — show waiting state
+  // instead of a token form that LAN mode never needs.
   if (token || lanBypass) return <Navigate to={destination} replace />;
+  if (lanBypass === null) {
+    return (
+      <main className="login-page">
+        <section className="login-card" aria-labelledby="login-title">
+          <p className="eyebrow">Private control plane</p>
+          <h1 id="login-title">Sign in to Omahab</h1>
+          <div className="state-message" role="status">
+            <span className="spinner" aria-hidden="true" /> Checking access…
+          </div>
+        </section>
+      </main>
+    );
+  }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();

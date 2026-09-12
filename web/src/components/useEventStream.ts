@@ -123,12 +123,13 @@ function tryPatchCache(ev: ControlEvent, queryClient: QueryClient): boolean {
 
 
 export function useEventStream() {
-  const { client, token } = useAuth();
+  const { client, token, lanBypass } = useAuth();
   const queryClient = useQueryClient();
   const lastIdRef = useRef<string | null>(null);
+  const authorized = token !== null || lanBypass === true;
 
   useEffect(() => {
-    if (!token) return;
+    if (!authorized) return;
 
     const cached = queryClient.getQueryData<ControlEvent[]>(["events"]);
     if (cached && cached.length > 0) lastIdRef.current = cached[0]?.id ?? null;
@@ -178,5 +179,5 @@ export function useEventStream() {
       controller.abort();
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
     };
-  }, [client, token, queryClient]);
+  }, [client, authorized, queryClient]);
 }
