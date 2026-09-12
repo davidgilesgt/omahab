@@ -20,7 +20,7 @@ type webAppDef struct {
 var omahabWebApps = []webAppDef{
 	{Name: "Omahab Photos", Subdomain: "photos", Slug: "photos", Icon: "photo"},
 	{Name: "Omahab Docs", Subdomain: "docs", Slug: "docs", Icon: "document"},
-	{Name: "Omahab Save", Subdomain: "save", Slug: "save", Icon: "bookmark"},
+	{Name: "Omahab Keep", Subdomain: "keep", Slug: "keep", Icon: "bookmark"},
 	{Name: "Omahab AI", Subdomain: "ai", Slug: "ai", Icon: "ai"},
 	{Name: "Omahab Git", Subdomain: "git", Slug: "git", Icon: "git"},
 	{Name: "Omahab CI", Subdomain: "ci", Slug: "ci", Icon: "ci"},
@@ -241,7 +241,7 @@ func desktopIcon(slug string) string {
 		return "image-x-generic"
 	case "docs":
 		return "x-office-document"
-	case "save":
+	case "keep":
 		return "bookmark-new"
 	case "ai":
 		return "applications-science"

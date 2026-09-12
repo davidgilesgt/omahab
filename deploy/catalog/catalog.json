@@ -393,7 +393,7 @@
         "memory_mb": 1024
       },
       "default": true,
-      "route": "save",
+      "route": "keep",
       "dependencies": [
         "caddy",
         "pocket-id"

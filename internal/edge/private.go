@@ -31,8 +31,8 @@ func RenderPrivateConfig(tailnetHost string, routes []exposure.Route) ([]byte, e
 		"photos":   ":8443",
 		"paperless": ":8444", // docs
 		"docs":     ":8444",
-		"karakeep": ":8445", // save
-		"save":     ":8445",
+		"karakeep": ":8445", // keep
+		"keep":     ":8445",
 		"immich":   ":8443",
 		"forgejo":  ":8446", // git
 		"git":      ":8446",

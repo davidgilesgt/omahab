@@ -350,7 +350,7 @@ func (b *Backend) ensurePaperlessOIDC(ctx context.Context, domainName string) er
 
 func (b *Backend) ensureKarakeepOIDC(ctx context.Context, domainName string) error {
 	// NextAuth custom-provider callback path (Karakeep docs).
-	callback := fmt.Sprintf("https://save.%s/api/auth/callback/custom", domainName)
+	callback := fmt.Sprintf("https://keep.%s/api/auth/callback/custom", domainName)
 	clientID, clientSecret, err := b.pocketClient.EnsureOIDCClient(ctx, "karakeep", []string{callback})
 	if err != nil {
 		return fmt.Errorf("ensure oidc client karakeep: %w", err)
@@ -372,7 +372,7 @@ func (b *Backend) ensureKarakeepOIDC(ctx context.Context, domainName string) err
 		return fmt.Errorf("store karakeep_oidc_client_secret: %w", err)
 	}
 	if err := b.writeAppEnv("karakeep", map[string]string{
-		"NEXTAUTH_URL":        "https://save." + domainName,
+		"NEXTAUTH_URL":        "https://keep." + domainName,
 		"OAUTH_PROVIDER_NAME": "Pocket ID",
 		"OAUTH_CLIENT_ID":     clientID,
 		"OAUTH_CLIENT_SECRET": clientSecret,

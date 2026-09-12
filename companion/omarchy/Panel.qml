@@ -341,7 +341,7 @@ Panel {
                 model: [
                   { name: "Photos", icon: "󰋩", app: "photos" },
                   { name: "Docs", icon: "󰈙", app: "docs" },
-                  { name: "Save", icon: "󰆓", app: "save" },
+                  { name: "Keep", icon: "󰆓", app: "keep" },
                   { name: "AI", icon: "󰚩", app: "ai" },
                   { name: "Git", icon: "󰊢", app: "git" },
                   { name: "CI", icon: "󰖬", app: "ci" },
