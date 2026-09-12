@@ -792,15 +792,16 @@ func (b *Backend) ensureForgejoAuthSource(ctx context.Context, domain, clientID,
 }
 
 type oauthAppDTO struct {
-	ID              int64    `json:"id"`
-	Name            string   `json:"name"`
-	ClientID        string   `json:"client_id"`
-	ClientIDAlt     string   `json:"clientId"`
-	ClientSecret    string   `json:"client_secret"`
-	ClientSecretAlt string   `json:"clientSecret"`
-	RedirectURIs    []string `json:"redirect_uris"`
-	RedirectURIsAlt []string `json:"redirectUris"`
-	RedirectURI     string   `json:"redirect_uri"`
+	ID                 int64    `json:"id"`
+	Name               string   `json:"name"`
+	ClientID           string   `json:"client_id"`
+	ClientIDAlt        string   `json:"clientId"`
+	ClientSecret       string   `json:"client_secret"`
+	ClientSecretAlt    string   `json:"clientSecret"`
+	ConfidentialClient bool     `json:"confidential_client"`
+	RedirectURIs       []string `json:"redirect_uris"`
+	RedirectURIsAlt    []string `json:"redirectUris"`
+	RedirectURI        string   `json:"redirect_uri"`
 }
 
 func (d *oauthAppDTO) effectiveClientID() string {
@@ -873,13 +874,22 @@ func (b *Backend) ensureWoodpeckerOAuthApp(ctx context.Context, baseURL, token, 
 		}
 		cid := existing.effectiveClientID()
 		sec := existing.effectiveClientSecret()
-		if hasRedirect && cid != "" && sec != "" {
+		// Woodpecker is a confidential client (authenticates with a secret, no
+		// PKCE support). Forgejo rejects the code exchange with
+		// "invalid_request: PKCE is required for public clients" when the app
+		// is public, so publicity alone forces an update even when the
+		// redirect URI already matches (live 2026-09-12).
+		if hasRedirect && cid != "" && sec != "" && existing.ConfidentialClient {
 			return cid, sec, nil
 		}
-		// Need to update redirect URIs (and possibly get secret)
+		// Need to update redirect URIs (and possibly get secret). Always send
+		// confidential_client: the field defaults to false (public) when
+		// omitted, and the update handler applies it unconditionally, so an
+		// omission would flip a confidential app back to public.
 		payload := map[string]any{
-			"name":          "Woodpecker",
-			"redirect_uris": []string{redirect},
+			"name":                "Woodpecker",
+			"redirect_uris":       []string{redirect},
+			"confidential_client": true,
 		}
 		// Include alternative key for compatibility
 		payload["redirectUris"] = []string{redirect}
@@ -918,10 +928,14 @@ func (b *Backend) ensureWoodpeckerOAuthApp(ctx context.Context, baseURL, token, 
 		}
 		return strings.TrimSpace(cid2), strings.TrimSpace(sec2), nil
 	}
-	// Create new
+	// Create new. confidential_client defaults to false (public) when
+	// omitted, which breaks Woodpecker's secret-based exchange (PKCE
+	// required for public clients). Woodpecker has no PKCE support, so it
+	// must be a confidential client.
 	payload := map[string]any{
-		"name":          "Woodpecker",
-		"redirect_uris": []string{redirect},
+		"name":                "Woodpecker",
+		"redirect_uris":       []string{redirect},
+		"confidential_client": true,
 	}
 	payload["redirectUris"] = []string{redirect}
 	var created oauthAppDTO
