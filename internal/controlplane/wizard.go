@@ -284,6 +284,36 @@ func (b *Backend) ListBackupRepositories(ctx context.Context) ([]backups.Reposit
 	return b.backups.Repositories(ctx)
 }
 
+// validBackupUsername reports whether s is safe to embed in the sftp URL
+// userinfo (Hetzner Storage Box account, e.g. u123456 or u123456-sub1).
+func validBackupUsername(s string) bool {
+	if s == "" || len(s) > 64 {
+		return false
+	}
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// validBackupHost reports whether s is a bare hostname/IP safe to embed in
+// the sftp URL host (no userinfo, port, path, or query smuggling).
+func validBackupHost(s string) bool {
+	if s == "" || len(s) > 253 {
+		return false
+	}
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 // CreateBackupRepository stores the credentials via the secrets service
 // and configures the repository via SecretRef; enables the timers.
 // It supports two forms:
@@ -314,6 +344,12 @@ func (b *Backend) CreateBackupRepository(ctx context.Context, req apitypes.Creat
 		}
 		if host == "" {
 			return backups.Repository{}, fmt.Errorf("%w: host is required for Hetzner", store.ErrValidation)
+		}
+		if !validBackupUsername(username) {
+			return backups.Repository{}, fmt.Errorf("%w: invalid username for Hetzner (letters, digits, '.', '_', '-' only)", store.ErrValidation)
+		}
+		if !validBackupHost(host) {
+			return backups.Repository{}, fmt.Errorf("%w: invalid host for Hetzner (bare hostname or IP only)", store.ErrValidation)
 		}
 		if strings.TrimSpace(subPass) == "" {
 			return backups.Repository{}, fmt.Errorf("%w: sub_account_password is required for Hetzner", store.ErrValidation)
@@ -430,7 +466,7 @@ func (b *Backend) CreateBackupRepository(ctx context.Context, req apitypes.Creat
 		},
 	})
 	if err != nil {
-		return backups.Repository{}, err
+		return backups.Repository{}, translateError(err)
 	}
 	b.enableBackupTimers(ctx)
 	// After creation run first backup immediately then verify so recovery_tested passes day one.

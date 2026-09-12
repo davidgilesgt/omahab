@@ -3,6 +3,8 @@ package apitypes
 import (
 	"errors"
 	"net/http"
+
+	"github.com/omahab/omahab/internal/backups"
 )
 
 const (
@@ -51,13 +53,13 @@ func httpStatus(err error) int {
 	if errors.As(err, &ae) {
 		return ae.HTTPStatus
 	}
-	if errors.Is(err, ErrNotFound) {
+	if errors.Is(err, ErrNotFound) || errors.Is(err, backups.ErrNotFound) {
 		return http.StatusNotFound
 	}
-	if errors.Is(err, ErrAlreadyExists) || errors.Is(err, ErrConflict) {
+	if errors.Is(err, ErrAlreadyExists) || errors.Is(err, ErrConflict) || errors.Is(err, backups.ErrConflict) || errors.Is(err, backups.ErrOperationInProgress) {
 		return http.StatusConflict
 	}
-	if errors.Is(err, ErrValidation) {
+	if errors.Is(err, ErrValidation) || errors.Is(err, backups.ErrInvalid) {
 		return http.StatusBadRequest
 	}
 	if errors.Is(err, ErrUnauthorized) {
@@ -78,13 +80,13 @@ func errorCode(err error) string {
 	if errors.As(err, &ae) {
 		return ae.Code
 	}
-	if errors.Is(err, ErrNotFound) {
+	if errors.Is(err, ErrNotFound) || errors.Is(err, backups.ErrNotFound) {
 		return CodeNotFound
 	}
-	if errors.Is(err, ErrAlreadyExists) || errors.Is(err, ErrConflict) {
+	if errors.Is(err, ErrAlreadyExists) || errors.Is(err, ErrConflict) || errors.Is(err, backups.ErrConflict) || errors.Is(err, backups.ErrOperationInProgress) {
 		return CodeConflict
 	}
-	if errors.Is(err, ErrValidation) {
+	if errors.Is(err, ErrValidation) || errors.Is(err, backups.ErrInvalid) {
 		return CodeBadRequest
 	}
 	if errors.Is(err, ErrUnauthorized) {

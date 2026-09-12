@@ -752,12 +752,13 @@ in
       cfg.package
       omahabOncePkg
       restic
+      postgresql
       git
       tailscale
       util-linux
       devpod
       tmux
     ];
-    systemd.services.omahabd.path = [ omahabOncePkg pkgs.tailscale pkgs.docker pkgs.systemd pkgs.restic pkgs.nftables pkgs.util-linux ];
+    systemd.services.omahabd.path = [ omahabOncePkg pkgs.tailscale pkgs.docker pkgs.systemd pkgs.restic pkgs.postgresql pkgs.nftables pkgs.util-linux ];
   };
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
+	"path/filepath"
 	"strings"
 )
 
@@ -16,6 +18,9 @@ func (s *Service) Configure(ctx context.Context, req ConfigureRequest) (Reposito
 	req.Location = strings.TrimSpace(req.Location)
 	if req.Location == "" {
 		return Repository{}, fmt.Errorf("%w: location is required", ErrInvalid)
+	}
+	if err := validateLocation(req.Location); err != nil {
+		return Repository{}, err
 	}
 	if req.SecretRef.ID == "" {
 		return Repository{}, fmt.Errorf("%w: secret_ref.id is required", ErrInvalid)
@@ -68,6 +73,42 @@ func (s *Service) Configure(ctx context.Context, req ConfigureRequest) (Reposito
 	return repo, nil
 }
 
+// validateLocation rejects anything that is not a restic backend location:
+// an sftp/rclone/rest/s3/b2/azure/gs backend reference or an absolute local
+// path. Bare words, relative paths, and unknown schemes are rejected with
+// ErrInvalid so misconfiguration surfaces at configure time instead of at
+// the first backup run.
+func validateLocation(loc string) error {
+	if filepath.IsAbs(loc) {
+		return nil
+	}
+	u, err := url.Parse(loc)
+	if err != nil || u.Scheme == "" {
+		return fmt.Errorf("%w: unsupported location %q (use sftp://, s3:, rest:, rclone:, b2:, azure:, gs:, or an absolute local path)", ErrInvalid, loc)
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "sftp":
+		// URL form (sftp://[user@]host[:port]/path) needs a host; restic's
+		// native form (sftp:user@host:path) carries the target opaquely.
+		if strings.HasPrefix(strings.ToLower(loc), "sftp://") {
+			if u.Host == "" {
+				return fmt.Errorf("%w: invalid sftp location %q: host is required", ErrInvalid, loc)
+			}
+			return nil
+		}
+		if strings.TrimSpace(u.Opaque) == "" {
+			return fmt.Errorf("%w: invalid sftp location %q", ErrInvalid, loc)
+		}
+		return nil
+	case "s3", "rest", "rclone", "b2", "azure", "gs":
+		if strings.TrimSpace(loc[len(u.Scheme)+1:]) == "" {
+			return fmt.Errorf("%w: invalid location %q: repository path is required", ErrInvalid, loc)
+		}
+		return nil
+	default:
+		return fmt.Errorf("%w: unsupported location %q (use sftp://, s3:, rest:, rclone:, b2:, azure:, gs:, or an absolute local path)", ErrInvalid, loc)
+	}
+}
 
 // Repositories lists configured backup repositories.
 func (s *Service) Repositories(ctx context.Context) ([]Repository, error) {
