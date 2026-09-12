@@ -9,7 +9,7 @@ fail=0
 pass() { echo "PASS: $*"; }
 fail_check() { echo "FAIL: $*" >&2; fail=1; }
 
-bash -n scripts/build.sh scripts/check.sh scripts/install-disk.sh && pass "bash syntax" || fail_check "bash syntax"
+bash -n scripts/build.sh scripts/check.sh scripts/install-disk.sh scripts/e2e-iso-install.sh && pass "bash syntax" || fail_check "bash syntax"
 
 # Config defaults: loopback standalone, wildcard via the NixOS module.
 grep -q 'DefaultListen.*127\.0\.0\.1' internal/config/config.go && pass "loopback API default" || fail_check "loopback API default"

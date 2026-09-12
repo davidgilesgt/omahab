@@ -12,3 +12,8 @@
 - Message: one short summary line in repo style (see `git log --oneline`); body only if the why isn't obvious.
 - Gate before every commit: `bash scripts/check.sh` (needs go+npm on PATH — use `nix develop` if missing). For Go changes also `nix build .#checks.x86_64-linux.go-vet .#checks.x86_64-linux.go-test --print-build-logs`.
 - Never commit artifacts, `.env*`, `*.sqlite`, or root binaries (check.sh enforces most of this).
+
+## VM testing — E2E ISO harness is the default
+- When asked to test in a VM, run `scripts/e2e-iso-install.sh`: builds the ISO, installs it onto a fresh VM disk, boots the installed system, probes the setup flow. Never substitute `nix run .#vm` or the NixOS unit tests — those skip the ISO/install path.
+- Freshness is mandatory: the VM disk is always recreated, and the ISO is rebuilt whenever HEAD moved since the last run (marker in `dist/e2e/`; the script enforces this even with `--skip-build`). When new commits land, re-run the harness from scratch — never reuse a booted VM or a stale ISO across commits, and never ask whether to recreate.
+- Harness state (disk, logs, markers) lives under `dist/e2e/`; `--keep` preserves the disk for debugging, default cleans it.
