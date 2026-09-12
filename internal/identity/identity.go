@@ -67,7 +67,11 @@ type PocketID interface {
 	// EnsureOIDCClientGroupAccess idempotently ensures that only the named groups have access to the given OIDC client.
 	// It appends the client to allowed groups without clobbering other clients, and ensures excluded default groups (guests) do not have access.
 	EnsureOIDCClientGroupAccess(ctx context.Context, clientID string, groupNames []string) error
+	// EnsureGroupCustomClaim idempotently ensures a custom OIDC claim key/value on the named group,
+	// preserving the group's other custom claims. Group claims ride on the profile scope.
+	EnsureGroupCustomClaim(ctx context.Context, groupName, key, value string) error
 }
+
 // EventRecorder records security events for audit.
 // If nil, the service falls back to the local identity_security_events table.
 type EventRecorder interface {

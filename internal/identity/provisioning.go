@@ -293,3 +293,51 @@ func (c *PocketIDClient) EnsureOIDCClientGroupAccess(ctx context.Context, client
 	}
 	return nil
 }
+
+// EnsureGroupCustomClaim idempotently ensures custom claim key=value on the
+// named group, preserving the group's other custom claims (Pocket ID's PUT
+// is a replacement set: omitted keys are deleted, so the existing set is
+// read first and merged). Group claims are emitted with the profile scope.
+func (c *PocketIDClient) EnsureGroupCustomClaim(ctx context.Context, groupName, key, value string) error {
+	groupName = strings.TrimSpace(groupName)
+	key = strings.TrimSpace(key)
+	if groupName == "" {
+		return store.Validation("groupName is required")
+	}
+	if key == "" {
+		return store.Validation("claim key is required")
+	}
+	if err := c.ensureConfigured(); err != nil {
+		return err
+	}
+	groups, err := c.EnsureGroups(ctx, []string{groupName})
+	if err != nil {
+		return err
+	}
+	if len(groups) == 0 {
+		return fmt.Errorf("pocket-id ensure group %q: no result", groupName)
+	}
+	var full pocketUserGroupDto
+	if err := c.doJSON(ctx, http.MethodGet, "/api/user-groups/"+url.PathEscape(groups[0].ID), nil, &full); err != nil {
+		return err
+	}
+	merged := make([]map[string]string, 0, len(full.CustomClaims)+1)
+	present := false
+	for _, cl := range full.CustomClaims {
+		if strings.TrimSpace(cl.Key) == "" {
+			continue
+		}
+		if cl.Key == key {
+			present = true
+			if cl.Value == value {
+				return nil
+			}
+			cl.Value = value
+		}
+		merged = append(merged, map[string]string{"key": cl.Key, "value": cl.Value})
+	}
+	if !present {
+		merged = append(merged, map[string]string{"key": key, "value": value})
+	}
+	return c.doJSON(ctx, http.MethodPut, "/api/custom-claims/user-group/"+url.PathEscape(groups[0].ID), merged, nil)
+}

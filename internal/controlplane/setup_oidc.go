@@ -657,6 +657,13 @@ func writeImmichOAuthConfig(path, domainName, clientID, clientSecret string) err
 			"mobileOverrideEnabled":   true,
 			"mobileRedirectUri":       "https://photos." + domainName + "/api/oauth/mobile-redirect",
 			"accountManagementUrl":    "https://id." + domainName + "/settings/account",
+			// Pocket ID emits the admins group's custom claim with the
+			// profile scope; Immich grants admin when the role claim
+			// contains "admin" and syncs it on every OAuth login, so the
+			// owner stays admin regardless of login order. Without this
+			// the first OAuth user registers as a non-admin and the
+			// system is left with no administrator.
+			"roleClaim": "immich_role",
 		},
 		"passwordLogin": map[string]any{"enabled": false},
 		"server":        map[string]any{"externalDomain": "https://photos." + domainName},
@@ -694,6 +701,17 @@ func (b *Backend) ensureImmichOIDC(ctx context.Context, domainName string) error
 	}
 	if err := upsertSecret(ctx, b.secrets, "platform-app", "immich_oidc_client_secret", clientSecret); err != nil {
 		return fmt.Errorf("store immich_oidc_client_secret: %w", err)
+	}
+	// Only admins and members may register via OAuth; guests must never
+	// reach Immich's auto-register.
+	if err := b.pocketClient.EnsureOIDCClientGroupAccess(ctx, clientID, []string{"admins", "members"}); err != nil {
+		return fmt.Errorf("ensure immich group access: %w", err)
+	}
+	// Map Pocket ID admins to Immich admins via the role claim pinned in
+	// writeImmichOAuthConfig. Immich re-syncs isAdmin from the claim on
+	// every OAuth login, so admin is order-independent.
+	if err := b.pocketClient.EnsureGroupCustomClaim(ctx, "admins", "immich_role", "admin"); err != nil {
+		return fmt.Errorf("ensure immich admin claim: %w", err)
 	}
 	path := immichConfigPath(b.cfg.DataDir)
 	if err := writeImmichOAuthConfig(path, domainName, clientID, clientSecret); err != nil {

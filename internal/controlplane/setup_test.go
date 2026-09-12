@@ -473,9 +473,10 @@ func TestWriteImmichOAuthConfig(t *testing.T) {
 	if oauth["enabled"] != true || oauth["clientId"] != "cid" || oauth["issuerUrl"] != "https://id.omahab.com" {
 		t.Fatalf("oauth = %+v", oauth)
 	}
-	pw, _ := cfg["passwordLogin"].(map[string]any)
-	if pw["enabled"] != false {
-		t.Fatalf("passwordLogin = %+v", pw)
+	// Pocket ID admins must map to Immich admins or the first OAuth
+	// registration lands as a non-admin and the system has no administrator.
+	if oauth["roleClaim"] != "immich_role" {
+		t.Fatalf("roleClaim = %v, want immich_role", oauth["roleClaim"])
 	}
 }
 
@@ -483,6 +484,8 @@ func TestSetupPhaseOIDCEnsuresImmichClient(t *testing.T) {
 	ctx := context.Background()
 	var createdName string
 	var createdCallbacks []any
+	var allowedClients []any
+	var groupClaims []map[string]string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -493,6 +496,17 @@ func TestSetupPhaseOIDCEnsuresImmichClient(t *testing.T) {
 				_ = json.NewEncoder(w).Encode([]any{})
 				return
 			}
+		case r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/allowed-oidc-clients"):
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if ids, ok := body["oidcClientIds"].([]any); ok {
+				for _, id := range ids {
+					allowedClients = append(allowedClients, id)
+				}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/api/custom-claims/user-group/"):
+			_ = json.NewDecoder(r.Body).Decode(&groupClaims)
 			_ = json.NewEncoder(w).Encode([]any{})
 		case strings.Contains(r.URL.Path, "/api/user-groups"):
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
@@ -557,6 +571,28 @@ func TestSetupPhaseOIDCEnsuresImmichClient(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `"enabled": true`) || !strings.Contains(string(raw), "immich-client") {
 		t.Fatalf("config = %s", raw)
+	}
+	// The immich client must be group-restricted to admins+members so a
+	// guest can never claim first-login admin via auto-register.
+	allowed := false
+	for _, c := range allowedClients {
+		if c == "immich-client" {
+			allowed = true
+		}
+	}
+	if !allowed {
+		t.Fatalf("immich client was not granted group access, allowed = %v", allowedClients)
+	}
+	// Pocket ID admins must carry immich_role=admin so the owner's first
+	// OAuth login registers as the Immich administrator.
+	adminClaim := false
+	for _, m := range groupClaims {
+		if m["key"] == "immich_role" && m["value"] == "admin" {
+			adminClaim = true
+		}
+	}
+	if !adminClaim {
+		t.Fatalf("admins group missing immich_role=admin claim, claims = %v", groupClaims)
 	}
 }
 

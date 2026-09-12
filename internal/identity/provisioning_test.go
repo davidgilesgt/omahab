@@ -439,6 +439,109 @@ func TestEnsureGroupAndUpdateAppAccess(t *testing.T) {
 	})
 }
 
+func TestEnsureGroupCustomClaim(t *testing.T) {
+	t.Run("already set is a no-op", func(t *testing.T) {
+		c, srv := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/api/user-groups":
+				json.NewEncoder(w).Encode(paginatedGroupsMinimalDto{Data: []pocketUserGroupMinimalDto{
+					{ID: "g1", Name: "admins", FriendlyName: "admins"},
+				}})
+			case r.Method == http.MethodGet && r.URL.Path == "/api/user-groups/g1":
+				json.NewEncoder(w).Encode(pocketUserGroupDto{
+					ID: "g1", Name: "admins",
+					CustomClaims: []pocketCustomClaimDto{{Key: "immich_role", Value: "admin"}},
+				})
+			default:
+				t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+				http.NotFound(w, r)
+			}
+		})
+		defer srv.Close()
+		if err := c.EnsureGroupCustomClaim(context.Background(), "admins", "immich_role", "admin"); err != nil {
+			t.Fatalf("EnsureGroupCustomClaim: %v", err)
+		}
+	})
+	t.Run("missing claim is merged and stored", func(t *testing.T) {
+		var putBody []map[string]string
+		c, srv := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/api/user-groups":
+				json.NewEncoder(w).Encode(paginatedGroupsMinimalDto{Data: []pocketUserGroupMinimalDto{
+					{ID: "g1", Name: "admins", FriendlyName: "admins"},
+				}})
+			case r.Method == http.MethodGet && r.URL.Path == "/api/user-groups/g1":
+				json.NewEncoder(w).Encode(pocketUserGroupDto{
+					ID: "g1", Name: "admins",
+					CustomClaims: []pocketCustomClaimDto{{Key: "other", Value: "x"}},
+				})
+			case r.Method == http.MethodPut && r.URL.Path == "/api/custom-claims/user-group/g1":
+				_ = json.NewDecoder(r.Body).Decode(&putBody)
+				json.NewEncoder(w).Encode([]pocketCustomClaimDto{})
+			default:
+				t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+				http.NotFound(w, r)
+			}
+		})
+		defer srv.Close()
+		if err := c.EnsureGroupCustomClaim(context.Background(), "admins", "immich_role", "admin"); err != nil {
+			t.Fatalf("EnsureGroupCustomClaim: %v", err)
+		}
+		got := map[string]string{}
+		for _, m := range putBody {
+			got[m["key"]] = m["value"]
+		}
+		if got["immich_role"] != "admin" || got["other"] != "x" {
+			t.Fatalf("PUT must preserve other claims and set immich_role=admin, got %v", putBody)
+		}
+	})
+	t.Run("stale value is updated", func(t *testing.T) {
+		var putBody []map[string]string
+		c, srv := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/api/user-groups":
+				json.NewEncoder(w).Encode(paginatedGroupsMinimalDto{Data: []pocketUserGroupMinimalDto{
+					{ID: "g1", Name: "admins", FriendlyName: "admins"},
+				}})
+			case r.Method == http.MethodGet && r.URL.Path == "/api/user-groups/g1":
+				json.NewEncoder(w).Encode(pocketUserGroupDto{
+					ID: "g1", Name: "admins",
+					CustomClaims: []pocketCustomClaimDto{{Key: "immich_role", Value: "user"}},
+				})
+			case r.Method == http.MethodPut && r.URL.Path == "/api/custom-claims/user-group/g1":
+				_ = json.NewDecoder(r.Body).Decode(&putBody)
+				json.NewEncoder(w).Encode([]pocketCustomClaimDto{})
+			default:
+				t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+				http.NotFound(w, r)
+			}
+		})
+		defer srv.Close()
+		if err := c.EnsureGroupCustomClaim(context.Background(), "admins", "immich_role", "admin"); err != nil {
+			t.Fatalf("EnsureGroupCustomClaim: %v", err)
+		}
+		if len(putBody) != 1 || putBody[0]["key"] != "immich_role" || putBody[0]["value"] != "admin" {
+			t.Fatalf("PUT must overwrite stale value without duplicating, got %v", putBody)
+		}
+	})
+	t.Run("validation", func(t *testing.T) {
+		c, srv := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			http.NotFound(w, r)
+		})
+		defer srv.Close()
+		if err := c.EnsureGroupCustomClaim(context.Background(), "", "k", "v"); err == nil {
+			t.Fatalf("want error for empty group")
+		}
+		if err := c.EnsureGroupCustomClaim(context.Background(), "admins", "", "v"); err == nil {
+			t.Fatalf("want error for empty key")
+		}
+		bare := &PocketIDClient{}
+		if err := bare.EnsureGroupCustomClaim(context.Background(), "admins", "k", "v"); err == nil || !isErrNotConfigured(err) {
+			t.Fatalf("want not configured, got %v", err)
+		}
+	})
+}
+
 func TestCreateUserWithInvite(t *testing.T) {
 	c, srv := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/api/users" {

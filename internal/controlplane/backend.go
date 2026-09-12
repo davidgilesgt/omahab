@@ -1230,6 +1230,10 @@ func (n *noopPocketID) EnsureOIDCClientGroupAccess(ctx context.Context, clientID
 	return fmt.Errorf("%w: PocketID not configured", ErrNotConfigured)
 }
 
+func (n *noopPocketID) EnsureGroupCustomClaim(ctx context.Context, groupName, key, value string) error {
+	return fmt.Errorf("%w: PocketID not configured", ErrNotConfigured)
+}
+
 // additional sink wrappers to satisfy specific types
 type knowledgeSink struct{ *domainEventSink }
 

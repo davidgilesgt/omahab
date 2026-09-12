@@ -220,12 +220,19 @@ type pocketUserGroupMinimalDto struct {
 }
 
 type pocketUserGroupDto struct {
-	ID                 string                `json:"id"`
-	Name               string                `json:"name"`
-	FriendlyName       string                `json:"friendlyName"`
-	Users              []pocketUserDto       `json:"users"`
-	AllowedOidcClients []pocketOidcClientDto `json:"allowedOidcClients"`
+	ID                 string                 `json:"id"`
+	Name               string                 `json:"name"`
+	FriendlyName       string                 `json:"friendlyName"`
+	Users              []pocketUserDto        `json:"users"`
+	AllowedOidcClients []pocketOidcClientDto  `json:"allowedOidcClients"`
+	CustomClaims       []pocketCustomClaimDto `json:"customClaims"`
 }
+
+type pocketCustomClaimDto struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
 type pocketOidcClientDto struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
