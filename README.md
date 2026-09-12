@@ -18,6 +18,7 @@ No service is open to the internet by default. Your data stays on your machine.
 | --- | --- |
 | Operating system | NixOS (the Omahab module builds the whole system from the flake) |
 | CPU | amd64 (x86_64) or arm64 (aarch64) |
+| System disk | 40 GB or more (a 20 GB disk fills during install; verified by `scripts/e2e-iso-install.sh`) |
 | Network | Internet access with working DNS |
 | Access | The machine's console (first boot) and an SSH session afterwards |
 | Administrator key | One SSH public key for the first user |

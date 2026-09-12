@@ -10,6 +10,19 @@ pass() { echo "PASS: $*"; }
 fail_check() { echo "FAIL: $*" >&2; fail=1; }
 
 bash -n scripts/build.sh scripts/check.sh scripts/install-disk.sh scripts/e2e-iso-install.sh && pass "bash syntax" || fail_check "bash syntax"
+# Runtime `set -u` safety net that bash -n cannot see: every variable used in
+# a script must be assigned (or guarded). Caught two clobbered assignments.
+unbound=0
+for s in scripts/build.sh scripts/check.sh scripts/install-disk.sh scripts/e2e-iso-install.sh; do
+  while IFS= read -r v; do
+    case "$v" in _|E2E_*) continue ;; esac
+    if ! grep -qE "(^|[^A-Za-z0-9_])${v}=" "$s" && ! grep -qE "\\$\\{${v}:[-=?+#]" "$s"; then
+      echo "FAIL: $s uses \$$v without assignment" >&2
+      unbound=1
+    fi
+  done < <(grep -oE '\$[A-Z_][A-Z_0-9]*' "$s" | tr -d '$' | sort -u)
+done
+[[ $unbound -eq 0 ]] && pass "no unbound vars" || fail_check "unbound vars"
 
 # Config defaults: loopback standalone, wildcard via the NixOS module.
 grep -q 'DefaultListen.*127\.0\.0\.1' internal/config/config.go && pass "loopback API default" || fail_check "loopback API default"
