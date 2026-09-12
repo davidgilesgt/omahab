@@ -70,7 +70,20 @@ func (b *Backend) setupPhaseOIDC(ctx context.Context) error {
 		return false
 	}
 	needImmich := bundleRunning("immich")
+	// Hermes defers to dependent_apps (after OIDC), so it is never running
+	// when this phase first executes. Treat it as needed when it is a
+	// default catalog bundle, otherwise the OIDC client_id is never ensured
+	// and hermes can never start (circular needHermes=false -> no client_id
+	// -> no env -> never runs).
 	needHermes := bundleRunning("hermes")
+	if !needHermes && b.apps != nil {
+		for _, bd := range b.apps.CatalogBundles() {
+			if bd.ID == "hermes" && bd.Default {
+				needHermes = true
+				break
+			}
+		}
+	}
 	needForgejo := bundleRunning("forgejo")
 	needPaperless := bundleRunning("paperless-ngx")
 	needKarakeep := bundleRunning("karakeep")

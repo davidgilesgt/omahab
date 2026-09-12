@@ -134,6 +134,10 @@ func (b *Backend) renderHermesKeyEnv(ctx context.Context, token string) error {
 		return fmt.Errorf("write hermes appenv: %w", err)
 	}
 	log.Printf("setup dependent_apps: hermes env rendered")
+	// Restart so a new LiteLLM token is picked up (mirrors renderHermesConfig).
+	ctx2, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = exec.CommandContext(ctx2, "systemctl", "restart", "docker-hermes.service").Run()
 	return nil
 }
 

@@ -613,7 +613,7 @@ Panel {
               }
             }
           }
-
+          Text {
             visible: client.clientdReachable && !client.serverOnline
             width: parent.width
             text: "Only Diagnose is available until the private connection is ready."

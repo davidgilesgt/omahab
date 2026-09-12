@@ -587,6 +587,13 @@ func (b *Backend) setupPhaseSecrets(ctx context.Context) error {
 				_ = upsertSecret(ctx, b.secrets, "platform-app", "pocketid_api_key", generateRandomBase64URL(32))
 			}
 		}
+		// Pocket ID refuses to start without ENCRYPTION_KEY (>=16 bytes);
+		// without it pocket-id stays failed and the admin-invite gate never opens.
+		if _, err := b.secrets.RevealByName(ctx, "platform-app", "pocketid_encryption_key"); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				_ = upsertSecret(ctx, b.secrets, "platform-app", "pocketid_encryption_key", generateRandomBase64URL(32))
+			}
+		}
 		if _, err := b.secrets.RevealByName(ctx, "platform-app", "hermes_api_server_key"); err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				_ = upsertSecret(ctx, b.secrets, "platform-app", "hermes_api_server_key", generateRandomBase64URL(32))
@@ -934,10 +941,12 @@ func (b *Backend) setupPhaseCoreApps(ctx context.Context) error {
 		}
 		return nil
 	}
-	// Defer woodpecker to dependent_apps phase after OIDC so Forgejo OAuth exists.
+	// Defer woodpecker and hermes to dependent_apps phase after OIDC:
+	// woodpecker needs the Forgejo OAuth app, hermes needs the OIDC
+	// client_id plus the LiteLLM virtual key in its env.
 	coreBundles := make([]apps.Bundle, 0, len(defaultBundles))
 	for _, bd := range defaultBundles {
-		if bd.ID == "woodpecker" {
+		if bd.ID == "woodpecker" || bd.ID == "hermes" {
 			continue
 		}
 		coreBundles = append(coreBundles, bd)
@@ -1023,18 +1032,20 @@ func (b *Backend) renderNativeAppEnv(ctx context.Context, dnsToken, domainName s
 	return nil
 }
 
-// Phase 5b: Dependent apps — Woodpecker after OIDC
+// Phase 5b: Dependent apps — Woodpecker and Hermes after OIDC
 
 func (b *Backend) setupPhaseDependentApps(ctx context.Context) error {
 	if b.apps == nil {
 		return fmt.Errorf("apps not configured")
 	}
 	var woodpeckerBundle *apps.Bundle
+	woodpeckerSkipped := false
 	for _, bd := range b.apps.CatalogBundles() {
 		if bd.ID == "woodpecker" {
 			if !bd.Default {
 				log.Printf("setup dependent_apps: woodpecker not default, skipping")
-				return nil
+				woodpeckerSkipped = true
+				break
 			}
 			c := bd
 			woodpeckerBundle = &c
@@ -1042,8 +1053,11 @@ func (b *Backend) setupPhaseDependentApps(ctx context.Context) error {
 		}
 	}
 	if woodpeckerBundle == nil {
-		log.Printf("setup dependent_apps: woodpecker bundle not found, skipping")
-		return nil
+		if !woodpeckerSkipped {
+			log.Printf("setup dependent_apps: woodpecker bundle not found, skipping")
+		}
+		// Woodpecker skipped, but hermes still needs its key + install.
+		return b.ensureHermesDependentApp(ctx)
 	}
 	dir := filepath.Join(b.cfg.StateDir, "secrets")
 	if strings.TrimSpace(b.cfg.StateDir) == "" {
@@ -1131,12 +1145,57 @@ func (b *Backend) setupPhaseDependentApps(ctx context.Context) error {
 		}
 	}
 	log.Printf("setup dependent_apps: woodpecker server and agent healthy")
-
 	// Hermes needs a real LiteLLM virtual key (OwnerKindHermes) issued
 	// once LiteLLM is healthy; it replaces the placeholder secret file.
+	// Afterwards the hermes bundle is installed/started now that the OIDC
+	// client_id and LiteLLM key exist in its env.
+	if err := b.ensureHermesDependentApp(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ensureHermesDependentApp issues the Hermes LiteLLM virtual key (rendering
+// env + config) and then installs/starts the hermes bundle. Hermes health is
+// tolerated: install/start failure only warns, it never hard-fails setup.
+// Woodpecker behavior above is unchanged (still hard-fails).
+func (b *Backend) ensureHermesDependentApp(ctx context.Context) error {
+	var hermesBundle *apps.Bundle
+	for _, bd := range b.apps.CatalogBundles() {
+		if bd.ID == "hermes" {
+			if !bd.Default {
+				log.Printf("setup dependent_apps: hermes not default, skipping")
+				return nil
+			}
+			c := bd
+			hermesBundle = &c
+			break
+		}
+	}
+	if hermesBundle == nil {
+		log.Printf("setup dependent_apps: hermes bundle not found, skipping")
+		return nil
+	}
 	if err := b.ensureHermesLiteLLMKey(ctx); err != nil {
 		return fmt.Errorf("hermes litellm key: %w", err)
 	}
+	domainName := ""
+	if inst, err := b.store.Instance(ctx); err == nil {
+		domainName = strings.TrimSpace(inst.Domain)
+	}
+	if err := b.ensureOmahabNetwork(ctx); err != nil {
+		log.Printf("setup dependent_apps: hermes network warn: %s", health.RedactDetail(err.Error()))
+	}
+	if err := b.ensureDefaultApp(ctx, *hermesBundle, domainName); err != nil {
+		log.Printf("setup dependent_apps: hermes install/start deferred (health-tolerant): %s", health.RedactDetail(err.Error()))
+		return nil
+	}
+	// Re-render config after install so the running unit picks up the OIDC
+	// client_id (renderHermesConfig restarts docker-hermes).
+	if err := b.renderHermesConfig(ctx, domainName); err != nil {
+		log.Printf("setup dependent_apps: hermes config warn: %s", health.RedactDetail(err.Error()))
+	}
+	log.Printf("setup dependent_apps: hermes installed")
 	return nil
 }
 
