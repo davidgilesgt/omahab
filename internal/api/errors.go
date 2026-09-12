@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/omahab/omahab/internal/apitypes"
+	"github.com/omahab/omahab/internal/store"
 )
 
 const (
@@ -53,13 +54,13 @@ func httpStatus(err error) int {
 	if errors.As(err, &ae) {
 		return ae.HTTPStatus
 	}
-	if errors.Is(err, ErrNotFound) {
+	if errors.Is(err, ErrNotFound) || errors.Is(err, store.ErrNotFound) {
 		return http.StatusNotFound
 	}
-	if errors.Is(err, ErrAlreadyExists) || errors.Is(err, ErrConflict) {
+	if errors.Is(err, ErrAlreadyExists) || errors.Is(err, ErrConflict) || errors.Is(err, store.ErrConflict) {
 		return http.StatusConflict
 	}
-	if errors.Is(err, ErrValidation) {
+	if errors.Is(err, ErrValidation) || errors.Is(err, store.ErrValidation) {
 		return http.StatusBadRequest
 	}
 	if errors.Is(err, ErrUnauthorized) {
@@ -80,13 +81,13 @@ func errorCode(err error) string {
 	if errors.As(err, &ae) {
 		return ae.Code
 	}
-	if errors.Is(err, ErrNotFound) {
+	if errors.Is(err, ErrNotFound) || errors.Is(err, store.ErrNotFound) {
 		return CodeNotFound
 	}
-	if errors.Is(err, ErrAlreadyExists) || errors.Is(err, ErrConflict) {
+	if errors.Is(err, ErrAlreadyExists) || errors.Is(err, ErrConflict) || errors.Is(err, store.ErrConflict) {
 		return CodeConflict
 	}
-	if errors.Is(err, ErrValidation) {
+	if errors.Is(err, ErrValidation) || errors.Is(err, store.ErrValidation) {
 		return CodeBadRequest
 	}
 	if errors.Is(err, ErrUnauthorized) {
