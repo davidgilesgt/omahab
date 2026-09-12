@@ -358,8 +358,9 @@ func (g *litellmGateway) ReconcileModels(ctx context.Context, aliases []Alias, c
 					}
 				}
 				sb.WriteString(fmt.Sprintf("      model: %s\n", yamlEscape(model)))
-				// api_key file reference projected via /run/secrets/provider_*
-				apiKeyRef := fmt.Sprintf("/run/secrets/provider_%s", string(cred.ID))
+				// api_key material is projected by controlplane next to each reconcile
+				// into <configDir>/secrets/provider_<id>; the gateway reads it via file://.
+				apiKeyRef := filepath.Join(g.configDir, "secrets", "provider_"+string(cred.ID))
 				sb.WriteString(fmt.Sprintf("      api_key: %s\n", yamlEscape("file://"+apiKeyRef)))
 			default:
 				// Fallback: treat any litellm-managed oauth as subscription

@@ -83,6 +83,7 @@ in
       # at boot, outside the unit sandbox — ExecStartPre cannot write into
       # the unit's own ReadOnlyPaths).
       "d ${dataDir}/apps/litellm/config 0750 root litellm-cfg - -"
+      "d ${dataDir}/apps/litellm/config/secrets 0750 root litellm-cfg - -"
       "C ${dataDir}/apps/litellm/config/litellm.yaml 0640 root litellm-cfg - ${litellmEmptyConfig}"
     ];
     # Root-owned oneshot prepares the caddy config tree before caddy
