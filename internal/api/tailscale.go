@@ -5,9 +5,8 @@ import (
 )
 
 // handleTailscaleUp starts Tailscale enrollment on the authenticated API.
-// Same behavior as POST /api/bootstrap/tailscale/up: returns {"auth_url": url}
-// with "" when already enrolled. Unlike the bootstrap version it is available
-// any time (bearerAuth group) and is not gated on first-boot.
+// Returns {"auth_url": url} with "" when already enrolled.
+// Available any time (bearerAuth group; LAN sources bypass the token).
 func (s *Server) handleTailscaleUp(w http.ResponseWriter, r *http.Request) {
 	url, err := s.backend.TailscaleUp()
 	if err != nil {
@@ -18,7 +17,7 @@ func (s *Server) handleTailscaleUp(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleTailscaleStatus polls Tailscale state on the authenticated API.
-// Same shape as GET /api/bootstrap/tailscale/status: {running, ip, state}.
+// Shape: {running, ip, state}.
 func (s *Server) handleTailscaleStatus(w http.ResponseWriter, r *http.Request) {
 	running, ip, state, err := s.backend.TailscaleStatus()
 	if err != nil {

@@ -70,6 +70,9 @@ function consumeFragmentToken(): void {
 
 interface AuthContextValue {
   token: string | null;
+  // True when the server accepts this browser without a token (lan placement
+  // + LAN source address). Null while the probe is in flight.
+  lanBypass: boolean | null;
   client: ApiClient;
   authError: string | null;
   clearAuthError: () => void;
@@ -111,6 +114,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }), []);
 
+  // LAN bypass probe: without a token, GET /api/v1/status succeeds only when
+  // the server trusts this source address (lan placement + LAN). Raw fetch on
+  // purpose — a 401 here must not fire the global unauthorized handler.
+  const [lanBypass, setLanBypass] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (token) {
+      setLanBypass(null);
+      return;
+    }
+    let cancelled = false;
+    setLanBypass(null);
+    (async () => {
+      try {
+        const res = await fetch("/api/v1/status", { cache: "no-store" });
+        if (!cancelled) setLanBypass(res.ok);
+      } catch {
+        if (!cancelled) setLanBypass(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
+
   useEffect(() => {
     function handleUnauthorized() {
       let enrolled = false;
@@ -119,14 +146,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       } catch {}
       setAuthError(enrolled
         ? "Your session has expired or the token is invalid. Please sign in again."
-        : "This device is not set up yet. Complete setup first, then sign in.");
+        : "Sign in with the 8-character panel token to continue.");
       signOut();
     }
     window.addEventListener("omahab:unauthorized", handleUnauthorized);
     return () => window.removeEventListener("omahab:unauthorized", handleUnauthorized);
   }, [signOut]);
 
-  const value = useMemo(() => ({ token, client, authError, clearAuthError, signIn, signOut }), [client, signIn, signOut, token, authError, clearAuthError]);
+  const value = useMemo(() => ({ token, lanBypass, client, authError, clearAuthError, signIn, signOut }), [client, signIn, signOut, token, lanBypass, authError, clearAuthError]);
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
@@ -137,14 +164,21 @@ export function useAuth() {
 }
 
 export function ProtectedRoute({ children }: { children: ReactNode }) {
-  const { token } = useAuth();
+  const { token, lanBypass } = useAuth();
   const location = useLocation();
-  if (!token) return <Navigate to="/login" replace state={{ from: location.pathname }} />;
-  return children;
+  if (token || lanBypass) return <>{children}</>;
+  if (lanBypass === null) {
+    return (
+      <div className="state-message" role="status" style={{ minHeight: "60vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <span className="spinner" aria-hidden="true" /> Checking access…
+      </div>
+    );
+  }
+  return <Navigate to="/login" replace state={{ from: location.pathname }} />;
 }
 
 export function LoginPage() {
-  const { token, signIn, authError, clearAuthError } = useAuth();
+  const { token, lanBypass, signIn, authError, clearAuthError } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const destination = (location.state as { from?: string } | null)?.from ?? "/";
@@ -152,7 +186,8 @@ export function LoginPage() {
   const [validating, setValidating] = useState(false);
   const displayError = submitError ?? authError;
 
-  if (token) return <Navigate to={destination} replace />;
+  // LAN bypass: no token needed when the server trusts this address.
+  if (token || lanBypass) return <Navigate to={destination} replace />;
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -187,9 +222,9 @@ export function LoginPage() {
       <section className="login-card" aria-labelledby="login-title">
         <p className="eyebrow">Private control plane</p>
         <h1 id="login-title">Sign in to Omahab</h1>
-        <p className="muted">Use the bearer token issued by your Omahab administrator. It remains in this browser tab only.</p>
+        <p className="muted">Enter the 8-character panel token shown on the server console. It remains in this browser tab only. On your home network no token is needed.</p>
         {displayError && <p className="inline-error" role="alert">{displayError}</p>}
-        <p className="muted">Find it on the host via <code className="mono">sudo cat /var/lib/omahab/api.token</code>, or reuse the admin token at <code className="mono">~/.config/omahab/token</code>.</p>
+        <p className="muted">Find it on the host via <code className="mono">sudo cat /var/lib/omahab/api.token</code>, or reuse the token at <code className="mono">~/.config/omahab/token</code>.</p>
         <form onSubmit={submit} className="form-stack">
           <label>
             Access token

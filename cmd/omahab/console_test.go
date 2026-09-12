@@ -101,7 +101,7 @@ func TestPickLANIPv4_FlagFiltering(t *testing.T) {
 	}
 }
 
-func TestRenderFirstBoot_NoColorContainsURLAndCode(t *testing.T) {
+func TestRenderFirstBoot_NoColorContainsURLAndToken(t *testing.T) {
 	var buf bytes.Buffer
 	caps := tui.Caps{IsTTY: false, ColorEnabled: false}
 	renderFirstBoot(&buf, caps, "192.168.1.42", "ABCD1234")
@@ -110,7 +110,7 @@ func TestRenderFirstBoot_NoColorContainsURLAndCode(t *testing.T) {
 		t.Fatalf("expected URL, got %q", out)
 	}
 	if !strings.Contains(out, "ABCD1234") {
-		t.Fatalf("expected code, got %q", out)
+		t.Fatalf("expected token, got %q", out)
 	}
 	if strings.Contains(out, "\x1b[") {
 		t.Fatalf("NO_COLOR output should not contain escapes, got %q", out)
@@ -144,7 +144,7 @@ func TestRenderFirstBoot_VPSHasNoLANURL(t *testing.T) {
 		t.Fatalf("vps should point at tailscale up, got %q", out)
 	}
 	if !strings.Contains(out, "ABCD1234") {
-		t.Fatalf("vps should still show the code, got %q", out)
+		t.Fatalf("vps should still show the token, got %q", out)
 	}
 }
 

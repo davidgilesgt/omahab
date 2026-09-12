@@ -230,26 +230,6 @@ export class ApiClient {
 
   doctor = () => this.request<DoctorReport>("/doctor");
 
-  bootstrapStatus = async (): Promise<{ active: boolean }> => {
-    let response: Response;
-    try {
-      response = await fetch("/api/bootstrap/status", { headers: { "Cache-Control": "no-store" } });
-    } catch (error) {
-      throw new ApiError(error instanceof Error ? error.message : "The server could not be reached.", "network_error", 0);
-    }
-    if (!response.ok) {
-      let detail: ApiErrorEnvelope | undefined;
-      try {
-        detail = (await response.json()) as ApiErrorEnvelope;
-      } catch {
-        // ignore
-      }
-      throw new ApiError(detail?.error.message ?? response.statusText ?? "Request failed", detail?.error.code ?? "request_failed", response.status);
-    }
-    return (await response.json()) as { active: boolean };
-  };
-
-
   hermesMCPToken = () => this.request<{ token: string }>("/hermes/mcp-token");
 
   rotateHermesMCPToken = () => this.request<{ token: string }>("/hermes/mcp-token/rotate", { method: "POST", body: JSON.stringify({}) });
@@ -259,26 +239,7 @@ export class ApiClient {
   addSystemSSHKeys = (input: AddSSHKeysRequest) =>
     this.request<AddSSHKeysResponse>("/system/ssh-keys", { method: "POST", body: JSON.stringify(input) });
   deleteSystemSSHKey = (input: DeleteSSHKeyRequest) =>
-    this.request<void>("/system/ssh-keys", { method: "DELETE", body: JSON.stringify(input) });
-
-  // Bootstrap SSH keys (LAN, token from claim)
-  bootstrapSSHKeys = (token: string | null) => {
-    const headers: Record<string, string> = { Accept: "application/json" };
-    if (token) headers.Authorization = `Bearer ${token}`;
-    return fetch("/api/bootstrap/ssh-keys", { headers }).then(async (response) => {
-      if (!response.ok) {
-        let detail: ApiErrorEnvelope | undefined;
-        try {
-          detail = (await response.json()) as ApiErrorEnvelope;
-        } catch {
-          // ignore
-        }
-        throw new ApiError(detail?.error.message ?? response.statusText ?? "Request failed", detail?.error.code ?? "request_failed", response.status);
-      }
-      return (await response.json()) as SystemSSHKeysResponse;
-    });
-  };
-
+    this.request<void>(`/system/ssh-keys`, { method: "DELETE", body: JSON.stringify(input) });
 
   knowledgePinnedModels = () => this.list<ModelInfo>("/knowledge/pinned-models");
 

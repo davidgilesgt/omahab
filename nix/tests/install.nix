@@ -1,5 +1,5 @@
-# NixOS integration test: module boots, omahabd serves, bootstrap works,
-# gated units skip cleanly, enrollment simulation adopts native bundles.
+# NixOS integration test: module boots, omahabd serves, panel token + LAN
+# bypass work, gated units skip cleanly, enrollment simulation adopts native bundles.
 { self, ... }:
 {
   name = "omahab-install";
@@ -35,13 +35,15 @@
     machine.succeed("stat -c '%U:%G:%a' /home/omahab/.ssh | grep -qx 'omahab:users:700'")
     machine.succeed("stat -c '%U:%G:%a' /home/omahab/.config/omahab | grep -qx 'omahab:users:700'")
 
-    # Bootstrap: code file exists, claim works, wrong code rejected.
-    machine.succeed("test -f /run/omahab/bootstrap-code")
-    machine.fail("curl -sf -X POST http://127.0.0.1:8484/api/bootstrap/claim -d '{\"code\":\"wrongcode00\"}'")
-    code = machine.succeed("cat /run/omahab/bootstrap-code").strip()[:10]
-    token = machine.succeed(
-      f"curl -sf -X POST http://127.0.0.1:8484/api/bootstrap/claim -d '{{\"code\":\"{code}\"}}'"
-    )
+    # Panel token: 8 chars, provisioned at startup (no claim step).
+    token = machine.succeed("cat /var/lib/omahab/api.token").strip()
+    assert len(token) == 8, f"panel token len {len(token)}, want 8"
+    machine.succeed("diff /var/lib/omahab/api.token /home/omahab/.config/omahab/token")
+
+    # LAN bypass: loopback reaches admin routes without a token.
+    machine.succeed("curl -sf http://127.0.0.1:8484/api/v1/network/status | grep -q lan")
+    # Setup checklist starts with SSH keys.
+    machine.succeed("curl -sf http://127.0.0.1:8484/api/v1/setup | grep -q ssh_keys")
 
     # Primary listener serves the SPA + API (single door).
     machine.succeed("curl -sf -o /dev/null http://127.0.0.1:8484/")
@@ -67,14 +69,8 @@
 
     # Docker for project deploys.
     machine.succeed("docker compose version")
-
-    # Completion leaves primary listener alive; bootstrap mutations become 404.
-    tok = token.split('"token":"')[1].split('"')[0]
-    machine.succeed(
-      "curl -sf -X POST http://127.0.0.1:8484/api/bootstrap/complete -H 'Authorization: Bearer " + tok + "'"
-    )
+    # No bootstrap endpoints remain; the panel is the single door.
+    machine.fail("curl -sf http://127.0.0.1:8484/api/bootstrap/status")
     machine.succeed("curl -sf http://127.0.0.1:8484/up | grep -q status")
-    machine.succeed("curl -sf http://127.0.0.1:8484/api/bootstrap/status | grep -q '\"active\":false'")
-    machine.fail("curl -sf -X POST http://127.0.0.1:8484/api/bootstrap/claim -d '{\"code\":\"wrongcode00\"}'")
   '';
 }

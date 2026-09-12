@@ -24,13 +24,12 @@ import (
 	"github.com/omahab/omahab/internal/netenv"
 	"github.com/omahab/omahab/internal/tui"
 )
-const bootstrapCodePath = "/run/omahab/bootstrap-code"
-const bootstrapDonePath = "/var/lib/omahab/bootstrap-done"
+const apiTokenPath = "/var/lib/omahab/api.token"
 
-// newConsoleCmd builds `omahab console`: the tty1 first-boot display.
-// Clears the screen, shows the LAN bootstrap URL + one-time code + QR,
-// refreshing every 5s; after bootstrap completes, shows a live status
-// screen (hostname, Tailscale IP, doctor, backup, events, exposure).
+// newConsoleCmd builds `omahab console`: the tty1 display.
+// Clears the screen, shows the LAN panel URL + panel token + QR,
+// refreshing every 5s; when the panel is down it shows live status
+// diagnostics instead (hostname, Tailscale IP, doctor, backup, events, exposure).
 func newConsoleCmd() *cobra.Command {
 	var once bool
 	cmd := &cobra.Command{
@@ -76,17 +75,17 @@ func runConsoleWithOptions(once bool) error {
 		if shouldClear {
 			fmt.Fprint(w, "\033[2J\033[H")
 		}
-		// Banner: compact wordmark when narrow to avoid overflow.
+		// Snapshot first: the banner title follows panel state.
+		snap := gatherConsoleSnapshot()
+		title := "first boot"
+		if snap.UpOK {
+			title = "live status"
+		}
 		var banner string
 		if width > 0 && width < 60 {
 			// Compact plain wordmark, no border, no ANSI when narrow.
 			banner = "  OMAHAB"
 		} else {
-			// Determine title for banner
-			title := "first boot"
-			if _, err := os.Stat(bootstrapDonePath); err == nil {
-				title = "live status"
-			}
 			banner = tui.Banner(title, caps)
 		}
 		for _, line := range strings.Split(banner, "\n") {
@@ -94,9 +93,7 @@ func runConsoleWithOptions(once bool) error {
 		}
 		fmt.Fprintln(w, "")
 
-		snap := gatherConsoleSnapshot()
 		renderConsoleSnapshot(w, caps, width, snap)
-
 		fmt.Fprintln(w, "")
 		if isRealTTY(w) {
 			fmt.Fprintln(w, "  press Enter for shell login")
@@ -157,19 +154,17 @@ func waitForEnter(timeout time.Duration) bool {
 
 // consoleSnapshot holds bounded status for console and welcome rendering.
 type consoleSnapshot struct {
-	LANIP           string
-	Hostname        string
-	MDNSURL         string
-	DashboardURL    string
-	Code            string
-	ServiceActive   string
-	ServiceSub      string
-	ServiceResult   string
-	ServiceErr      error
-	UpOK            bool
-	UpErr           error
-	BootstrapActive *bool
-	BootstrapErr    error
+	LANIP         string
+	Hostname      string
+	MDNSURL       string
+	DashboardURL  string
+	PanelToken    string
+	ServiceActive string
+	ServiceSub    string
+	ServiceResult string
+	ServiceErr    error
+	UpOK          bool
+	UpErr         error
 }
 
 func gatherConsoleSnapshot() consoleSnapshot {
@@ -190,7 +185,7 @@ func gatherConsoleSnapshot() consoleSnapshot {
 	} else {
 		snap.DashboardURL = snap.MDNSURL
 	}
-	snap.Code = readBootstrapCode()
+	snap.PanelToken = readPanelToken()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	active, sub, result, err := queryServiceStatus(ctx)
 	cancel()
@@ -203,36 +198,6 @@ func gatherConsoleSnapshot() consoleSnapshot {
 	cancel2()
 	snap.UpOK = upOK
 	snap.UpErr = upErr
-	if snap.UpOK {
-		ctx3, cancel3 := context.WithTimeout(context.Background(), time.Second)
-		bActive, bErr := probeBootstrapStatusWithContext(ctx3, "http://127.0.0.1:8484")
-		cancel3()
-		snap.BootstrapActive = bActive
-		snap.BootstrapErr = bErr
-		if bActive == nil && bErr != nil {
-			_, statErr := os.Stat(bootstrapDonePath)
-			var active bool
-			if statErr == nil {
-				active = false
-			} else if os.IsNotExist(statErr) {
-				active = true
-			} else {
-				active = true
-			}
-			snap.BootstrapActive = &active
-		}
-	} else {
-		_, statErr := os.Stat(bootstrapDonePath)
-		var active bool
-		if statErr == nil {
-			active = false
-		} else if os.IsNotExist(statErr) {
-			active = true
-		} else {
-			active = true
-		}
-		snap.BootstrapActive = &active
-	}
 	return snap
 }
 
@@ -284,35 +249,6 @@ func probeUpWithContext(ctx context.Context, base string) (bool, error) {
 	return false, fmt.Errorf("up status not up: %s", string(body))
 }
 
-func probeBootstrapStatusWithContext(ctx context.Context, base string) (*bool, error) {
-	url := strings.TrimRight(base, "/") + "/api/bootstrap/status"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "application/json")
-	client := &http.Client{Timeout: time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("bootstrap status %d", resp.StatusCode)
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1024))
-	if err != nil {
-		return nil, err
-	}
-	var out struct {
-		Active bool `json:"active"`
-	}
-	if err := json.Unmarshal(body, &out); err != nil {
-		return nil, err
-	}
-	return &out.Active, nil
-}
-
 func renderConsoleSnapshot(w io.Writer, caps tui.Caps, width int, snap consoleSnapshot) {
 	isFailed := snap.ServiceActive == "failed" || snap.ServiceResult == "failed" || snap.ServiceResult == "failure" || (snap.ServiceErr != nil)
 	if isFailed {
@@ -328,6 +264,7 @@ func renderConsoleSnapshot(w io.Writer, caps tui.Caps, width int, snap consoleSn
 			fmt.Fprintln(w, "")
 			fmt.Fprintln(w, "    SSH in and run: sudo tailscale up")
 			fmt.Fprintln(w, "    Then open the dashboard from a device on the same tailnet.")
+			renderPanelToken(w, caps, width, "", snap.PanelToken)
 			return
 		}
 		fmt.Fprintln(w, "  Waiting for a network address")
@@ -344,57 +281,52 @@ func renderConsoleSnapshot(w io.Writer, caps tui.Caps, width int, snap consoleSn
 			return
 		}
 	}
-	if snap.BootstrapActive != nil && *snap.BootstrapActive {
-		fmt.Fprintln(w, "  Finish setup")
+	if snap.UpOK {
+		fmt.Fprintln(w, "  Control panel ready")
 		fmt.Fprintln(w, "")
 		fmt.Fprintln(w, "    Open this URL on another device:")
 		fmt.Fprintf(w, "      %s\n", snap.DashboardURL)
 		fmt.Fprintf(w, "      also: %s (if mDNS is available)\n", snap.MDNSURL)
-		if snap.Code != "" {
-			fmt.Fprintln(w, "")
-			fmt.Fprintln(w, "    One-time code (from this console):")
-			if caps.ColorEnabled && width >= 60 {
-				style := lipgloss.NewStyle().Foreground(tui.NeutralFG).Background(tui.NeutralBG).Padding(0, 2).Bold(true)
-				rendered := style.Render(snap.Code)
-				if rendered == snap.Code {
-					rendered = "  " + snap.Code + "  "
-				}
-				fmt.Fprintf(w, "      %s\n", rendered)
-			} else {
-				fmt.Fprintf(w, "      %s\n", snap.Code)
-			}
-			if width >= 60 && caps.ColorEnabled {
-				if qr, err := qrcode.New(snap.DashboardURL+"#code="+snap.Code, qrcode.Medium); err == nil {
-					fmt.Fprintln(w, "")
-					fmt.Fprint(w, qr.ToSmallString(false))
-				}
-			}
-			fmt.Fprintln(w, "")
-			fmt.Fprintln(w, "    After claiming, the token is at ~/.config/omahab/token (XDG-aware, 0600)")
-		} else {
-			fmt.Fprintln(w, "")
-			fmt.Fprintln(w, "    One-time code:")
-			fmt.Fprintln(w, "      Run sudo omahab console --once to view")
-		}
-		return
-	}
-	if snap.BootstrapActive != nil && !*snap.BootstrapActive {
-		fmt.Fprintln(w, "  Control panel ready")
-		fmt.Fprintln(w, "")
-		fmt.Fprintln(w, "    Dashboard:")
-		fmt.Fprintf(w, "      %s\n", snap.DashboardURL)
-		fmt.Fprintf(w, "      also: %s\n", snap.MDNSURL)
+		renderPanelToken(w, caps, width, snap.DashboardURL, snap.PanelToken)
 		fmt.Fprintln(w, "")
 		fmt.Fprintln(w, "    Run omahab status to check")
 		return
 	}
-	if snap.UpOK {
-		fmt.Fprintln(w, "  Control panel ready")
+	fmt.Fprintln(w, "  Starting the control panel...")
+}
+
+// renderPanelToken shows the 8-character panel token (and QR when a wide
+// color console exists). Empty token means omahabd is still starting.
+func renderPanelToken(w io.Writer, caps tui.Caps, width int, url, token string) {
+	if token == "" {
 		fmt.Fprintln(w, "")
-		fmt.Fprintf(w, "    %s\n", snap.DashboardURL)
+		fmt.Fprintln(w, "    Panel token:")
+		fmt.Fprintln(w, "      (waiting for the panel token — omahabd is starting)")
 		return
 	}
-	fmt.Fprintln(w, "  Starting the control panel...")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "    Panel token (from this console):")
+	if caps.ColorEnabled && width >= 60 {
+		style := lipgloss.NewStyle().Foreground(tui.NeutralFG).Background(tui.NeutralBG).Padding(0, 2).Bold(true)
+		rendered := style.Render(token)
+		if rendered == token {
+			rendered = "  " + token + "  "
+		}
+		fmt.Fprintf(w, "      %s\n", rendered)
+	} else {
+		fmt.Fprintf(w, "      %s\n", token)
+	}
+	if width >= 60 && caps.ColorEnabled && url != "" {
+		if qr, err := qrcode.New(url, qrcode.Medium); err == nil {
+			fmt.Fprintln(w, "")
+			fmt.Fprint(w, qr.ToSmallString(false))
+		}
+	}
+	fmt.Fprintln(w, "")
+	if url != "" {
+		fmt.Fprintln(w, "    No token needed on this network — the token guards tailnet/remote access.")
+	}
+	fmt.Fprintln(w, "    Also at ~/.config/omahab/token (XDG-aware, 0600)")
 }
 
 func findLoginPath() string {
@@ -410,12 +342,12 @@ func findLoginPath() string {
 	return "/bin/login"
 }
 
-func renderFirstBoot(w io.Writer, caps tui.Caps, ip, code string) {
+func renderFirstBoot(w io.Writer, caps tui.Caps, ip, token string) {
 	if consolePlacement() == "vps" {
-		renderFirstBootVPS(w, caps, code)
+		renderFirstBootVPS(w, caps, token)
 		return
 	}
-	fmt.Fprintln(w, "  Complete setup from any device on this network:")
+	fmt.Fprintln(w, "  Open the panel from any device on this network:")
 	fmt.Fprintln(w, "")
 	if ip != "" {
 		url := fmt.Sprintf("http://%s:8484", ip)
@@ -439,7 +371,7 @@ func renderFirstBoot(w io.Writer, caps tui.Caps, ip, code string) {
 			hostname = hostname[:idx]
 		}
 		fmt.Fprintf(w, "      also: http://%s.local:8484\n", hostname)
-		renderFirstBootCode(w, caps, ip, code)
+		renderFirstBootCode(w, caps, ip, token)
 	} else {
 		fmt.Fprintln(w, "      (waiting for a network address)")
 	}
@@ -448,43 +380,44 @@ func renderFirstBoot(w io.Writer, caps tui.Caps, ip, code string) {
 // renderFirstBootVPS is the first-boot screen on tailscale-only boxes:
 // there is no LAN URL, so it points at SSH + `tailscale up` + the
 // tailnet dashboard instead of a "waiting for a network address" dead-end.
-func renderFirstBootVPS(w io.Writer, caps tui.Caps, code string) {
-	fmt.Fprintln(w, "  Complete setup from a device on your tailnet:")
+func renderFirstBootVPS(w io.Writer, caps tui.Caps, token string) {
+	fmt.Fprintln(w, "  Open the panel from a device on your tailnet:")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "      1) SSH into this machine (or use your cloud console)")
 	fmt.Fprintln(w, "      2) Run: sudo tailscale up")
 	fmt.Fprintln(w, "      3) Open the dashboard from a device on the same tailnet")
-	renderFirstBootCode(w, caps, "", code)
+	renderFirstBootCode(w, caps, "", token)
 }
 
-// renderFirstBootCode shows the one-time code (and QR when a LAN URL
+// renderFirstBootCode shows the panel token (and QR when a LAN URL
 // exists). With empty ip there is no URL to encode, so the QR is skipped.
-func renderFirstBootCode(w io.Writer, caps tui.Caps, ip, code string) {
-	if code == "" {
+func renderFirstBootCode(w io.Writer, caps tui.Caps, ip, token string) {
+	if token == "" {
 		fmt.Fprintln(w, "")
-		fmt.Fprintln(w, "  (waiting for the one-time code — omahabd is starting)")
+		fmt.Fprintln(w, "  (waiting for the panel token — omahabd is starting)")
 		return
 	}
 	fmt.Fprintln(w, "")
-	fmt.Fprintln(w, "  One-time code:")
+	fmt.Fprintln(w, "  Panel token:")
 	if caps.ColorEnabled {
 		codeStyle := lipgloss.NewStyle().Foreground(tui.NeutralFG).Background(tui.NeutralBG).Padding(0, 2).Bold(true)
-		rendered := codeStyle.Render(code)
-		if rendered == code {
-			rendered = "\x1b[1m  " + code + "  \x1b[0m"
+		rendered := codeStyle.Render(token)
+		if rendered == token {
+			rendered = "\x1b[1m  " + token + "  \x1b[0m"
 		}
 		fmt.Fprintf(w, "      %s\n", rendered)
 	} else {
-		fmt.Fprintf(w, "      %s\n", code)
+		fmt.Fprintf(w, "      %s\n", token)
 	}
 	if ip != "" {
-		if qr, err := qrcode.New("http://"+ip+":8484/#code="+code, qrcode.Medium); err == nil {
+		if qr, err := qrcode.New("http://"+ip+":8484", qrcode.Medium); err == nil {
 			fmt.Fprintln(w, "")
 			fmt.Fprint(w, qr.ToSmallString(false))
 		}
 	}
 	fmt.Fprintln(w, "")
-	fmt.Fprintln(w, "  After Complete, CLI token at ~/.config/omahab/token (XDG-aware, 0600)")
+	fmt.Fprintln(w, "  No token needed on this network — the token guards tailnet/remote access.")
+	fmt.Fprintln(w, "  CLI token at ~/.config/omahab/token (XDG-aware, 0600)")
 }
 
 func renderLiveStatus(w io.Writer, caps tui.Caps) {
@@ -844,15 +777,11 @@ func tailscaleIPv4() string {
 	return strings.TrimSpace(string(out))
 }
 
-// readBootstrapCode reads the one-time code from tmpfs.
-func readBootstrapCode() string {
-	data, err := os.ReadFile(bootstrapCodePath)
+// readPanelToken reads the 8-character panel token (root 0600).
+func readPanelToken() string {
+	data, err := os.ReadFile(apiTokenPath)
 	if err != nil {
 		return ""
 	}
-	code := strings.TrimSpace(string(data))
-	if len(code) > 10 {
-		code = code[:10]
-	}
-	return code
+	return strings.TrimSpace(string(data))
 }

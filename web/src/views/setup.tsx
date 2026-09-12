@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../auth";
 import type { Secret, SetupStatus } from "../api/types";
@@ -106,9 +106,9 @@ function tailnetErrorMessage(err: unknown): string {
   return "Tailnet path check failed";
 }
 
-type BoxId = "tailscale" | "domain" | "cloudflare" | "lan" | "admin" | "recovery" | "backups" | "storage" | "woodpecker";
+type BoxId = "ssh" | "tailscale" | "domain" | "cloudflare" | "lan" | "admin" | "recovery" | "backups" | "storage" | "woodpecker";
 
-const BLOCKING: BoxId[] = ["tailscale", "domain", "cloudflare", "lan", "admin", "recovery", "backups"];
+const BLOCKING: BoxId[] = ["ssh", "tailscale", "domain", "cloudflare", "lan", "admin", "recovery", "backups"];
 
 function Box({
   title,
@@ -172,6 +172,10 @@ export function SetupPage() {
     queryFn: fetchNetworkStatus,
     retry: false,
   });
+  // SSH keys first: the installer seeds keys, add more here.
+  const sshQuery = useQuery({ queryKey: ["system-ssh-keys"], queryFn: client.systemSSHKeys, retry: false });
+  const [sshGithubUser, setSshGithubUser] = useState("");
+  const [sshPaste, setSshPaste] = useState("");
 
   const [domain, setDomain] = useState("");
   const [dnsToken, setDnsToken] = useState("");
@@ -408,6 +412,29 @@ export function SetupPage() {
     onError: (err) => toast.error(err instanceof Error ? err.message : "Reopen failed"),
   });
 
+  const sshAddMutation = useMutation({
+    mutationFn: async () => {
+      const github = sshGithubUser.trim();
+      const keys = sshPaste.trim() ? sshPaste.trim().split("\n").map((k) => k.trim()).filter(Boolean) : [];
+      if (!github && keys.length === 0) throw new Error("Enter a GitHub username or paste at least one public key");
+      return client.addSystemSSHKeys({ github_user: github || undefined, keys: keys.length ? keys : undefined });
+    },
+    onSuccess: (data) => {
+      toast.success(data.added === 0 ? "No new keys added (already present)" : `Added ${data.added} key(s)`);
+      setSshGithubUser("");
+      setSshPaste("");
+      advance();
+      void queryClient.invalidateQueries({ queryKey: ["system-ssh-keys"] });
+      void queryClient.invalidateQueries({ queryKey: ["setup"] });
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Add keys failed"),
+  });
+
+  function submitSSH(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    void sshAddMutation.mutate();
+  }
+
   const inviteMutation = useMutation({
     mutationFn: async () => {
       if (!inviteEmail.trim() || !inviteName.trim()) throw new Error("Name and email required");
@@ -599,6 +626,7 @@ export function SetupPage() {
   const tailscaleIp = tailscaleQuery.data?.ip ?? "";
   const lanClosed = networkQuery.data?.lan_closed === true;
   const doneMap: Record<BoxId, boolean> = {
+    ssh: isOk("ssh_keys"),
     tailscale: tailscaleRunning || isOk("tailscale"),
     domain: domainValid && isOk("domain"),
     cloudflare: isOk("cloudflare_dns"),
@@ -641,8 +669,59 @@ export function SetupPage() {
         </div>
       </header>
       <hr className="setup-divider" />
-
       <div className="setup-accordion">
+        <Box title="SSH keys" done={doneMap.ssh} open={openId === "ssh"} onToggle={() => toggle("ssh")}>
+          <p>The installer seeded keys for the administrator. Add more here if needed.</p>
+          {sshQuery.isLoading ? (
+            <p>Loading installed keys…</p>
+          ) : sshQuery.isError ? (
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+              <span className="inline-error" role="alert">{sshQuery.error instanceof Error ? sshQuery.error.message : "Failed to load keys"}</span>
+              <button className="button ghost" type="button" onClick={() => void sshQuery.refetch()}>Retry</button>
+            </div>
+          ) : (
+            <>
+              {sshQuery.data && (
+                <p>Administrator username: <strong className="mono">{sshQuery.data.username}</strong> <CopyButton text={sshQuery.data.username} label="Copy username" /></p>
+              )}
+              {!sshQuery.data?.items.length ? (
+                <p>No SSH keys installed yet — remote SSH stays unavailable until you add one.</p>
+              ) : (
+                <ul style={{ listStyle: "none", padding: 0, display: "grid", gap: 6 }}>
+                  {sshQuery.data.items.map((k) => (
+                    <li key={k.fingerprint} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: "0.9em", wordBreak: "break-all", overflowWrap: "anywhere" }}>
+                      <span className="mono">{k.type}</span>
+                      <span className="mono">{k.fingerprint}</span>
+                      <span style={{ opacity: 0.7 }}>{k.comment || "no comment"}</span>
+                      <CopyButton text={k.fingerprint} label="Copy fingerprint" />
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </>
+          )}
+          <form className="form-stack" onSubmit={submitSSH}>
+            <label className="field">
+              <span>GitHub username</span>
+              <input value={sshGithubUser} onChange={(e) => setSshGithubUser(e.target.value)} placeholder="your-github-username" autoComplete="off" />
+            </label>
+            <label className="field">
+              <span>…or paste public keys (one per line)</span>
+              <textarea value={sshPaste} onChange={(e) => setSshPaste(e.target.value)} rows={4} placeholder="ssh-ed25519 AAAA…" className="mono" />
+            </label>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button className="button primary" type="submit" disabled={sshAddMutation.isPending}>
+                {sshAddMutation.isPending ? "Adding…" : "Add keys"}
+              </button>
+              <button className="button ghost" type="button" onClick={() => { void sshQuery.refetch(); void setupQuery.refetch(); }}>
+                Refresh status
+              </button>
+            </div>
+            {sshAddMutation.isError && (
+              <p className="inline-error" role="alert">{sshAddMutation.error instanceof Error ? sshAddMutation.error.message : "Add keys failed"}</p>
+            )}
+          </form>
+        </Box>
         <Box title="Tailscale" done={doneMap.tailscale} open={openId === "tailscale"} onToggle={() => toggle("tailscale")}>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button className="button primary" type="button" onClick={() => void tailscaleLoginMutation.mutate()} disabled={tailscaleLoginMutation.isPending || tailscaleProving}>

@@ -74,10 +74,6 @@ type Backend struct {
 	masterKey [32]byte
 	apiToken  string
 
-	// first-boot bootstrap gate (lazily initialized)
-	bsMu   sync.Mutex
-	bsGate *BootstrapGate
-
 	// extended integrations for dashboard-triggered actions
 	emailRouter     *cloudflare.EmailClient
 	emailPrimary    string
@@ -151,7 +147,7 @@ func New(ctx context.Context, st *store.Store, opts Options) (*Backend, error) {
 	}
 	// Backup units' env file (best-effort; failures logged, not fatal).
 	if err := EnsureBackupEnv(opts.Config.StateDir, tok); err != nil {
-		log.Printf("bootstrap: ensure backup.env: %v", err)
+		log.Printf("backend: ensure backup.env: %v", err)
 	}
 	b := &Backend{
 		cfg:       opts.Config,
@@ -169,13 +165,14 @@ func New(ctx context.Context, st *store.Store, opts Options) (*Backend, error) {
 	if err := b.initServices(ctx); err != nil {
 		return nil, err
 	}
-	// First-boot: generate the one-time claim code eagerly so the console
-	// can display it immediately.
-	_ = b.bootstrapGate()
+	// Panel token for the admin user: no claim step, so provision at
+	// startup (best-effort; the user may not exist yet on first boot).
+	if err := ProvisionUserToken(opts.Config.AdminUser, tok); err != nil {
+		log.Printf("admin token file: %v", err)
+	}
 	// Close-LAN is explicit and sticky: re-apply the nft deletion while
 	// the sentinel is present (best-effort, never fails startup).
 	b.reapplyLANClosedAtStartup()
-	// Start setup reconciler in background (best-effort, single-flight).
 	go func() {
 		bg := context.Background()
 		// Use timeout so startup does not hang forever on external APIs.

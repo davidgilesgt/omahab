@@ -24,32 +24,29 @@ No service is open to the internet by default. Your data stays on your machine.
 
 Docker remains only for user-project deploys (ONCE) and CI job containers; every platform application itself is a native systemd service in the NixOS closure.
 
-## First boot: the console wizard
+## First boot: open the panel
 
-Boot the appliance image (or a machine whose NixOS configuration imports `nix/module.nix` with `services.omahab.enable = true`). The console on tty1 shows:
+The console (tty1) shows the LAN panel URL and the 8-character panel token:
 
 ```
-  ┌─────────────────────────────────────────────┐
-  │            OMAHAB  ·  first boot            │
-  └─────────────────────────────────────────────┘
+  Open the panel from any device on this network:
 
-  Complete setup from any device on this network:
+      http://192.168.1.42:8484
 
-      http://192.168.1.42:8485
-
-  One-time code:
-      7gc3x9k2mq
+  Panel token:
+      k3m9qd2x
 ```
 
-Open the URL on any device in the same LAN (mDNS `omahab.local` also works, best-effort). The wizard:
+Open the URL on any device in the same LAN (mDNS `omahab.local` also works, best-effort).
+On your home network no token is needed; from the tailnet or elsewhere, enter the
+panel token. The token lives at `/var/lib/omahab/api.token` (root 0600) and is
+provisioned to `~/.config/omahab/token` at daemon startup.
 
-1. **Claim** — enter the one-time code shown on the console. The code is single-use, rotates after 20 failed attempts (5/min per host), and the claim returns your administrator token.
-2. **Mode** — **New server** or **Restore from backup**. New server continues to SSH keys; Restore collects Hetzner Storage Box username+host+sub-account password (once, SFTP:23) + 24-word recovery phrase, lists `restic snapshots --json --latest 10`, restores `--target /` with `--include` per `DefaultPaths()` including `/var/lib/tailscale` (keeps Tailscale IP; fallback to normal Tailscale step if rejected), unwraps `recovery.kit` → `master.key`, runs `post_restore` hooks, writes `bootstrap-done`, restarts `omahabd`.
-3. **SSH keys** *(new-server mode)* — import from GitHub or paste public keys for the `omahab` admin account (skippable; the console remains the recovery path).
-4. **Tailscale** *(new-server mode)* — approve the server into your tailnet. The dashboard is reachable only over the tailnet.
-5. **Handoff** — the wizard points you at `http://<tailscale-ip>:8484/#token=…`; everything after (domain, Cloudflare, recovery key, storage, AI providers, backups) happens on the authenticated dashboard. Secrets never transit the LAN page.
+Then work through the setup checklist at `http://<lan-ip>:8484/setup`:
 
-When the wizard completes, port 8485 closes.
+1. **SSH keys** — the installer seeds keys for the `omahab` admin account; add more here if needed.
+2. **Tailscale** — approve the server into your tailnet.
+3. Everything after (domain, Cloudflare, recovery key, storage, AI providers, backups) happens on the panel.
 
 ### `omahab setup` (SSH fallback)
 
@@ -150,17 +147,17 @@ omahab project rollback demo
 | `/var/lib/omahab/recovery.kit` | Recovery kit JSON `{version:1,fingerprint,master_wrapped base64,created_at}` (0600) |
 | `/var/lib/omahab/backup.env` | Backup env (if restic SFTP/REST credentials needed) |
 | `/var/lib/omahab/backup_ssh/` | Hetzner SFTP key: `id_ed25519` (0600), `id_ed25519.pub`, `known_hosts` (0600) |
-| `/run/omahab/bootstrap-code` | First-boot one-time claim code (tmpfs, 0600) |
-| `~omahab/.config/omahab/token` | Administrator CLI token (provisioned by omahabd, 0600) |
+| `/var/lib/omahab/api.token` | 8-character panel token (root 0600, generated at first start) |
+| `~omahab/.config/omahab/token` | Panel token copy for the admin user (provisioned by omahabd at startup, 0600) |
 | `/etc/omahab-release` | Pinned flake ref for `omahab system upgrade` |
 
 ## Security model
 
-- `omahabd` binds `0.0.0.0:8484`; the nftables table `inet omahab` is the admission boundary: TCP 8484 only on `tailscale0` and `lo`; port 8485 (first-boot wizard) only from RFC1918 LAN ranges and closes after completion.
+- `omahabd` binds `0.0.0.0:8484`; the nftables table `inet omahab` is the admission boundary: TCP 8484 on `tailscale0`, `lo`, and (lan placement) RFC1918/ULA/link-local LAN ranges.
+- On lan placement (the ISO-installer default), LAN sources reach the panel without a token; tailnet/remote access requires the 8-character panel token.
 - Default-deny inbound; SSH 22, Tailscale UDP 41641, and 80/443 on `tailscale0` are the only other accepts.
 - sshd: no passwords, no root login; config is atomic with the generation.
 - Secrets live under `/var/lib/omahab/secrets` (0700) and per-bundle `appenv` files (0640, service-user group); a `.nix` file never holds a secret.
-- The claim code carries ~50 bits, is single-use, and rate-limited; exhaustion rotates it.
 - Restic backups cover state + data + native-service directories; databases are dumped (`pg_dump -Fc` into `/var/lib/omahab/dumps`) before every backup — raw DB files are never backed up.
 
 ## Upgrades
@@ -255,8 +252,8 @@ only matches if the hostname names an upstream output.
 
 | Message | Cause and solution |
 | --- | --- |
-| Bootstrap wizard unreachable on :8485 | The wizard closes after completion. Check `test -f /var/lib/omahab/bootstrap-done`; to re-run, remove the file and restart `omahabd` |
-| `invalid code` on claim | The code rotates after 20 failed attempts; read the current one on the tty1 console |
+| Panel asks for a token on the LAN | LAN bypass needs lan placement and a LAN source address. Check `OMAHAB_PLACEMENT` (vps disables it) and that the client is on RFC1918/ULA/link-local |
+| `invalid bearer token` on the tailnet | Read the 8-character token on the tty1 console or via `sudo cat /var/lib/omahab/api.token` |
 | `omahabd` health check timed out | `journalctl -u omahabd -n 50 --no-pager`; the daemon did not return `200` on `http://127.0.0.1:8484/up` |
 | Domain-gated service inactive | Expected before domain enrollment: the unit waits for `/var/lib/omahab/appenv/<bundle>.env` |
 | `omahab system upgrade` rolled back | The new generation failed the 120s health gate; check `journalctl -u omahabd` on the previous generation |

@@ -208,19 +208,23 @@ services.omahab.enable = true;
 
 `services.omahab.enable` is the only user-facing option; domain, tokens, and per-household values are runtime state, never in a `.nix` file.
 
-### 5.3 First-boot bootstrap
+### 5.3 First-boot access
 
-On first boot the console (tty1) shows the LAN wizard URL and a one-time claim code; `omahabd` serves the wizard on `:8485` (LAN-only, per the nftables rules) while `/var/lib/omahab/bootstrap-done` is absent. The wizard claims the appliance with the code (single-use, rate-limited, rotated on exhaustion), installs SSH keys for the `omahab` admin account, enrolls Tailscale, and hands off to the authenticated dashboard over the tailnet; port 8485 then closes. `sudo omahab setup` is the SSH fallback for the same flow.
-
-Secrets never transit the LAN page: everything after the Tailscale step happens on the authenticated dashboard.
+On first boot the console (tty1) shows the LAN panel URL and the 8-character panel token.
+There is no claim step: on lan placement (the ISO-installer default) LAN sources reach the
+panel at `:8484` without a token, while tailnet/remote access requires the panel token
+(`/var/lib/omahab/api.token`, root 0600, provisioned to `~/.config/omahab/token` at daemon
+startup). SSH keys are seeded by the installer and extended as the first setup-checklist
+step; Tailscale enrollment lives on the checklist too. `sudo omahab setup` is the SSH
+fallback for the same flow.
 
 ### 5.4 Strict appliance posture
 
-The system remains an appliance: it does not adopt arbitrary existing servers. Fresh-image boot is the only supported path; disaster recovery = boot fresh image → wizard “Restore from backup” → Hetzner credentials + recovery phrase. The wizard offers two modes after the claim code: “Set up a new server” (normal SSH-keys → Tailscale flow) and “Restore from backup” (Hetzner Storage Box username+host+sub-account password once + 24-word phrase → `restic snapshots --json --latest 10` → restore `--target /` with `--include` per `DefaultPaths()` including `/var/lib/tailscale` so the node keeps its Tailscale identity/IP; fallback to normal Tailscale step if coordination server rejects it). Restore never writes under `/nix` or `/etc`.
+The system remains an appliance: it does not adopt arbitrary existing servers. Fresh-image boot is the only supported path; disaster recovery = boot fresh image → “Restore from backup” on the setup checklist → Hetzner credentials + recovery phrase. The checklist offers “Set up a new server” (normal SSH-keys → Tailscale flow) and “Restore from backup” (Hetzner Storage Box username+host+sub-account password once + 24-word phrase → `restic snapshots --json --latest 10` → restore `--target /` with `--include` per `DefaultPaths()` including `/var/lib/tailscale` so the node keeps its Tailscale identity/IP; fallback to normal Tailscale step if coordination server rejects it). Restore never writes under `/nix` or `/etc`.
 
 ### 5.5 SSH-first setup and hardening
 
-sshd is hardened declaratively in the closure: pubkey-only, no password or keyboard-interactive authentication, no root login. SSH keys are runtime state (`~omahab/.ssh/authorized_keys`, provisioned by the first-boot wizard or `omahab setup`); GitHub import is one-time and never continuously synchronized. Because sshd configuration is atomic with the generation, the installer-era rollback timers are obsolete — `nixos-rebuild test`/`switch --rollback` is the recovery mechanism.
+sshd is hardened declaratively in the closure: pubkey-only, no password or keyboard-interactive authentication, no root login. SSH keys are runtime state (`~omahab/.ssh/authorized_keys`, seeded by the installer and extended as the first setup-checklist step or via `omahab setup`); GitHub import is one-time and never continuously synchronized. Because sshd configuration is atomic with the generation, the installer-era rollback timers are obsolete — `nixos-rebuild test`/`switch --rollback` is the recovery mechanism.
 
 Default policy (from the module):
 
@@ -234,12 +238,12 @@ PermitRootLogin no
 ### 5.6 Host security baseline
 
 - one NixOS closure, signed store paths, atomic generations with rollback;
-- nftables default-deny inbound (`table inet omahab`); TCP 8484 only on tailscale0/lo; first-boot 8485 LAN-only and closed after bootstrap;
+- nftables default-deny inbound (`table inet omahab`); TCP 8484 on tailscale0/lo plus LAN ranges on lan placement;
 - no direct application port publication; native services bind loopback, Caddy is the only edge;
 - Cloudflare Tunnel uses outbound connections;
 - Docker socket available only to `omahabd`; CI builds use the rootless podman builder socket;
 - root-owned secret material under `/var/lib/omahab` (0700/0600), per-bundle env files 0640 with service-user group;
-- key-only SSH after bootstrap;
+- key-only SSH; the 8-character panel token guards tailnet/remote panel access, LAN sources bypass it on lan placement;
 - health and security checks through `omahab doctor`;
 - explicit, supervised upgrades (`omahab system upgrade` with health gate + automatic rollback); no unattended rebuilds.
 
@@ -1030,7 +1034,7 @@ Applications not selected for the initial default:
 ### 23.2 Foundation release
 
 - NixOS closure, appliance images, and the first-boot console wizard;
-- one-time claim code + LAN bootstrap, SSH-key enrollment, declarative sshd hardening;
+- panel token + LAN bypass, SSH-key enrollment, declarative sshd hardening;
 - amd64 and arm64 support;
 - same-disk and separate-data layouts;
 - `omahabd` and control database;
@@ -1081,7 +1085,7 @@ Omahab is not complete until these scenarios work end to end.
 ### Installation and recovery
 
 1. Boot the appliance image on a fresh machine.
-2. Claim it with the one-time code from the LAN wizard and install SSH keys.
+2. Open the panel from the LAN (no token needed) — SSH keys are seeded by the installer.
 3. Join Tailscale and configure Cloudflare from the dashboard.
 4. Enroll two passkeys.
 5. Lose passkey access.
@@ -1103,7 +1107,7 @@ Omahab is not complete until these scenarios work end to end.
 3. Configure encrypted Hetzner backup (wizard step immediately after recovery phrase: enter Hetzner sub-account username+host+password once; system generates ed25519 key, uploads via SFTP:23, derives restic password from phrase, creates `sftp://…/omahab/<instanceID>`, runs first backup + verify so `recovery_tested` is ok).
 4. Destroy the Omahab machine.
 5. Boot a fresh appliance image on a replacement.
-6. In the first-boot LAN wizard choose “Restore from backup” → enter Hetzner username+host+password (once) + 24-word phrase → system derives restic password, uploads key, lists `restic snapshots --json --latest 10`, restores `--target /` with `--include` per `DefaultPaths()` (including `/var/lib/tailscale` so Tailscale IP is kept; fallback to normal Tailscale step if rejected), unwraps `recovery.kit` → `master.key`, runs `post_restore` hooks, writes `bootstrap-done`, restarts `omahabd` (or `omahab backup restore --fresh` from SSH).
+6. On the setup checklist choose “Restore from backup” → enter Hetzner username+host+password (once) + 24-word phrase → system derives restic password, uploads key, lists `restic snapshots --json --latest 10`, restores `--target /` with `--include` per `DefaultPaths()` (including `/var/lib/tailscale` so Tailscale IP is kept; fallback to normal Tailscale step if rejected), unwraps `recovery.kit` → `master.key`, runs `post_restore` hooks, restarts `omahabd` (or `omahab backup restore --fresh` from SSH).
 7. Confirm photos, databases, repositories, identities, and projects are usable.
 
 

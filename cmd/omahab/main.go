@@ -277,20 +277,11 @@ func hintForError(err error) string {
 	if err == nil {
 		return ""
 	}
-	// Pre-setup: bootstrap not yet complete -> guide to WebUI claim URL at LAN IP
-	// instead of dead-ending at login. Empty on vps placement (tailscale-only).
-	bootstrapHint := ""
-	if isBootstrapPending() {
-		if url := bootstrapClaimURL(); url != "" {
-			bootstrapHint = fmt.Sprintf(" — claim this device at %s", url)
-		}
-	}
+	// No token needed on the home network (lan placement + LAN source);
+	// elsewhere the 8-character panel token authenticates.
 	if apiErr, ok := err.(*apiclient.APIError); ok {
 		switch apiErr.StatusCode {
 		case http.StatusUnauthorized, http.StatusForbidden:
-			if bootstrapHint != "" {
-				return "hint: authentication failed (401)" + bootstrapHint + " (code on console) or set OMAHAB_TOKEN / ~/.config/omahab/token or run `omahab login`"
-			}
 			return "hint: authentication failed (401) — set OMAHAB_TOKEN or ~/.config/omahab/token or run `omahab login`"
 		case http.StatusNotFound:
 			return "hint: not found (404) — run `omahab <resource> list` to see available resources"
@@ -304,9 +295,6 @@ func hintForError(err error) string {
 		return "hint: check --server / OMAHAB_SERVER and Tailscale connectivity"
 	}
 	if strings.Contains(msg, "401") || strings.Contains(msg, "unauthorized") || strings.Contains(msg, "unauthenticated") {
-		if bootstrapHint != "" {
-			return "hint: set OMAHAB_TOKEN or ~/.config/omahab/token" + bootstrapHint + " (code on console) or run `omahab login`"
-		}
 		return "hint: set OMAHAB_TOKEN or ~/.config/omahab/token or run `omahab login`"
 	}
 	if strings.Contains(msg, "404") || strings.Contains(msg, "not found") {
@@ -376,16 +364,7 @@ func runWelcome(w io.Writer) error {
 		serverSource = "~/.config/omahab/client.json"
 	}
 	tokenStatus := "not set"
-	hint := ""
-	if isBootstrapPending() {
-		if url := bootstrapClaimURL(); url != "" {
-			hint = fmt.Sprintf("open %s (code on console) to claim", url)
-		} else {
-			hint = "open http://<device-ip>:8484 (code on console) to claim"
-		}
-	} else {
-		hint = "export OMAHAB_TOKEN or ~/.config/omahab/token (XDG-aware) or run `omahab login`"
-	}
+	hint := "export OMAHAB_TOKEN or ~/.config/omahab/token (XDG-aware) or run `omahab login`"
 	if tok := strings.TrimSpace(os.Getenv("OMAHAB_TOKEN")); tok != "" {
 		tokenStatus = "set (via OMAHAB_TOKEN)"
 		hint = ""
@@ -444,23 +423,10 @@ func runWelcome(w io.Writer) error {
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Run `omahab --help` for commands.")
 	if tokenStatus == "not set" {
-		if isBootstrapPending() {
-			if url := bootstrapClaimURL(); url != "" {
-				fmt.Fprintf(w, "First boot: claim at %s (one-time code on console).\n", url)
-				hostname, _ := os.Hostname()
-				if hostname != "" {
-					if idx := strings.Index(hostname, "."); idx != -1 {
-						hostname = hostname[:idx]
-					}
-					fmt.Fprintf(w, "Also try http://%s.local:8484\n", hostname)
-				}
-				fmt.Fprintln(w, "Token will be provisioned to ~/.config/omahab/token after Complete.")
-			} else {
-				fmt.Fprintln(w, "First boot: open http://<device-ip>:8484 (code on console) to claim.")
-			}
-		} else {
-			fmt.Fprintln(w, "First run?  `omahab login [--server <url>]` to authenticate.")
+		if url := lanPanelURL(); url != "" {
+			fmt.Fprintf(w, "Open %s — no token needed on this network.\n", url)
 		}
+		fmt.Fprintln(w, "First run?  `omahab login [--server <url>]` to authenticate.")
 	} else {
 		fmt.Fprintln(w, "Try `omahab status` to check the control plane.")
 	}
@@ -507,17 +473,16 @@ func renderWelcomeKV(w io.Writer, width int, server, serverSource, tokenStatus, 
 }
 
 type welcomeSnapshot struct {
-	LANIP           string
-	MDNSURL         string
-	DashboardURL    string
-	Server          string
-	IsRemote        bool
-	ServiceActive   string
-	ServiceResult   string
-	ServiceErr      error
-	UpOK            bool
-	UpErr           error
-	BootstrapActive *bool
+	LANIP          string
+	MDNSURL        string
+	DashboardURL   string
+	Server         string
+	IsRemote       bool
+	ServiceActive  string
+	ServiceResult  string
+	ServiceErr     error
+	UpOK           bool
+	UpErr          error
 }
 
 func gatherWelcomeSnapshot(server string) welcomeSnapshot {
@@ -563,40 +528,6 @@ func gatherWelcomeSnapshot(server string) welcomeSnapshot {
 	cancel2()
 	snap.UpOK = upOK
 	snap.UpErr = upErr
-	// Bootstrap status if reachable
-	if snap.UpOK {
-		ctx3, cancel3 := context.WithTimeout(context.Background(), time.Second)
-		bActive, _ := probeBootstrapStatusWithContext(ctx3, base)
-		cancel3()
-		if bActive != nil {
-			snap.BootstrapActive = bActive
-		} else {
-			// fallback to local sentinel when probe fails but we are local
-			if !snap.IsRemote {
-				_, statErr := os.Stat(bootstrapDonePath)
-				var active bool
-				if statErr == nil {
-					active = false
-				} else if os.IsNotExist(statErr) {
-					active = true
-				} else {
-					active = true
-				}
-				snap.BootstrapActive = &active
-			}
-		}
-	} else if !snap.IsRemote {
-		_, statErr := os.Stat(bootstrapDonePath)
-		var active bool
-		if statErr == nil {
-			active = false
-		} else if os.IsNotExist(statErr) {
-			active = true
-		} else {
-			active = true
-		}
-		snap.BootstrapActive = &active
-	}
 	return snap
 }
 
@@ -621,19 +552,7 @@ func renderWelcomeReadiness(w io.Writer, snap welcomeSnapshot) {
 			return
 		}
 	}
-	if snap.BootstrapActive != nil && *snap.BootstrapActive {
-		fmt.Fprintln(w, "  Finish setup")
-		fmt.Fprintln(w, "")
-		if snap.IsRemote {
-			fmt.Fprintf(w, "    Open %s\n", snap.Server)
-		} else {
-			fmt.Fprintf(w, "    Open %s\n", snap.DashboardURL)
-			fmt.Fprintf(w, "    also: %s (if mDNS is available)\n", snap.MDNSURL)
-		}
-		fmt.Fprintln(w, "    Get the one-time code with: sudo omahab console --once")
-		return
-	}
-	if snap.BootstrapActive != nil && !*snap.BootstrapActive {
+	if snap.UpOK {
 		fmt.Fprintln(w, "  Control panel ready")
 		fmt.Fprintln(w, "")
 		if snap.IsRemote {
@@ -645,28 +564,15 @@ func renderWelcomeReadiness(w io.Writer, snap welcomeSnapshot) {
 		fmt.Fprintln(w, "    Run omahab status to check")
 		return
 	}
-	if snap.UpOK {
-		fmt.Fprintln(w, "  Control panel ready")
-		fmt.Fprintln(w, "")
-		fmt.Fprintf(w, "    %s\n", snap.DashboardURL)
-		return
-	}
 	fmt.Fprintln(w, "  Starting the control panel...")
 }
 
-// isBootstrapPending reports whether first-boot bootstrap is still pending.
-// Sentinel is /var/lib/omahab/bootstrap-done (same as console.go and controlplane).
-func isBootstrapPending() bool {
-	_, err := os.Stat(bootstrapDonePath)
-	return os.IsNotExist(err)
-}
-
-// bootstrapClaimURL returns the WebUI claim URL at the device LAN IP
+// lanPanelURL returns the panel URL at the device LAN IP
 // (http://<lan-ip>:8484) for first-boot guidance, falling back to
 // http://<hostname>.local:8484 or empty when no address available.
 // On vps placement there is no LAN URL: it returns "" so callers point
 // at SSH + `tailscale up` instead. Never returns 127.0.0.1.
-func bootstrapClaimURL() string {
+func lanPanelURL() string {
 	if consolePlacement() == "vps" {
 		return ""
 	}
@@ -690,27 +596,19 @@ func newLoginCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "login",
 		Short: "Authenticate with the control plane",
-	Long: `Prompt for a bearer token (input hidden), verify it, and save credentials.
+	Long: `Prompt for the 8-character panel token (input hidden), verify it, and save credentials.
 
-Pre-setup (bootstrap pending): the token does not exist yet — claim the device
-at the WebUI URL shown on the console (http://<lan-ip>:8484 or http://<hostname>.local:8484
-with the one-time code) to obtain the token. The daemon provisions
-~/.config/omahab/token (XDG-aware: $XDG_CONFIG_HOME/omahab/token else $HOME/.config/omahab/token, 0600)
-only at bootstrap Complete (see controlplane/bootstrap_api.go decision).
-
-After bootstrap, the token is stored with 0600 permissions to ~/.config/omahab/token
-(XDG-aware) and OMAHAB_TOKEN env var takes precedence at runtime. Use --server to set the
-control plane URL (LAN IP / <hostname>.local fallback).`,
+The token is shown on the server console and stored with 0600 permissions to
+~/.config/omahab/token (XDG-aware: $XDG_CONFIG_HOME/omahab/token else
+$HOME/.config/omahab/token); the daemon provisions it at startup.
+OMAHAB_TOKEN env var takes precedence at runtime. On your home network no
+token is needed. Use --server to set the control plane URL
+(LAN IP / <hostname>.local fallback).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Pre-setup guidance: if bootstrap still pending and no token, point to WebUI.
-			if isBootstrapPending() {
-				if tok, _ := (apiclient.FileCredentialStore{}).Token(); strings.TrimSpace(tok) == "" {
-					if url := bootstrapClaimURL(); url != "" {
-						fmt.Fprintf(os.Stderr, "Bootstrap pending — claim this device at %s (code on console) to obtain a token.\n", url)
-					} else {
-						fmt.Fprintf(os.Stderr, "Bootstrap pending — claim at http://<device-ip>:8484 (code on console)\n")
-					}
-					fmt.Fprintf(os.Stderr, "Token will be provisioned to ~/.config/omahab/token after Complete.\n")
+			// First-boot guidance: no token yet — point at the panel URL.
+			if tok, _ := (apiclient.FileCredentialStore{}).Token(); strings.TrimSpace(tok) == "" {
+				if url := lanPanelURL(); url != "" {
+					fmt.Fprintf(os.Stderr, "No token saved — open %s (no token needed on this network) or enter the 8-character panel token from the console.\n", url)
 				}
 			}
 			server := strings.TrimSpace(loginServer)

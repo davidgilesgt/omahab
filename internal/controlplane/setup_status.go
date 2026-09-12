@@ -19,7 +19,20 @@ import (
 // secrets, exposure observations, apps, identity, and backups.
 // It persists nothing new — all derivable — per plan step 6.
 func (b *Backend) GetSetupStatus(ctx context.Context) (apitypes.SetupStatus, error) {
-	checks := make([]apitypes.SetupCheck, 0, 12)
+	checks := make([]apitypes.SetupCheck, 0, 13)
+	// --- ssh_keys check (first: installer seeds keys, add more here) ---
+	sshCheck := apitypes.SetupCheck{ID: "ssh_keys"}
+	if keys, err := b.ListSSHKeys(ctx); err != nil {
+		sshCheck.Status = "pending"
+		sshCheck.Detail = "query failed: " + err.Error()
+	} else if len(keys) == 0 {
+		sshCheck.Status = "pending"
+		sshCheck.Detail = "no SSH keys installed"
+	} else {
+		sshCheck.Status = "ok"
+		sshCheck.Detail = "ssh keys installed"
+	}
+	checks = append(checks, sshCheck)
 	// --- domain check ---
 	inst, instErr := b.store.Instance(ctx)
 	domain := ""
@@ -483,15 +496,8 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (apitypes.SetupStatus, err
 }
 
 func (b *Backend) isLocalReady() bool {
-	if !BootstrapActive() {
-		return true
-	}
-	if b.cfg.StateDir != "" {
-		if _, err := os.Stat(filepath.Join(b.cfg.StateDir, "bootstrap-done")); err == nil {
-			return true
-		}
-	}
-	return false
+	// No claim step: the local control panel is ready once the daemon runs.
+	return true
 }
 
 func deriveSetupState(checks []apitypes.SetupCheck, domainSentinel bool, cfDNSPresent bool) string {
@@ -568,6 +574,10 @@ func classifyCoreApp(st apps.Status) apitypes.SetupAppStatus {
 
 func applySetupCheckMeta(c apitypes.SetupCheck) apitypes.SetupCheck {
 	switch c.ID {
+	case "ssh_keys":
+		c.Label = "Add SSH keys"
+		c.Owner = "operator"
+		c.Action = "Add an SSH key for the admin user below."
 	case "domain":
 		c.Label = "Choose your domain"
 		c.Owner = "operator"
@@ -623,7 +633,7 @@ func applySetupCheckMeta(c apitypes.SetupCheck) apitypes.SetupCheck {
 	return c
 }
 func orderSetupChecks(checks []apitypes.SetupCheck) []apitypes.SetupCheck {
-	order := []string{"domain", "cloudflare_dns", "tailscale", "recovery_key", "admin_passkeys", "backups_configured", "storage_configured", "tunnel", "dashboard_dns", "core_apps", "woodpecker_connection", "automatic_reconciliation", "recovery_tested"}
+	order := []string{"ssh_keys", "domain", "cloudflare_dns", "tailscale", "recovery_key", "admin_passkeys", "backups_configured", "storage_configured", "tunnel", "dashboard_dns", "core_apps", "woodpecker_connection", "automatic_reconciliation", "recovery_tested"}
 	byID := make(map[string]apitypes.SetupCheck, len(checks))
 	for _, c := range checks {
 		byID[c.ID] = c

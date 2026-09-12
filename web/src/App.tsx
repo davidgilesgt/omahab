@@ -10,9 +10,7 @@ import { AssistantKnowledgePanel } from "./views/knowledge";
 import { DoctorPage } from "./views/doctor";
 import { HomePage } from "./views/home";
 import { WelcomePage } from "./views/welcome";
-import { BootstrapPage } from "./views/bootstrap";
 import { SetupPage } from "./views/setup";
-import { ApiClient } from "./api/client";
 
 function isHomeHost(): boolean {
   if (typeof window === "undefined") return false;
@@ -102,21 +100,18 @@ function HomeHostRedirects() {
 }
 
 export default function App() {
-  const [active, setActive] = useState<boolean | null>(null);
-  const [bootstrapError, setBootstrapError] = useState<string | null>(null);
+  const [serverError, setServerError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   const fetchStatus = useCallback(async () => {
     setLoading(true);
-    setBootstrapError(null);
+    setServerError(null);
     try {
-      const client = new ApiClient(() => null);
-      const data = await client.bootstrapStatus();
-      setActive(data.active);
+      const res = await fetch("/up", { cache: "no-store" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Failed to reach server";
-      setBootstrapError(msg);
-      setActive(null);
+      setServerError(msg);
     } finally {
       setLoading(false);
     }
@@ -129,12 +124,12 @@ export default function App() {
   if (loading) {
     return (
       <div className="state-message" role="status" style={{ minHeight: "60vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
-        <span className="spinner" aria-hidden="true" /> Checking setup status…
+        <span className="spinner" aria-hidden="true" /> Checking server status…
       </div>
     );
   }
 
-  if (bootstrapError !== null) {
+  if (serverError !== null) {
     return (
       <div
         className="state-message error-state"
@@ -143,7 +138,7 @@ export default function App() {
       >
         <div>
           <strong>Can't reach the server</strong>
-          <p>{bootstrapError}</p>
+          <p>{serverError}</p>
           <p className="muted" style={{ fontSize: "0.9em" }}>Check that the server is on and on the same network, then retry.</p>
         </div>
         <button className="button primary" type="button" onClick={() => void fetchStatus()}>
@@ -153,21 +148,7 @@ export default function App() {
     );
   }
 
-  if (active === true) {
-    // Bootstrap still pending: onboarding from / on any host
-    return (
-      <Routes>
-        <Route path="/" element={<BootstrapPage />} />
-        <Route path="/bootstrap" element={<BootstrapPage />} />
-        <Route path="/welcome/:token" element={<Navigate to="/" replace />} />
-        <Route path="/login" element={<Navigate to="/" replace />} />
-        <Route path="/admin/*" element={<Navigate to="/" replace />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
-    );
-  }
-
-  // Bootstrap complete: resume host-aware dashboard routing, redirect deep link
+  // No claim step: host-aware dashboard routing, redirect deep link.
   const isHome = isHomeHost();
   if (isHome) {
     return (

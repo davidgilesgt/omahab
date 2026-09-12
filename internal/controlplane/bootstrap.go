@@ -75,8 +75,10 @@ func EnsureMasterKey(path string) ([32]byte, error) {
 	return k, nil
 }
 
-// EnsureAPIToken loads or creates a 32-random-byte token at path with 0600.
-// Returns the raw token string (hex encoded 64 chars). File contains raw token.
+// EnsureAPIToken loads or creates the panel token at path with 0600.
+// New tokens are 8 lowercase Crockford-base32 chars (5 random bytes,
+// ~40 bits) — short enough to type from the console. Existing tokens
+// of any length keep working; the file contains the raw token.
 func EnsureAPIToken(path string) (string, error) {
 	if path == "" {
 		return "", fmt.Errorf("api token path is required")
@@ -92,12 +94,12 @@ func EnsureAPIToken(path string) (string, error) {
 	} else if !os.IsNotExist(err) {
 		return "", fmt.Errorf("read api token: %w", err)
 	}
-	// Generate 32 random bytes -> hex 64 chars
-	var b [32]byte
+	// Generate 5 random bytes -> 8 Crockford chars.
+	var b [5]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", fmt.Errorf("generate api token: %w", err)
 	}
-	tok := hex.EncodeToString(b[:])
+	tok := encodeShortToken(b[:])
 	// ensure parent dir
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
@@ -129,6 +131,28 @@ func EnsureAPIToken(path string) (string, error) {
 	}
 	_ = os.Chmod(path, 0600)
 	return tok, nil
+}
+
+// encodeShortToken renders b as lowercase Crockford base32 (no i/l/o/u).
+// 5 bytes -> exactly 8 chars (~40 bits).
+func encodeShortToken(b []byte) string {
+	const alphabet = "0123456789abcdefghjkmnpqrstvwxyz"
+	out := make([]byte, 0, 8)
+	bits := 0
+	var acc uint
+	for _, x := range b {
+		acc = acc<<8 | uint(x)
+		bits += 8
+		for bits >= 5 && len(out) < 8 {
+			bits -= 5
+			out = append(out, alphabet[(acc>>bits)&0x1f])
+		}
+	}
+	for len(out) < 8 && bits > 0 {
+		out = append(out, alphabet[(acc<<uint(5-bits))&0x1f])
+		bits = 0
+	}
+	return string(out)
 }
 
 // EnsureBackupEnv writes the backup units' env file (OMAHAB_SERVER/OMAHAB_TOKEN)

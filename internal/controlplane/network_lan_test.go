@@ -1,80 +1,10 @@
 package controlplane
 
 import (
-	"crypto/sha256"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
-
-// gateWithCode returns a gate holding an active code without touching the
-// filesystem (/run/omahab is not writable in tests).
-func gateWithCode(code string) *BootstrapGate {
-	g := NewBootstrapGate()
-	sum := sha256.Sum256([]byte(code))
-	g.codeHash = sum[:]
-	return g
-}
-
-func TestClaimLANExceptionConsumes(t *testing.T) {
-	t.Setenv("OMAHAB_PLACEMENT", "")
-	g := gateWithCode("secretcode1")
-	if err := g.Claim("", "192.168.1.5"); err != nil {
-		t.Fatalf("lan empty claim: %v", err)
-	}
-	// First-claimer wins: the code is consumed.
-	if err := g.Claim("secretcode1", "192.168.1.5"); err == nil {
-		t.Fatal("consumed code must not claim again")
-	}
-}
-
-func TestClaimLANExceptionLoopback(t *testing.T) {
-	t.Setenv("OMAHAB_PLACEMENT", "lan")
-	g := gateWithCode("secretcode1")
-	if err := g.Claim("  ", "127.0.0.1"); err != nil {
-		t.Fatalf("loopback empty claim: %v", err)
-	}
-}
-
-func TestClaimEmptyPublicSourceRejected(t *testing.T) {
-	t.Setenv("OMAHAB_PLACEMENT", "")
-	g := gateWithCode("secretcode1")
-	if err := g.Claim("", "8.8.8.8"); err == nil {
-		t.Fatal("empty code from public source must fail")
-	} else if !strings.Contains(err.Error(), "invalid code") {
-		t.Fatalf("want invalid code, got %v", err)
-	}
-	// Code must not be consumed by the failed attempt.
-	if err := g.Claim("secretcode1", "8.8.8.8"); err != nil {
-		t.Fatalf("real code must still work: %v", err)
-	}
-}
-
-func TestClaimEmptyVPSRejected(t *testing.T) {
-	t.Setenv("OMAHAB_PLACEMENT", "vps")
-	g := gateWithCode("secretcode1")
-	if err := g.Claim("", "192.168.1.5"); err == nil {
-		t.Fatal("empty code on vps placement must fail")
-	}
-	if err := g.Claim("secretcode1", "192.168.1.5"); err != nil {
-		t.Fatalf("real code must still work on vps: %v", err)
-	}
-}
-
-func TestClaimNormalPathUnchanged(t *testing.T) {
-	t.Setenv("OMAHAB_PLACEMENT", "lan")
-	g := gateWithCode("secretcode1")
-	if err := g.Claim("wrongcode00", "192.168.1.5"); err == nil {
-		t.Fatal("wrong code must fail")
-	}
-	if err := g.Claim("secretcode1", "192.168.1.5"); err != nil {
-		t.Fatalf("correct code: %v", err)
-	}
-	if err := g.Claim("secretcode1", "192.168.1.5"); err == nil {
-		t.Fatal("code must be single-use")
-	}
-}
 
 func TestPlacementDefault(t *testing.T) {
 	t.Setenv("OMAHAB_PLACEMENT", "")

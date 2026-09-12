@@ -1,7 +1,6 @@
 package apitypes
 
 import (
-	"context"
 	"time"
 
 	"github.com/omahab/omahab/internal/domain"
@@ -9,7 +8,6 @@ import (
 	"github.com/omahab/omahab/internal/identity"
 	"github.com/omahab/omahab/internal/knowledge"
 	"github.com/omahab/omahab/internal/scm"
-	"github.com/omahab/omahab/internal/sshkeys"
 )
 
 
@@ -454,13 +452,14 @@ type SetupWoodpeckerRequest struct {
 
 // SetupStatus is the aggregated first-run setup checklist state.
 // State is one of waiting_for_cloudflare, reconciling, attention, complete.
-// LocalReady is true when owner bootstrap is complete (local control panel ready),
+// LocalReady is true once the daemon runs (local control panel ready),
 // independent of optional integration health (domain, Tailscale, backups, etc.).
 type SetupStatus struct {
 	State      string       `json:"state"`
 	LocalReady bool         `json:"local_ready"`
 	Checks     []SetupCheck `json:"checks"`
 }
+
 // SetupCheck is one checklist entry. Status is ok|pending|failed|skipped.
 type SetupCheck struct {
 	ID           string           `json:"id"`
@@ -473,33 +472,13 @@ type SetupCheck struct {
 	PasskeyCount *int             `json:"passkey_count,omitempty"`
 	Target       *int             `json:"target,omitempty"`
 }
+
 // SetupAppStatus tracks one default bundle in the core_apps check.
 type SetupAppStatus struct {
 	BundleID string `json:"bundle_id"`
 	Status   string `json:"status"`
 	Detail   string `json:"detail,omitempty"`
 }
-
-// BootstrapGate is the control-plane side of first-boot bootstrap.
-type BootstrapGate interface {
-	// Claim validates the one-time code; success consumes it.
-	Claim(code, sourceIP string) error
-	// SSHKeys installs keys for the admin user.
-	SSHKeys(githubUser string, pastedKeys []string) (int, error)
-	// ListSSHKeys lists installed SSH keys for the admin user.
-	ListSSHKeys(ctx context.Context) ([]sshkeys.SSHKey, error)
-	// AdminUsername returns the configured Linux admin username.
-	AdminUsername() string
-	// TailscaleUp starts enrollment, returning the auth URL.
-	TailscaleUp() (string, error)
-	// TailscaleStatus polls enrollment state.
-	TailscaleStatus() (running bool, ip string, state string, err error)
-	// Complete writes bootstrap-done and closes the listener.
-	Complete() error
-	// Active reports whether bootstrap is still pending.
-	Active() bool
-}
-
 
 // HealthReport aliases for convenience.
 type HealthReport = health.Report

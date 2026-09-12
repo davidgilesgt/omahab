@@ -28,9 +28,8 @@ type Config struct {
 	DatabasePath  string
 	MasterKeyPath string
 	// APITokenPath is /var/lib/omahab/api.token (root 0600, created early via
-	// EnsureAPIToken). The per-user CLI token ~/.config/omahab/token is NOT
-	// created here; see controlplane/bootstrap_api.go token timing decision
-	// (keep-at-Complete with messaging, provision only at finalizeBootstrap).
+	// EnsureAPIToken). The per-user CLI token ~/.config/omahab/token is
+	// provisioned by the daemon at startup via ProvisionUserToken.
 	APITokenPath  string
 	ShutdownGrace time.Duration
 	CatalogPath   string

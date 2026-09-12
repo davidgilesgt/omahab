@@ -101,7 +101,6 @@ func run() error {
 		EmailHMACKey:     string(emailKey),
 		SCMWebhookSecret: webhookSecret,
 		DLDir:            dlDir,
-		Bootstrap:        backend,
 	})
 	if err != nil {
 		return fmt.Errorf("create server: %w", err)

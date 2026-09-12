@@ -1,42 +1,47 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/omahab/omahab/internal/controlplane"
-	"github.com/omahab/omahab/internal/sshkeys"
 )
 
-// stubGate implements BootstrapGate for handler-plumbing tests.
-type stubGate struct {
-	active   bool
-	claimErr error
-	lastCode string
-	lastIP   string
-}
+// TestBearerAuthLANBypass pins the LAN trust boundary: on lan placement,
+// LAN sources reach admin routes without a token while WAN sources get 401.
+func TestBearerAuthLANBypass(t *testing.T) {
+	backend := newRealBackend(t, nil)
+	srv := newRealServer(t, backend)
 
-func (g *stubGate) Claim(code, sourceIP string) error {
-	g.lastCode, g.lastIP = code, sourceIP
-	return g.claimErr
+	lan := httptest.NewRequest(http.MethodGet, "/api/v1/network/status", nil)
+	lan.RemoteAddr = "192.168.1.10:54321"
+	lanRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(lanRec, lan)
+	if lanRec.Code != http.StatusOK {
+		t.Fatalf("lan without token = %d, body %s, want 200", lanRec.Code, lanRec.Body.String())
+	}
+
+	wan := httptest.NewRequest(http.MethodGet, "/api/v1/network/status", nil)
+	wan.RemoteAddr = "203.0.113.9:54321"
+	wanRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(wanRec, wan)
+	if wanRec.Code != http.StatusUnauthorized {
+		t.Fatalf("wan without token = %d, body %s, want 401", wanRec.Code, wanRec.Body.String())
+	}
+
+	bad := httptest.NewRequest(http.MethodGet, "/api/v1/network/status", nil)
+	bad.RemoteAddr = "203.0.113.9:54321"
+	bad.Header.Set("Authorization", "Bearer wrong-token")
+	badRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(badRec, bad)
+	if badRec.Code != http.StatusUnauthorized {
+		t.Fatalf("wan wrong token = %d, body %s, want 401", badRec.Code, badRec.Body.String())
+	}
 }
-func (g *stubGate) SSHKeys(string, []string) (int, error) { return 0, nil }
-func (g *stubGate) ListSSHKeys(context.Context) ([]sshkeys.SSHKey, error) {
-	return nil, nil
-}
-func (g *stubGate) AdminUsername() string { return "omahab" }
-func (g *stubGate) TailscaleUp() (string, error) { return "", nil }
-func (g *stubGate) TailscaleStatus() (bool, string, string, error) {
-	return false, "", "", nil
-}
-func (g *stubGate) Complete() error { return nil }
-func (g *stubGate) Active() bool    { return g.active }
 
 func TestNetworkStatusShape(t *testing.T) {
 	backend := newRealBackend(t, nil)
@@ -114,35 +119,5 @@ func TestCloseOpenLANHandler(t *testing.T) {
 	}
 	if _, err := os.Stat(sentinel); !os.IsNotExist(err) {
 		t.Fatalf("open-lan did not clear sentinel: %v", err)
-	}
-}
-
-func TestBootstrapClaimEmptyCodeReachesGate(t *testing.T) {
-	backend := newRealBackend(t, nil)
-	gate := &stubGate{active: true}
-	srv := newRealServer(t, backend, func(c *Config) { c.Bootstrap = gate })
-
-	// Empty code from a LAN source must reach the gate (not 400).
-	req := httptest.NewRequest(http.MethodPost, "/api/bootstrap/claim", strings.NewReader(`{"code":""}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.RemoteAddr = "192.168.1.10:54321"
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("lan empty claim = %d, body %s, want 200", rec.Code, rec.Body.String())
-	}
-	if gate.lastCode != "" || gate.lastIP != "192.168.1.10" {
-		t.Fatalf("gate saw code=%q ip=%q, want empty + 192.168.1.10", gate.lastCode, gate.lastIP)
-	}
-
-	// Gate rejection maps to 401.
-	gate.claimErr = errUnauthorized("invalid code")
-	req2 := httptest.NewRequest(http.MethodPost, "/api/bootstrap/claim", strings.NewReader(`{"code":""}`))
-	req2.Header.Set("Content-Type", "application/json")
-	req2.RemoteAddr = "203.0.113.9:54321"
-	rec2 := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec2, req2)
-	if rec2.Code != http.StatusUnauthorized {
-		t.Fatalf("rejected claim = %d, body %s, want 401", rec2.Code, rec2.Body.String())
 	}
 }

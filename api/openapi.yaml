@@ -3,12 +3,14 @@ info:
   title: Omahab Control API
   description: |
     Authenticated control-plane API for omahabd. All routes are under /api/v1 except
-    /up. Bearer authentication is required except for /up and the email webhook which
-    uses a separate HMAC authentication path. Mutating requests require Content-Type
-    application/json. Unknown JSON fields are rejected. Request bodies are limited
-    (1 MiB JSON, 5 MiB email webhook) and per-request timeouts are enforced. SSE
-    streaming at /api/v1/events/stream supports Last-Event-ID replay and heartbeat
-    comments. Secret and provider-credential reads return metadata only.
+    /up. Bearer authentication uses the 8-character panel token, except for /up and
+    the email webhook which uses a separate HMAC authentication path. On lan placement
+    (the default), requests from LAN source addresses bypass the bearer token.
+    Mutating requests require Content-Type application/json. Unknown JSON fields are
+    rejected. Request bodies are limited (1 MiB JSON, 5 MiB email webhook) and
+    per-request timeouts are enforced. SSE streaming at /api/v1/events/stream supports
+    Last-Event-ID replay and heartbeat comments. Secret and provider-credential reads
+    return metadata only.
   version: 0.1.0
   contact:
     name: Omahab
@@ -21,162 +23,6 @@ tags:
   - name: setup
     description: First-run setup status and Woodpecker PAT handoff
 paths:
-  /api/bootstrap/claim:
-    post:
-      summary: Claim the appliance with the one-time bootstrap code
-      description: |
-        First-boot only (served on LAN, port 8484). Exchanges the
-        one-time code shown on the tty1 console for the administrator API
-        token. Single-use; 5 attempts/min per host and 20 total, after which
-        the code rotates. Inert once bootstrap is complete.
-        LAN exception: when placement is lan (the default), an empty code
-        from a LAN source address claims successfully and consumes the
-        single-use code (first-claimer wins); empty codes from non-LAN
-        sources fail with 401.
-      security: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [code]
-              properties:
-                code: { type: string, example: 7gc3x9k2mq }
-      responses:
-        '200':
-          description: Claimed; the token is returned once
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  token: { type: string }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '429': { $ref: '#/components/responses/Error' }
-
-  /api/bootstrap/status:
-    get:
-      summary: Bootstrap active status
-      description: "Public (no auth), always available. Returns whether first-boot bootstrap is still active plus lan_claim (true when the caller may claim with an empty code: lan placement and a LAN source address). Cache-Control no-store."
-      operationId: bootstrapStatus
-      security: []
-      responses:
-        '200':
-          description: Status
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [active, lan_claim]
-                properties:
-                  active: { type: boolean }
-                  lan_claim: { type: boolean }
-
-
-  /api/bootstrap/ssh-keys:
-    get:
-      summary: List administrator SSH keys (bootstrap)
-      description: First-boot only; requires the bootstrap-claimed bearer token. Returns the configured admin username and installed public keys. Preinstalled keys from the installer are listed; no re-import is needed. Preserve restore transitions.
-      operationId: bootstrapListSSHKeys
-      security: [{ bearerAuth: [] }]
-      responses:
-        '200':
-          description: Installed keys
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [username, items]
-                properties:
-                  username: { type: string }
-                  items:
-                    type: array
-                    items: { $ref: '#/components/schemas/SSHKey' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '404': { $ref: '#/components/responses/Error' }
-        '500': { $ref: '#/components/responses/Error' }
-    post:
-      summary: Install administrator SSH keys (bootstrap)
-      description: First-boot only; requires the bootstrap-claimed bearer token. Imports keys from a GitHub user and/or pasted public keys for the omahab admin account. Empty input skips the step.
-      operationId: bootstrapSSHKeys
-      security: [{ bearerAuth: [] }]
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                github_user: { type: string }
-                keys:
-                  type: array
-                  items: { type: string }
-              additionalProperties: false
-      responses:
-        '200':
-          description: Keys merged additively
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  added: { type: integer }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '404': { $ref: '#/components/responses/Error' }
-        '502': { $ref: '#/components/responses/Error' }
-        '500': { $ref: '#/components/responses/Error' }
-
-  /api/bootstrap/tailscale/up:
-    post:
-      summary: Start Tailscale enrollment (bootstrap)
-      description: First-boot only; runs `tailscale up` and returns the printed auth URL.
-      operationId: bootstrapTailscaleUp
-      security: [{ bearerAuth: [] }]
-      responses:
-        '200':
-          description: Enrollment started
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  auth_url: { type: string }
-        '502': { $ref: '#/components/responses/Error' }
-
-  /api/bootstrap/tailscale/status:
-    get:
-      summary: Poll Tailscale enrollment state (bootstrap)
-      operationId: bootstrapTailscaleStatus
-      security: [{ bearerAuth: [] }]
-      responses:
-        '200':
-          description: Current state
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  running: { type: boolean }
-                  ip: { type: string }
-                  state: { type: string }
-
-  /api/bootstrap/complete:
-    post:
-      summary: Finish first-boot bootstrap
-      description: Writes /var/lib/omahab/bootstrap-done. Further enrollment happens on the authenticated dashboard at the same origin.
-      operationId: bootstrapComplete
-      security: [{ bearerAuth: [] }]
-      responses:
-        '200':
-          description: Bootstrap complete
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  complete: { type: boolean }
-
   /api/v1/setup/verify-cloudflare:
     post:
       summary: Live-verify a Cloudflare API token
@@ -207,7 +53,7 @@ paths:
   /api/v1/tailscale/up:
     post:
       summary: Start Tailscale enrollment (authenticated)
-      description: Authenticated mirror of POST /api/bootstrap/tailscale/up; runs `tailscale up` and returns the printed auth URL ("" when already enrolled). Available any time with the admin bearer token; not gated on first-boot.
+      description: Runs `tailscale up` and returns the printed auth URL ("" when already enrolled). On lan placement, LAN sources bypass the bearer token.
       operationId: tailscaleUp
       responses:
         '200':
@@ -223,7 +69,7 @@ paths:
   /api/v1/tailscale/status:
     get:
       summary: Poll Tailscale enrollment state (authenticated)
-      description: Authenticated mirror of GET /api/bootstrap/tailscale/status. Available any time with the admin bearer token.
+      description: Poll Tailscale enrollment state. On lan placement, LAN sources bypass the bearer token.
       operationId: tailscaleStatus
       responses:
         '200':
@@ -2433,7 +2279,7 @@ components:
       required: [state, local_ready, checks]
       properties:
         state: { type: string, enum: [waiting_for_cloudflare, reconciling, attention, complete] }
-        local_ready: { type: boolean, description: "true when owner setup (bootstrap) is complete; local control panel is ready independent of integration health" }
+        local_ready: { type: boolean, description: "true once the daemon runs; local control panel is ready independent of integration health" }
         checks: { type: array, items: { $ref: '#/components/schemas/SetupCheck' } }
 
     SetupCheck:

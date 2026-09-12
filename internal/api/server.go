@@ -23,6 +23,7 @@ import (
 
 	"github.com/omahab/omahab/internal/companion"
 	"github.com/omahab/omahab/internal/controlplane"
+	"github.com/omahab/omahab/internal/netenv"
 )
 
 //go:embed openapi.yaml
@@ -44,12 +45,6 @@ type Server struct {
 	// dlDir is the filesystem directory for /dl/* and /install.sh.
 	dlDirPath string
 
-	// bootstrap is the first-boot gate (LAN listener, /api/bootstrap/*).
-	// nil disables the bootstrap routes.
-	bootstrap BootstrapGate
-	// adminToken is the raw admin API token returned by the bootstrap
-	// claim (kept in memory only; never logged).
-	adminToken string
 	// mcpHandler is the streamable HTTP MCP handler for /mcp.
 	mcpHandler http.Handler
 }
@@ -69,9 +64,6 @@ type Config struct {
 
 	// DLDir is the directory serving /dl/* and /install.sh. If empty, OMAHAB_DL_DIR env or ./dist/dl fallback is used.
 	DLDir string
-
-	// Bootstrap enables the first-boot route group. Nil disables it.
-	Bootstrap BootstrapGate
 }
 
 const (
@@ -108,8 +100,6 @@ func New(cfg Config) (*Server, error) {
 		emailHMACKey:     []byte(cfg.EmailHMACKey),
 		scmWebhookSecret: []byte(cfg.SCMWebhookSecret),
 		dlDirPath:        cfg.DLDir,
-		bootstrap:        cfg.Bootstrap,
-		adminToken:       cfg.BearerToken,
 		mcpHandler:       cfg.MCPHandler,
 	}
 	if cfg.BearerToken != "" {
@@ -198,23 +188,7 @@ func (s *Server) buildRouter() chi.Router {
 		})
 	}
 
-	// Bootstrap status: public, always available (outside gate).
-	r.Get("/api/bootstrap/status", s.handleBootstrapStatus)
-
-	// First-boot bootstrap (gate is inert when nil or bootstrap already completed).
-	r.Group(func(r chi.Router) {
-		r.Post("/api/bootstrap/claim", s.withBodyLimit(defaultBodyLimit, s.handleBootstrapClaim))
-		r.Group(func(r chi.Router) {
-			r.Use(s.bootstrapGateActive)
-			r.Get("/api/bootstrap/ssh-keys", s.handleBootstrapListSSHKeys)
-			r.Post("/api/bootstrap/ssh-keys", s.withBodyLimit(64<<10, s.handleBootstrapSSHKeys))
-			r.Post("/api/bootstrap/tailscale/up", s.handleBootstrapTailscaleUp)
-			r.Get("/api/bootstrap/tailscale/status", s.handleBootstrapTailscaleStatus)
-			r.Post("/api/bootstrap/complete", s.handleBootstrapComplete)
-		})
-	})
-
-	// Authenticated API group.
+	// Authenticated API group (LAN sources on lan placement bypass the token).
 	r.Group(func(r chi.Router) {
 		r.Use(s.bearerAuth)
 
@@ -640,12 +614,19 @@ func (s *Server) timeoutMiddleware(d time.Duration) func(http.Handler) http.Hand
 // bearerAuth enforces constant-time bearer token comparison. Skipped only for /up and HMAC routes
 // which are not inside the authenticated group. Device tokens (oma_dev_...) are rejected with 403
 // on every admin route to enforce allowlist: companion devices may only call device-endpoints.
+// LAN exception: on lan placement (the ISO-installer default), requests from
+// LAN source addresses (RFC1918/ULA/link-local/loopback) bypass the token —
+// the LAN is the trusted path, the panel token guards tailnet/remote access.
 func (s *Server) bearerAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.tokenHash == nil {
 			// No token configured; allow (used in tests). But still reject device tokens if they appear,
 			// to preserve 403 semantics even when auth disabled? In tests tokenHash=nil means auth disabled,
 			// so we allow all. However deviceAuth tests use nil tokenHash; bearerAuth with nil should still allow admin routes.
+			next.ServeHTTP(w, r)
+			return
+		}
+		if controlplane.Placement() == "lan" && netenv.IsLANAddr(clientIP(r)) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -684,6 +665,14 @@ func (s *Server) bearerAuth(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func clientIP(r *http.Request) string {
+	host := r.RemoteAddr
+	if i := strings.LastIndex(host, ":"); i > 0 {
+		host = host[:i]
+	}
+	return host
 }
 
 // deviceAuth validates companion device tokens (oma_dev_...) via companion.Service.

@@ -126,26 +126,3 @@ func (s *Server) handleDeleteSystemSSHKeys(w http.ResponseWriter, r *http.Reques
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
-
-func (s *Server) handleBootstrapListSSHKeys(w http.ResponseWriter, r *http.Request) {
-	if s.bootstrap == nil || !s.bootstrap.Active() {
-		writeError(w, r, newAPIError(http.StatusNotFound, CodeNotFound, "bootstrap complete"))
-		return
-	}
-	if !s.requireBootstrapToken(w, r) {
-		return
-	}
-	keys, err := s.bootstrap.ListSSHKeys(r.Context())
-	if err != nil {
-		writeError(w, r, newAPIError(http.StatusInternalServerError, CodeInternal, "failed to read SSH keys"))
-		return
-	}
-	if keys == nil {
-		keys = []sshkeys.SSHKey{}
-	}
-	username := s.bootstrap.AdminUsername()
-	writeJSON(w, http.StatusOK, map[string]any{
-		"username": username,
-		"items":    keys,
-	})
-}

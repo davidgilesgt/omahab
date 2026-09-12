@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -8,11 +9,13 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/omahab/omahab/internal/tailnet"
 )
 
 // lanClosedPath is the sentinel marking an explicit close-LAN action.
-// Same pattern as bootstrapDonePath. A var (not const) so tests can
-// redirect it; production value is /var/lib/omahab/lan-closed.
+// A var (not const) so tests can redirect it;
+// production value is /var/lib/omahab/lan-closed.
 var lanClosedPath = "/var/lib/omahab/lan-closed"
 
 // lanRuleComments are the stable nft rule comments identifying the three
@@ -110,6 +113,20 @@ func (b *Backend) Placement() string {
 // LANClosed exposes the close-LAN sentinel for the network status API.
 func (b *Backend) LANClosed() bool {
 	return LANClosed()
+}
+
+// TailscaleUp starts enrollment, returning the auth URL.
+func (b *Backend) TailscaleUp() (string, error) {
+	return tailnet.Up(context.Background())
+}
+
+// TailscaleStatus polls enrollment state.
+func (b *Backend) TailscaleStatus() (bool, string, string, error) {
+	st, err := tailnet.Status(context.Background())
+	if err != nil {
+		return false, "", "", err
+	}
+	return st.Running, st.IP, st.State, nil
 }
 
 // NetworkStatus returns placement, close-LAN state, and whether
