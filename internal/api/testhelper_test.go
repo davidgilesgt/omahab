@@ -5,10 +5,32 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/omahab/omahab/internal/apps"
 	"github.com/omahab/omahab/internal/config"
 	"github.com/omahab/omahab/internal/controlplane"
+	"github.com/omahab/omahab/internal/domain"
 	"github.com/omahab/omahab/internal/store"
 )
+
+// fakeAppsRunner performs no host side effects: installs never reach
+// systemctl or the appenv directory, so route tests run without escalation.
+type fakeAppsRunner struct{}
+
+func (fakeAppsRunner) Deploy(context.Context, domain.Application, apps.DeploySpec) error {
+	return nil
+}
+func (fakeAppsRunner) Start(context.Context, domain.Application, apps.DeploySpec) error {
+	return nil
+}
+func (fakeAppsRunner) Stop(context.Context, domain.Application, apps.DeploySpec) error {
+	return nil
+}
+func (fakeAppsRunner) Remove(context.Context, domain.Application, apps.DeploySpec) error {
+	return nil
+}
+func (fakeAppsRunner) Check(context.Context, domain.Application, apps.DeploySpec) (domain.Health, error) {
+	return domain.HealthUnknown, nil
+}
 
 func testConfig(root string) config.Config {
 	return config.Config{
@@ -21,7 +43,7 @@ func testConfig(root string) config.Config {
 	}
 }
 
-func newRealBackend(t *testing.T, mutate func(*config.Config)) *controlplane.Backend {
+func newRealBackend(t *testing.T, mutate func(*config.Config), runners ...apps.Runner) *controlplane.Backend {
 	t.Helper()
 	root := t.TempDir()
 	cfg := testConfig(root)
@@ -36,7 +58,11 @@ func newRealBackend(t *testing.T, mutate func(*config.Config)) *controlplane.Bac
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	backend, err := controlplane.New(context.Background(), st, controlplane.Options{Config: cfg, Version: "test"})
+	opts := controlplane.Options{Config: cfg, Version: "test"}
+	if len(runners) > 0 {
+		opts.AppsRunner = runners[0]
+	}
+	backend, err := controlplane.New(context.Background(), st, opts)
 	if err != nil {
 		t.Fatalf("new backend: %v", err)
 	}

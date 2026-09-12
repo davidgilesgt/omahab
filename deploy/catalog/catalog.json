@@ -11,6 +11,7 @@
         "path": "/config/",
         "port": 2019
       },
+      "startup_grace_seconds": 60,
       "data": [
         {
           "name": "caddy_data",
@@ -54,6 +55,7 @@
         "path": "/health",
         "port": 1411
       },
+      "startup_grace_seconds": 180,
       "data": [
         {
           "name": "pocket_id_data",
@@ -106,6 +108,7 @@
         "path": "/api/healthz",
         "port": 3000
       },
+      "startup_grace_seconds": 180,
       "data": [
         {
           "name": "forgejo_data",
@@ -165,6 +168,7 @@
         "path": "/healthz",
         "port": 8000
       },
+      "startup_grace_seconds": 120,
       "data": [
         {
           "name": "woodpecker_data",
@@ -228,6 +232,7 @@
         "path": "/api/server/ping",
         "port": 2283
       },
+      "startup_grace_seconds": 600,
       "data": [
         {
           "name": "immich_postgres_data",
@@ -291,6 +296,7 @@
         "path": "/api/",
         "port": 28981
       },
+      "startup_grace_seconds": 300,
       "data": [
         {
           "name": "paperless_postgres_data",
@@ -351,6 +357,7 @@
         "path": "/api/health",
         "port": 3010
       },
+      "startup_grace_seconds": 300,
       "data": [
         {
           "name": "karakeep_data",
@@ -417,6 +424,7 @@
         "path": "/rest/system/ping",
         "port": 8384
       },
+      "startup_grace_seconds": 120,
       "data": [
         {
           "name": "syncthing_config",
@@ -464,6 +472,7 @@
         "path": "/health/liveliness",
         "port": 4000
       },
+      "startup_grace_seconds": 180,
       "data": [
         {
           "name": "litellm_postgres_data",
@@ -519,6 +528,7 @@
       "health_check": {
         "kind": "none"
       },
+      "startup_grace_seconds": 60,
       "data": [
         {
           "name": "embedding_models",
@@ -558,6 +568,7 @@
         "path": "/v1/health",
         "port": 2586
       },
+      "startup_grace_seconds": 60,
       "data": [
         {
           "name": "ntfy_cache",
@@ -607,6 +618,7 @@
         "path": "/api/status",
         "port": 8085
       },
+      "startup_grace_seconds": 300,
       "data": [
         {
           "name": "hermes_home",
@@ -646,6 +658,7 @@
         "path": "/",
         "port": 8500
       },
+      "startup_grace_seconds": 60,
       "data": [
         {
           "name": "machine_backups",
@@ -658,7 +671,7 @@
       "resources": {
         "memory_mb": 256
       },
-      "default": true,
+      "default": false,
       "route": "backup.{{.Domain}}",
       "dependencies": [
         "caddy"

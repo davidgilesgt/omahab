@@ -58,11 +58,7 @@ func (b *Backend) CreateSecret(ctx context.Context, req apitypes.CreateSecretReq
 	}
 	if strings.HasPrefix(req.Name, "cloudflare_") {
 		if err := b.refreshExposure(ctx); err != nil {
-			_, _ = b.events.Publish(ctx, events.PublishInput{
-				Type:     "exposure.refresh_failed",
-				Severity: "warning",
-				Message:  "exposure refresh after secret create failed: " + err.Error(),
-			})
+			b.publishExposureRefreshIssue(ctx, "after secret create", err)
 		}
 	}
 	return *s, nil
@@ -75,11 +71,7 @@ func (b *Backend) UpdateSecret(ctx context.Context, id domain.ID, req apitypes.U
 	}
 	if strings.HasPrefix(string(s.Name), "cloudflare_") {
 		if err := b.refreshExposure(ctx); err != nil {
-			_, _ = b.events.Publish(ctx, events.PublishInput{
-				Type:     "exposure.refresh_failed",
-				Severity: "warning",
-				Message:  "exposure refresh after secret update failed: " + err.Error(),
-			})
+			b.publishExposureRefreshIssue(ctx, "after secret update", err)
 		}
 	}
 	return *s, nil

@@ -315,7 +315,7 @@ func (s *Service) List(ctx context.Context, opts ListOptions) ([]domain.Event, s
 		args = append(args, cursorTime, cursorTime, cursorID)
 	}
 	if opts.Filter.Type != "" {
-		if !allowedTypes[opts.Filter.Type] {
+		if !isAllowedType(opts.Filter.Type) {
 			return nil, "", store.Validationf("unknown event type %q", opts.Filter.Type)
 		}
 		sb.WriteString(` AND type = ?`)
@@ -381,7 +381,7 @@ func (s *Service) ListSimple(ctx context.Context, limit, offset int, filter List
 	args := []any{}
 	sb.WriteString(`SELECT id, type, severity, resource_id, message, data, read_at, created_at FROM events WHERE 1=1`)
 	if filter.Type != "" {
-		if !allowedTypes[filter.Type] {
+		if !isAllowedType(filter.Type) {
 			return nil, store.Validationf("unknown event type %q", filter.Type)
 		}
 		sb.WriteString(` AND type = ?`)
@@ -425,7 +425,7 @@ func (s *Service) UnreadCount(ctx context.Context, filter ListFilter) (int, erro
 	args := []any{}
 	sb.WriteString(`SELECT COUNT(*) FROM events WHERE read_at IS NULL`)
 	if filter.Type != "" {
-		if !allowedTypes[filter.Type] {
+		if !isAllowedType(filter.Type) {
 			return 0, store.Validationf("unknown event type %q", filter.Type)
 		}
 		sb.WriteString(` AND type = ?`)
@@ -475,7 +475,7 @@ func (s *Service) MarkAllReadByType(ctx context.Context, eventType string) error
 	if t == "" {
 		return store.Validation("event type is required")
 	}
-	if !allowedTypes[t] {
+	if !isAllowedType(t) {
 		return store.Validationf("unknown event type %q", t)
 	}
 	now := s.now().UTC().Format(time.RFC3339Nano)

@@ -96,12 +96,13 @@ type Backend struct {
 	httpsProbe    func(context.Context, string) error
 	httpsWait     time.Duration
 	httpsInterval time.Duration
+	// appsRunner overrides the systemd runner when set via Options (test seam).
+	appsRunner apps.Runner
 
 	// woodpecker_connection check overrides (test injectable)
 	podmanSocketPath          string
 	woodpeckerHTTPClient      *http.Client
 	woodpeckerBaseURLOverride string
-	// forgejo bootstrap overrides (test injectable)
 	forgejoExec                func(context.Context, ...string) (string, error)
 	forgejoBaseURLOverride     string
 	forgejoHTTPClientOverride  *http.Client
@@ -112,6 +113,10 @@ type Options struct {
 	Config    config.Config
 	Version   string
 	StartedAt time.Time
+	// AppsRunner overrides the default systemd runner. Nil means the
+	// production SystemdRunner (real systemctl + appenv writes). Tests
+	// inject a fake so installs never touch the host service manager.
+	AppsRunner apps.Runner
 }
 
 // New creates backend, ensures migrations, instance, tokens, services.
@@ -156,6 +161,7 @@ func New(ctx context.Context, st *store.Store, opts Options) (*Backend, error) {
 		startedAt: opts.StartedAt,
 		masterKey: mk,
 		apiToken:  tok,
+		appsRunner: opts.AppsRunner,
 	}
 	if b.startedAt.IsZero() {
 		b.startedAt = time.Now().UTC()
@@ -246,13 +252,16 @@ func (b *Backend) initServices(ctx context.Context) error {
 			return fmt.Errorf("apps catalog %s: %w", b.cfg.CatalogPath, err)
 		}
 	}
-	systemdRunner := apps.NewSystemdRunner(nil, "", func(bundleID string) []string {
-		bundle, ok := catalog.Get(bundleID)
-		if !ok {
-			return nil
-		}
-		return bundle.Units
-	})
+	systemdRunner := b.appsRunner
+	if systemdRunner == nil {
+		systemdRunner = apps.NewSystemdRunner(nil, "", func(bundleID string) []string {
+			bundle, ok := catalog.Get(bundleID)
+			if !ok {
+				return nil
+			}
+			return bundle.Units
+		})
+	}
 	domainEnv := func(ctx context.Context, app domain.Application) ([]string, error) {
 		inst, err := b.store.Instance(ctx)
 		if err != nil {
@@ -350,28 +359,24 @@ func (b *Backend) initServices(ctx context.Context) error {
 
 	b.hermes = hermes.New(b.db, newHermesSink(b.events))
 
-	// scm with real Forgejo/Woodpecker clients resolved from secrets
-	forgejoBase := secretOrEnv("forgejo_base_url", "OMAHAB_FORGEJO_URL")
-	forgejoToken := secretOrEnv("forgejo_token", "OMAHAB_FORGEJO_TOKEN")
-	woodpeckerBase := secretOrEnv("woodpecker_base_url", "OMAHAB_WOODPECKER_URL")
-	woodpeckerToken := secretOrEnv("woodpecker_token", "OMAHAB_WOODPECKER_TOKEN")
-	var forgejoClient scm.ForgejoClient
-	var woodpeckerClient scm.WoodpeckerClient
-	if forgejoBase != "" && forgejoToken != "" {
-		forgejoClient = scm.NewForgejoClient(scm.ForgejoConfig{BaseURL: forgejoBase, Token: forgejoToken, SecretStore: secretsStoreAdapter{b.secrets}})
-	}
-	if woodpeckerBase != "" && woodpeckerToken != "" {
-		woodpeckerClient = scm.NewWoodpeckerClient(scm.WoodpeckerConfig{BaseURL: woodpeckerBase, Token: woodpeckerToken})
-	}
-	scmSvc, err := scm.New(b.db, forgejoClient, woodpeckerClient, secretsStoreAdapter{b.secrets}, newScmSink(b.events))
-	if err != nil {
-		_, _ = b.events.Publish(ctx, events.PublishInput{
-			Type:     "scm.init_failed",
-			Severity: "warning",
-			Message:  "scm init failed: " + err.Error(),
-		})
-	} else {
-		b.scm = scmSvc
+	// scm binds once Forgejo/Woodpecker credentials exist. Before that it
+	// defers quietly (info, no phone notification); setupPhaseDependentApps
+	// retries once Forgejo lands. Only real failures warn.
+	if err := b.bindSCM(ctx); err != nil {
+		if errors.Is(err, scm.ErrValidation) {
+			log.Printf("scm init deferred: %v", err)
+			_, _ = b.events.Publish(ctx, events.PublishInput{
+				Type:     "scm.init_deferred",
+				Severity: "info",
+				Message:  "scm init deferred: " + err.Error(),
+			})
+		} else {
+			_, _ = b.events.Publish(ctx, events.PublishInput{
+				Type:     "scm.init_failed",
+				Severity: "warning",
+				Message:  "scm init failed: " + err.Error(),
+			})
+		}
 	}
 	b.identity, _ = identity.New(b.db, &noopPocketID{})
 	_ = b.bindPocketID(ctx)
@@ -612,6 +617,31 @@ func (b *Backend) bindSCM(ctx context.Context) error {
 	return nil
 }
 
+// errTailscaleIPNotRecorded marks exposure refresh attempts made before
+// the tailnet reported an IP. Callers must use errors.Is: it is a
+// not-ready-yet deferral, not a failure — it resolves on a later trigger
+// and must stay info (never warn, never phone-notify).
+var errTailscaleIPNotRecorded = errors.New("tailscale IP not recorded")
+
+// publishExposureRefreshIssue reports a best-effort exposure refresh
+// failure. Not-ready-yet causes publish info under
+// exposure.refresh_deferred; real failures keep the warning.
+func (b *Backend) publishExposureRefreshIssue(ctx context.Context, action string, err error) {
+	if errors.Is(err, errTailscaleIPNotRecorded) {
+		_, _ = b.events.Publish(ctx, events.PublishInput{
+			Type:     "exposure.refresh_deferred",
+			Severity: "info",
+			Message:  "exposure refresh " + action + " deferred: tailscale IP not yet recorded",
+		})
+		return
+	}
+	_, _ = b.events.Publish(ctx, events.PublishInput{
+		Type:     "exposure.refresh_failed",
+		Severity: "warning",
+		Message:  "exposure refresh " + action + " failed: " + err.Error(),
+	})
+}
+
 func (b *Backend) refreshExposure(ctx context.Context) error {
 	b.exposureMu.Lock()
 	defer b.exposureMu.Unlock()
@@ -693,7 +723,7 @@ func (b *Backend) refreshExposure(ctx context.Context) error {
 		effectiveAccToken = ""
 	}
 	if strings.TrimSpace(inst.TailscaleIP) == "" {
-		return fmt.Errorf("tailscale IP not recorded")
+		return errTailscaleIPNotRecorded
 	}
 	clients, cErr := cloudflare.NewClients(cloudflare.Options{
 		APITokenDNS:     dnsToken,
@@ -794,6 +824,7 @@ func (b *Backend) removeProjectExposure(ctx context.Context, hostname string) er
 	_, err = expSvc.Apply(ctx, plan.ID)
 	return err
 }
+
 // APIToken returns raw token (for server)
 
 func (b *Backend) APIToken() string { return b.apiToken }
@@ -1192,6 +1223,7 @@ func (n *noopPocketID) CreateOIDCClientSecret(ctx context.Context, clientID stri
 func (n *noopPocketID) EnsureOIDCClientGroupAccess(ctx context.Context, clientID string, groupNames []string) error {
 	return fmt.Errorf("%w: PocketID not configured", ErrNotConfigured)
 }
+
 // additional sink wrappers to satisfy specific types
 type knowledgeSink struct{ *domainEventSink }
 

@@ -531,7 +531,7 @@ func (b *Backend) waitAppHealthy(ctx context.Context, appID domain.ID, timeout t
 		isNative := false
 		if cat := b.apps.CatalogSnapshot(); cat != nil {
 			if bundle, ok := cat.Get(st.BundleID); ok {
-				isNative = len(bundle.Units) > 0
+				isNative = isNativeBundle(bundle)
 			}
 		}
 		if err := requireRunningHealthy(st, isNative); err == nil {
@@ -543,7 +543,7 @@ func (b *Backend) waitAppHealthy(ctx context.Context, appID domain.ID, timeout t
 			if last.BundleID != st.BundleID {
 				if cat := b.apps.CatalogSnapshot(); cat != nil {
 					if bundle, ok := cat.Get(last.BundleID); ok {
-						isNativeLast = len(bundle.Units) > 0
+						isNativeLast = isNativeBundle(bundle)
 					} else {
 						isNativeLast = false
 					}

@@ -193,6 +193,15 @@ EOF
           integration = pkgs.testers.runNixOSTest (import ./nix/tests/install.nix { inherit self; });
           installer-disk = pkgs.testers.runNixOSTest (import ./nix/tests/installer-disk.nix { inherit self; });
           image = self.nixosConfigurations.omahab-appliance.config.system.build.isoImage;
+        } // lib.optionalAttrs (system == "x86_64-linux") {
+          # Install-time closure gate. nixos-install builds
+          # omahab-installed on user hardware at install time; nothing
+          # else in blocking CI builds it (installer-disk uses
+          # --no-install, integration is continue-on-error). Service
+          # dependency suites that run at build time (e.g. a2a-sdk via
+          # installCheckPhase) fail here instead of on the installer.
+          # nixosConfigurations are x86_64-linux only, hence the guard.
+          installed-closure = self.nixosConfigurations.omahab-installed.config.system.build.toplevel;
         };
       }
     ) // {

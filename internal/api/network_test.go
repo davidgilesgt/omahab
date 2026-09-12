@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os/exec"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/omahab/omahab/internal/controlplane"
 	"github.com/omahab/omahab/internal/sshkeys"
 )
 
@@ -79,25 +81,39 @@ func TestNetworkAuthRequired(t *testing.T) {
 func TestCloseOpenLANHandler(t *testing.T) {
 	backend := newRealBackend(t, nil)
 	srv := newRealServer(t, backend)
-	_, nftMissing := exec.LookPath("nft")
-	for _, path := range []string{"/api/v1/network/close-lan", "/api/v1/network/open-lan"} {
+	// Fake the firewall seams: no LAN rules present, restarts are no-ops.
+	// The handler test must never exec nft/systemctl or touch the host
+	// sentinel, so it runs without escalation on any machine.
+	sentinel := filepath.Join(t.TempDir(), "lan-closed")
+	restore := controlplane.SetLANSeamsForTest(sentinel,
+		func(args ...string) (string, error) { return "", nil },
+		func() error { return nil })
+	defer restore()
+	post := func(path string) (int, bool) {
+		t.Helper()
 		req := httptest.NewRequest(http.MethodPost, path, nil)
 		req.Header.Set("Authorization", "Bearer test-token")
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, req)
-		// Without nft the handler must surface 502, never 2xx with a lie
-		// and never a 500 panic. Where nft exists the table may or may
-		// not be present, so accept either outcome.
-		if nftMissing != nil {
-			if rec.Code != http.StatusBadGateway {
-				t.Fatalf("POST %s without nft = %d, body %s, want 502", path, rec.Code, rec.Body.String())
-			}
-		} else if rec.Code != http.StatusOK && rec.Code != http.StatusBadGateway {
-			t.Fatalf("POST %s = %d, body %s, want 200 or 502", path, rec.Code, rec.Body.String())
+		var out struct {
+			Closed bool `json:"closed"`
 		}
-		if rec.Code == http.StatusOK && !strings.Contains(rec.Body.String(), "closed") {
-			t.Fatalf("POST %s 200 body %s missing closed field", path, rec.Body.String())
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("POST %s: decode %v: %s", path, err, rec.Body.String())
 		}
+		return rec.Code, out.Closed
+	}
+	if code, closed := post("/api/v1/network/close-lan"); code != http.StatusOK || !closed {
+		t.Fatalf("close-lan = %d closed=%v, want 200 true", code, closed)
+	}
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Fatalf("close-lan did not write sentinel: %v", err)
+	}
+	if code, closed := post("/api/v1/network/open-lan"); code != http.StatusOK || closed {
+		t.Fatalf("open-lan = %d closed=%v, want 200 false", code, closed)
+	}
+	if _, err := os.Stat(sentinel); !os.IsNotExist(err) {
+		t.Fatalf("open-lan did not clear sentinel: %v", err)
 	}
 }
 

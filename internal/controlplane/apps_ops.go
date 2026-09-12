@@ -11,7 +11,6 @@ import (
 	"github.com/omahab/omahab/internal/apitypes"
 	"github.com/omahab/omahab/internal/apps"
 	"github.com/omahab/omahab/internal/domain"
-	"github.com/omahab/omahab/internal/events"
 	"github.com/omahab/omahab/internal/health"
 	"github.com/omahab/omahab/internal/store"
 )
@@ -77,13 +76,10 @@ func (b *Backend) UpdateInstance(ctx context.Context, domainName string, assista
 	if err != nil {
 		return domain.Instance{}, translateError(err)
 	}
-	// Refresh exposure with new domain (best-effort, log on failure).
+	// Refresh exposure with new domain (best-effort; not-ready-yet defers
+	// quietly instead of warning).
 	if err := b.refreshExposure(ctx); err != nil {
-		_, _ = b.events.Publish(ctx, events.PublishInput{
-			Type:     "exposure.refresh_failed",
-			Severity: "warning",
-			Message:  "exposure refresh after UpdateInstance failed: " + err.Error(),
-		})
+		b.publishExposureRefreshIssue(ctx, "after UpdateInstance", err)
 	}
 	return saved, nil
 }

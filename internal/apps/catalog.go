@@ -86,23 +86,29 @@ func parseDurationOrDefault(s string, def time.Duration) time.Duration {
 // declarative bundle of native NixOS service units, health and exposure
 // capability, persistent-data declarations, and backup hooks.
 type Bundle struct {
-	ID              string           `json:"id"`
-	Name            string           `json:"name"`
-	Port            int              `json:"port,omitempty"`
-	DefaultExposure domain.Exposure  `json:"default_exposure,omitempty"`
-	MaxExposure     domain.Exposure  `json:"max_exposure,omitempty"`
-	HealthCheck     HealthCheck      `json:"health_check"`
-	Data            []DataVolume     `json:"data,omitempty"`
-	Backup          BackupHooks      `json:"backup,omitempty"`
-	OIDC            OIDCConfig       `json:"oidc,omitempty"`
-	Resources       ResourceGuidance `json:"resources,omitempty"`
-	Default         bool             `json:"default"`
-	Route           string           `json:"route"`
-	Dependencies    []string         `json:"dependencies,omitempty"`
-	SecretSources   []string         `json:"secret_sources,omitempty"`
-	PipelineImage   string           `json:"pipeline_image,omitempty"`
-	Units           []string         `json:"units,omitempty"`
-	Groups          []string         `json:"groups,omitempty"`
+	ID              string          `json:"id"`
+	Name            string          `json:"name"`
+	Port            int             `json:"port,omitempty"`
+	DefaultExposure domain.Exposure `json:"default_exposure,omitempty"`
+	MaxExposure     domain.Exposure `json:"max_exposure,omitempty"`
+	HealthCheck     HealthCheck     `json:"health_check"`
+	// StartupGraceSeconds bounds how long setup waits-and-polls for this
+	// bundle to report healthy after install/start before calling it a
+	// failure. First-boot startups (JVM-size services, DB migrations) need
+	// minutes; an immediate single probe turns every cold start into a
+	// setup.step_failed event. Zero means no grace (single probe).
+	StartupGraceSeconds int              `json:"startup_grace_seconds,omitempty"`
+	Data                []DataVolume     `json:"data,omitempty"`
+	Backup              BackupHooks      `json:"backup,omitempty"`
+	OIDC                OIDCConfig       `json:"oidc,omitempty"`
+	Resources           ResourceGuidance `json:"resources,omitempty"`
+	Default             bool             `json:"default"`
+	Route               string           `json:"route"`
+	Dependencies        []string         `json:"dependencies,omitempty"`
+	SecretSources       []string         `json:"secret_sources,omitempty"`
+	PipelineImage       string           `json:"pipeline_image,omitempty"`
+	Units               []string         `json:"units,omitempty"`
+	Groups              []string         `json:"groups,omitempty"`
 }
 
 // exposureRank orders exposure so requests can be checked against a bundle's
@@ -155,10 +161,12 @@ func (b Bundle) validate() (Bundle, error) {
 	if exposureRank(b.DefaultExposure) > exposureRank(b.MaxExposure) {
 		problems = append(problems, fmt.Sprintf("default_exposure %q exceeds max_exposure %q", b.DefaultExposure, b.MaxExposure))
 	}
-
 	var hcProblems []string
 	b.HealthCheck, hcProblems = validateHealthCheck(b.HealthCheck, b.Port)
 	problems = append(problems, hcProblems...)
+	if b.StartupGraceSeconds < 0 {
+		problems = append(problems, fmt.Sprintf("startup_grace_seconds %d must not be negative", b.StartupGraceSeconds))
+	}
 
 	seenVol := map[string]bool{}
 	for _, v := range b.Data {

@@ -156,6 +156,12 @@ func (b *Backend) EnrollCompanion(ctx context.Context, code string) (apitypes.En
 			}
 		}
 	}
+	// Machine backup server is not a default bundle: nothing to serve
+	// until a client exists. First enrollment installs it (best-effort;
+	// enrollment succeeds regardless).
+	if dev != nil {
+		b.ensureResticServerApp(ctx)
+	}
 	return resp, nil
 }
 

@@ -95,6 +95,24 @@ in
   isoImage.makeUsbBootable = true;
   boot.loader.grub.memtest86.enable = lib.mkDefault true;
   boot.loader.systemd-boot.enable = lib.mkForce false;
+  # Install cache: prebuild the packages nixos-install would otherwise
+  # compile on target hardware (our overrides aren't on cache.nixos.org:
+  # pinned-fastapi scope incl. litellm/a2a-sdk, caddy+plugins, go bins).
+  # nixos-install reuses identical store paths from the live medium, so
+  # install becomes copy plus the remaining cache downloads — no local
+  # builds. Stock deps still substitute from cache.nixos.org (install
+  # already requires network); embedding the full toplevel would push
+  # the ISO past GitHub's 2GB release-asset cap, hence the subset.
+  isoImage.storeContents = lib.optionals (pkgs.system == "x86_64-linux") (
+    let installed = self.nixosConfigurations.omahab-installed.config;
+    in [
+      installed.services.litellm.package
+      installed.services.caddy.package
+      self.packages.${pkgs.system}.omahab
+      self.packages.${pkgs.system}.omahab-embedding-worker
+      self.packages.${pkgs.system}.omahab-once
+    ]
+  );
 
   # Live ISO must not run the installed appliance.  We do NOT import
   # self.nixosModules.omahab here, so omahabd and its companions are

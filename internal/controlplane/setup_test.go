@@ -14,11 +14,13 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/omahab/omahab/internal/apps"
 	"github.com/omahab/omahab/internal/config"
 	"github.com/omahab/omahab/internal/domain"
 	"github.com/omahab/omahab/internal/events"
+	"github.com/omahab/omahab/internal/exposure"
 	"github.com/omahab/omahab/internal/identity"
 	"github.com/omahab/omahab/internal/secrets"
 	"github.com/omahab/omahab/internal/store"
@@ -617,6 +619,8 @@ func (s *scriptedRunner) Remove(_ context.Context, _ domain.Application, _ apps.
 	return nil
 }
 func (s *scriptedRunner) Check(_ context.Context, _ domain.Application, _ apps.DeploySpec) (domain.Health, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.health == "" {
 		return domain.HealthHealthy, nil
 	}
@@ -845,5 +849,291 @@ func TestEnsureDefaultAppNonNativeUnknownFails(t *testing.T) {
 	}
 	if runner.removeCount == 0 {
 		t.Fatalf("non-native Unknown should have triggered Uninstall/Remove, removeCount=%d", runner.removeCount)
+	}
+}
+
+func bundleIDs(bundles []apps.Bundle) []string {
+	out := make([]string, 0, len(bundles))
+	for _, b := range bundles {
+		out = append(out, b.ID)
+	}
+	return out
+}
+
+func TestPartitionLoginBundlesPutsLoginFirst(t *testing.T) {
+	t.Parallel()
+	digest := "sha256:" + strings.Repeat("a", 64)
+	mk := func(ids ...string) []apps.Bundle {
+		out := make([]apps.Bundle, 0, len(ids))
+		for _, id := range ids {
+			out = append(out, testSetupBundle(id, digest, domain.ExposurePrivate, id, nil))
+		}
+		return out
+	}
+	login, rest := partitionLoginBundles(mk("caddy", "embedding-worker", "litellm", "ntfy", "pocket-id", "forgejo", "immich"))
+	if got := bundleIDs(login); len(got) != 2 || got[0] != "caddy" || got[1] != "pocket-id" {
+		t.Fatalf("login = %v, want [caddy pocket-id]", got)
+	}
+	if got, want := bundleIDs(rest), []string{"embedding-worker", "litellm", "ntfy", "forgejo", "immich"}; !equalStrings(got, want) {
+		t.Fatalf("rest = %v, want %v", got, want)
+	}
+	// Reversed input still pins caddy ahead of pocket-id.
+	login, rest = partitionLoginBundles(mk("pocket-id", "karakeep", "caddy"))
+	if got := bundleIDs(login); len(got) != 2 || got[0] != "caddy" || got[1] != "pocket-id" {
+		t.Fatalf("login reversed = %v, want [caddy pocket-id]", got)
+	}
+	if got := bundleIDs(rest); len(got) != 1 || got[0] != "karakeep" {
+		t.Fatalf("rest reversed = %v, want [karakeep]", got)
+	}
+	// No login bundles → everything stays in rest, order preserved.
+	login, rest = partitionLoginBundles(mk("immich", "karakeep"))
+	if len(login) != 0 {
+		t.Fatalf("login = %v, want empty", bundleIDs(login))
+	}
+	if got := bundleIDs(rest); len(got) != 2 || got[0] != "immich" || got[1] != "karakeep" {
+		t.Fatalf("rest = %v, want [immich karakeep]", got)
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestGraceForBundleDurations(t *testing.T) {
+	t.Parallel()
+	if got := graceForBundle(apps.Bundle{}); got != 0 {
+		t.Fatalf("zero grace = %v, want 0 (legacy single probe)", got)
+	}
+	if got := graceForBundle(apps.Bundle{StartupGraceSeconds: 90}); got != 90*time.Second {
+		t.Fatalf("grace = %v, want 90s", got)
+	}
+	if got := graceForBundle(apps.Bundle{StartupGraceSeconds: -5}); got != 0 {
+		t.Fatalf("negative grace = %v, want 0", got)
+	}
+}
+
+func TestEnsureDefaultAppPollsThroughStartupGrace(t *testing.T) {
+	ctx := context.Background()
+	digest := "sha256:" + strings.Repeat("a", 64)
+	runner := &scriptedRunner{health: domain.HealthUnhealthy}
+	b, _ := newSetupBackend(t, runner)
+	caddy := testSetupBundle("caddy", digest, domain.ExposurePublic, "", nil)
+	caddy.StartupGraceSeconds = 4
+	cat, err := apps.NewCatalog(caddy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := apps.NewService(b.db, apps.Options{Catalog: cat, Runner: runner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.apps = svc
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		runner.mu.Lock()
+		runner.health = domain.HealthHealthy
+		runner.mu.Unlock()
+	}()
+	if err := b.ensureDefaultApp(ctx, caddy, "omahab.com"); err != nil {
+		t.Fatalf("should recover within startup grace, got %v", err)
+	}
+}
+
+func TestLoginExposureExposesIdAndDashboard(t *testing.T) {
+	ctx := context.Background()
+	digest := "sha256:" + strings.Repeat("a", 64)
+	runner := &scriptedRunner{health: domain.HealthHealthy}
+	b, _ := newSetupBackend(t, runner)
+	if err := b.store.Migrate(ctx, exposure.Migrations()...); err != nil {
+		t.Fatal(err)
+	}
+	edge := &memEdge{routes: map[string]exposure.Route{}}
+	expSvc, err := exposure.New(b.store, exposure.Config{
+		Domain:      "omahab.com",
+		TailscaleIP: "100.75.94.122",
+		TunnelDNS:   "tunnel.example.com",
+	}, exposure.Clients{DNS: &memDNS{}, Edge: edge})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.exposure = expSvc
+	b.httpsProbe = func(_ context.Context, _ string) error { return nil }
+	pocket := testSetupBundle("pocket-id", digest, domain.ExposurePrivate, "id", []string{"caddy"})
+	if err := b.ensureDefaultApp(ctx, pocket, "omahab.com"); err != nil {
+		t.Fatalf("install pocket-id: %v", err)
+	}
+	if err := b.setupPhaseLoginExposure(ctx); err != nil {
+		t.Fatalf("login exposure: %v", err)
+	}
+	edge.mu.Lock()
+	defer edge.mu.Unlock()
+	if _, ok := edge.routes["id.omahab.com"]; !ok {
+		t.Fatalf("missing id.omahab.com route: %v", edge.routes)
+	}
+	if _, ok := edge.routes["omahab.omahab.com"]; !ok {
+		t.Fatalf("missing omahab.omahab.com route: %v", edge.routes)
+	}
+}
+
+func TestExposureRefreshNotReadyDefersQuietly(t *testing.T) {
+	ctx := context.Background()
+	b, ev := newSetupBackend(t, nil)
+	inst, err := b.store.Instance(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.TailscaleIP = ""
+	if _, err := b.store.SaveInstance(ctx, inst); err != nil {
+		t.Fatal(err)
+	}
+	err = b.refreshExposure(ctx)
+	if !errors.Is(err, errTailscaleIPNotRecorded) {
+		t.Fatalf("refresh err = %v, want tailscale IP not recorded", err)
+	}
+	b.publishExposureRefreshIssue(ctx, "after secret create", err)
+	if got := eventTypes(t, ev, "exposure.refresh_failed"); len(got) != 0 {
+		t.Fatalf("not-ready must not warn, got %v", got)
+	}
+	msgs := eventMessages(t, ev, "exposure.refresh_deferred")
+	if len(msgs) != 1 || !strings.Contains(msgs[0], "deferred") {
+		t.Fatalf("deferred events = %v, want one info notice", msgs)
+	}
+}
+
+func TestResolveBundleHostname(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		route, domain, want string
+		ok                  bool
+	}{
+		{"id", "omahab.com", "id.omahab.com", true},
+		{"backup.{{.Domain}}", "omahab.com", "backup.omahab.com", true},
+		{"ai.{{.Domain}}", "omahab.com", "ai.omahab.com", true},
+		{"", "omahab.com", "", false},
+		{"id", "", "", false},
+		{"id", "example.com", "", false},
+		{"id", "not-configured.invalid", "", false},
+		{"backup.{{.Unknown}}", "omahab.com", "", false},
+	}
+	for _, c := range cases {
+		got, ok := resolveBundleHostname(c.route, c.domain)
+		if ok != c.ok || got != c.want {
+			t.Errorf("resolve(%q, %q) = (%q, %v), want (%q, %v)", c.route, c.domain, got, ok, c.want, c.ok)
+		}
+	}
+}
+
+func resticTestBackend(t *testing.T, runner *scriptedRunner) *Backend {
+	t.Helper()
+	digest := "sha256:" + strings.Repeat("a", 64)
+	b, _ := newSetupBackend(t, runner)
+	restic := testSetupBundle("restic-server", digest, domain.ExposurePrivate, "backup.{{.Domain}}", []string{"caddy"})
+	restic.Default = false
+	restic.Port = 8500
+	cat, err := apps.NewCatalog(
+		testSetupBundle("caddy", digest, domain.ExposurePublic, "", nil),
+		restic,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := apps.NewService(b.db, apps.Options{Catalog: cat, Runner: runner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.apps = svc
+	return b
+}
+
+func countBundleApps(t *testing.T, b *Backend, bundleID string) int {
+	t.Helper()
+	list, err := b.apps.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, st := range list {
+		if st.BundleID == bundleID {
+			n++
+		}
+	}
+	return n
+}
+
+func TestEnsureResticServerAppInstallsOnFirstEnroll(t *testing.T) {
+	ctx := context.Background()
+	runner := &scriptedRunner{health: domain.HealthHealthy}
+	b := resticTestBackend(t, runner)
+	if n := countBundleApps(t, b, "restic-server"); n != 0 {
+		t.Fatalf("restic apps before ensure = %d, want 0", n)
+	}
+	b.ensureResticServerApp(ctx)
+	if n := countBundleApps(t, b, "restic-server"); n != 1 {
+		t.Fatalf("restic apps after ensure = %d, want 1", n)
+	}
+	// Second enrollment is a no-op, never a duplicate install.
+	b.ensureResticServerApp(ctx)
+	if n := countBundleApps(t, b, "restic-server"); n != 1 {
+		t.Fatalf("restic apps after re-ensure = %d, want 1", n)
+	}
+}
+
+func TestEnsureResticServerAppSkipsWithoutCatalogEntry(t *testing.T) {
+	ctx := context.Background()
+	runner := &scriptedRunner{health: domain.HealthHealthy}
+	b, _ := newSetupBackend(t, runner)
+	digest := "sha256:" + strings.Repeat("a", 64)
+	cat, err := apps.NewCatalog(testSetupBundle("caddy", digest, domain.ExposurePublic, "", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := apps.NewService(b.db, apps.Options{Catalog: cat, Runner: runner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.apps = svc
+	b.ensureResticServerApp(ctx)
+	if n := countBundleApps(t, b, "restic-server"); n != 0 {
+		t.Fatalf("restic apps = %d, want 0 (not in catalog)", n)
+	}
+}
+
+func TestFinalExposureIncludesNonDefaultInstalled(t *testing.T) {
+	ctx := context.Background()
+	runner := &scriptedRunner{health: domain.HealthHealthy}
+	b := resticTestBackend(t, runner)
+	if err := b.store.Migrate(ctx, exposure.Migrations()...); err != nil {
+		t.Fatal(err)
+	}
+	edge := &memEdge{routes: map[string]exposure.Route{}}
+	expSvc, err := exposure.New(b.store, exposure.Config{
+		Domain:      "omahab.com",
+		TailscaleIP: "100.75.94.122",
+		TunnelDNS:   "tunnel.example.com",
+	}, exposure.Clients{DNS: &memDNS{}, Edge: edge})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.exposure = expSvc
+	b.httpsProbe = func(_ context.Context, _ string) error { return nil }
+	b.ensureResticServerApp(ctx)
+	if err := b.setupPhaseExposure(ctx); err != nil {
+		t.Fatalf("final exposure: %v", err)
+	}
+	edge.mu.Lock()
+	defer edge.mu.Unlock()
+	if _, ok := edge.routes["backup.omahab.com"]; !ok {
+		t.Fatalf("missing backup.omahab.com route: %v", edge.routes)
+	}
+	if _, ok := edge.routes["omahab.omahab.com"]; !ok {
+		t.Fatalf("missing omahab.omahab.com route: %v", edge.routes)
 	}
 }

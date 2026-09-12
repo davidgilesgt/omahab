@@ -72,7 +72,7 @@ func TestInstallApplicationRoute(t *testing.T) {
 			t.Fatal(err)
 		}
 		c.CatalogPath = p
-	})
+	}, fakeAppsRunner{})
 	server := newRealServer(t, backend)
 
 	if res := doPost(t, server, "/api/v1/applications", map[string]any{}); res.Code != http.StatusBadRequest {
@@ -88,18 +88,16 @@ func TestInstallApplicationRoute(t *testing.T) {
 	}
 
 	res := doPost(t, server, "/api/v1/applications", map[string]any{"bundle_id": "immich"})
-	// In test environment, systemd runner may not be available (no systemctl), so install may return 500.
-	// Accept either 201 (success) or 500 (runner failure) as not-bad-request; the important checks are the earlier 400s.
-	if res.Code != http.StatusCreated && res.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, body = %s, want 201 or 500", res.Code, res.Body.String())
+	// The fake runner performs no host side effects, so install is
+	// deterministic: 201 without touching systemctl or the appenv directory.
+	if res.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s, want 201", res.Code, res.Body.String())
 	}
-	if res.Code == http.StatusCreated {
-		var app domain.Application
-		if err := json.Unmarshal(res.Body.Bytes(), &app); err != nil {
-			t.Fatal(err)
-		}
-		if app.BundleID != "immich" {
-			t.Fatalf("install did not round-trip: %+v", app)
-		}
+	var app domain.Application
+	if err := json.Unmarshal(res.Body.Bytes(), &app); err != nil {
+		t.Fatal(err)
+	}
+	if app.BundleID != "immich" {
+		t.Fatalf("install did not round-trip: %+v", app)
 	}
 }

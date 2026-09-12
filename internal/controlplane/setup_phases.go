@@ -216,6 +216,7 @@ func (b *Backend) runReservedSetup(ctx context.Context) error {
 		{"secrets", b.setupPhaseSecrets},
 		{"core_apps", b.setupPhaseCoreApps},
 		{"oidc", b.setupPhaseOIDC},
+		{"login_exposure", b.setupPhaseLoginExposure},
 		{"dependent_apps", b.setupPhaseDependentApps},
 		{"exposure", b.setupPhaseExposure},
 	}
@@ -990,11 +991,19 @@ func (b *Backend) setupPhaseCoreApps(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("topo sort: %w", err)
 	}
-	for _, bd := range sorted {
+	login, rest := partitionLoginBundles(sorted)
+	ordered := make([]apps.Bundle, 0, len(sorted))
+	ordered = append(ordered, login...)
+	ordered = append(ordered, rest...)
+	for _, bd := range ordered {
 		if err := b.ensureDefaultApp(ctx, bd, domainName); err != nil {
 			return fmt.Errorf("%s: %w", bd.ID, err)
 		}
 		log.Printf("setup core apps: %s running and healthy", bd.ID)
+		// Incremental exposure: publish this app's route now so it
+		// becomes usable as it lands (best-effort; final exposure
+		// verifies everything).
+		b.exposeBundleRoute(ctx, bd, domainName)
 	}
 	return nil
 }
@@ -1126,6 +1135,16 @@ func (b *Backend) renderNativeAppEnv(ctx context.Context, dnsToken, domainName s
 func (b *Backend) setupPhaseDependentApps(ctx context.Context) error {
 	if b.apps == nil {
 		return fmt.Errorf("apps not configured")
+	}
+	// Retry a deferred scm bind: Forgejo/Woodpecker credentials land as
+	// those apps come up. Single guarded transition (nil → set), so no
+	// lock: readers already tolerate nil, and success ends retries.
+	// Log-only on repeat deferral (startup already published the notice);
+	// never fails the phase.
+	if b.scm == nil {
+		if err := b.bindSCM(ctx); err != nil {
+			log.Printf("setup dependent_apps: scm rebind deferred: %v", err)
+		}
 	}
 	var woodpeckerBundle *apps.Bundle
 	woodpeckerSkipped := false
@@ -1461,7 +1480,12 @@ func (b *Backend) ensureDefaultApp(ctx context.Context, bundle apps.Bundle, doma
 		if err != nil {
 			return err
 		}
-		return requireRunningHealthy(st, isNative)
+		if err := requireRunningHealthy(st, isNative); err == nil {
+			return nil
+		}
+		// Cold starts take minutes; poll through the bundle's startup
+		// grace instead of failing setup on the first probe.
+		return b.waitForHealthy(ctx, st.ID, bundle)
 	}
 	switch existing.ObservedState {
 	case apps.ObservedRunning:
@@ -1477,21 +1501,17 @@ func (b *Backend) ensureDefaultApp(ctx context.Context, bundle apps.Bundle, doma
 			// SystemdRunner.Remove is just Stop and Service.Uninstall refuses
 			// native outright (dead-end). Service.Start on an already-running
 			// app is a no-op, so we force a restart via Stop+Start to ensure
-			// the runner is invoked, then re-check and report.
+			// the runner is invoked, then wait through startup grace.
 			if _, serr := b.apps.Stop(ctx, existing.ID); serr != nil {
 				return fmt.Errorf("native app %s health is %s: restart (stop) failed (no uninstall: system closure defines service): %w", bundle.ID, st.Health, serr)
 			}
 			if _, serr := b.apps.Start(ctx, existing.ID); serr != nil {
 				return fmt.Errorf("native app %s health is %s: restart (start) failed (no uninstall: system closure defines service): %w", bundle.ID, st.Health, serr)
 			}
-			st2, cerr := b.apps.CheckHealth(ctx, existing.ID)
-			if cerr != nil {
-				return cerr
+			if cerr := b.waitForHealthy(ctx, existing.ID, bundle); cerr != nil {
+				return fmt.Errorf("native app %s (no uninstall: system closure defines service; restart attempted): %w", bundle.ID, cerr)
 			}
-			if err := requireRunningHealthy(st2, true); err == nil {
-				return nil
-			}
-			return fmt.Errorf("native app %s health is %s, want healthy (no uninstall: system closure defines service; restart attempted)", bundle.ID, st2.Health)
+			return nil
 		}
 		if err := b.apps.Uninstall(ctx, existing.ID); err != nil {
 			return err
@@ -1500,17 +1520,14 @@ func (b *Backend) ensureDefaultApp(ctx context.Context, bundle apps.Bundle, doma
 		if err != nil {
 			return err
 		}
-		return requireRunningHealthy(st, false)
+		return b.waitForHealthy(ctx, st.ID, bundle)
 	case apps.ObservedStopped:
 		st, err := b.apps.Start(ctx, existing.ID)
 		if err != nil {
 			return err
 		}
 		if st.ObservedState == apps.ObservedRunning {
-			st, err = b.apps.CheckHealth(ctx, existing.ID)
-			if err != nil {
-				return err
-			}
+			return b.waitForHealthy(ctx, existing.ID, bundle)
 		}
 		return requireRunningHealthy(st, isNative)
 	default:
@@ -1520,18 +1537,13 @@ func (b *Backend) ensureDefaultApp(ctx context.Context, bundle apps.Bundle, doma
 			if err != nil {
 				return fmt.Errorf("native app %s is %s: restart failed (no uninstall): %w", bundle.ID, existing.ObservedState, err)
 			}
-			if st.ObservedState == apps.ObservedRunning {
-				st2, cerr := b.apps.CheckHealth(ctx, existing.ID)
-				if cerr != nil {
-					return cerr
-				}
-				st = st2
+			if st.ObservedState != apps.ObservedRunning {
+				return requireRunningHealthy(st, isNativeBundle(bundle))
 			}
-			if err := requireRunningHealthy(st, true); err == nil {
-				return nil
-			} else {
-				return fmt.Errorf("native app %s is %s health %s (no uninstall, system closure; restart attempted): %w", bundle.ID, st.ObservedState, st.Health, err)
+			if cerr := b.waitForHealthy(ctx, existing.ID, bundle); cerr != nil {
+				return fmt.Errorf("native app %s (no uninstall, system closure; restart attempted): %w", bundle.ID, cerr)
 			}
+			return nil
 		}
 		if err := b.apps.Uninstall(ctx, existing.ID); err != nil {
 			return err
@@ -1540,8 +1552,59 @@ func (b *Backend) ensureDefaultApp(ctx context.Context, bundle apps.Bundle, doma
 		if err != nil {
 			return err
 		}
-		return requireRunningHealthy(st, false)
+		return b.waitForHealthy(ctx, st.ID, bundle)
 	}
+}
+
+// graceForBundle returns how long setup waits-and-polls for a freshly
+// installed or restarted bundle to report healthy before failing the
+// phase. Cold starts (DB migrations, large services, first-run key
+// generation) take minutes; a single immediate probe turns every one
+// into a setup.step_failed event and a manual Retry mash. Zero means the
+// legacy single probe (used by tests and instant-readiness bundles).
+func graceForBundle(bundle apps.Bundle) time.Duration {
+	if bundle.StartupGraceSeconds <= 0 {
+		return 0
+	}
+	return time.Duration(bundle.StartupGraceSeconds) * time.Second
+}
+
+// waitForHealthy polls CheckHealth through the bundle's startup grace,
+// returning nil once requireRunningHealthy passes. With no grace it does
+// a single probe (legacy behavior).
+func (b *Backend) waitForHealthy(ctx context.Context, id domain.ID, bundle apps.Bundle) error {
+	if grace := graceForBundle(bundle); grace > 0 {
+		return b.waitAppHealthy(ctx, id, grace)
+	}
+	st, err := b.apps.CheckHealth(ctx, id)
+	if err != nil {
+		return err
+	}
+	return requireRunningHealthy(st, isNativeBundle(bundle))
+}
+
+// loginBundleIDs are the bundles the login path needs: admin enrollment,
+// the id route, and every OIDC dependent hang off Caddy + Pocket ID.
+var loginBundleIDs = map[string]bool{"caddy": true, "pocket-id": true}
+
+// partitionLoginBundles orders core bundles so the login path installs
+// first. Pocket ID should be the #2 install right after Caddy; letting
+// media servers and their cold starts go first delays login and lets
+// their startup races fail the batch before Pocket ID ever installs. The
+// input is already topo-sorted, so both partitions keep dependency order;
+// Caddy is pinned ahead of Pocket ID explicitly.
+func partitionLoginBundles(sorted []apps.Bundle) (login, rest []apps.Bundle) {
+	for _, bd := range sorted {
+		if loginBundleIDs[bd.ID] {
+			login = append(login, bd)
+		} else {
+			rest = append(rest, bd)
+		}
+	}
+	sort.SliceStable(login, func(i, j int) bool {
+		return login[i].ID == "caddy" && login[j].ID != "caddy"
+	})
+	return login, rest
 }
 
 func requireRunningHealthy(st apps.Status, isNative bool) error {

@@ -36,6 +36,20 @@ var nftablesRestart = func() error {
 	return exec.Command("systemctl", "restart", "nftables.service").Run()
 }
 
+// SetLANSeamsForTest redirects the close-LAN sentinel path and the nft /
+// systemctl invocations so handler-level tests in other packages run without
+// touching the host firewall or service manager. It returns a restore func
+// the test must defer. Production code never calls this.
+func SetLANSeamsForTest(sentinelPath string, nft func(args ...string) (string, error), restart func() error) (restore func()) {
+	oldPath, oldNft, oldRestart := lanClosedPath, nftExec, nftablesRestart
+	lanClosedPath = sentinelPath
+	nftExec = nft
+	nftablesRestart = restart
+	return func() {
+		lanClosedPath, nftExec, nftablesRestart = oldPath, oldNft, oldRestart
+	}
+}
+
 // lanHandleRe matches nft --handle list output, capturing the trailing
 // handle number.
 var lanHandleRe = regexp.MustCompile(`handle\s+(\d+)\s*$`)
