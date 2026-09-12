@@ -12,7 +12,8 @@ import (
 )
 
 // TestBearerAuthLANBypass pins the LAN trust boundary: on lan placement,
-// LAN sources reach admin routes without a token while WAN sources get 401.
+// LAN and tailnet sources reach admin routes without a token while WAN
+// sources get 401.
 func TestBearerAuthLANBypass(t *testing.T) {
 	backend := newRealBackend(t, nil)
 	srv := newRealServer(t, backend)
@@ -23,6 +24,25 @@ func TestBearerAuthLANBypass(t *testing.T) {
 	srv.Handler().ServeHTTP(lanRec, lan)
 	if lanRec.Code != http.StatusOK {
 		t.Fatalf("lan without token = %d, body %s, want 200", lanRec.Code, lanRec.Body.String())
+	}
+
+	// Tailnet is trusted like LAN on lan placement: the setup wizard hops
+	// from the LAN origin to the 100.x origin without a token to carry.
+	tail := httptest.NewRequest(http.MethodGet, "/api/v1/network/status", nil)
+	tail.RemoteAddr = "100.89.20.15:54321"
+	tailRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(tailRec, tail)
+	if tailRec.Code != http.StatusOK {
+		t.Fatalf("tailnet without token = %d, body %s, want 200", tailRec.Code, tailRec.Body.String())
+	}
+
+	// The rest of 100/8 outside 100.64/10 is public space, not tailnet.
+	public100 := httptest.NewRequest(http.MethodGet, "/api/v1/network/status", nil)
+	public100.RemoteAddr = "100.0.0.1:54321"
+	public100Rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(public100Rec, public100)
+	if public100Rec.Code != http.StatusUnauthorized {
+		t.Fatalf("public 100/8 without token = %d, body %s, want 401", public100Rec.Code, public100Rec.Body.String())
 	}
 
 	wan := httptest.NewRequest(http.MethodGet, "/api/v1/network/status", nil)
@@ -40,6 +60,31 @@ func TestBearerAuthLANBypass(t *testing.T) {
 	srv.Handler().ServeHTTP(badRec, bad)
 	if badRec.Code != http.StatusUnauthorized {
 		t.Fatalf("wan wrong token = %d, body %s, want 401", badRec.Code, badRec.Body.String())
+	}
+}
+
+// TestBearerAuthVPSRequiresToken pins the VPS side: no LAN/tailnet bypass,
+// every source needs the panel token.
+func TestBearerAuthVPSRequiresToken(t *testing.T) {
+	t.Setenv("OMAHAB_PLACEMENT", "vps")
+	backend := newRealBackend(t, nil)
+	srv := newRealServer(t, backend)
+	for _, remote := range []string{"192.168.1.10:54321", "100.89.20.15:54321", "203.0.113.9:54321"} {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/network/status", nil)
+		req.RemoteAddr = remote
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s without token = %d, body %s, want 401", remote, rec.Code, rec.Body.String())
+		}
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/network/status", nil)
+	req.RemoteAddr = "100.89.20.15:54321"
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("tailnet with token = %d, body %s, want 200", rec.Code, rec.Body.String())
 	}
 }
 

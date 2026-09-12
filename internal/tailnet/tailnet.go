@@ -204,11 +204,17 @@ func truncate(s string, n int) string {
 	return s
 }
 
-// IsTailscaleIPv4 reports whether ip is a 100.64.0.0/10 CGNAT address.
+// IsTailscaleIPv4 reports whether ip is a 100.64.0.0/10 CGNAT address
+// (first octet 100, second octet 64-127). Tailscale assigns tailnet
+// addresses only inside that range; the rest of 100/8 is public space.
 func IsTailscaleIPv4(ip string) bool {
-	parsed := net.ParseIP(ip)
-	if parsed == nil || parsed.To4() == nil {
+	parsed := net.ParseIP(strings.TrimSpace(ip))
+	if parsed == nil {
 		return false
 	}
-	return parsed.To4()[0] == 100
+	v4 := parsed.To4()
+	if v4 == nil {
+		return false
+	}
+	return v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127
 }

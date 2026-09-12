@@ -6,7 +6,7 @@ import (
 
 // handleTailscaleUp starts Tailscale enrollment on the authenticated API.
 // Returns {"auth_url": url} with "" when already enrolled.
-// Available any time (bearerAuth group; LAN sources bypass the token).
+// Available any time (bearerAuth group; lan placement: LAN + tailnet sources bypass the token).
 func (s *Server) handleTailscaleUp(w http.ResponseWriter, r *http.Request) {
 	url, err := s.backend.TailscaleUp()
 	if err != nil {

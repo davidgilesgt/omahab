@@ -24,6 +24,7 @@ import (
 	"github.com/omahab/omahab/internal/companion"
 	"github.com/omahab/omahab/internal/controlplane"
 	"github.com/omahab/omahab/internal/netenv"
+	"github.com/omahab/omahab/internal/tailnet"
 )
 
 //go:embed openapi.yaml
@@ -188,7 +189,7 @@ func (s *Server) buildRouter() chi.Router {
 		})
 	}
 
-	// Authenticated API group (LAN sources on lan placement bypass the token).
+	// Authenticated API group (lan placement: LAN + tailnet sources bypass the token).
 	r.Group(func(r chi.Router) {
 		r.Use(s.bearerAuth)
 
@@ -610,13 +611,15 @@ func (s *Server) timeoutMiddleware(d time.Duration) func(http.Handler) http.Hand
 		})
 	}
 }
-
 // bearerAuth enforces constant-time bearer token comparison. Skipped only for /up and HMAC routes
 // which are not inside the authenticated group. Device tokens (oma_dev_...) are rejected with 403
 // on every admin route to enforce allowlist: companion devices may only call device-endpoints.
 // LAN exception: on lan placement (the ISO-installer default), requests from
 // LAN source addresses (RFC1918/ULA/link-local/loopback) bypass the token —
-// the LAN is the trusted path, the panel token guards tailnet/remote access.
+// the LAN is the trusted path. Tailnet sources (100.64.0.0/10) bypass it too:
+// tailnet membership already authenticates the caller, so a home-LAN install
+// never asks for the panel token on any of its own origins. On vps placement
+// every source needs the token.
 func (s *Server) bearerAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.tokenHash == nil {
@@ -626,7 +629,7 @@ func (s *Server) bearerAuth(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if controlplane.Placement() == "lan" && netenv.IsLANAddr(clientIP(r)) {
+		if controlplane.Placement() == "lan" && (netenv.IsLANAddr(clientIP(r)) || tailnet.IsTailscaleIPv4(clientIP(r))) {
 			next.ServeHTTP(w, r)
 			return
 		}

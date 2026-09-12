@@ -5,7 +5,7 @@ info:
     Authenticated control-plane API for omahabd. All routes are under /api/v1 except
     /up. Bearer authentication uses the 8-character panel token, except for /up and
     the email webhook which uses a separate HMAC authentication path. On lan placement
-    (the default), requests from LAN source addresses bypass the bearer token.
+    (the default), requests from LAN source addresses and tailnet addresses (100.64.0.0/10) bypass the bearer token.
     Mutating requests require Content-Type application/json. Unknown JSON fields are
     rejected. Request bodies are limited (1 MiB JSON, 5 MiB email webhook) and
     per-request timeouts are enforced. SSE streaming at /api/v1/events/stream supports
@@ -53,7 +53,7 @@ paths:
   /api/v1/tailscale/up:
     post:
       summary: Start Tailscale enrollment (authenticated)
-      description: Runs `tailscale up` and returns the printed auth URL ("" when already enrolled). On lan placement, LAN sources bypass the bearer token.
+      description: Runs `tailscale up` and returns the printed auth URL ("" when already enrolled). On lan placement, LAN and tailnet sources bypass the bearer token.
       operationId: tailscaleUp
       responses:
         '200':
@@ -69,7 +69,7 @@ paths:
   /api/v1/tailscale/status:
     get:
       summary: Poll Tailscale enrollment state (authenticated)
-      description: Poll Tailscale enrollment state. On lan placement, LAN sources bypass the bearer token.
+      description: Poll Tailscale enrollment state. On lan placement, LAN and tailnet sources bypass the bearer token.
       operationId: tailscaleStatus
       responses:
         '200':

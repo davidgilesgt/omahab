@@ -16,9 +16,10 @@ function sessionToken(): string {
 }
 
 // Origin handoff: sessionStorage does not cross origins (LAN IP -> tailnet IP
-// -> HTTPS), so carry the panel token in the fragment for auto-auth. Only
-// when a token exists (WAN/VPS or a previously signed-in browser) — in LAN
-// bypass mode there is nothing to carry and the bare URL keeps working.
+// -> HTTPS), so carry the panel token in the fragment for auto-auth whenever
+// this browser has one. On vps placement that token is what keeps the tailnet
+// origin signed in. On lan placement the server trusts LAN + tailnet sources,
+// so the bare URL also works and no token screen appears.
 function withSessionToken(base: string): string {
   const t = sessionToken().trim();
   return t ? `${base}#token=${encodeURIComponent(t)}` : base;
