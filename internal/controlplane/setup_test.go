@@ -7,9 +7,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 
 	"github.com/omahab/omahab/internal/apps"
@@ -389,8 +392,61 @@ func TestSetupPhaseOIDCSkipsHermesWhenAbsent(t *testing.T) {
 	}
 }
 
-func TestWriteImmichOAuthConfig(t *testing.T) {
+func TestEnsureImmichConfigStubHandsOffOwnership(t *testing.T) {
 	t.Parallel()
+	// Fresh-install equivalent: a temp dir written as non-root must end
+	// up owned readable by the service user with no hand-fix.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "apps", "immich", "immich.json")
+	if err := ensureImmichConfigStub(path); err != nil {
+		t.Fatal(err)
+	}
+	// Missing-user lookup (immich absent outside the NixOS closure)
+	// falls back gracefully instead of failing setup.
+	if err := chownToUser(path, "omahab-test-no-such-user"); err != nil {
+		t.Fatalf("missing user must fall back gracefully: %v", err)
+	}
+	// Current-user chown exercises the real lookup+chown path with no
+	// root needed (same-uid chown is permitted for unprivileged users).
+	me, err := user.Current()
+	if err != nil {
+		t.Skipf("no current user: %v", err)
+	}
+	if err := chownToUser(path, me.Username); err != nil {
+		t.Fatalf("chown to current user: %v", err)
+	}
+	wantUID, err := strconv.Atoi(me.Uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys, ok := st.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Skip("no stat_t on this platform")
+	}
+	if int(sys.Uid) != wantUID {
+		t.Fatalf("owner uid = %d want %d", sys.Uid, wantUID)
+	}
+	if st.Mode().Perm() != 0o600 {
+		t.Fatalf("mode = %o want 600", st.Mode().Perm())
+	}
+	dst, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dst.Mode().Perm() != 0o750 {
+		t.Fatalf("dir mode = %o want 750", dst.Mode().Perm())
+	}
+	// Second call repairs ownership of pre-existing stubs.
+	if err := ensureImmichConfigStub(path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWriteImmichOAuthConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "immich.json")
 	if err := writeImmichOAuthConfig(path, "omahab.com", "cid", "csecret"); err != nil {

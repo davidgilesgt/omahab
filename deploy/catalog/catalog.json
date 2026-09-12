@@ -283,13 +283,13 @@
     {
       "id": "paperless-ngx",
       "name": "Paperless-ngx",
-      "port": 8000,
+      "port": 28981,
       "default_exposure": "private",
       "max_exposure": "shared",
       "health_check": {
         "kind": "http",
         "path": "/api/",
-        "port": 8000
+        "port": 28981
       },
       "data": [
         {

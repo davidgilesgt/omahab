@@ -52,6 +52,13 @@ in
       # Syncthing data dir under /srv/omahab (module chowns it).
       "d ${dataDir}/sync 0755 syncthing syncthing - -"
       "d ${stateDir}/hermes 0700 10000 10000 - -"
+      # Immich uses a non-default mediaLocation the module never creates
+      # (its `e` rule only repairs existing dirs): pre-create config +
+      # library dirs owned by the service user for fresh no-volume installs.
+      # The `z` line repairs immich.json after omahabd (root) renders it.
+      "d ${dataDir}/apps/immich 0750 immich immich - -"
+      "d ${dataDir}/apps/immich/library 0700 immich immich - -"
+      "z ${dataDir}/apps/immich/immich.json 0600 immich immich - -"
     ];
     # Root-owned oneshot prepares the caddy config tree before caddy
     # starts (caddy runs as its own user; it cannot create the root
@@ -137,7 +144,16 @@ in
     services.immich = {
       enable = true;
       mediaLocation = "${dataDir}/apps/immich/library";
+      # Module default "localhost" resolves to ::1 first: the server binds
+      # v6 only and the v4 health probe never connects. Pin v4 loopback in
+      # the closure itself (flows to IMMICH_HOST).
+      host = "127.0.0.1";
     };
+    # Non-default mediaLocation is not created by the module (its tmpfiles
+    # `e` rule only repairs existing dirs): pre-create the config + library
+    # dirs owned by the service user so fresh no-volume installs start with
+    # zero guest hand-fix (see tmpfiles.rules above). The `z` line repairs
+    # immich.json ownership after omahabd (root) renders it.
     systemd.services.immich-server = {
       environment.IMMICH_CONFIG_FILE = "${dataDir}/apps/immich/immich.json";
       serviceConfig.BindReadOnlyPaths = [ "${dataDir}/apps/immich/immich.json" ];

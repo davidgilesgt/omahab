@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -361,7 +363,12 @@ func immichConfigPath(dataDir string) string {
 
 func ensureImmichConfigStub(path string) error {
 	if _, err := os.Stat(path); err == nil {
-		return nil
+		// Pre-existing stub (e.g. written before the ownership handoff):
+		// ensure the service user can still read it.
+		if err := chownToUser(filepath.Dir(path), immichServiceUser); err != nil {
+			return err
+		}
+		return chownToUser(path, immichServiceUser)
 	} else if !os.IsNotExist(err) {
 		return err
 	}
@@ -369,7 +376,38 @@ func ensureImmichConfigStub(path string) error {
 		return err
 	}
 	stub := []byte("{\n  \"oauth\": {\n    \"enabled\": false\n  }\n}\n")
-	return os.WriteFile(path, stub, 0o600)
+	if err := os.WriteFile(path, stub, 0o600); err != nil {
+		return err
+	}
+	// Fresh installs start with no volume: hand the data dir and config
+	// to the immich service user so immich-server can read them with
+	// zero guest hand-fix.
+	if err := chownToUser(filepath.Dir(path), immichServiceUser); err != nil {
+		return err
+	}
+	return chownToUser(path, immichServiceUser)
+}
+
+// immichServiceUser is the NixOS services.immich.user the server runs as.
+const immichServiceUser = "immich"
+
+// chownToUser chowns path to username's UID/GID. A missing user (unit
+// tests outside the NixOS closure, pre-user-creation boot) is not an
+// error: the caller keeps root-owned files rather than failing setup.
+func chownToUser(path, username string) error {
+	u, err := user.Lookup(username)
+	if err != nil {
+		return nil
+	}
+	uid, err := strconv.Atoi(u.Uid)
+	if err != nil {
+		return nil
+	}
+	gid, err := strconv.Atoi(u.Gid)
+	if err != nil {
+		return nil
+	}
+	return os.Chown(path, uid, gid)
 }
 
 func immichOIDCCallbacks(domainName string) []string {

@@ -176,13 +176,20 @@ func (r *SystemdRunner) Remove(ctx context.Context, app domain.Application, spec
 	return r.Stop(ctx, app, spec)
 }
 
-// Check observes health for native bundles: HTTP probes hit the loopback
-// port from the catalog health check; command checks are unsupported
-// (there is no container to exec inside) and report unknown.
+// Check observes health for native bundles: HTTP probes hit the native
+// loopback port (internal/apps/native_ports.go is authoritative; the
+// catalog health-check port is the compose default and may lag it, as
+// paperless-ngx :8000 vs the native :28981 listener did). Command checks
+// are unsupported (there is no container to exec inside) and report
+// unknown.
 func (r *SystemdRunner) Check(ctx context.Context, app domain.Application, spec DeploySpec) (domain.Health, error) {
 	switch spec.Health.Kind {
 	case CheckHTTP:
-		return probeHTTP(ctx, spec.Health, spec.Health.Port)
+		hc := spec.Health
+		if p, ok := NativePort(app.BundleID); ok {
+			hc.Port = p
+		}
+		return probeHTTP(ctx, hc, hc.Port)
 	case CheckCommand:
 		// No container to exec in: native services are probed via HTTP
 		// or not at all. Report unknown rather than failing.
