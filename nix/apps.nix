@@ -175,7 +175,25 @@ in
       environmentFile = [ "${appEnv}/woodpecker.env" ];
       extraGroups = [ "omahab-builder" ];
     };
-    systemd.services."woodpecker-agent-docker" = gate "woodpecker";
+    # The agent must be a STATIC user: DynamicUser silently drops
+    # SupplementaryGroups (live 2026-09-12: agent denied on podman.sock),
+    # so the omahab-builder group above never applies to a dynamic unit.
+    users.users."woodpecker-agent-docker" = {
+      isSystemUser = true;
+      group = "woodpecker-agent-docker";
+      extraGroups = [ "omahab-builder" ];
+    };
+    users.groups."woodpecker-agent-docker" = { };
+    systemd.services."woodpecker-agent-docker" = mkMerge [
+      (gate "woodpecker")
+      {
+        serviceConfig = {
+          DynamicUser = mkForce false;
+          User = "woodpecker-agent-docker";
+          Group = "woodpecker-agent-docker";
+        };
+      }
+    ];
 
     # ----------------------------------------------------------------
     # Immich — photos. OAuth config file written by omahabd.
@@ -478,10 +496,17 @@ in
     # ----------------------------------------------------------------
     services.postgresql = {
       enable = true;
-      ensureDatabases = [ "litellm" ];
+      ensureDatabases = [ "litellm" "woodpecker" ];
       ensureUsers = [
         {
           name = "litellm";
+          ensureDBOwnership = true;
+        }
+        # Woodpecker server runs under DynamicUser (ephemeral UID), so socket
+        # peer auth is impossible: it connects over TCP scram with the role
+        # password omahabd syncs from the materialized secret at install.
+        {
+          name = "woodpecker-server";
           ensureDBOwnership = true;
         }
       ];

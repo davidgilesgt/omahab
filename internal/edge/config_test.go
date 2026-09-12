@@ -121,3 +121,37 @@ func TestRenderConfig_RejectsEmptyToken(t *testing.T) {
 		t.Fatalf("expected error for whitespace token")
 	}
 }
+
+func TestRenderConfig_SyncthingHostRewrite(t *testing.T) {
+	b, err := RenderConfig("example.com", "tok", []exposure.Route{
+		{Hostname: "sync.example.com", Upstream: "http://127.0.0.1:8384"},
+		{Hostname: "id.example.com", Upstream: "http://127.0.0.1:1411"},
+	})
+	if err != nil {
+		t.Fatalf("RenderConfig failed: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	routes := raw["apps"].(map[string]any)["http"].(map[string]any)["servers"].(map[string]any)["main"].(map[string]any)["routes"].([]any)
+	byID := map[string]map[string]any{}
+	for _, r := range routes {
+		m := r.(map[string]any)
+		byID[m["@id"].(string)] = m
+	}
+	syncHandle := byID["omahab-sync.example.com"]["handle"].([]any)[0].(map[string]any)
+	headers, ok := syncHandle["headers"].(map[string]any)
+	if !ok {
+		t.Fatalf("sync route must set request headers, got %+v", syncHandle)
+	}
+	set := headers["request"].(map[string]any)["set"].(map[string]any)
+	hosts, ok := set["Host"].([]any)
+	if !ok || len(hosts) != 1 || hosts[0] != "127.0.0.1:8384" {
+		t.Fatalf("sync Host must rewrite to upstream, got %+v", set)
+	}
+	idHandle := byID["omahab-id.example.com"]["handle"].([]any)[0].(map[string]any)
+	if _, ok := idHandle["headers"]; ok {
+		t.Fatalf("non-syncthing routes must not set headers, got %+v", idHandle)
+	}
+}

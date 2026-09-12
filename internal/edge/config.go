@@ -37,17 +37,28 @@ func RenderConfig(domain string, dnsToken string, routes []exposure.Route) ([]by
 		}
 		// Remove trailing slash
 		dial = strings.TrimSuffix(dial, "/")
+		handler := map[string]any{
+			"handler": "reverse_proxy",
+			"upstreams": []any{
+				map[string]any{"dial": dial},
+			},
+		}
+		// Syncthing's GUI enforces host checking and rejects the public
+		// hostname (its v2 GUI ignores insecureSkipHostcheck; live 2026-09-12).
+		// Rewrite Host to the upstream so the check passes. Scoped to
+		// syncthing's native GUI dial: every other app keeps its public Host,
+		// which Django ALLOWED_HOSTS / CSRF origins depend on.
+		if dial == "127.0.0.1:8384" {
+			handler["headers"] = map[string]any{
+				"request": map[string]any{
+					"set": map[string]any{"Host": []string{dial}},
+				},
+			}
+		}
 		entry := map[string]any{
 			"@id":  "omahab-" + hostname,
 			"match": []any{map[string]any{"host": []string{hostname}}},
-			"handle": []any{
-				map[string]any{
-					"handler": "reverse_proxy",
-					"upstreams": []any{
-						map[string]any{"dial": dial},
-					},
-				},
-			},
+			"handle": []any{handler},
 		}
 		caddyRoutes = append(caddyRoutes, entry)
 	}
