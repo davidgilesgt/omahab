@@ -37,6 +37,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 DISK="$WORKDIR/disk.qcow2"
+# Guest disk: the installed closure (immich ML, paperless/tika, litellm
+# stacks) exceeds 20G; a previous run died at 18.6/20GiB during unit
+# generation. qcow2 is thin-provisioned, so this costs host only what the
+# guest writes. Override with E2E_DISK_GB.
+DISK_GB="${E2E_DISK_GB:-40}"
 SERIAL_PORT=4445
 HTTP_PORT=8485
 SSH_PORT=2223
@@ -105,7 +110,7 @@ log "iso: $ISO_FILE"
 
 # --- Fresh VM disk, always (never reuse installed state across runs).
 rm -f "$DISK"
-"$QEMU_IMG" create -f qcow2 "$DISK" 20G >/dev/null
+"$QEMU_IMG" create -f qcow2 "$DISK" "${DISK_GB}G" >/dev/null
 log "fresh disk: $DISK"
 
 # --- Phase 1: boot the ISO, drive the installer over the serial console.
