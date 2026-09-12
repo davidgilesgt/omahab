@@ -341,8 +341,9 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/api/v1/backup-repositories", s.handleListBackupRepositories)
 		r.Post("/api/v1/backup-repositories", s.withBodyLimit(defaultBodyLimit, s.handleCreateBackupRepository))
 		r.Delete("/api/v1/backup-repositories/{id}", s.handleDeleteBackupRepository)
-		r.Post("/api/v1/setup/reconcile", s.withBodyLimit(defaultBodyLimit, s.handleTriggerSetupReconcile))
-		r.Put("/api/v1/setup/woodpecker", s.withBodyLimit(defaultBodyLimit, s.handleSetupWoodpecker))
+	r.Post("/api/v1/setup/reconcile", s.withBodyLimit(defaultBodyLimit, s.handleTriggerSetupReconcile))
+	r.Post("/api/v1/setup/verify-cloudflare", s.withBodyLimit(defaultBodyLimit, s.handleVerifyCloudflareToken))
+ 	r.Put("/api/v1/setup/woodpecker", s.withBodyLimit(defaultBodyLimit, s.handleSetupWoodpecker))
 
 		// Users / identity recovery
 		r.Get("/api/v1/users", s.handleListUsers)
