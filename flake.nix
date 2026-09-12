@@ -29,7 +29,7 @@
           # full Go rebuild in the guest). Go only reads these paths.
           src = lib.fileset.toSource {
             root = ./.;
-            fileset = lib.fileset.unions [ ./go.mod ./go.sum ./cmd ./internal ];
+            fileset = lib.fileset.unions [ ./go.mod ./go.sum ./cmd ./internal ./workers/embedding/pinned_models.json.example ];
           };
           vendorHash = "sha256-FUZb9WWkYKQR+ZIxNvUmjJMw07LOZw66EhO7Z3XSdVo=";
           subPackages = [
