@@ -264,6 +264,28 @@ in
       # Upstream defaults to :3000, colliding with Forgejo. Native-port
       # contract (internal/apps/native_ports.go) assigns karakeep :3010.
       extraEnvironment.PORT = "3010";
+      # 0.33.2 over pinned nixpkgs' 0.33.1 (AI-relevant: INFERENCE_TEXT_MODEL
+      # default gpt-4.1-mini -> gpt-5.6-luna, conditional
+      # INFERENCE_USE_MAX_COMPLETION_TOKENS default; plus chrome/node/crawler
+      # fixes). Scoped package override, not an overlay: the module exposes
+      # `package` for exactly this. Drop when the pin moves past 0.33.2.
+      package = pkgs.karakeep.overrideAttrs (old: rec {
+        version = "0.33.2";
+        src = pkgs.fetchFromGitHub {
+          owner = "karakeep-app";
+          repo = "karakeep";
+          tag = "cli/v${version}";
+          hash = "sha256-NsVe8jyGjXZ4fvQqxwHqHlTpaAD89+76rx0TsyFPTjs=";
+        };
+        pnpmDeps = pkgs.fetchPnpmDeps {
+          pname = "karakeep";
+          inherit version src;
+          patches = old.patches;
+          pnpm = pkgs.pnpm_11;
+          fetcherVersion = 4;
+          hash = "sha256-BcEhsyRENarAhF9MyHdDjSycchJ0vm/78FbE78Gl19E=";
+        };
+      });
     };
     systemd.services.karakeep-web = {
       partOf = lib.mkForce [ ];
