@@ -390,9 +390,16 @@ in
       };
       cmd = [ "gateway" "run" ];
       environmentFiles = [ "${appEnv}/hermes.env" ];
-      ports = [ "127.0.0.1:8085:9119" "127.0.0.1:8642:8642" ];
       volumes = [ "/var/lib/omahab/hermes:/opt/data" ];
-      extraOptions = [ "--add-host=host.docker.internal:host-gateway" ];
+      # Host networking: the gateway must fetch OIDC discovery from the
+      # public issuer (https://id.<domain>, a Tailscale IP) exactly like
+      # native services do — from the default bridge that fetch times out
+      # (live 2026-09-12: hermes "OIDC discovery unreachable", while
+      # Karakeep in the host netns succeeds). Dashboard/API stay
+      # loopback-only via HERMES_*_HOST=127.0.0.1 in the rendered env, on
+      # the same host ports as before, so no `ports` remap applies
+      # (host mode ignores it).
+      extraOptions = [ "--network=host" ];
     };
     systemd.services.docker-hermes = gate "hermes";
     # ----------------------------------------------------------------

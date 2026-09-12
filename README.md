@@ -90,11 +90,11 @@ All of these install automatically (no click-to-install) as native NixOS service
 | ntfy | Notifications |
 | Restic REST Server | Machine backups (restic REST, append-only, `backup.<domain>`) |
 
-Cross-app integrations are provisioned automatically: Pocket ID OIDC clients for every supporting service (Forgejo, Woodpecker, Immich, Paperless, Karakeep, Hermes), Forgejo↔Woodpecker OAuth, and a real LiteLLM virtual key for Hermes. Application versions track the nixpkgs pin in `flake.lock` — the flake is the release gate.
+Cross-app integrations are provisioned automatically: Pocket ID OIDC clients for every supporting service (Forgejo, Woodpecker, Immich, Paperless, Karakeep, Hermes, LiteLLM), Forgejo↔Woodpecker OAuth, and a real LiteLLM virtual key for Hermes. Application versions track the nixpkgs pin in `flake.lock` — the flake is the release gate.
 
 ## AI tools (Hermes via MCP)
 
-Hermes (the `nousresearch/hermes-agent` dashboard at `https://ai.<domain>`) talks to `omahabd` over a streamable-HTTP MCP server at `http://host.docker.internal:8484/mcp` (`POST/GET /mcp` outside `bearerAuth`, `Authorization: Bearer ${OMAHAB_MCP_TOKEN}` SHA-256 verified; admin and `oma_dev_` tokens are rejected with 403). All tools return JSON text content.
+Hermes (the `nousresearch/hermes-agent` dashboard at `https://ai.<domain>`) talks to `omahabd` over a streamable-HTTP MCP server at `http://127.0.0.1:8484/mcp` (`POST/GET /mcp` outside `bearerAuth`, `Authorization: Bearer ${OMAHAB_MCP_TOKEN}` SHA-256 verified; admin and `oma_dev_` tokens are rejected with 403). All tools return JSON text content.
 
 Tool surface (36 wire names, no destructive tools):
 

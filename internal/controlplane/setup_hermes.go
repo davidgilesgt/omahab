@@ -106,20 +106,25 @@ func (b *Backend) renderHermesKeyEnv(ctx context.Context, token string) error {
 		}
 	}
 	kv := map[string]string{
-		"HERMES_UID":              "10000",
-		"HERMES_GID":              "10000",
-		"HERMES_DASHBOARD":        "1",
-		"HERMES_DASHBOARD_HOST":   "0.0.0.0",
-		"HERMES_DASHBOARD_PORT":   "9119",
-		"API_SERVER_ENABLED":      "true",
-		"API_SERVER_HOST":         "0.0.0.0",
-		"API_SERVER_PORT":         "8642",
-		"API_SERVER_KEY":          apiServerKey,
-		"OPENAI_BASE_URL":         "http://host.docker.internal:4000/v1",
-		"OPENAI_API_KEY":          token,
-		"ANTHROPIC_BASE_URL":      "http://host.docker.internal:4000",
-		"ANTHROPIC_API_KEY":       token,
-		"OMAHAB_MCP_TOKEN":        mcpToken,
+		"HERMES_UID":            "10000",
+		"HERMES_GID":            "10000",
+		"HERMES_DASHBOARD":      "1",
+		// Host network mode (nix/apps.nix): bind loopback only, on the
+		// same host ports the bridge publish used to remap (dashboard
+		// 8085 = Caddy/health-check upstream, API 8642), so upstreams
+		// need no changes and nothing is exposed beyond the host.
+		"HERMES_DASHBOARD_HOST": "127.0.0.1",
+		"HERMES_DASHBOARD_PORT": "8085",
+		"API_SERVER_ENABLED":    "true",
+		"API_SERVER_HOST":       "127.0.0.1",
+		"API_SERVER_PORT":       "8642",
+		"API_SERVER_KEY":        apiServerKey,
+		// Host netns: host.docker.internal is gone; loopback is us.
+		"OPENAI_BASE_URL":       "http://127.0.0.1:4000/v1",
+		"OPENAI_API_KEY":        token,
+		"ANTHROPIC_BASE_URL":    "http://127.0.0.1:4000",
+		"ANTHROPIC_API_KEY":     token,
+		"OMAHAB_MCP_TOKEN":      mcpToken,
 	}
 	if domainName != "" && domainName != "example.com" && domainName != "not-configured.invalid" {
 		kv["HERMES_DASHBOARD_PUBLIC_URL"] = "https://ai." + domainName
@@ -143,7 +148,7 @@ func (b *Backend) renderHermesKeyEnv(ctx context.Context, token string) error {
 
 const omahabServerSkillBody = `# Omahab Server MCP Tools
 
-This skill describes the Omahab MCP server at `+"`http://host.docker.internal:8484/mcp`"+` (auth: `+"`Authorization: Bearer ${OMAHAB_MCP_TOKEN}`"+`). All tools return JSON text content.
+This skill describes the Omahab MCP server at `+"`http://127.0.0.1:8484/mcp`"+` (auth: `+"`Authorization: Bearer ${OMAHAB_MCP_TOKEN}`"+`). All tools return JSON text content.
 
 ## Repository tools
 
@@ -203,11 +208,11 @@ func (b *Backend) renderHermesConfig(ctx context.Context, domainName string) err
 		"model": map[string]any{
 			"provider": "custom",
 			"default":  "omahab/balanced",
-			"base_url": "http://host.docker.internal:4000/v1",
+			"base_url": "http://127.0.0.1:4000/v1",
 		},
 		"dashboard": map[string]any{
 			"public_url":     "https://ai." + domainName,
-			"trusted_proxies": []string{"172.17.0.1"},
+			"trusted_proxies": []string{"127.0.0.1"},
 			"oauth": map[string]any{
 				"provider": "self-hosted",
 				"self_hosted": map[string]any{
@@ -222,7 +227,7 @@ func (b *Backend) renderHermesConfig(ctx context.Context, domainName string) err
 		},
 		"mcp_servers": map[string]any{
 			"omahab": map[string]any{
-				"url": "http://host.docker.internal:8484/mcp",
+				"url": "http://127.0.0.1:8484/mcp",
 				"headers": map[string]any{
 					"Authorization": "Bearer ${OMAHAB_MCP_TOKEN}",
 				},

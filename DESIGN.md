@@ -621,25 +621,24 @@ The Hermes `default` profile is the primary assistant and the only bot Omahab sh
 model:
   provider: custom
   default: omahab/balanced
-  base_url: http://host.docker.internal:4000/v1
+  base_url: http://127.0.0.1:4000/v1
 dashboard:
   public_url: https://ai.<domain>
-  trusted_proxies: ["172.17.0.1"]
+  trusted_proxies: ["127.0.0.1"]
   oauth: { provider: self-hosted, self_hosted: { issuer: https://id.<domain>, client_id: <id> } }
 approvals:
   mode: smart
   deny: ["rm -rf /*", "git push --force*", "git push -f*", "*--no-verify*"]
 mcp_servers:
   omahab:
-    url: http://host.docker.internal:8484/mcp
-    headers: { Authorization: "Bearer ${OMAHAB_MCP_TOKEN}" }
+    url: http://127.0.0.1:8484/mcp
 ```
 
-Model traffic goes through LiteLLM at `http://host.docker.internal:4000/v1` (`https://models.<domain>/v1` externally) with a per-Hermes virtual key. The dashboard is served by the same `nousresearch/hermes-agent` container on `0.0.0.0:9119` and exposed as `https://ai.<domain>`.
+Model traffic goes through LiteLLM at `http://127.0.0.1:4000/v1` (`https://models.<domain>/v1` externally) with a per-Hermes virtual key. The dashboard is served by the same `nousresearch/hermes-agent` container (host networking, loopback bind `127.0.0.1:8085`) and exposed as `https://ai.<domain>`.
 
 ### 13.2 Tools
 
-Hermes tools are provided via a streamable-HTTP MCP server inside omahabd at `http://host.docker.internal:8484/mcp` (Bearer `OMAHAB_MCP_TOKEN`, SHA-256 verified; admin and `oma_dev_` tokens are rejected with 403; the server is mounted at `POST/GET /mcp` outside `bearerAuth`). All tools return JSON text content.
+Hermes tools are provided via a streamable-HTTP MCP server inside omahabd at `http://127.0.0.1:8484/mcp` (Bearer `OMAHAB_MCP_TOKEN`, SHA-256 verified; admin and `oma_dev_` tokens are rejected with 403; the server is mounted at `POST/GET /mcp` outside `bearerAuth`). All tools return JSON text content.
 
 Wire names (36 tools):
 

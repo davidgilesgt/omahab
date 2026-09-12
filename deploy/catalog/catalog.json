@@ -612,7 +612,7 @@
     {
       "id": "hermes",
       "name": "Hermes",
-      "port": 9119,
+      "port": 8085,
       "default_exposure": "private",
       "max_exposure": "shared",
       "health_check": {

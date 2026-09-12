@@ -22,7 +22,7 @@ const (
 	NativePortSyncthingGUI    = 8384
 	NativePortNtfy            = 2586
 	NativePortLiteLLM         = 4000
-	NativePortHermes          = 8085 // oci-container published to loopback
+	NativePortHermes          = 8085 // hermes dashboard on loopback (host-network container)
 )
 
 // NativePort returns the loopback port for a bundle ID, if the bundle is
