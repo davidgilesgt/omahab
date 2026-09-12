@@ -758,6 +758,6 @@ in
       devpod
       tmux
     ];
-    systemd.services.omahabd.path = [ omahabOncePkg pkgs.tailscale pkgs.docker pkgs.systemd pkgs.restic pkgs.nftables ];
+    systemd.services.omahabd.path = [ omahabOncePkg pkgs.tailscale pkgs.docker pkgs.systemd pkgs.restic pkgs.nftables pkgs.util-linux ];
   };
 }

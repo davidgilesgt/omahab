@@ -44,7 +44,8 @@
     machine.succeed("curl -sf http://127.0.0.1:8484/api/v1/network/status | grep -q lan")
     # Setup checklist starts with SSH keys.
     machine.succeed("curl -sf http://127.0.0.1:8484/api/v1/setup | grep -q ssh_keys")
-
+    # Storage candidates: lsblk must be on the daemon PATH (regression: 500 without util-linux).
+    machine.succeed("curl -sf http://127.0.0.1:8484/api/v1/system/disks | grep -q items")
     # Primary listener serves the SPA + API (single door).
     machine.succeed("curl -sf -o /dev/null http://127.0.0.1:8484/")
 
