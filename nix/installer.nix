@@ -93,6 +93,10 @@ in
   # Boot both BIOS and UEFI for the live ISO.
   isoImage.makeEfiBootable = true;
   isoImage.makeUsbBootable = true;
+  # Serial console: headless installs over IPMI SOL and scripted installs
+  # (scripts/e2e-iso-install.sh drives the installer over ttyS0) go silent
+  # after the bootloader without this. ttyS0 first keeps video preferred.
+  boot.kernelParams = [ "console=ttyS0,115200n8" "console=tty0" ];
   boot.loader.grub.memtest86.enable = lib.mkDefault true;
   boot.loader.systemd-boot.enable = lib.mkForce false;
   # Install cache: prebuild the packages nixos-install would otherwise
