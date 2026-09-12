@@ -421,7 +421,7 @@
       "max_exposure": "private",
       "health_check": {
         "kind": "http",
-        "path": "/rest/system/ping",
+        "path": "/rest/noauth/health",
         "port": 8384
       },
       "startup_grace_seconds": 120,

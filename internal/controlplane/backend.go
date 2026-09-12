@@ -299,6 +299,12 @@ func (b *Backend) initServices(ctx context.Context) error {
 	b.syncer = syncer.New(b.db, b.cfg.DataDir+"/sync", syncer.NewKnowledgeRegistrar(b.knowledge))
 	syncBaseURL := secretOrEnv("syncthing_base_url", "OMAHAB_SYNCTHING_URL")
 	syncAPIKey := secretOrEnv("syncthing_api_key", "OMAHAB_SYNCTHING_API_KEY")
+	if syncAPIKey == "" {
+		// Read-back: Syncthing autogenerates its GUI key into config.xml;
+		// the secrets import in setupPhaseCoreApps persists it, but a
+		// restart before that import still needs the live key.
+		syncAPIKey = syncthingConfigAPIKey(b.cfg.DataDir)
+	}
 	if syncBaseURL == "" {
 		syncBaseURL = "http://127.0.0.1:8384"
 	}
