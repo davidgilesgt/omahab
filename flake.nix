@@ -23,7 +23,14 @@
         omahab = pkgs.buildGoModule {
           pname = "omahab";
           inherit version;
-          src = lib.cleanSource ./.;
+          # Narrow src: the backend rewrites nix/install-local.nix and
+          # nix/installed-hardware.nix inside the guest flake copy, and a
+          # whole-tree src would retarget every output (pre-seed never hits,
+          # full Go rebuild in the guest). Go only reads these paths.
+          src = lib.fileset.toSource {
+            root = ./.;
+            fileset = lib.fileset.unions [ ./go.mod ./go.sum ./cmd ./internal ];
+          };
           vendorHash = "sha256-FUZb9WWkYKQR+ZIxNvUmjJMw07LOZw66EhO7Z3XSdVo=";
           subPackages = [
             "cmd/omahab"
@@ -51,7 +58,10 @@
           pname = "omahab-embedding-worker";
           inherit version;
           pyproject = true;
-          src = lib.cleanSource ./.;
+          src = lib.fileset.toSource {
+            root = ./.;
+            fileset = lib.fileset.unions [ ./workers/embedding ./README.md ];
+          };
           postPatch = ''
             cp workers/embedding/pyproject.toml ./pyproject.toml
             cat >> ./pyproject.toml <<'EOF'
@@ -100,7 +110,10 @@ EOF
         mkClientd = { goos, goarch }: pkgs.buildGoModule {
           pname = "omahab-clientd-${goos}-${goarch}";
           inherit version;
-          src = lib.cleanSource ./.;
+          src = lib.fileset.toSource {
+            root = ./.;
+            fileset = lib.fileset.unions [ ./go.mod ./go.sum ./cmd ./internal ];
+          };
           vendorHash = "sha256-FUZb9WWkYKQR+ZIxNvUmjJMw07LOZw66EhO7Z3XSdVo=";
           subPackages = [ "cmd/omahab-clientd" ];
           env.CGO_ENABLED = "0";
