@@ -94,9 +94,8 @@ else
   nix build .#image-iso -o dist/iso
   printf '%s' "$HEAD" > "$MARKER"
 fi
-ISO_FILE="$(readlink -f "$ISO")/iso"
-[[ -f "$ISO_FILE" ]] || ISO_FILE="$(readlink -f "$ISO")"
-[[ -f "$ISO_FILE" ]] || die "no ISO image under $ISO"
+ISO_FILE="$(ls "$(readlink -f "$ISO")"/iso/*.iso 2>/dev/null | head -1 || true)"
+[[ -n "$ISO_FILE" && -f "$ISO_FILE" ]] || die "no ISO image under $ISO (want $ISO/iso/*.iso, cf. release.yml)"
 log "iso: $ISO_FILE"
 
 # --- Fresh VM disk, always (never reuse installed state across runs).
