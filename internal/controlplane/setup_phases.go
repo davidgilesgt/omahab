@@ -773,6 +773,15 @@ func (b *Backend) setupPhaseSecrets(ctx context.Context) error {
 	}
 	_ = os.Chmod(dir, 0o700)
 	for _, src := range sources {
+		// Repair a materialized litellm_db_url that still points at the
+		// compose-era litellm-postgres hostname (unresolvable on native
+		// placement; the gateway then starts with prisma_client=None and every
+		// DB endpoint — including SSO /sso/key/generate — 403s). The password
+		// is preserved; only the host is corrected. Runs before the
+		// exists-check below so already-materialized files converge.
+		if src == "litellm_db_url" {
+			repairLitellmDBURLHost(dir)
+		}
 		if src == "hermes_jwt_secret" || src == "hermes_db_password" {
 			continue
 		}
@@ -809,7 +818,7 @@ func (b *Backend) setupPhaseSecrets(ctx context.Context) error {
 				}
 				_ = os.Chmod(pwdPath, 0o644)
 			}
-			content = fmt.Sprintf("postgresql://litellm:%s@litellm-postgres:5432/litellm", pwd)
+			content = fmt.Sprintf("postgresql://litellm:%s@127.0.0.1:5432/litellm", pwd)
 		case "woodpecker_db_url":
 			pwdPath := filepath.Join(dir, "woodpecker_db_password")
 			pwdBytes, err := os.ReadFile(pwdPath)
@@ -845,14 +854,16 @@ func (b *Backend) setupPhaseSecrets(ctx context.Context) error {
 		}
 		_ = os.Chmod(path, 0o644)
 	}
-	// Mirror file-backed woodpecker secrets into the broker: the OIDC phase
-	// renders the native appenv from RevealByName (platform-app scope), which
-	// never sees the compose-legacy files above. Without the mirror the agent
-	// secret and DB URL render empty and the agent cannot authenticate
-	// (live 2026-09-12). Only non-empty values are mirrored, so placeholders
-	// never shadow real credentials.
+	// Mirror file-backed secrets into the broker: the render/OIDC phases
+	// project the native appenv from RevealByName (platform-app scope), which
+	// never sees the files above. Without the mirror the agent secret and DB
+	// URL render empty and the agent cannot authenticate (live 2026-09-12);
+	// the same gap left LITELLM_MASTER_KEY and DATABASE_URL out of litellm.env,
+	// so the gateway ran with prisma_client=None and every DB endpoint —
+	// including SSO /sso/key/generate — 403d. Only non-empty values are
+	// mirrored, so placeholders never shadow real credentials.
 	if b.secrets != nil {
-		for _, name := range []string{"woodpecker_db_password", "woodpecker_db_url", "woodpecker_grpc_secret", "woodpecker_agent_secret"} {
+		for _, name := range []string{"woodpecker_db_password", "woodpecker_db_url", "woodpecker_grpc_secret", "woodpecker_agent_secret", "litellm_master_key", "litellm_db_url", "litellm_db_password"} {
 			if _, err := b.secrets.RevealByName(ctx, "platform-app", name); err == nil {
 				continue
 			}
@@ -864,6 +875,26 @@ func (b *Backend) setupPhaseSecrets(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// repairLitellmDBURLHost rewrites a litellm_db_url secret file that still
+// carries the unresolvable litellm-postgres host, preserving the password.
+// Missing files and already-correct files are no-ops; errors only warn (the
+// fresh-materialization path below and the broker mirror converge anyway).
+func repairLitellmDBURLHost(dir string) {
+	raw, err := os.ReadFile(filepath.Join(strings.TrimSpace(dir), "litellm_db_url"))
+	if err != nil {
+		return
+	}
+	fixed := strings.ReplaceAll(string(raw), "@litellm-postgres", "@127.0.0.1")
+	if fixed == string(raw) {
+		return
+	}
+	if err := os.WriteFile(filepath.Join(strings.TrimSpace(dir), "litellm_db_url"), []byte(fixed), 0o644); err != nil {
+		log.Printf("repair litellm_db_url host: %v", err)
+		return
+	}
+	log.Printf("repair litellm_db_url host: corrected to 127.0.0.1 (password preserved)")
 }
 
 // atomicReplaceSecretFile atomically replaces a projected secret file in dir/name
@@ -1141,6 +1172,10 @@ func (b *Backend) renderNativeAppEnv(ctx context.Context, dnsToken, domainName s
 	if err != nil {
 		return fmt.Errorf("litellm: %w", err)
 	}
+	// The gateway only reads its EnvironmentFile at unit start: a changed
+	// master key or DB URL needs a restart, otherwise it keeps running with
+	// prisma_client=None (every DB endpoint, including SSO login, 403s).
+	masterBefore, dbBefore := existing["LITELLM_MASTER_KEY"], existing["DATABASE_URL"]
 	if k := reveal("litellm_master_key"); k != "" {
 		existing["LITELLM_MASTER_KEY"] = k
 	}
@@ -1200,6 +1235,12 @@ func (b *Backend) renderNativeAppEnv(ctx context.Context, dnsToken, domainName s
 	if merged := mergeLiteLLMProviderEnv(existing, live); len(merged) > 0 {
 		if err := b.writeAppEnv("litellm", merged, "litellm"); err != nil {
 			return fmt.Errorf("litellm: %w", err)
+		}
+		if merged["LITELLM_MASTER_KEY"] != masterBefore || merged["DATABASE_URL"] != dbBefore {
+			log.Printf("render native appenv: litellm master key or DB URL changed, redeploying gateway")
+			if err := b.redeployBundle(ctx, "litellm"); err != nil {
+				return fmt.Errorf("litellm: %w", err)
+			}
 		}
 	}
 	if err := b.writeAppEnv("ntfy", map[string]string{

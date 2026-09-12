@@ -632,6 +632,18 @@ func TestSetupPhaseOIDCEnsuresLitellmClient(t *testing.T) {
 	if _, err := b.secrets.Put(ctx, "platform-app", "pocketid_api_key", "test-key"); err != nil {
 		t.Fatal(err)
 	}
+	// The OIDC phase syncs the litellm role password first; stub the systemd
+	// boundary and seed the password as on-box setup would have materialized.
+	if _, err := b.secrets.Put(ctx, "platform-app", "litellm_db_password", "testdbpassword01_-AB"); err != nil {
+		t.Fatal(err)
+	}
+	var alterDB, alterStmt string
+	oldAlter := runPostgresAlterRole
+	runPostgresAlterRole = func(_ context.Context, db, stmt string) (string, error) {
+		alterDB, alterStmt = db, stmt
+		return "", nil
+	}
+	t.Cleanup(func() { runPostgresAlterRole = oldAlter })
 	t.Setenv("OMAHAB_POCKETID_URL", srv.URL)
 	t.Setenv("OMAHAB_OIDC_DISCOVERY_URL", discovery.URL)
 	startsBefore := runner.startCount
@@ -659,13 +671,13 @@ func TestSetupPhaseOIDCEnsuresLitellmClient(t *testing.T) {
 		t.Fatalf("read litellm env: %v", err)
 	}
 	for k, want := range map[string]string{
-		"LITELLM_MASTER_KEY":              "mk-test",
-		"GENERIC_CLIENT_ID":               "litellm-client",
-		"GENERIC_CLIENT_SECRET":           "litellm-secret",
-		"GENERIC_AUTHORIZATION_ENDPOINT":  "https://id.omahab.com/authorize",
-		"GENERIC_TOKEN_ENDPOINT":          "https://id.omahab.com/api/oidc/token",
-		"GENERIC_USERINFO_ENDPOINT":       "https://id.omahab.com/api/oidc/userinfo",
-		"PROXY_BASE_URL":                  "https://models.omahab.com",
+		"LITELLM_MASTER_KEY":             "mk-test",
+		"GENERIC_CLIENT_ID":              "litellm-client",
+		"GENERIC_CLIENT_SECRET":          "litellm-secret",
+		"GENERIC_AUTHORIZATION_ENDPOINT": "https://id.omahab.com/authorize",
+		"GENERIC_TOKEN_ENDPOINT":         "https://id.omahab.com/api/oidc/token",
+		"GENERIC_USERINFO_ENDPOINT":      "https://id.omahab.com/api/oidc/userinfo",
+		"PROXY_BASE_URL":                 "https://models.omahab.com",
 	} {
 		if env[k] != want {
 			t.Fatalf("litellm env[%s] = %q, want %q (full env: %v)", k, env[k], want, env)
@@ -677,6 +689,235 @@ func TestSetupPhaseOIDCEnsuresLitellmClient(t *testing.T) {
 	}
 	if got := runner.startCount - startsBefore; got != 1 {
 		t.Fatalf("litellm starts across two oidc runs = %d, want 1 (converged rerun restarts)", got)
+	}
+	if alterDB != "litellm" || !strings.Contains(alterStmt, `ALTER ROLE "litellm"`) {
+		t.Fatalf("postgres auth sync = db %q stmt %q, want litellm ALTER ROLE", alterDB, alterStmt)
+	}
+}
+
+// The OIDC phase must sync the litellm role password before rendering SSO so
+// TCP md5 auth works (NixOS pg_hba); without it the gateway runs DB-less.
+func TestSetupPhaseOIDCEnsuresLitellmPostgresAuth(t *testing.T) {
+	ctx := context.Background()
+	runner := &scriptedRunner{health: domain.HealthHealthy}
+	b := newAppsBackend(t, runner, "sha256:"+strings.Repeat("a", 64))
+	if _, err := b.secrets.Put(ctx, "platform-app", "litellm_db_password", "rolepassword01_-AB"); err != nil {
+		t.Fatal(err)
+	}
+	var alterDB, alterStmt string
+	calls := 0
+	oldAlter := runPostgresAlterRole
+	runPostgresAlterRole = func(_ context.Context, db, stmt string) (string, error) {
+		calls++
+		alterDB, alterStmt = db, stmt
+		return "", nil
+	}
+	t.Cleanup(func() { runPostgresAlterRole = oldAlter })
+	if err := b.ensureLitellmPostgresAuth(ctx); err != nil {
+		t.Fatalf("postgres auth: %v", err)
+	}
+	if calls != 1 || alterDB != "litellm" {
+		t.Fatalf("alter calls = %d db = %q, want 1 litellm", calls, alterDB)
+	}
+	wantStmt := `ALTER ROLE "litellm" WITH PASSWORD 'rolepassword01_-AB'`
+	if alterStmt != wantStmt {
+		t.Fatalf("alter stmt = %q, want %q", alterStmt, wantStmt)
+	}
+}
+
+func TestEnsureLitellmPostgresAuthFailureModes(t *testing.T) {
+	ctx := context.Background()
+	b := newTestBackend(t, nil)
+	// Missing password (no broker secret, empty StateDir file) fails closed
+	// without touching the systemd boundary.
+	called := false
+	oldAlter := runPostgresAlterRole
+	runPostgresAlterRole = func(_ context.Context, _, _ string) (string, error) {
+		called = true
+		return "", nil
+	}
+	t.Cleanup(func() { runPostgresAlterRole = oldAlter })
+	if err := b.ensureLitellmPostgresAuth(ctx); err == nil || !strings.Contains(err.Error(), "litellm_db_password") {
+		t.Fatalf("missing password err = %v, want litellm_db_password complaint", err)
+	}
+	if called {
+		t.Fatal("systemd boundary must not run without a valid password")
+	}
+	// Exec failure reports the role, never the password.
+	if _, err := b.secrets.Put(ctx, "platform-app", "litellm_db_password", "supersecretpassword01"); err != nil {
+		t.Fatal(err)
+	}
+	runPostgresAlterRole = func(_ context.Context, _, _ string) (string, error) {
+		return "psql: FATAL", errors.New("exit status 1")
+	}
+	err := b.ensureLitellmPostgresAuth(ctx)
+	if err == nil || !strings.Contains(err.Error(), "alter litellm role") {
+		t.Fatalf("exec failure err = %v, want alter litellm role", err)
+	}
+	if strings.Contains(err.Error(), "supersecretpassword01") {
+		t.Fatal("error must never contain the password")
+	}
+}
+
+// A materialized litellm_db_url pointing at the compose-era litellm-postgres
+// hostname must converge to 127.0.0.1 with the password preserved, and mirror
+// into the broker so the gateway render picks it up.
+func TestSetupPhaseSecretsRepairsLitellmDBURLHost(t *testing.T) {
+	ctx := context.Background()
+	digest := "sha256:" + strings.Repeat("a", 64)
+	runner := &scriptedRunner{health: domain.HealthHealthy}
+	b, _ := newSetupBackend(t, runner)
+	stateRoot := t.TempDir()
+	b.cfg.StateDir = filepath.Join(stateRoot, "state")
+	b.cfg.DataDir = filepath.Join(stateRoot, "data")
+	lb := testSetupBundle("litellm", digest, domain.ExposurePrivate, "models", []string{"caddy", "pocket-id"})
+	lb.SecretSources = []string{"litellm_master_key", "litellm_db_url", "litellm_db_password"}
+	cat, err := apps.NewCatalog(
+		testSetupBundle("caddy", digest, domain.ExposurePublic, "", nil),
+		testSetupBundle("pocket-id", digest, domain.ExposurePrivate, "id", []string{"caddy"}),
+		lb,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := apps.NewService(b.db, apps.Options{Catalog: cat, Runner: runner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.apps = svc
+	secretsDir := filepath.Join(b.cfg.StateDir, "secrets")
+	if err := os.MkdirAll(secretsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const password = "keepmepassword01_-AB"
+	broken := "postgresql://litellm:" + password + "@litellm-postgres:5432/litellm"
+	if err := os.WriteFile(filepath.Join(secretsDir, "litellm_db_url"), []byte(broken), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(secretsDir, "litellm_db_password"), []byte(password), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.setupPhaseSecrets(ctx); err != nil {
+		t.Fatalf("secrets: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(secretsDir, "litellm_db_url"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "postgresql://litellm:" + password + "@127.0.0.1:5432/litellm"
+	if strings.TrimSpace(string(raw)) != want {
+		t.Fatalf("repaired url = %q, want %q", raw, want)
+	}
+	mirrored, err := b.secrets.RevealByName(ctx, "platform-app", "litellm_db_url")
+	if err != nil {
+		t.Fatalf("broker mirror missing: %v", err)
+	}
+	if mirrored != want {
+		t.Fatalf("mirrored url = %q, want %q", mirrored, want)
+	}
+	// Second run is a no-op (idempotent repair + fill-missing mirror).
+	if err := b.setupPhaseSecrets(ctx); err != nil {
+		t.Fatalf("secrets rerun: %v", err)
+	}
+	raw2, _ := os.ReadFile(filepath.Join(secretsDir, "litellm_db_url"))
+	if string(raw2) != string(raw) {
+		t.Fatalf("rerun changed url: %q vs %q", raw2, raw)
+	}
+}
+
+// Fresh installs must materialize the loopback host directly (never the
+// unresolvable compose hostname).
+func TestSetupPhaseSecretsMaterializesLitellmDBURLOnLoopback(t *testing.T) {
+	ctx := context.Background()
+	digest := "sha256:" + strings.Repeat("a", 64)
+	runner := &scriptedRunner{health: domain.HealthHealthy}
+	b, _ := newSetupBackend(t, runner)
+	stateRoot := t.TempDir()
+	b.cfg.StateDir = filepath.Join(stateRoot, "state")
+	b.cfg.DataDir = filepath.Join(stateRoot, "data")
+	lb := testSetupBundle("litellm", digest, domain.ExposurePrivate, "models", []string{"caddy", "pocket-id"})
+	lb.SecretSources = []string{"litellm_db_url", "litellm_db_password"}
+	cat, err := apps.NewCatalog(
+		testSetupBundle("caddy", digest, domain.ExposurePublic, "", nil),
+		testSetupBundle("pocket-id", digest, domain.ExposurePrivate, "id", []string{"caddy"}),
+		lb,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := apps.NewService(b.db, apps.Options{Catalog: cat, Runner: runner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.apps = svc
+	if err := b.setupPhaseSecrets(ctx); err != nil {
+		t.Fatalf("secrets: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(b.cfg.StateDir, "secrets", "litellm_db_url"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	url := strings.TrimSpace(string(raw))
+	if strings.Contains(url, "litellm-postgres") || !strings.Contains(url, "@127.0.0.1:5432/litellm") {
+		t.Fatalf("materialized url = %q, want loopback host", url)
+	}
+}
+
+// The gateway only reads its EnvironmentFile at unit start: when the render
+// introduces DATABASE_URL it must bounce the unit, and a converged re-render
+// must not.
+func TestRenderNativeAppEnvRedeploysOnDatabaseURLChange(t *testing.T) {
+	ctx := context.Background()
+	digest := "sha256:" + strings.Repeat("a", 64)
+	runner := &scriptedRunner{health: domain.HealthHealthy}
+	b := newAppsBackend(t, runner, digest)
+	stateRoot := t.TempDir()
+	b.cfg.StateDir = filepath.Join(stateRoot, "state")
+	b.cfg.DataDir = filepath.Join(stateRoot, "data")
+	lb := testSetupBundle("litellm", digest, domain.ExposurePrivate, "models", []string{"caddy", "pocket-id"})
+	lb.Units = []string{"litellm.service"}
+	cat, err := apps.NewCatalog(
+		testSetupBundle("caddy", digest, domain.ExposurePublic, "", nil),
+		testSetupBundle("pocket-id", digest, domain.ExposurePrivate, "id", []string{"caddy"}),
+		lb,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := apps.NewService(b.db, apps.Options{Catalog: cat, Runner: runner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.apps = svc
+	if err := b.ensureDefaultApp(ctx, lb, "omahab.com"); err != nil {
+		t.Fatalf("install litellm: %v", err)
+	}
+	const dbURL = "postgresql://litellm:pw01_-AB@127.0.0.1:5432/litellm"
+	if _, err := b.secrets.Put(ctx, "platform-app", "litellm_master_key", "mk-render"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.secrets.Put(ctx, "platform-app", "litellm_db_url", dbURL); err != nil {
+		t.Fatal(err)
+	}
+	startsBefore := runner.startCount
+	if err := b.renderNativeAppEnv(ctx, "", "omahab.com"); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	env, err := b.readAppEnv("litellm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env["DATABASE_URL"] != dbURL || env["LITELLM_MASTER_KEY"] != "mk-render" {
+		t.Fatalf("rendered env = %v, want DB URL + master key", env)
+	}
+	if got := runner.startCount - startsBefore; got != 1 {
+		t.Fatalf("starts after DB URL introduction = %d, want 1", got)
+	}
+	if err := b.renderNativeAppEnv(ctx, "", "omahab.com"); err != nil {
+		t.Fatalf("rerender: %v", err)
+	}
+	if got := runner.startCount - startsBefore; got != 1 {
+		t.Fatalf("starts after converged rerender = %d, want still 1", got)
 	}
 }
 

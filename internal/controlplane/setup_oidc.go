@@ -130,6 +130,9 @@ func (b *Backend) setupPhaseOIDC(ctx context.Context) error {
 		}
 	}
 	if needLitellm {
+		if err := b.ensureLitellmPostgresAuth(ctx); err != nil {
+			return err
+		}
 		if err := b.ensureLitellmOIDC(ctx, domainName); err != nil {
 			return err
 		}
@@ -437,6 +440,12 @@ func fetchOIDCEndpoints(ctx context.Context, discoveryBase string) (authorize, t
 	return strings.TrimSpace(doc.AuthorizationEndpoint), strings.TrimSpace(doc.TokenEndpoint), strings.TrimSpace(doc.UserinfoEndpoint), nil
 }
 
+// runPostgresAlterRole executes psql as the postgres superuser (peer auth).
+// Assigned to a var so tests can stub the systemd boundary.
+var runPostgresAlterRole = func(ctx context.Context, db, stmt string) (string, error) {
+	return systemdRunAsUser(ctx, "postgres", "postgres", "/tmp", []string{"HOME=/tmp"}, "psql", "-d", db, "-c", stmt)
+}
+
 // ensureLitellmOIDC wires LiteLLM Admin UI SSO (generic OIDC) to Pocket ID.
 // Without these env vars the UI renders "Login with SSO" disabled with
 // "Please configure SSO to log in with SSO." The write is a
@@ -471,8 +480,8 @@ func (b *Backend) ensureLitellmOIDC(ctx context.Context, domainName string) erro
 		return fmt.Errorf("litellm oidc discovery: %w", err)
 	}
 	want := map[string]string{
-		"GENERIC_CLIENT_ID":            clientID,
-		"GENERIC_CLIENT_SECRET":        clientSecret,
+		"GENERIC_CLIENT_ID":              clientID,
+		"GENERIC_CLIENT_SECRET":          clientSecret,
 		"GENERIC_AUTHORIZATION_ENDPOINT": authorizeEP,
 		"GENERIC_TOKEN_ENDPOINT":         tokenEP,
 		"GENERIC_USERINFO_ENDPOINT":      userinfoEP,
@@ -498,6 +507,41 @@ func (b *Backend) ensureLitellmOIDC(ctx context.Context, domainName string) erro
 		}
 	}
 	log.Printf("setup oidc: litellm client ensured")
+	return nil
+}
+
+// ensureLitellmPostgresAuth syncs the litellm role password with the
+// materialized secret so TCP md5 auth works on native placement (NixOS pg_hba:
+// peer on socket, md5 on TCP; the role comes from the NixOS postgres module
+// with no password). Without it the gateway starts with prisma_client=None
+// and every DB endpoint — including SSO /sso/key/generate — 403s "DB not
+// connected". Idempotent: ALTER ROLE is a plain assignment. The password never
+// appears in errors (only its presence is reported). Mirrors
+// ensureWoodpeckerPostgresAuth.
+func (b *Backend) ensureLitellmPostgresAuth(ctx context.Context) error {
+	password := ""
+	if b.secrets != nil {
+		if v, err := b.secrets.RevealByName(ctx, "platform-app", "litellm_db_password"); err == nil {
+			password = strings.TrimSpace(v)
+		}
+	}
+	if password == "" {
+		dir := filepath.Join(b.cfg.StateDir, "secrets")
+		if strings.TrimSpace(b.cfg.StateDir) == "" {
+			dir = "/var/lib/omahab/secrets"
+		}
+		if raw, err := os.ReadFile(filepath.Join(dir, "litellm_db_password")); err == nil {
+			password = strings.TrimSpace(string(raw))
+		}
+	}
+	if !validPostgresPassword(password) {
+		return fmt.Errorf("litellm_db_password missing or outside safe alphabet")
+	}
+	stmt := "ALTER ROLE \"litellm\" WITH PASSWORD '" + password + "'"
+	out, err := runPostgresAlterRole(ctx, "litellm", stmt)
+	if err != nil {
+		return fmt.Errorf("alter litellm role: %s", health.RedactDetail(strings.TrimSpace(out+" "+err.Error())))
+	}
 	return nil
 }
 
