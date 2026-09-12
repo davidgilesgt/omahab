@@ -245,6 +245,17 @@ in
     services.gotenberg.port = 3001;
 
     # ----------------------------------------------------------------
+    # Appliance scope: no shell-driven reconfiguration on the box (managed
+    # via WebUI/API; installer tooling stays on the live ISO). Drops
+    # nixos-install/-enter/-generate-config/-rebuild and their perl envs
+    # from the installed closure (faster install, smaller disk).
+    system.disableInstallerTools = true;
+    # Threaded initrd compression: zstd -10 single-threaded is the
+    # default; the 2-vCPU target compresses ~2x faster with -T2.
+    # Decompression at boot is identical. The initrd is per-install
+    # (hardware modules) either way, so no cache is lost.
+    boot.initrd.compressorArgs = [ "-10" "-T2" ];
+    # ----------------------------------------------------------------
     # Karakeep — bookmarks. Domain-gated (NextAuth + OIDC).
     # ----------------------------------------------------------------
     services.karakeep = {

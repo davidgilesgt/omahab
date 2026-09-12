@@ -1291,7 +1291,7 @@ if [[ "$RESUME_MODE" -eq 0 ]]; then
 
   # -------------------------------------------------------------------
   # Partition, format, mount
-  # Partition system disk
+  echo "install-disk: TIMING partition-format-start $(date +%s)" >&2
   part_sys() {
     if [[ "$FIRMWARE" == bios ]]; then
       parted -s "$SYS_DEV" -- mklabel gpt \
@@ -1520,6 +1520,7 @@ configure_stage() {
   update_manifest_stage "configure"
   progress "configure" "running" "generating hardware config"
   log "generating hardware config"
+  echo "install-disk: TIMING configure-start $(date +%s)" >&2
   if ! nixos-generate-config --root "$MNT" 2>>"$LOG_FILE"; then
     progress "configure" "failed" "nixos-generate-config failed"
     die "generating hardware config failed"
@@ -1527,11 +1528,14 @@ configure_stage() {
 
   TARGET_FLAKE="$MNT/etc/omahab/flake"
   log "installing flake source to $TARGET_FLAKE"
+  echo "install-disk: TIMING flake-copy-start $(date +%s)" >&2
   if ! mkdir -p "$TARGET_FLAKE" 2>>"$LOG_FILE"; then die "creating $TARGET_FLAKE failed"; fi
   if ! cp -a "$FLAKE_SRC"/. "$TARGET_FLAKE"/ 2>>"$LOG_FILE"; then die "copying flake source failed"; fi
+  echo "install-disk: TIMING flake-copy-end $(date +%s)" >&2
   mkdir -p "$TARGET_FLAKE/nix"
   if [[ -f "$MNT/etc/nixos/hardware-configuration.nix" ]]; then
     cp "$MNT/etc/nixos/hardware-configuration.nix" "$TARGET_FLAKE/nix/installed-hardware.nix"
+    log "detected hardware: $(grep -A8 'availableKernelModules' "$TARGET_FLAKE/nix/installed-hardware.nix" | tr '\n' ' ')"
   else
     die "hardware-configuration.nix not generated"
   fi
@@ -1777,10 +1781,21 @@ install_stage() {
   update_manifest_stage "install"
   progress "install" "running" "running nixos-install (this takes a while)"
   log "running nixos-install --root $MNT --flake $MNT/etc/omahab/flake#$FLAKE_ATTR --no-root-passwd"
-  if ! nixos-install --root "$MNT" --flake "$TARGET_FLAKE#$FLAKE_ATTR" --no-root-passwd 2>>"$LOG_FILE"; then
+  echo "install-disk: TIMING nixos-install-start $(date +%s)" >&2
+  # --option sandbox=false: install builds are all upstream NixOS/nixpkgs
+  # text/assembly derivations (units, etc, initrd) — trusted, input-
+  # addressed, sandbox-verified by Hydra. Skipping the per-build chroot
+  # bind-mount storm matters on 2 vCPU. Outputs are identical; the
+  # installed system's own daemon keeps sandboxing enabled.
+  # --max-jobs 2 --cores 2: trivial builds are single-threaded (2 at a
+  # time); the few heavy ones (initrd compress) use both cores.
+  # --option http-connections 50: guest downloads average ~1.4 MB/s per
+  # flow (slirp per-flow overhead dominates), so more flows raise aggregate.
+  if ! nixos-install --root "$MNT" --flake "$TARGET_FLAKE#$FLAKE_ATTR" --no-root-passwd --option sandbox false --max-jobs 2 --cores 2 --option http-connections 50 2>>"$LOG_FILE"; then
     progress "install" "failed" "nixos-install failed — see $LOG_FILE"
     die "nixos-install failed"
   fi
+  echo "install-disk: TIMING nixos-install-end $(date +%s)" >&2
   progress "install" "complete" "nixos-install complete"
 }
 
@@ -1789,7 +1804,7 @@ install_stage() {
 account_stage() {
   local d mp i p uuid target_uid target_gid hash_content target_shadow auth_keys_src omahab_bin target_auth target_auth2
   update_manifest_stage "account"
-  progress "account" "running" "configuring administrator account $USERNAME"
+  echo "install-disk: TIMING account-start $(date +%s)" >&2
   log "installing password hash for $USERNAME"
   # Use nixos-enter + chpasswd -e over stdin. Hash file is 0600 root-owned.
   hash_content=$(cat "${MANIFEST_DIR}/password-hash" 2>/dev/null || cat "$PASSWORD_HASH_FILE" 2>/dev/null || true)
@@ -1975,6 +1990,7 @@ if [[ "$RESUME_MODE" -eq 0 ]]; then
   account_stage
   verify_stage
   unmount_stage
+  echo "install-disk: TIMING backend-end $(date +%s)" >&2
   progress "done" "complete" "installation complete"
   CURRENT_STAGE="done"
   # Success message
