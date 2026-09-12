@@ -101,18 +101,23 @@ in
   boot.loader.systemd-boot.enable = lib.mkForce false;
   # Install cache: prebuild the packages nixos-install would otherwise
   # compile on target hardware (our overrides aren't on cache.nixos.org:
-  # pinned-fastapi scope incl. litellm/a2a-sdk, caddy+plugins, go bins).
+  # pinned-fastapi scope incl. litellm/a2a-sdk, caddy+plugins, go bins,
+  # npm dist for omahab-web, embedding worker env).
   # nixos-install reuses identical store paths from the live medium, so
   # install becomes copy plus the remaining cache downloads — no local
   # builds. Stock deps still substitute from cache.nixos.org (install
   # already requires network); embedding the full toplevel would push
   # the ISO past GitHub's 2GB release-asset cap, hence the subset.
+  # omahab-web (2.5 MiB) and omahab-catalog (KiBs) cost ~nothing on the
+  # ISO but save a full npm build plus its sandbox tmpfs in the guest.
   isoImage.storeContents = lib.optionals (pkgs.system == "x86_64-linux") (
     let installed = self.nixosConfigurations.omahab-installed.config;
     in [
       installed.services.litellm.package
       installed.services.caddy.package
       self.packages.${pkgs.system}.omahab
+      self.packages.${pkgs.system}.omahab-web
+      self.packages.${pkgs.system}.omahab-catalog
       self.packages.${pkgs.system}.omahab-embedding-worker
       self.packages.${pkgs.system}.omahab-once
       # The 4 clientd binaries: their per-target Go module graphs are GBs of
