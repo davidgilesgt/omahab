@@ -108,17 +108,23 @@ func TestClassifyCoreAppHealth(t *testing.T) {
 	st := apps.Status{BundleID: "caddy"}
 	st.ObservedState = apps.ObservedRunning
 	st.Health = domain.HealthHealthy
-	as := classifyCoreApp(st)
+	as := classifyCoreApp(st, false)
 	if as.Status != "running" {
 		t.Fatalf("healthy running = %+v", as)
 	}
 	st.Health = domain.HealthUnknown
-	as = classifyCoreApp(st)
+	as = classifyCoreApp(st, false)
 	if as.Status != "pending" {
-		t.Fatalf("unknown health = %+v", as)
+		t.Fatalf("unknown health non-native = %+v", as)
+	}
+	// Native bundles without an HTTP probe report Unknown while running;
+	// the reconciler treats that as OK, so the display must too.
+	as = classifyCoreApp(st, true)
+	if as.Status != "running" {
+		t.Fatalf("unknown health native = %+v", as)
 	}
 	st.Health = domain.HealthUnhealthy
-	as = classifyCoreApp(st)
+	as = classifyCoreApp(st, false)
 	if as.Status != "failed" {
 		t.Fatalf("unhealthy = %+v", as)
 	}

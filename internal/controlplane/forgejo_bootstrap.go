@@ -69,28 +69,34 @@ func redactForgejoError(err error) error {
 	return errors.New(redacted)
 }
 
-// runForgejoAdminCommand executes `forgejo admin <args>` inside the Forgejo container.
-// It uses b.forgejoExec if set (for tests), otherwise attempts docker exec.
+// runForgejoAdminCommand executes `forgejo admin <args>`, preferring the
+// native NixOS path (runuser as the forgejo service user) and falling back
+// to docker exec for legacy compose-placed deployments.
+// It uses b.forgejoExec if set (for tests).
 func (b *Backend) runForgejoAdminCommand(ctx context.Context, args ...string) (string, error) {
 	if b.forgejoExec != nil {
 		return b.forgejoExec(ctx, args...)
 	}
 	// Native (NixOS) path first: forgejo is a systemd service running as
 	// its own user; exec the admin CLI directly, no container involved.
-	if out, err := b.runNativeForgejoAdmin(ctx, args...); err == nil {
-		return out, nil
+	nativeOut, nativeErr := b.runNativeForgejoAdmin(ctx, args...)
+	if nativeErr == nil {
+		return nativeOut, nil
 	}
 	// Compose fallback (legacy Debian installs / hermes-style containers).
-	containerID, err := b.findForgejoContainerID(ctx)
-	if err != nil {
-		return "", err
+	// Keep the native failure in the message: it is the real cause on
+	// native systems, where the container lookup below can only fail.
+	containerID, cerr := b.findForgejoContainerID(ctx)
+	if cerr != nil {
+		return "", fmt.Errorf("forgejo admin unavailable (native: %s; container lookup: %s)",
+			health.RedactDetail(strings.TrimSpace(nativeErr.Error())), strings.TrimSpace(redactForgejoError(cerr).Error()))
 	}
 	fullArgs := append([]string{"exec", containerID, "forgejo", "admin"}, args...)
 	cmd := exec.CommandContext(ctx, "docker", fullArgs...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err = cmd.Run()
+	err := cmd.Run()
 	out := strings.TrimSpace(stdout.String())
 	errOut := strings.TrimSpace(stderr.String())
 	combined := strings.TrimSpace(out + "\n" + errOut)
@@ -123,11 +129,27 @@ func (b *Backend) runNativeForgejoAdmin(ctx context.Context, args ...string) (st
 	if err != nil {
 		return "", err
 	}
-	if _, uerr := user.Lookup("forgejo"); uerr != nil {
+	usr, uerr := user.Lookup("forgejo")
+	if uerr != nil {
 		return "", fmt.Errorf("native forgejo user not found: %w", uerr)
+	}
+	// Mirror the service environment: the forgejo CLI resolves its work dir,
+	// custom path, and HOME from env (the unit sets FORGEJO_WORK_DIR/HOME and
+	// WorkingDirectory=/var/lib/forgejo). A bare runuser inherits omahabd's
+	// CWD (/var/lib/omahab) and root's env, so the CLI cannot find app.ini
+	// and fails — which the container fallback then masks.
+	workDir := forgejoServiceWorkingDir(ctx)
+	if workDir == "" {
+		workDir = usr.HomeDir
 	}
 	fullArgs := append([]string{"-u", "forgejo", "--", gitea, "admin"}, args...)
 	cmd := exec.CommandContext(ctx, "runuser", fullArgs...)
+	cmd.Dir = workDir
+	cmd.Env = append(os.Environ(),
+		"FORGEJO_WORK_DIR="+workDir,
+		"FORGEJO_CUSTOM="+workDir+"/custom",
+		"HOME="+usr.HomeDir,
+	)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -175,6 +197,25 @@ func forgejoServiceExecStart(ctx context.Context) string {
 		return ""
 	}
 	return out.String()
+}
+
+// forgejoServiceWorkingDir reports WorkingDirectory of forgejo.service, or ""
+// when unavailable (callers fall back to the forgejo user's home).
+func forgejoServiceWorkingDir(ctx context.Context) string {
+	cmd := exec.CommandContext(ctx, "systemctl", "show", "forgejo.service", "-p", "WorkingDirectory")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(out.String(), "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "WorkingDirectory="); ok {
+			if v = strings.TrimSpace(v); v != "" && strings.HasPrefix(v, "/") {
+				return v
+			}
+		}
+	}
+	return ""
 }
 
 // parseForgejoExecStart extracts the server binary path from

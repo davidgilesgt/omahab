@@ -225,7 +225,7 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (apitypes.SetupStatus, err
 					}
 					anyPending = true
 				} else {
-					as = classifyCoreApp(st)
+					as = classifyCoreApp(st, isNativeBundle(bnd))
 					switch as.Status {
 					case "failed":
 						anyFailed = true
@@ -533,7 +533,7 @@ func deriveSetupState(checks []apitypes.SetupCheck, domainSentinel bool, cfDNSPr
 	return "complete"
 }
 
-func classifyCoreApp(st apps.Status) apitypes.SetupAppStatus {
+func classifyCoreApp(st apps.Status, isNative bool) apitypes.SetupAppStatus {
 	as := apitypes.SetupAppStatus{BundleID: st.BundleID}
 	switch st.ObservedState {
 	case apps.ObservedRunning:
@@ -547,6 +547,15 @@ func classifyCoreApp(st apps.Status) apitypes.SetupAppStatus {
 				as.Detail = "unhealthy"
 			}
 		default:
+			// Native bundles without an HTTP probe (e.g. embedding-worker,
+			// kind "none") report HealthUnknown via SystemdRunner.Check. The
+			// reconciler treats that as OK for native (requireRunningHealthy),
+			// so the status display must too — otherwise the setup screen can
+			// never go green for a healthy native service.
+			if isNative {
+				as.Status = "running"
+				break
+			}
 			as.Status = "pending"
 			as.Detail = "health " + string(st.Health)
 		}
