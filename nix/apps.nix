@@ -79,7 +79,11 @@ in
       # service via a static group distinct from the unit name: DynamicUser
       # implicitly takes user `litellm`, so a static group named `litellm`
       # collides (217/USER "already exists"). `litellm-cfg` avoids it.
+      # `d` owns the dir; `C` seeds the empty table once (only if missing,
+      # at boot, outside the unit sandbox — ExecStartPre cannot write into
+      # the unit's own ReadOnlyPaths).
       "d ${dataDir}/apps/litellm/config 0750 root litellm-cfg - -"
+      "C ${dataDir}/apps/litellm/config/litellm.yaml 0640 root litellm-cfg - ${litellmEmptyConfig}"
     ];
     # Root-owned oneshot prepares the caddy config tree before caddy
     # starts (caddy runs as its own user; it cannot create the root
@@ -292,8 +296,9 @@ in
     # file instead (caddy-style: omahabd owns the content, systemd owns
     # path). DynamicUser keeps an ephemeral UID, so the file stays
     # group-readable via a static `litellm-cfg` group (NOT `litellm`:
-    # DynamicUser implicitly takes user `litellm`): tmpfiles owns the dir,
-    # the renderer chgrps each render, ExecStartPre seeds the empty table once.
+    # DynamicUser implicitly takes user `litellm`): tmpfiles owns the dir
+    # and seeds the empty table once (`C` only-if-missing), the renderer
+    # chgrps each render.
     users.groups.litellm-cfg = { };
     systemd.services.litellm = mkMerge [
       (gate "litellm")
@@ -305,11 +310,6 @@ in
           # the group name differs from the dynamic user name.
           SupplementaryGroups = [ "litellm-cfg" ];
           ReadOnlyPaths = [ litellmConfigDir ];
-          ExecStartPre = pkgs.writeShellScript "litellm-config-seed" ''
-            if [ ! -f "${litellmConfig}" ]; then
-              ${pkgs.coreutils}/bin/install -D -m0640 -o root -g litellm-cfg ${litellmEmptyConfig} "${litellmConfig}"
-            fi
-          '';
           ExecStart = mkForce (
             let l = config.services.litellm; in
             "${l.package}/bin/litellm --host ${l.host} --port ${toString l.port} --config ${litellmConfig}"
