@@ -29,8 +29,8 @@ func RenderPrivateConfig(tailnetHost string, routes []exposure.Route) ([]byte, e
 	// Stable port map for known apps (from plan B4: photos 8443, docs 8444, etc.)
 	portMap := map[string]string{
 		"photos":   ":8443",
-		"paperless": ":8444", // docs
-		"docs":     ":8444",
+		"paperless": ":8444", // archive
+		"archive":  ":8444",
 		"karakeep": ":8445", // keep
 		"keep":     ":8445",
 		"immich":   ":8443",

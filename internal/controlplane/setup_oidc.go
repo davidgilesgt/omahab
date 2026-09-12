@@ -307,7 +307,7 @@ func paperlessOIDCEnv(domainName, clientID, clientSecret string) string {
 }
 
 func (b *Backend) ensurePaperlessOIDC(ctx context.Context, domainName string) error {
-	callback := fmt.Sprintf("https://docs.%s/accounts/oidc/pocket-id/login/callback/", domainName)
+	callback := fmt.Sprintf("https://archive.%s/accounts/oidc/pocket-id/login/callback/", domainName)
 	clientID, clientSecret, err := b.pocketClient.EnsureOIDCClient(ctx, "paperless", []string{callback})
 	if err != nil {
 		return fmt.Errorf("ensure oidc client paperless: %w", err)
@@ -329,7 +329,7 @@ func (b *Backend) ensurePaperlessOIDC(ctx context.Context, domainName string) er
 		return fmt.Errorf("store paperless_oidc_client_secret: %w", err)
 	}
 	if err := b.writeAppEnv("paperless-ngx", map[string]string{
-		"PAPERLESS_URL":                     "https://docs." + domainName,
+		"PAPERLESS_URL":                     "https://archive." + domainName,
 		"PAPERLESS_APPS":                    "allauth.socialaccount.providers.openid_connect",
 		"PAPERLESS_SOCIALACCOUNT_PROVIDERS": paperlessOIDCEnv(domainName, clientID, clientSecret),
 		// Skip the initial-user setup: first OIDC login auto-provisions the

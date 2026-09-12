@@ -340,7 +340,7 @@ Panel {
               Repeater {
                 model: [
                   { name: "Photos", icon: "󰋩", app: "photos" },
-                  { name: "Docs", icon: "󰈙", app: "docs" },
+                  { name: "Archive", icon: "󰈙", app: "archive" },
                   { name: "Keep", icon: "󰆓", app: "keep" },
                   { name: "AI", icon: "󰚩", app: "ai" },
                   { name: "Git", icon: "󰊢", app: "git" },

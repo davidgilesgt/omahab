@@ -324,7 +324,7 @@
         "memory_mb": 2048
       },
       "default": true,
-      "route": "docs",
+      "route": "archive",
       "dependencies": [
         "caddy",
         "pocket-id"

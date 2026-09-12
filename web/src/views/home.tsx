@@ -15,7 +15,7 @@ type TileDef = {
 
 const TILES: TileDef[] = [
   { id: "immich", name: "Photos", purpose: "Private photo library", icon: Image, route: "photos", group: "everyday" },
-  { id: "paperless-ngx", name: "Docs", purpose: "Document archive", icon: FileText, route: "docs", group: "everyday" },
+  { id: "paperless-ngx", name: "Archive", purpose: "Document archive", icon: FileText, route: "archive", group: "everyday" },
   { id: "karakeep", name: "Keep", purpose: "Bookmarks & saves", icon: Bookmark, route: "keep", group: "everyday" },
   { id: "syncthing", name: "Sync", purpose: "File sync", icon: FolderSync, route: "sync", group: "everyday" },
   { id: "hermes", name: "AI", purpose: "Your AI assistant", icon: Sparkles, route: "ai", group: "everyday" },
