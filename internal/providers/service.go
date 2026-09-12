@@ -49,9 +49,6 @@ const (
 	EntitlementUnknown     = "unknown"
 )
 
-
-
-
 // Alias names routed to applications via the gateway.
 const (
 	AliasFast      = "omahab/fast"
@@ -59,7 +56,6 @@ const (
 	AliasReasoning = "omahab/reasoning"
 	AliasEmbedding = "omahab/embedding"
 )
-
 
 // ManagedBy values for provider_credentials.managed_by.
 const (
@@ -69,7 +65,6 @@ const (
 
 // Alias for compatibility with differing capitalization expectations.
 const ManagedByLitellm = ManagedByLiteLLM
-
 
 // ExternalRef values for provider_credentials.external_ref (litellm-managed).
 const (
@@ -340,7 +335,7 @@ type IssueVirtualKeyInput struct {
 // interface as well so Service can call it without a package-level duplicate.
 type virtualKeyGateway interface {
 	IssueVirtualKey(ctx context.Context, vk VirtualKey) (string, error)
-	RevokeVirtualKey(ctx context.Context, gatewayKeyID string) error
+	RevokeVirtualKey(ctx context.Context, gatewayKeyID, keyAlias string) error
 }
 
 // Service brokers provider credential metadata, aliases, and scoped virtual
@@ -1200,7 +1195,7 @@ func (s *Service) IssueVirtualKey(ctx context.Context, in IssueVirtualKeyInput) 
 		}
 		// If we had issued in gateway, attempt to revoke to avoid orphan.
 		if gatewayKeyID != nil && s.vkGateway != nil {
-			_ = s.vkGateway.RevokeVirtualKey(ctx, *gatewayKeyID)
+			_ = s.vkGateway.RevokeVirtualKey(ctx, *gatewayKeyID, name)
 		}
 		return nil, fmt.Errorf("insert virtual key: %w", err)
 	}
@@ -1302,12 +1297,12 @@ func (s *Service) RevokeVirtualKey(ctx context.Context, id domain.ID) error {
 		}
 		// Already revoked — still attempt gateway revoke if needed, but treat as success.
 		if vk.GatewayKeyID != nil && s.vkGateway != nil {
-			_ = s.vkGateway.RevokeVirtualKey(ctx, *vk.GatewayKeyID)
+			_ = s.vkGateway.RevokeVirtualKey(ctx, *vk.GatewayKeyID, vk.Name)
 		}
 		return nil
 	}
 	if vk.GatewayKeyID != nil && s.vkGateway != nil {
-		if err := s.vkGateway.RevokeVirtualKey(ctx, *vk.GatewayKeyID); err != nil {
+		if err := s.vkGateway.RevokeVirtualKey(ctx, *vk.GatewayKeyID, vk.Name); err != nil {
 			// Gateway revoke failure should not mask local revoke success, but surface as warning.
 			// We still consider the key revoked locally; caller can retry gateway revocation if needed.
 			_ = s.sink.Emit(ctx, domain.Event{
@@ -1343,7 +1338,7 @@ func (s *Service) DeleteVirtualKey(ctx context.Context, id domain.ID) error {
 		return err
 	}
 	if vk.GatewayKeyID != nil && s.vkGateway != nil {
-		if err := s.vkGateway.RevokeVirtualKey(ctx, *vk.GatewayKeyID); err != nil {
+		if err := s.vkGateway.RevokeVirtualKey(ctx, *vk.GatewayKeyID, vk.Name); err != nil {
 			now := s.nowUTC()
 			_ = s.sink.Emit(ctx, domain.Event{
 				ID:         domain.ID(newID()),
@@ -1389,13 +1384,13 @@ func (s *Service) ValidateVirtualKey(ctx context.Context, token string) (*Virtua
 		return nil, ErrVirtualKeyInvalid
 	}
 	var (
-		id, name, keyPrefix, scopesStr string
-		gatewayKeyID, ownerKind, ownerID sql.NullString
+		id, name, keyPrefix, scopesStr       string
+		gatewayKeyID, ownerKind, ownerID     sql.NullString
 		rpmLimit, tpmLimit, concurrencyLimit sql.NullInt64
-		budgetAmount sql.NullFloat64
-		budgetDuration sql.NullString
-		expiresAt, revokedAt           sql.NullString
-		createdAt, updatedAt           string
+		budgetAmount                         sql.NullFloat64
+		budgetDuration                       sql.NullString
+		expiresAt, revokedAt                 sql.NullString
+		createdAt, updatedAt                 string
 	)
 	err := s.db.QueryRowContext(ctx,
 		`SELECT id, name, key_prefix, scopes, gateway_key_id, owner_kind, owner_id, rpm_limit, tpm_limit, concurrency_limit, budget_amount, budget_duration, expires_at, revoked_at, created_at, updated_at FROM provider_virtual_keys WHERE key_hash = ?`, hash).
@@ -1473,12 +1468,12 @@ type credScanner interface{ Scan(dest ...any) error }
 func scanCredential(row credScanner) (*Credential, error) {
 	var (
 		id, provider, credType, displayName string
-		secretID sql.NullString
-		managedBy sql.NullString
-		externalRef sql.NullString
-		entitlement, entitlementMessage               string
-		expiresAt, lastCheckedAt                      sql.NullString
-		health, createdAt, updatedAt                  string
+		secretID                            sql.NullString
+		managedBy                           sql.NullString
+		externalRef                         sql.NullString
+		entitlement, entitlementMessage     string
+		expiresAt, lastCheckedAt            sql.NullString
+		health, createdAt, updatedAt        string
 	)
 	if err := row.Scan(&id, &provider, &credType, &displayName, &secretID, &managedBy, &externalRef, &entitlement, &entitlementMessage, &expiresAt, &health, &lastCheckedAt, &createdAt, &updatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -1526,13 +1521,13 @@ type vkScanner interface{ Scan(dest ...any) error }
 
 func scanVirtualKey(row vkScanner) (*VirtualKey, error) {
 	var (
-		id, name, keyPrefix, scopesStr string
-		gatewayKeyID, ownerKind, ownerID sql.NullString
+		id, name, keyPrefix, scopesStr       string
+		gatewayKeyID, ownerKind, ownerID     sql.NullString
 		rpmLimit, tpmLimit, concurrencyLimit sql.NullInt64
-		budgetAmount sql.NullFloat64
-		budgetDuration sql.NullString
-		expiresAt, revokedAt           sql.NullString
-		createdAt, updatedAt           string
+		budgetAmount                         sql.NullFloat64
+		budgetDuration                       sql.NullString
+		expiresAt, revokedAt                 sql.NullString
+		createdAt, updatedAt                 string
 	)
 	if err := row.Scan(&id, &name, &keyPrefix, &scopesStr, &gatewayKeyID, &ownerKind, &ownerID, &rpmLimit, &tpmLimit, &concurrencyLimit, &budgetAmount, &budgetDuration, &expiresAt, &revokedAt, &createdAt, &updatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

@@ -7,7 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
- 	"io"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -34,7 +34,7 @@ type GatewayAdmin interface {
 	Health(ctx context.Context) error
 	ReconcileModels(ctx context.Context, aliases []Alias, creds []Credential) error
 	IssueVirtualKey(ctx context.Context, vk VirtualKey) (string, error)
-	RevokeVirtualKey(ctx context.Context, gatewayKeyID string) error
+	RevokeVirtualKey(ctx context.Context, gatewayKeyID, keyAlias string) error
 	StartOAuth(ctx context.Context, provider, flow string) (OAuthSession, error)
 	PollOAuth(ctx context.Context, sessionID string) (OAuthSession, error)
 	ForwardOAuthCallback(ctx context.Context, sessionID, callbackPath string) error
@@ -126,7 +126,6 @@ func NewGateway(db any, opts GatewayOptions) (*litellmGateway, error) {
 	return NewLiteLLMGateway(db, opts)
 }
 
-
 // Health checks gateway liveliness and verifies the pinned image exposes required xAI OAuth support.
 // It uses ClassifyHTTPStatus for 401/403 mapping and validates argv-safety for the pin check.
 func (g *litellmGateway) Health(ctx context.Context) error {
@@ -206,6 +205,7 @@ func (g *litellmGateway) verifyPin(ctx context.Context) error {
 	}
 	return nil
 }
+
 // ReconcileModels renders staged LiteLLM config with required privacy settings and atomically replaces the live config.
 // It ensures general_settings.store_prompts_in_spend_logs false, litellm_settings.turn_off_message_logging true,
 // no external callbacks, router_settings.num_retries 0 and fallbacks [] (no silent metered fallback),
@@ -450,7 +450,7 @@ func (g *litellmGateway) ReconcileModels(ctx context.Context, aliases []Alias, c
 // litellm service group. Missing group or chown failure is ignored so tests
 // and foreign hosts keep working; the unit then fails closed on restart.
 func shareGatewayConfig(path string) {
- 	grp, err := user.LookupGroup("litellm-cfg")
+	grp, err := user.LookupGroup("litellm-cfg")
 	if err != nil {
 		return
 	}
@@ -557,13 +557,16 @@ func (g *litellmGateway) IssueVirtualKey(ctx context.Context, vk VirtualKey) (st
 	return gatewayID, nil
 }
 
-func (g *litellmGateway) RevokeVirtualKey(ctx context.Context, gatewayKeyID string) error {
+func (g *litellmGateway) RevokeVirtualKey(ctx context.Context, gatewayKeyID, keyAlias string) error {
 	gatewayKeyID = strings.TrimSpace(gatewayKeyID)
-	if gatewayKeyID == "" {
+	keyAlias = strings.TrimSpace(keyAlias)
+	if gatewayKeyID == "" && keyAlias == "" {
 		return fmt.Errorf("%w: gateway_key_id is required", ErrValidation)
 	}
-	if strings.Contains(gatewayKeyID, "\x00") || strings.ContainsAny(gatewayKeyID, "`$|;&*?~#()<>") {
-		return fmt.Errorf("%w: gatewayKeyID contains invalid characters", ErrValidation)
+	for _, id := range []string{gatewayKeyID, keyAlias} {
+		if strings.Contains(id, "\x00") || strings.ContainsAny(id, "`$|;&*?~#()<>") {
+			return fmt.Errorf("%w: gatewayKeyID contains invalid characters", ErrValidation)
+		}
 	}
 	if strings.TrimSpace(g.masterKey) == "" {
 		// No master key: treat as success in test
@@ -571,8 +574,19 @@ func (g *litellmGateway) RevokeVirtualKey(ctx context.Context, gatewayKeyID stri
 	}
 	ctx2, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
+	// /key/delete matches rows by token or key_alias, not by the key_id
+	// returned from /key/generate — so send both. The alias is what
+	// IssueVirtualKey sets at generate time, hence the reliable handle.
+	seen := map[string]bool{}
+	keys := make([]string, 0, 2)
+	for _, id := range []string{keyAlias, gatewayKeyID} {
+		if id != "" && !seen[id] {
+			seen[id] = true
+			keys = append(keys, id)
+		}
+	}
 	payload := map[string]any{
-		"keys": []string{gatewayKeyID},
+		"keys": keys,
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -951,13 +965,17 @@ var _ GatewayAdmin = (*litellmGateway)(nil)
 type NoopGateway struct{}
 
 func (NoopGateway) Health(ctx context.Context) error { return nil }
-func (NoopGateway) ReconcileModels(ctx context.Context, aliases []Alias, creds []Credential) error { return nil }
+func (NoopGateway) ReconcileModels(ctx context.Context, aliases []Alias, creds []Credential) error {
+	return nil
+}
 func (NoopGateway) IssueVirtualKey(ctx context.Context, vk VirtualKey) (string, error) {
 	var b [16]byte
 	_, _ = rand.Read(b[:])
 	return "sk-" + hex.EncodeToString(b[:]), nil
 }
-func (NoopGateway) RevokeVirtualKey(ctx context.Context, gatewayKeyID string) error { return nil }
+func (NoopGateway) RevokeVirtualKey(ctx context.Context, gatewayKeyID, keyAlias string) error {
+	return nil
+}
 func (NoopGateway) StartOAuth(ctx context.Context, provider, flow string) (OAuthSession, error) {
 	return OAuthSession{}, fmt.Errorf("%w: oauth not configured", ErrValidation)
 }
