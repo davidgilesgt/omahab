@@ -434,7 +434,9 @@ func (g *litellmGateway) ReconcileModels(ctx context.Context, aliases []Alias, c
 	}
 	_ = os.Remove(bakPath)
 	// The systemd unit runs DynamicUser (ephemeral UID) with static group
-	// `litellm` and reads this file via group permission (see nix/apps.nix).
+	// `litellm-cfg` and reads this file via group permission (see nix/apps.nix).
+	// The group must differ from the unit name: DynamicUser implicitly takes
+	// user `litellm`, so a same-named static group fails 217/USER.
 	// Best-effort: unit tests and non-NixOS hosts lack the group, in which
 	// case the file stays root-only and the unit fails loudly on restart.
 	shareGatewayConfig(finalPath)
@@ -447,7 +449,7 @@ func (g *litellmGateway) ReconcileModels(ctx context.Context, aliases []Alias, c
 // litellm service group. Missing group or chown failure is ignored so tests
 // and foreign hosts keep working; the unit then fails closed on restart.
 func shareGatewayConfig(path string) {
-	grp, err := user.LookupGroup("litellm")
+ 	grp, err := user.LookupGroup("litellm-cfg")
 	if err != nil {
 		return
 	}

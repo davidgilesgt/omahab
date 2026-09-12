@@ -76,8 +76,10 @@ in
       "d ${dataDir}/apps/immich/library 0700 immich immich - -"
       "z ${dataDir}/apps/immich/immich.json 0600 immich immich - -"
       # LiteLLM live config (rendered by omahabd, read by the DynamicUser
-      # service via the static litellm group).
-      "d ${dataDir}/apps/litellm/config 0750 root litellm - -"
+      # service via a static group distinct from the unit name: DynamicUser
+      # implicitly takes user `litellm`, so a static group named `litellm`
+      # collides (217/USER "already exists"). `litellm-cfg` avoids it.
+      "d ${dataDir}/apps/litellm/config 0750 root litellm-cfg - -"
     ];
     # Root-owned oneshot prepares the caddy config tree before caddy
     # starts (caddy runs as its own user; it cannot create the root
@@ -288,23 +290,24 @@ in
     # (model_list: [] forever), while omahabd renders the live routing
     # table to /srv on every credential/alias change. Run the mutable
     # file instead (caddy-style: omahabd owns the content, systemd owns
-    # the path). DynamicUser keeps an ephemeral UID, so the file stays
-    # group-readable via a static `litellm` group: tmpfiles owns the
-    # dir, the renderer chgrps each render, ExecStartPre seeds the
-    # empty table exactly once.
-    users.groups.litellm = { };
+    # path). DynamicUser keeps an ephemeral UID, so the file stays
+    # group-readable via a static `litellm-cfg` group (NOT `litellm`:
+    # DynamicUser implicitly takes user `litellm`): tmpfiles owns the dir,
+    # the renderer chgrps each render, ExecStartPre seeds the empty table once.
+    users.groups.litellm-cfg = { };
     systemd.services.litellm = mkMerge [
       (gate "litellm")
       {
         serviceConfig = {
           # DynamicUser allocates an ephemeral UID and refuses a static
           # Group= ("already exists"); a static *supplementary* group is
-          # the supported combination for group-readable files.
-          SupplementaryGroups = [ "litellm" ];
+          # the supported combination for group-readable files, provided
+          # the group name differs from the dynamic user name.
+          SupplementaryGroups = [ "litellm-cfg" ];
           ReadOnlyPaths = [ litellmConfigDir ];
           ExecStartPre = pkgs.writeShellScript "litellm-config-seed" ''
             if [ ! -f "${litellmConfig}" ]; then
-              ${pkgs.coreutils}/bin/install -D -m0640 -o root -g litellm ${litellmEmptyConfig} "${litellmConfig}"
+              ${pkgs.coreutils}/bin/install -D -m0640 -o root -g litellm-cfg ${litellmEmptyConfig} "${litellmConfig}"
             fi
           '';
           ExecStart = mkForce (
