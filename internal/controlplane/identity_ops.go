@@ -490,9 +490,10 @@ func (b *Backend) CreateProviderCredential(ctx context.Context, req apitypes.Cre
 				credVals = append(credVals, *c)
 			}
 		}
-		// Project key material before rendering so file:// refs resolve on disk.
+		// Sync provider key material into the litellm env before rendering so
+		// os.environ refs resolve at request time.
 		// Fail closed: roll back metadata + secret like a reconcile failure.
-		if err := b.projectProviderSecrets(ctx, credVals); err != nil {
+		if err := b.syncLiteLLMProviderEnv(ctx, credVals); err != nil {
 			_ = b.providers.DeleteCredential(ctx, cred.ID)
 			if managedBy == providers.ManagedByOmahab && secretID != "" {
 				_ = b.secrets.Delete(ctx, secretID)
@@ -525,8 +526,8 @@ func (b *Backend) CreateProviderCredential(ctx context.Context, req apitypes.Cre
 					prevCredVals = append(prevCredVals, *c)
 				}
 			}
-			// Best-effort: keep projected files convergent with the restored state.
-			_ = b.projectProviderSecrets(ctx, prevCredVals)
+			// Best-effort: keep the litellm env convergent with the restored state.
+			_ = b.syncLiteLLMProviderEnv(ctx, prevCredVals)
 			if rerr := b.gateway.ReconcileModels(ctx, prevVals, prevCredVals); rerr == nil {
 				_ = b.reloadLiteLLMGateway(ctx)
 			}
@@ -554,7 +555,7 @@ func (b *Backend) CreateProviderCredential(ctx context.Context, req apitypes.Cre
 					prevCredVals3 = append(prevCredVals3, *c)
 				}
 			}
-			_ = b.projectProviderSecrets(ctx, prevCredVals3)
+			_ = b.syncLiteLLMProviderEnv(ctx, prevCredVals3)
 			if rerr := b.gateway.ReconcileModels(ctx, prevVals3, prevCredVals3); rerr == nil {
 				_ = b.reloadLiteLLMGateway(ctx)
 			}
@@ -582,7 +583,7 @@ func (b *Backend) CreateProviderCredential(ctx context.Context, req apitypes.Cre
 					prevCredVals2 = append(prevCredVals2, *c)
 				}
 			}
-			_ = b.projectProviderSecrets(ctx, prevCredVals2)
+			_ = b.syncLiteLLMProviderEnv(ctx, prevCredVals2)
 			if rerr := b.gateway.ReconcileModels(ctx, prevVals2, prevCredVals2); rerr == nil {
 				_ = b.reloadLiteLLMGateway(ctx)
 			}
@@ -644,8 +645,8 @@ func (b *Backend) DeleteProviderCredential(ctx context.Context, id domain.ID) er
 				aliasVals = append(aliasVals, *a)
 			}
 		}
-		// Prune the deleted credential's file before rendering so no ref dangles.
-		if err := b.projectProviderSecrets(ctx, remainingCredVals); err != nil {
+		// Sync the deleted credential out of the litellm env before rendering.
+		if err := b.syncLiteLLMProviderEnv(ctx, remainingCredVals); err != nil {
 			return translateError(err)
 		}
 		if err := b.gateway.ReconcileModels(ctx, aliasVals, remainingCredVals); err != nil {
@@ -667,7 +668,7 @@ func (b *Backend) DeleteProviderCredential(ctx context.Context, id domain.ID) er
 			_ = b.secrets.Delete(ctx, cred.SecretID)
 		}
 		_ = b.secrets.DeleteByName(ctx, "provider", secretName)
-		// Explicitly drop the projected file (covers paths where no reconcile ran).
+		// Explicitly drop the legacy projected file (covers paths where no reconcile ran).
 		b.removeProviderSecretFile(string(id))
 	}
 	return nil
@@ -756,8 +757,9 @@ func (b *Backend) SetModelAlias(ctx context.Context, name string, req apitypes.S
 				credVals = append(credVals, *c)
 			}
 		}
-		// Project key material before rendering so file:// refs resolve on disk.
-		if err := b.projectProviderSecrets(ctx, credVals); err != nil {
+		// Sync provider key material into the litellm env before rendering so
+		// os.environ refs resolve at request time.
+		if err := b.syncLiteLLMProviderEnv(ctx, credVals); err != nil {
 			return apitypes.ModelAlias{}, translateError(err)
 		}
 		if err := b.gateway.ReconcileModels(ctx, aliasVals, credVals); err != nil {

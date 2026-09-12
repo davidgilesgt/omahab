@@ -358,10 +358,10 @@ func (g *litellmGateway) ReconcileModels(ctx context.Context, aliases []Alias, c
 					}
 				}
 				sb.WriteString(fmt.Sprintf("      model: %s\n", yamlEscape(model)))
-				// api_key material is projected by controlplane next to each reconcile
-				// into <configDir>/secrets/provider_<id>; the gateway reads it via file://.
-				apiKeyRef := filepath.Join(g.configDir, "secrets", "provider_"+string(cred.ID))
-				sb.WriteString(fmt.Sprintf("      api_key: %s\n", yamlEscape("file://"+apiKeyRef)))
+				// api_key material is delivered via the litellm systemd unit's
+				// EnvironmentFile (appenv/litellm.env); LiteLLM resolves the
+				// os.environ/<NAME> ref at request time.
+				sb.WriteString(fmt.Sprintf("      api_key: %s\n", yamlEscape("os.environ/"+ProviderEnvVar(string(cred.ID)))))
 			default:
 				// Fallback: treat any litellm-managed oauth as subscription
 				if credType == CredentialTypeOAuth && mb == ManagedByLiteLLM {
@@ -985,6 +985,33 @@ const (
 	OAuthStatusExpired   = "expired"
 	OAuthStatusError     = "error"
 )
+
+// ProviderEnvVarPrefix namespaces omahab-managed provider key material in the
+// litellm systemd unit's EnvironmentFile (appenv/litellm.env). The renderer
+// emits `api_key: os.environ/<NAME>` refs; controlplane converges the file.
+const ProviderEnvVarPrefix = "OMAHAB_PROVIDER_"
+
+// ProviderEnvVar maps a credential ID to its environment variable name:
+// OMAHAB_PROVIDER_<SANITIZED_ID> where sanitization uppercases and maps every
+// non-ASCII-alphanumeric byte to '_'. Deterministic and injective enough for
+// credential IDs (UUID/hex); never logs or touches key material.
+func ProviderEnvVar(id string) string {
+	id = strings.TrimSpace(id)
+	var sb strings.Builder
+	sb.WriteString(ProviderEnvVarPrefix)
+	for i := range id {
+		c := id[i]
+		if c >= 'a' && c <= 'z' {
+			c -= 'a' - 'A'
+		}
+		if (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+			sb.WriteByte(c)
+		} else {
+			sb.WriteByte('_')
+		}
+	}
+	return sb.String()
+}
 
 var allowedProviderFlow = map[string]map[string]bool{
 	ProviderChatGPT: {FlowDeviceCode: true},

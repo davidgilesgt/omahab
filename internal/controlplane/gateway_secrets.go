@@ -4,9 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/user"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/omahab/omahab/internal/providers"
@@ -21,28 +19,17 @@ func (b *Backend) gatewayConfigDir() string {
 	return b.cfg.DataDir + "/apps/litellm/config"
 }
 
-// projectProviderSecrets delivers omahab-managed API key material to files the
-// LiteLLM gateway can actually read: <configDir>/secrets/provider_<credID>.
-// The renderer only emits file:// refs; without this projection the refs
-// dangle and chat 401s pre-upstream.
-//
-// It is convergent: files for credentials absent from creds are pruned (only
-// provider_* names are ever touched). Callers MUST invoke it immediately
-// before every successful-path ReconcileModels so refs resolve on disk before
-// the config goes live, and treat a projection error as fail-closed (clean up
-// like a reconcile failure, never reconcile without the material).
+// revealProviderEnv reveals omahab-managed API key material keyed by
+// environment variable name (providers.ProviderEnvVar). litellm-managed oauth
+// credentials carry no key material and contribute nothing. Fail-closed: any
+// reveal error aborts with an error naming the credential ID only.
 //
 // Key material is never logged; errors name credential IDs only.
-func (b *Backend) projectProviderSecrets(ctx context.Context, creds []providers.Credential) error {
+func (b *Backend) revealProviderEnv(ctx context.Context, creds []providers.Credential) (map[string]string, error) {
 	if b.secrets == nil {
-		return fmt.Errorf("gateway secrets: secrets not configured")
+		return nil, fmt.Errorf("gateway secrets: secrets not configured")
 	}
-	dir := filepath.Join(b.gatewayConfigDir(), "secrets")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("gateway secrets mkdir: %w", err)
-	}
-	shareGatewaySecretsDir(dir)
-	live := make(map[string]bool, len(creds))
+	live := make(map[string]string, len(creds))
 	for _, c := range creds {
 		if strings.ToLower(strings.TrimSpace(c.CredentialType)) != providers.CredentialTypeAPIKey {
 			continue
@@ -56,7 +43,7 @@ func (b *Backend) projectProviderSecrets(ctx context.Context, creds []providers.
 		}
 		id := strings.TrimSpace(string(c.ID))
 		if id == "" {
-			return fmt.Errorf("gateway secrets: credential with empty id")
+			return nil, fmt.Errorf("gateway secrets: credential with empty id")
 		}
 		var material string
 		var err error
@@ -66,71 +53,98 @@ func (b *Backend) projectProviderSecrets(ctx context.Context, creds []providers.
 			material, err = b.secrets.RevealByName(ctx, "provider", "credential."+id)
 		}
 		if err != nil {
-			return fmt.Errorf("gateway secrets: cannot reveal material for credential %s: %w", id, err)
+			return nil, fmt.Errorf("gateway secrets: cannot reveal material for credential %s: %w", id, err)
 		}
-		path := filepath.Join(dir, "provider_"+id)
-		if err := os.WriteFile(path, []byte(material), 0o600); err != nil {
-			return fmt.Errorf("gateway secrets: cannot write file for credential %s: %w", id, err)
-		}
-		shareGatewaySecretFile(path)
-		live["provider_"+id] = true
+		live[providers.ProviderEnvVar(id)] = material
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return fmt.Errorf("gateway secrets: cannot list %s: %w", dir, err)
+	return live, nil
+}
+
+// mergeLiteLLMProviderEnv is the single-writer merge for appenv/litellm.env,
+// shared by the runtime projection (syncLiteLLMProviderEnv) and the setup
+// render (renderNativeAppEnv). It copies existing (preserving everything else,
+// including master key and DB URL), sets every live OMAHAB_PROVIDER_* var, and
+// prunes stale OMAHAB_PROVIDER_* keys absent from live. No other prefix is
+// ever touched.
+func mergeLiteLLMProviderEnv(existing, live map[string]string) map[string]string {
+	merged := make(map[string]string, len(existing)+len(live))
+	for k, v := range existing {
+		merged[k] = v
 	}
-	for _, e := range entries {
-		name := e.Name()
-		if !strings.HasPrefix(name, "provider_") || live[name] {
+	for k := range merged {
+		if !strings.HasPrefix(k, providers.ProviderEnvVarPrefix) {
 			continue
 		}
-		_ = os.Remove(filepath.Join(dir, name))
+		if _, ok := live[k]; !ok {
+			delete(merged, k)
+		}
 	}
+	for k, v := range live {
+		merged[k] = v
+	}
+	return merged
+}
+
+// syncLiteLLMProviderEnv converges appenv/litellm.env to the existing platform
+// vars (master key, DB URL, untouched) plus the live provider vars revealed
+// from creds, pruning stale OMAHAB_PROVIDER_* entries. The renderer only emits
+// os.environ/<NAME> refs; without this projection the refs dangle and chat
+// 401s pre-upstream. Restart re-reads the EnvironmentFile, so the existing
+// reload ordering (env → reconcile → restart → health) just works.
+//
+// Callers MUST invoke it immediately before every successful-path
+// ReconcileModels so refs resolve via the environment before the config goes
+// live, and treat a sync error as fail-closed (clean up like a reconcile
+// failure, never reconcile without the material). It also convergently prunes
+// legacy per-credential files (<configDir>/secrets/provider_*).
+//
+// Key material is never logged; errors name credential IDs only.
+func (b *Backend) syncLiteLLMProviderEnv(ctx context.Context, creds []providers.Credential) error {
+	live, err := b.revealProviderEnv(ctx, creds)
+	if err != nil {
+		return err
+	}
+	existing, err := b.readAppEnv("litellm")
+	if err != nil {
+		return fmt.Errorf("gateway secrets: cannot read litellm env: %w", err)
+	}
+	merged := mergeLiteLLMProviderEnv(existing, live)
+	if len(merged) == 0 {
+		// Nothing to gate the unit on yet; leave a missing env file missing.
+		pruneOrphanProviderSecretFiles(b.gatewayConfigDir())
+		return nil
+	}
+	if err := b.writeAppEnv("litellm", merged, "litellm"); err != nil {
+		return fmt.Errorf("gateway secrets: cannot write litellm env: %w", err)
+	}
+	pruneOrphanProviderSecretFiles(b.gatewayConfigDir())
 	return nil
 }
 
-// removeProviderSecretFile explicitly drops one projected file (used after
-// credential delete, covering paths where no reconcile ran, e.g. nil gateway).
-// Best-effort: convergent prune on the next projection is the backstop.
+// pruneOrphanProviderSecretFiles removes legacy per-credential files
+// (<configDir>/secrets/provider_*) left over from file://-ref delivery.
+// Best-effort; only provider_* names are ever touched. Missing dir is a no-op.
+func pruneOrphanProviderSecretFiles(configDir string) {
+	dir := filepath.Join(configDir, "secrets")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), "provider_") {
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir, e.Name()))
+	}
+}
+
+// removeProviderSecretFile explicitly drops one legacy projected file (used
+// after credential delete, covering paths where no reconcile ran, e.g. nil
+// gateway). Best-effort: convergent prune on the next sync is the backstop.
 func (b *Backend) removeProviderSecretFile(id string) {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return
 	}
 	_ = os.Remove(filepath.Join(b.gatewayConfigDir(), "secrets", "provider_"+id))
-}
-
-// shareGatewaySecretsDir makes the secrets dir traversable by the litellm
-// service group. Best-effort: unit tests and non-NixOS hosts lack the group,
-// in which case files stay root-only and the unit fails loudly on restart.
-func shareGatewaySecretsDir(dir string) {
-	gid, ok := litellmCfgGID()
-	if !ok {
-		return
-	}
-	_ = os.Chown(dir, 0, gid)
-	_ = os.Chmod(dir, 0o750)
-}
-
-// shareGatewaySecretFile makes one projected key file group-readable by the
-// litellm service group. Same best-effort semantics as shareGatewaySecretsDir.
-func shareGatewaySecretFile(path string) {
-	gid, ok := litellmCfgGID()
-	if !ok {
-		return
-	}
-	_ = os.Chown(path, 0, gid)
-	_ = os.Chmod(path, 0o640)
-}
-
-func litellmCfgGID() (int, bool) {
-	grp, err := user.LookupGroup("litellm-cfg")
-	if err != nil {
-		return 0, false
-	}
-	gid, err := strconv.Atoi(grp.Gid)
-	if err != nil {
-		return 0, false
-	}
-	return gid, true
 }

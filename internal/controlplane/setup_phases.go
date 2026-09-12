@@ -26,6 +26,7 @@ import (
 	"github.com/omahab/omahab/internal/edge"
 	"github.com/omahab/omahab/internal/events"
 	"github.com/omahab/omahab/internal/health"
+	"github.com/omahab/omahab/internal/providers"
 	"github.com/omahab/omahab/internal/secrets"
 	"github.com/omahab/omahab/internal/store"
 )
@@ -877,6 +878,37 @@ func (b *Backend) writeAppEnv(bundleID string, kv map[string]string, ownerUser s
 	return nil
 }
 
+// readAppEnv reads <appEnvDir>/<bundle>.env back into a map with a minimal
+// KEY=VALUE parser (skips blanks and #-comments, splits on the first '=').
+// A missing file yields an empty map and nil error so merges converge from
+// scratch. Values never leave the backend; only keys appear in errors.
+func (b *Backend) readAppEnv(bundleID string) (map[string]string, error) {
+	out := map[string]string{}
+	raw, err := os.ReadFile(filepath.Join(b.appEnvDir(), bundleID+".env"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return out, nil
+		}
+		return nil, fmt.Errorf("read appenv %s: %w", bundleID, err)
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		idx := strings.IndexByte(line, '=')
+		if idx < 0 {
+			continue
+		}
+		k := strings.TrimSpace(line[:idx])
+		if k == "" {
+			continue
+		}
+		out[k] = strings.TrimSpace(line[idx+1:])
+	}
+	return out, nil
+}
+
 func generateRandomBase64URL(nBytes int) string {
 	b := make([]byte, nBytes)
 	if _, err := rand.Read(b); err != nil {
@@ -1007,15 +1039,72 @@ func (b *Backend) renderNativeAppEnv(ctx context.Context, dnsToken, domainName s
 	if err := b.writeAppEnv("pocket-id", pocketEnv, "pocket-id"); err != nil {
 		return fmt.Errorf("pocket-id: %w", err)
 	}
-	litellmEnv := map[string]string{}
+	// LiteLLM env converges through the single-writer merge shared with the
+	// runtime projection: fresh platform vars overlay the existing file, live
+	// provider vars merge in, stale provider vars prune. Nil providers
+	// (tests) skip the provider merge, preserving existing entries.
+	existing, err := b.readAppEnv("litellm")
+	if err != nil {
+		return fmt.Errorf("litellm: %w", err)
+	}
 	if k := reveal("litellm_master_key"); k != "" {
-		litellmEnv["LITELLM_MASTER_KEY"] = k
+		existing["LITELLM_MASTER_KEY"] = k
 	}
 	if u := reveal("litellm_db_url"); u != "" {
-		litellmEnv["DATABASE_URL"] = u
+		existing["DATABASE_URL"] = u
 	}
-	if len(litellmEnv) > 0 {
-		if err := b.writeAppEnv("litellm", litellmEnv, "litellm"); err != nil {
+	live := make(map[string]string)
+	for k, v := range existing {
+		if strings.HasPrefix(k, providers.ProviderEnvVarPrefix) {
+			live[k] = v
+		}
+	}
+	if b.providers != nil {
+		if creds, err := b.providers.ListCredentials(ctx); err == nil {
+			want := make(map[string]bool, len(creds))
+			for _, c := range creds {
+				if c == nil {
+					continue
+				}
+				if strings.ToLower(strings.TrimSpace(c.CredentialType)) != providers.CredentialTypeAPIKey {
+					continue
+				}
+				mb := strings.TrimSpace(c.ManagedBy)
+				if mb == "" {
+					mb = providers.ManagedByOmahab
+				}
+				if mb != providers.ManagedByOmahab {
+					continue
+				}
+				id := strings.TrimSpace(string(c.ID))
+				if id == "" {
+					continue
+				}
+				env := providers.ProviderEnvVar(id)
+				want[env] = true
+				var material string
+				var rerr error
+				if strings.TrimSpace(string(c.SecretID)) != "" {
+					material, rerr = b.secrets.Reveal(ctx, c.SecretID)
+				} else {
+					material, rerr = b.secrets.RevealByName(ctx, "provider", "credential."+id)
+				}
+				if rerr == nil {
+					live[env] = material
+				}
+				// Reveal failure keeps the carried value (transient); a
+				// deleted credential drops out of want and prunes below.
+			}
+			for k := range live {
+				if !want[k] {
+					delete(live, k)
+				}
+			}
+		}
+		// List failure: live stays as carried values — pure preserve, no prune.
+	}
+	if merged := mergeLiteLLMProviderEnv(existing, live); len(merged) > 0 {
+		if err := b.writeAppEnv("litellm", merged, "litellm"); err != nil {
 			return fmt.Errorf("litellm: %w", err)
 		}
 	}
