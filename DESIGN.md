@@ -211,8 +211,10 @@ services.omahab.enable = true;
 ### 5.3 First-boot access
 
 On first boot the console (tty1) shows the LAN panel URL and the 8-character panel token.
-There is no claim step: on lan placement (the ISO-installer default) LAN sources reach the
-panel at `:8484` without a token, while tailnet/remote access requires the panel token
+There is no claim step: on lan placement (the ISO-installer default) LAN sources and
+tailnet sources (100.64.0.0/10) reach the panel at `:8484` without a token — tailnet
+membership already authenticates the caller, so a home-LAN install never asks for the
+token on any of its own origins. On vps placement every source needs the panel token
 (`/var/lib/omahab/api.token`, root 0600, provisioned to `~/.config/omahab/token` at daemon
 startup). SSH keys are seeded by the installer and extended as the first setup-checklist
 step; Tailscale enrollment lives on the checklist too. `sudo omahab setup` is the SSH
@@ -243,7 +245,7 @@ PermitRootLogin no
 - Cloudflare Tunnel uses outbound connections;
 - Docker socket available only to `omahabd`; CI builds use the rootless podman builder socket;
 - root-owned secret material under `/var/lib/omahab` (0700/0600), per-bundle env files 0640 with service-user group;
-- key-only SSH; the 8-character panel token guards tailnet/remote panel access, LAN sources bypass it on lan placement;
+- key-only SSH; the 8-character panel token guards panel access on vps placement, while on lan placement LAN + tailnet (100.64.0.0/10) sources bypass it;
 - health and security checks through `omahab doctor`;
 - explicit, supervised upgrades (`omahab system upgrade` with health gate + automatic rollback); no unattended rebuilds.
 
