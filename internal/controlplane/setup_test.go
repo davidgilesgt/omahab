@@ -678,6 +678,7 @@ func TestSetupPhaseOIDCEnsuresLitellmClient(t *testing.T) {
 		"GENERIC_TOKEN_ENDPOINT":         "https://id.omahab.com/api/oidc/token",
 		"GENERIC_USERINFO_ENDPOINT":      "https://id.omahab.com/api/oidc/userinfo",
 		"PROXY_BASE_URL":                 "https://models.omahab.com",
+		"AUTO_REDIRECT_UI_LOGIN_TO_SSO":  "true",
 	} {
 		if env[k] != want {
 			t.Fatalf("litellm env[%s] = %q, want %q (full env: %v)", k, env[k], want, env)

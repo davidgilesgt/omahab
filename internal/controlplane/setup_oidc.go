@@ -486,6 +486,11 @@ func (b *Backend) ensureLitellmOIDC(ctx context.Context, domainName string) erro
 		"GENERIC_TOKEN_ENDPOINT":         tokenEP,
 		"GENERIC_USERINFO_ENDPOINT":      userinfoEP,
 		"PROXY_BASE_URL":                 proxyBase,
+		// SSO-only login: the UI bounces straight to Pocket ID instead of
+		// rendering the master-key form (LiteLLM's own login banner prescribes
+		// this flag; 1.97 has no env to remove the field itself, and the key
+		// stays for service/API use).
+		"AUTO_REDIRECT_UI_LOGIN_TO_SSO": "true",
 	}
 	existing, err := b.readAppEnv("litellm")
 	if err != nil {
