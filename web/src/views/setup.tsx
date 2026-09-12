@@ -200,6 +200,7 @@ export function SetupPage() {
   const [woodpeckerToken, setWoodpeckerToken] = useState("");
 
   const [openOverride, setOpenOverride] = useState<BoxId | null | undefined>(undefined);
+  const [coreOpen, setCoreOpen] = useState<string | null>(null);
   const advance = () => setOpenOverride(undefined);
 
   // Tailscale login flow: after the user starts login, prove the tailnet path
@@ -611,7 +612,6 @@ export function SetupPage() {
   const autoOpen: BoxId | null = BLOCKING.find((id) => !doneMap[id]) ?? null;
   const openId = openOverride !== undefined ? openOverride : autoOpen;
   const toggle = (id: BoxId) => setOpenOverride(openId === id ? null : id);
-  const [coreOpen, setCoreOpen] = useState<string | null>(null);
   const identityAppIds = ["caddy", "pocket-id"];
   const identityApps = coreAppList.filter((a) => identityAppIds.includes(a.bundle_id));
   const otherApps = coreAppList.filter((a) => !identityAppIds.includes(a.bundle_id));
