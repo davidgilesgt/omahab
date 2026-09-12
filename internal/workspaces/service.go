@@ -106,6 +106,7 @@ type ForgejoTokenIssuer interface {
 type VirtualKeyIssuer interface {
 	IssueVirtualKey(ctx context.Context, in providers.IssueVirtualKeyInput) (*providers.VirtualKeyWithToken, error)
 	RevokeVirtualKey(ctx context.Context, id domain.ID) error
+	DeleteVirtualKey(ctx context.Context, id domain.ID) error
 }
 
 // Runner is the DevPod-style backend that actually creates and stops workspace
@@ -292,6 +293,8 @@ func parseRepoRef(cloneURL string) (scm.RepoRef, string, error) {
 }
 
 // Create validates inputs, persists a workspace row, and delegates to the Runner.
+// Creation is atomic: if branch creation or Runner.Up fails, the pending row
+// (and any issued credentials) is rolled back and nil is returned with the error.
 func (s *Service) Create(ctx context.Context, in CreateInput) (*domain.Workspace, error) {
 	if strings.TrimSpace(string(in.ProjectID)) == "" {
 		return nil, fmt.Errorf("%w: project_id is required", ErrValidation)
@@ -362,7 +365,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*domain.Workspace
 				CreatedAt:    now,
 			}
 			if err := s.runner.Up(ctx, id, in.ProjectID, branch, agent, RunnerOpts{DevcontainerSource: devcontainerSource}); err != nil {
-				return ws, fmt.Errorf("runner up: %w", err)
+				return s.rollbackCreate(ctx, id, "", "", fmt.Errorf("runner up: %w", err))
 			}
 			_, _ = s.db.ExecContext(ctx, `UPDATE workspaces SET status = ?, updated_at = ? WHERE id = ?`,
 				StatusRunning, now.Format(time.RFC3339Nano), id)
@@ -485,10 +488,10 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*domain.Workspace
 				ws.Branch = branch
 				err2 := s.branchCreator.CreateBranch(ctx, repoRef, branch, defaultBranch)
 				if err2 != nil {
-					return ws, fmt.Errorf("create branch: %w", err2)
+					return s.rollbackCreate(ctx, id, "", "", fmt.Errorf("create branch: %w", err2))
 				}
 			} else {
-				return ws, fmt.Errorf("create branch: %w", err)
+				return s.rollbackCreate(ctx, id, "", "", fmt.Errorf("create branch: %w", err))
 			}
 		}
 	}
@@ -517,7 +520,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*domain.Workspace
 	}
 
 	// 3. Create per-workspace Forgejo token
-	var forgejoToken string
+	var forgejoToken, forgejoTokenName string
 	if s.forgejo != nil && repoRef.Owner != "" {
 		tokenName := "ws-" + id
 		scopes := []string{"read:repository", "write:repository"}
@@ -525,6 +528,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*domain.Workspace
 		tok, err := s.forgejo.CreateAccessToken(ctx, "omahab", tokenName, scopes, repos)
 		if err == nil {
 			forgejoToken = tok
+			forgejoTokenName = tokenName
 			_, _ = s.db.ExecContext(ctx, `UPDATE workspaces SET forgejo_token_name = ?, updated_at = ? WHERE id = ?`, tokenName, now.Format(time.RFC3339Nano), id)
 		}
 	}
@@ -588,10 +592,10 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*domain.Workspace
 		Name:                name,
 		DevcontainerContent: devContent,
 	}
-
-	// Delegate to Runner. If Runner fails, mark workspace accordingly but still return it.
+	// Delegate to Runner. On failure roll back the pending row (plus any issued
+	// credentials) so a failed provision never leaves a phantom workspace.
 	if err := s.runner.Up(ctx, id, in.ProjectID, branch, agent, opts); err != nil {
-		return ws, fmt.Errorf("runner up: %w", err)
+		return s.rollbackCreate(ctx, id, gatewayKeyID, forgejoTokenName, fmt.Errorf("runner up: %w", err))
 	}
 
 	// Mark running on success
@@ -600,6 +604,23 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*domain.Workspace
 	ws.Status = StatusRunning
 
 	return ws, nil
+}
+
+// rollbackCreate removes the pending workspace row (and its capabilities)
+// created by Create when a later provisioning step fails, so a failed
+// provision never leaves a phantom row. An issued virtual key and Forgejo
+// token are deleted best-effort. It returns nil plus the wrapped provisioning
+// error so callers cannot observe the rolled-back workspace.
+func (s *Service) rollbackCreate(ctx context.Context, id, gatewayKeyID, forgejoTokenName string, err error) (*domain.Workspace, error) {
+	if strings.TrimSpace(gatewayKeyID) != "" && s.providers != nil {
+		_ = s.providers.DeleteVirtualKey(ctx, domain.ID(gatewayKeyID))
+	}
+	if strings.TrimSpace(forgejoTokenName) != "" && s.forgejo != nil {
+		_ = s.forgejo.DeleteAccessToken(ctx, "omahab", forgejoTokenName)
+	}
+	_, _ = s.db.ExecContext(ctx, `DELETE FROM workspace_capabilities WHERE workspace_id = ?`, id)
+	_, _ = s.db.ExecContext(ctx, `DELETE FROM workspaces WHERE id = ?`, id)
+	return nil, err
 }
 
 // Get returns a workspace by ID.

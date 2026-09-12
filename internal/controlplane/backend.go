@@ -893,7 +893,12 @@ func translateError(err error) error {
 	if errors.Is(err, ErrNotConfigured) {
 		return fmt.Errorf("%w: %v", apitypes.ErrValidation, err)
 	}
-	// Fallback: check strings that contain not found/validation
+	if errors.Is(err, providers.ErrNotFound) {
+		return fmt.Errorf("%w: %v", apitypes.ErrNotFound, err)
+	}
+	if errors.Is(err, providers.ErrValidation) {
+		return fmt.Errorf("%w: %v", apitypes.ErrValidation, err)
+	}
 	msg := strings.ToLower(err.Error())
 	if strings.Contains(msg, "not found") {
 		return fmt.Errorf("%w: %v", apitypes.ErrNotFound, err)

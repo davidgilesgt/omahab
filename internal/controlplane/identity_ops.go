@@ -790,7 +790,7 @@ func (b *Backend) DeleteModelKey(ctx context.Context, id domain.ID) error {
 	if b.providers == nil {
 		return translateError(fmt.Errorf("%w: providers not configured", ErrNotConfigured))
 	}
-	if err := b.providers.RevokeVirtualKey(ctx, id); err != nil {
+	if err := b.providers.DeleteVirtualKey(ctx, id); err != nil {
 		return translateError(err)
 	}
 	return nil

@@ -2,6 +2,7 @@ package workspaces
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -534,6 +535,45 @@ func TestService_ValidateCapability_ConsumedRaceFix(t *testing.T) {
 	// Our fix checks RowsAffected so second should be ErrCapabilityConsumed, not nil
 	if err := svc.ValidateCapability(ctx, string(ws.ID), cap.Token); err != ErrCapabilityConsumed {
 		t.Errorf("second validate = %v want ErrCapabilityConsumed", err)
+	}
+}
+
+// errRunner fails Up like a missing devpod binary.
+type errRunner struct{ NoopRunner }
+
+func (errRunner) Up(_ context.Context, _ string, _ domain.ID, _, _ string, _ RunnerOpts) error {
+	return errors.New("no devpod binary")
+}
+
+// A failed provision must not leave a phantom pending row: Create returns the
+// error with a nil workspace and no row persists.
+func TestService_Create_RollsBackOnRunnerFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   CreateInput
+	}{
+		{"branch-path", CreateInput{ProjectID: "p-fail", Branch: "main"}},
+		{"title-path", CreateInput{ProjectID: "p-fail", Title: "hello world"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := openTestDB(t)
+			svc := New(st.DB(), errRunner{})
+			ctx := context.Background()
+			ws, err := svc.Create(ctx, tc.in)
+			if err == nil {
+				t.Fatal("Create with failing runner should return an error")
+			}
+			if ws != nil {
+				t.Fatalf("Create should return nil workspace on failure, got %+v", ws)
+			}
+			list, err := svc.List(ctx)
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			if len(list) != 0 {
+				t.Fatalf("failed provision left %d phantom row(s)", len(list))
+			}
+		})
 	}
 }
 
