@@ -205,6 +205,12 @@ in
       # v6 only and the v4 health probe never connects. Pin v4 loopback in
       # the closure itself (flows to IMMICH_HOST).
       host = "127.0.0.1";
+      # Skip the initial admin-account wizard: OIDC (Pocket ID, autoRegister)
+      # provisions users on first login, so the local setup step is dead
+      # weight (immich-app/immich#18847, IMMICH_ALLOW_SETUP=false upstream).
+      # Safe with passwordLogin already disabled in immich.json — no local
+      # recovery path is removed.
+      environment.IMMICH_ALLOW_SETUP = "false";
     };
     # Non-default mediaLocation is not created by the module (its tmpfiles
     # `e` rule only repairs existing dirs): pre-create the config + library

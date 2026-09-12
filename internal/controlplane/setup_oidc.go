@@ -323,6 +323,12 @@ func (b *Backend) ensurePaperlessOIDC(ctx context.Context, domainName string) er
 		"PAPERLESS_URL":                     "https://docs." + domainName,
 		"PAPERLESS_APPS":                    "allauth.socialaccount.providers.openid_connect",
 		"PAPERLESS_SOCIALACCOUNT_PROVIDERS": paperlessOIDCEnv(domainName, clientID, clientSecret),
+		// Skip the initial-user setup: first OIDC login auto-provisions the
+		// account from Pocket ID claims instead of showing the signup form
+		// (PAPERLESS_SOCIALACCOUNT_ALLOW_SIGNUPS already defaults true).
+		// New users are plain users; grant admin via createsuperuser or the
+		// SYNC_SUPERUSER_GROUP claim once Pocket ID emits groups.
+		"PAPERLESS_SOCIAL_AUTO_SIGNUP": "true",
 	}, "paperless"); err != nil {
 		return fmt.Errorf("write paperless appenv: %w", err)
 	}
