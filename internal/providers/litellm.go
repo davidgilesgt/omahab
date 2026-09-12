@@ -7,11 +7,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
+ 	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -431,9 +433,32 @@ func (g *litellmGateway) ReconcileModels(ctx context.Context, aliases []Alias, c
 		return fmt.Errorf("gateway rename: %w", err)
 	}
 	_ = os.Remove(bakPath)
+	// The systemd unit runs DynamicUser (ephemeral UID) with static group
+	// `litellm` and reads this file via group permission (see nix/apps.nix).
+	// Best-effort: unit tests and non-NixOS hosts lack the group, in which
+	// case the file stays root-only and the unit fails loudly on restart.
+	shareGatewayConfig(finalPath)
 	// Note: restart/health-check is handled by backend apps runner after ReconcileModels;
 	// gateway does not directly restart here to keep single responsibility.
 	return nil
+}
+
+// shareGatewayConfig makes a freshly rendered config group-readable by the
+// litellm service group. Missing group or chown failure is ignored so tests
+// and foreign hosts keep working; the unit then fails closed on restart.
+func shareGatewayConfig(path string) {
+	grp, err := user.LookupGroup("litellm")
+	if err != nil {
+		return
+	}
+	gid, err := strconv.Atoi(grp.Gid)
+	if err != nil {
+		return
+	}
+	_ = os.Chown(path, 0, gid)
+	_ = os.Chmod(path, 0o640)
+	_ = os.Chown(filepath.Dir(path), 0, gid)
+	_ = os.Chmod(filepath.Dir(path), 0o750)
 }
 
 func (g *litellmGateway) IssueVirtualKey(ctx context.Context, vk VirtualKey) (string, error) {
