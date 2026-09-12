@@ -37,7 +37,7 @@ type SocketError struct {
 }
 ```
 
-`ID` may be any non-empty string; the daemon echoes it verbatim. `Method` is case-insensitive, normalized with `strings.TrimSpace(strings.ToLower(...))`.
+`ID` may be any non-empty string; the daemon echoes it verbatim. `Method` is case-insensitive on the daemon (`strings.TrimSpace(strings.ToLower(...))` in `dispatchSocket`); the typed Go client (`internal/apiclient`) only trims, so callers should lowercase before sending.
 
 Legacy envelope `{"action": "...", "params": {...}}` is **not** supported. A legacy envelope has no `method` key, so `Method == ""` after decode and the daemon returns `unknown_method` (see Acceptance: `printf '{"action":"status"}' | socat ...` returns `unknown_method`).
 
@@ -54,7 +54,7 @@ HTTP-style errors from the server are mapped to `internal` with the server's mes
 
 ## Canonical method table
 
-One name per action; aliases from pre-A1 (`open-ai`, `hermes.open`, `project_clone`, `runner.*`, `env.sync`, etc.) are **removed**. Clients must use exactly the names below.
+Socket aliases from pre-A1 (`hermes.open`, `project_clone`, `runner.*`, `env.sync`, etc.) are **removed**. `ai.open` is the canonical socket name (the `omahab-clientd` *binary* keeps a separate kebab-case `open-ai` CLI subcommand — socket vs CLI naming differs there). Clients must use exactly the names below.
 
 | Method | Params | Result | Errors | Description |
 |---|---|---|---|---|
@@ -63,20 +63,23 @@ One name per action; aliases from pre-A1 (`open-ai`, `hermes.open`, `project_clo
 | `ai.open` | `{"url"?: string}` | `{"result":"opened ai"}` | `internal` | Opens Hermes/AI URL. If `url` omitted, derives from `ServerURL`. Preflight checks instance pinning. |
 | `dashboard.open` | `{}` | `{"result":"opened omahab"}` | `internal` | Opens `ServerURL` in default browser. |
 | `project.list` | `{}` | `[]ProjectState` | — | Local project fetch states (`Project`, `LocalPath`, `LastFetched`, `FetchError`, `GitStatus`). Synced from `GET /api/v1/companion/projects`. |
-| `project.clone` | `{"slug": string, "dir"?: string}`<br>`slug` may be project ID or slug. `dir` defaults to `~/Projects/<slug>`. | `{"project_id": string, "slug": string, "dir": string, "clone_url": string}` | `bad_request` (slug required), `not_found`, `conflict` (dest exists), `internal` (not connected, no repo URL, `git clone` failed, terminal failed) | Resolves project via `GET /api/v1/companion/projects` (device token), `git clone <repository_url> <dir>`, `Upsert`s `ProjectStore`, then `OpenTerminal(dir)`. Requires device enrollment (`oma_dev_`). Uses `HOME` for default dir. |
+| `project.clone` | `{"slug"?: string, "project_id"?: string, "dir"?: string}`<br>`slug` may be project ID or slug; `project_id` is an explicit fallback. `dir` defaults to `~/Projects/<slug>` (capital P; the `omahab project clone` CLI help spells the same default lowercase). | `{"project_id": string, "slug": string, "dir": string, "clone_url": string}` | `bad_request` (slug required), `not_found`, `conflict` (dest exists), `internal` (not connected, no repo URL, `git clone` failed, terminal failed) | Resolves project via `GET /api/v1/companion/projects` (device token), `git clone <repository_url> <dir>`, `Upsert`s `ProjectStore`, then `OpenTerminal(dir)`. Requires device enrollment (`oma_dev_`). Uses `HOME` for default dir. |
 | `project.open` | `{"slug": string}` or `{"project_id": string}` | `{"project_id": string, "dir": string}` | `bad_request`, `internal` | Opens project dir in terminal. Resolves `LocalPath` from `ProjectStore`, else `~/Projects/<slug>`. |
 | `workspace.list` | `{}` | `[]Workspace` (`domain.Workspace`) | `internal` (not connected) | Proxies `GET /api/v1/companion/workspaces` (device auth). |
 | `workspace.create` | `{"project_slug": string, "title": string, "instructions"?: string}`<br>`project_slug` also accepts `slug` alias for compat. | `Workspace` | `bad_request`, `internal` | Creates via `POST /api/v1/companion/workspaces` (device auth), then if `running|pending` opens `ssh -t omahab@<host> sudo omahab workspace attach <id>` in terminal. `host` from `ServerURL`. |
-| `workspace.attach` | `{"id": string}` or `{"workspace_id": string}` or `{"dir": string, "local_path"?: string}` | `{"workspace_id": string, "result":"terminal opened"}` | `internal` | If `id` present, `ssh -t omahab@<host> sudo omahab workspace attach <id>`; else `OpenTerminal(dir \| "." )`. `workspace` is canonical, `runner` alias removed. |
+| `workspace.attach` | `{"id": string}` or `{"workspace_id": string}` or `{"dir": string, "local_path"?: string}` | `{"workspace_id": string, "result":"terminal opened"}` | `internal` | If `id` present, `ssh -t omahab@<host> sudo omahab workspace attach <id>`; else `OpenTerminal(dir \| "." )`. `workspace` is canonical on the socket; `runner` remains a hidden CLI alias on the server. |
 | `workspace.stop` | `{"id": string}` or `{"workspace_id": string}` | `{"workspace_id": string, "result":"stopped"}` | `bad_request`, `internal` | Calls `POST /api/v1/companion/workspaces/{id}/stop` (device auth, reuses `workspaces.Service.Stop`). |
 | `environment.sync` | `{}` | `{"result":"environment synced","detail":"Applied to new apps; restart existing apps"}` | `internal` | `EnvironmentManager.Sync` — fetches `GET /api/v1/companion/environment` (If-None-Match), atomic `0600`, D-Bus `SetEnvironment`. |
 | `environment.clear` | `{}` | `{"result":"environment cleared"}` | `internal` | Removes managed file and unsets via D-Bus. |
 | `environment.status` | `{}` | `{"revision": int, "variable_count": int, "synced_at": *time.Time, "error": string}` | — | Redacted; never includes values. |
 | `backup.run` | `{}` | `{"result":"backup completed"}` | `internal` | Runs `backupDrive` (`RunBackupDrive`) synchronously (10m ctx). |
-| `backup.status` | `{}` | `{"last_snapshot": *time.Time, "error": string}` | — | Refreshes via `StatusBackupDrive`, returns cached `backupLastSnapshot`/`backupError`. |
-| `subscribe` | `{}` | `{"result":"subscribed"}` | — | Placeholder for C1 push. Future: holds connection and streams `{"event":"status","data":DaemonStatus}` on every state change, no deadline. Currently returns immediately and closes. |
+| `backup.status` | `{}` | `{"last_snapshot": *time.Time, "error": string}` | — | Refreshes via `StatusBackupDrive`, returns cached `backupLastSnapshot`/`backupError`. (The richer `BackupDriveStatus` with `snapshot_id` is CLI-only in `omahab backup-drive status`; the socket shape stays narrow.) |
+| `sync.add` | `{"name": string, "local_path"?: string, ...}` | folder state | `bad_request`, `internal` | Implemented in `dispatchSocket` (Syncthing enrollment); not removed. |
+| `app.open` | `{"app": string}` | `{"app": string, "url": string}` | `bad_request`, `internal` | Opens a platform-app URL. Served by the daemon but intentionally outside the QML call sites below. |
+| `workspace.openInEditor` | `{"id"?: string, "workspace_id"?: string, ...}` | editor result | `bad_request`, `internal` | Opens a workspace in the configured editor. Served by the daemon but intentionally outside the QML call sites below. |
+| `subscribe` | `{}` | streams `{"event":"status","data":DaemonStatus}` frames | — | Holds the connection open (no deadline), sends the current status immediately, then pushes on every `broadcastStatus`; closed only when the client disconnects. |
 
-`project.new` / `sync.add` / `xai.oauth.connect` are **deleted**. `sync.add` will return `unknown_method` until C5 re-adds it with real Syncthing enrollment. `xai.oauth.connect` is removed; OAuth is via `omahab provider login xai` + loopback relay.
+`project.new` / `xai.oauth.connect` are **deleted** and return `unknown_method`. `xai.oauth.connect` is removed; OAuth is via `omahab provider login xai` + loopback relay.
 
 ### Status shape (`DaemonStatus`)
 
@@ -159,7 +162,7 @@ function refresh() { enqueue("status", {}, "status", ""); enqueue("workspace.lis
 function workspaceStop(id) { enqueue("workspace.stop", {id: id}, "action", "Stop workspace") }
 ```
 
-*No* `OMAHAB_SOCKET` — renamed to `OMAHAB_CLIENTD_SOCKET` in A1. `Clientd.qml` call sites use `status`, `diagnose`, `ai.open`, `dashboard.open`, `project.list`, `project.clone`, `project.open`, `workspace.list`, `workspace.create`, `workspace.attach`, `workspace.stop`, `environment.*`, `backup.*`, `subscribe`.
+*No* `OMAHAB_SOCKET` — renamed to `OMAHAB_CLIENTD_SOCKET` in A1. `Clientd.qml` call sites use `status`, `diagnose`, `ai.open`, `dashboard.open`, `project.list`, `project.clone`, `project.open`, `workspace.list`, `workspace.create`, `workspace.attach`, `workspace.stop`, `environment.*`, `backup.*`, `subscribe`. (`sync.add`, `app.open`, and `workspace.openInEditor` are served by the daemon but have no QML call site.)
 
 ## Device HTTP API (complementary)
 
@@ -168,7 +171,11 @@ The daemon proxies companion actions to the server via device-authenticated endp
 - `GET /api/v1/companion/projects` — used by `project.clone` to resolve `slug` → `repository_url`.
 - `GET /api/v1/companion/workspaces` / `POST /api/v1/companion/workspaces` / `POST /api/v1/companion/workspaces/{id}/stop` — used by `workspace.*`.
 - `GET /api/v1/companion/environment` — used by `environment.*`.
-- `POST /api/v1/provider-oauth/xai/callback/{session_id}` — loopback relay (not via daemon).
+- `GET /api/v1/companion/status`, `GET /api/v1/companion/events`, `GET /api/v1/companion/events/stream` — companion status/event feeds.
+- `PUT /api/v1/companion/devices/me` — device self-update.
+- `POST /api/v1/companion/sync/folders` — used by `sync.add`.
+- `POST /api/v1/provider-oauth/{provider}/callback/{session_id}` — loopback relay for any provider (not only xai; not via daemon).
+- `/api/v1/companion/mcp` (and trailing-slash variant) — device-scoped MCP handler when configured.
 
 Admin token (`Bearer` without `oma_dev_` prefix) is rejected on these with `403`. Unknown device method maps to `404`/`403` on HTTP, which the daemon surfaces as `internal`.
 

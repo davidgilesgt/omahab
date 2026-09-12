@@ -1398,6 +1398,89 @@ paths:
         '200': { description: Projects, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/Project' } } } } } } }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/companion/workspaces:
+    get:
+      summary: List workspaces (device only)
+      description: Device-only. Proxied by clientd `workspace.list`. Admin bearer rejected.
+      operationId: getCompanionWorkspaces
+      security: [{ deviceAuth: [] }]
+      responses:
+        '200': { description: Workspaces, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/Workspace' } } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      summary: Create workspace (device only)
+      description: Device-only. Proxied by clientd `workspace.create`. Admin bearer rejected.
+      operationId: createCompanionWorkspace
+      security: [{ deviceAuth: [] }]
+      responses:
+        '201': { description: Workspace, content: { application/json: { schema: { $ref: '#/components/schemas/Workspace' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/companion/workspaces/{id}/stop:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    post:
+      summary: Stop workspace (device only)
+      description: Device-only. Proxied by clientd `workspace.stop`. Admin bearer rejected.
+      operationId: stopCompanionWorkspace
+      security: [{ deviceAuth: [] }]
+      responses:
+        '200': { description: Stopped }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/companion/sync/folders:
+    post:
+      summary: Create sync folder (device only)
+      description: Device-only. Used by clientd `sync.add`. Admin bearer rejected.
+      operationId: createCompanionSyncFolder
+      security: [{ deviceAuth: [] }]
+      responses:
+        '201': { description: Folder }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/companion/devices/me:
+    put:
+      summary: Update own device (device only)
+      description: Device-only self-update. Admin bearer rejected.
+      operationId: updateCompanionDeviceMe
+      security: [{ deviceAuth: [] }]
+      responses:
+        '200': { description: Updated device, content: { application/json: { schema: { $ref: '#/components/schemas/CompanionDevice' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/companion/events/stream:
+    get:
+      summary: Stream companion events via SSE (device only)
+      description: Device-only SSE feed with Last-Event-ID replay and heartbeats. Admin bearer rejected.
+      operationId: streamCompanionEvents
+      security: [{ deviceAuth: [] }]
+      responses:
+        '200': { description: SSE stream }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/companion/mcp:
+    get:
+      summary: Device-scoped MCP endpoint
+      description: Device-only MCP handler when configured. Admin bearer rejected.
+      operationId: companionMcp
+      security: [{ deviceAuth: [] }]
+      responses:
+        '200': { description: MCP response }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      summary: Device-scoped MCP call
+      description: Device-only MCP handler when configured. Admin bearer rejected.
+      operationId: companionMcpPost
+      security: [{ deviceAuth: [] }]
+      responses:
+        '200': { description: MCP response }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
   /api/v1/companion/devices:
     get:
       summary: List companion devices (admin)
@@ -1422,7 +1505,7 @@ paths:
     parameters: [{ $ref: '#/components/parameters/IdPath' }]
     put:
       summary: Set device allow_provider_oauth
-      description: Admin only. Toggles whether device may relay xAI loopback callback (allow_provider_oauth). Used to gate POST /api/v1/provider-oauth/xai/callback/{session_id}.
+      description: Admin only. Toggles whether device may relay the loopback callback (allow_provider_oauth). Used to gate POST /api/v1/provider-oauth/{provider}/callback/{session_id}.
       operationId: setDeviceAllowOAuth
       requestBody:
         required: true

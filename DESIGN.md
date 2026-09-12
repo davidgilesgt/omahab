@@ -165,15 +165,15 @@ Recommended storage layout:
 
 Omahab-owned host software uses Go as its primary language. `omahab`, `omahabd`, `omahab-clientd`, and the installation, application, deployment, Cloudflare, backup, synchronization, workspace, event, email-processing, and health controllers are Go binaries. Use the current stable Go release pinned by each Omahab release.
 
-The authenticated control API uses HTTP/JSON with an OpenAPI contract. Use the Go standard library with Chi for routing, Cobra for CLI commands, and hand-written request/response types in `internal/api/types.go` mirrored in `web/src/api/types.ts`; OpenAPI is descriptive. Use ordinary HTTP for commands and queries, Server-Sent Events for control-plane event streams, and WebSockets only where bidirectional behavior requires them, including Hermes's existing JSON-RPC transport. Do not add gRPC initially.
+The authenticated control API uses HTTP/JSON with an OpenAPI contract. Use the Go standard library with Chi for routing, Cobra for CLI commands, and hand-written request/response types in `internal/apitypes` (aliased from `internal/api/types.go`) mirrored by the hand-maintained `web/src/api/types.ts`; OpenAPI is descriptive. Use ordinary HTTP for commands and queries, Server-Sent Events for control-plane event streams, and WebSockets only where bidirectional behavior requires them, including Hermes's existing JSON-RPC transport. Do not add gRPC initially.
 
-Use `database/sql` with `modernc.org/sqlite` so SQLite does not require a C toolchain, `sqlc` for typed queries, and explicit schema migrations. Durable jobs, desired and observed state, releases, and normalized events remain SQLite-backed state machines. Do not add Redis, a message broker, or an external workflow engine for the initial single-node product.
+Use `database/sql` with `modernc.org/sqlite` so SQLite does not require a C toolchain, `sqlc` for typed queries where adopted (`internal/store` is generated; `internal/apps`, `internal/secrets`, `internal/projects`, `internal/providers` remain hand-written `database/sql` until migrated per TODO P2-1), and explicit schema migrations. Durable jobs, desired and observed state, releases, and normalized events remain SQLite-backed state machines. Do not add a message broker or an external workflow engine for the initial single-node product; the one exception is a local Redis on 6379 as the LiteLLM cache (`services.redis.servers.omahab` in `nix/apps.nix`).
 
-Browser applications use TypeScript, React, and Vite, with React Router, TanStack Query, and generated OpenAPI client types. Build static assets served by the Go control plane or Caddy; do not require a Node.js server in production. Reuse Hermes Desktop's existing React components and styling conventions rather than creating a second design system.
+Browser applications use TypeScript, React, and Vite, with React Router, TanStack Query, and a hand-written API client (`web/src/api/client.ts` with aliases mirroring OpenAPI operationIds; OpenAPI stays descriptive, no generated client). Build static assets served by the Go control plane or Caddy; do not require a Node.js server in production. Reuse Hermes Desktop's existing React components and styling conventions rather than creating a second design system.
 
-The Omarchy shell plugin remains a thin QML/JavaScript presentation layer over `omahab-clientd`. The Cloudflare Email Worker remains a minimal native TypeScript edge adapter. Local embedding inference remains an isolated Python worker because its model, tokenizer, and ONNX ecosystem are materially stronger there.
+The Omarchy shell plugin remains a thin QML/JavaScript presentation layer over `omahab-clientd`. The Cloudflare Email Worker remains a minimal native TypeScript edge adapter. Local embedding inference remains an isolated Python worker because its model, tokenizer, and ONNX ecosystem are materially stronger there. The closure also ships LiteLLM (Python service) and the Hermes OCI container as first-class runtimes alongside the Go binaries.
 
-Language consolidation must not collapse failure domains. Embedding inference and other resource-heavy or native-library workloads remain outside `omahabd`, even when controlled through its API. Omahab orchestrates Caddy, `cloudflared`, Tailscale, restic, Syncthing, DevPod, `hass-cli`, Hermes, and the model gateway as upstream components rather than reimplementing them.
+Language consolidation must not collapse failure domains. Embedding inference and other resource-heavy or native-library workloads remain outside `omahabd`, even when controlled through its API. Omahab orchestrates Caddy, `cloudflared`, Tailscale, restic, Syncthing, DevPod, `hass-cli`, Hermes, Redis (LiteLLM cache only), and the model gateway as upstream components rather than reimplementing them.
 
 ## 5. Host OS and installation
 
@@ -186,18 +186,19 @@ Reasons:
 - the whole appliance — kernel, systemd units, nftables, sshd, tailscale, docker/podman, and the application services — is versioned as one generation with atomic switch and rollback;
 - application versions track the pinned nixpkgs revision, so the flake lock is the release gate;
 - no imperative package installation, no unattended-upgrades divergence, no installer journal — `nixos-rebuild` is the safety net;
-- amd64 and arm64 availability.
+- amd64 installer ISO and appliance configs; Go/Node packages additionally build for arm64, but there is no aarch64 ISO output.
 
-Docker remains only for user-project deploys (ONCE) and CI job containers. Platform applications are native systemd services.
+Docker remains for user-project deploys (ONCE) and the Hermes container; CI job containers run on the rootless podman builder. Platform applications are otherwise native systemd services.
 
 ### 5.2 Installation form
 
-Omahab ships appliance images and a NixOS module:
+Omahab ships a bootable installer ISO and a NixOS module (there is no `image-qcow` target; Proxmox installs boot the ISO):
 
 ```sh
 nix build .#image-iso     # bootable installer ISO
-nix build .#image-qcow    # qcow2 appliance disk (Proxmox: import)
 ```
+
+Install paths in code: the guided `omahab install` wizard on the ISO driving the `omahab-install-disk` backend (`scripts/install-disk.sh`: GPT/ESP layout, `--placement lan|vps`, `--selection-file`, `--network-file`, `--resume-install`), the dev VM (`apps.vm`), and the `nixosConfigurations.omahab-installed` template rewritten in-guest.
 
 Or add to any NixOS host:
 
@@ -206,7 +207,7 @@ imports = [ github:davidgilesgt/omahab#nixosModules.omahab ];
 services.omahab.enable = true;
 ```
 
-`services.omahab.enable` is the only user-facing option; domain, tokens, and per-household values are runtime state, never in a `.nix` file.
+`services.omahab.enable` is the primary switch (alongside `package`, `webPackage`, `catalogPackage`, `embeddingWorkerPackage`, `listen`, `placement`, `releaseRef`, `releaseURL`, `adminUser` in `nix/module.nix`); domain, tokens, and per-household values are runtime state, never in a `.nix` file.
 
 ### 5.3 First-boot access
 
@@ -215,10 +216,10 @@ There is no claim step: on lan placement (the ISO-installer default) LAN sources
 tailnet sources (100.64.0.0/10) reach the panel at `:8484` without a token — tailnet
 membership already authenticates the caller, so a home-LAN install never asks for the
 token on any of its own origins. On vps placement every source needs the panel token
-(`/var/lib/omahab/api.token`, root 0600, provisioned to `~/.config/omahab/token` at daemon
-startup). SSH keys are seeded by the installer and extended as the first setup-checklist
-step; Tailscale enrollment lives on the checklist too. `sudo omahab setup` is the SSH
-fallback for the same flow.
+(`/var/lib/omahab/api.token`, root 0600, provisioned to the configured admin user's `~/.config/omahab/token` at daemon
+startup). SSH keys come from the installer's `--authorized-keys-file` (optional) and are extended as the first setup-checklist
+step; Tailscale enrollment lives on the checklist too. `omahab setup` is the SSH
+fallback for the Tailscale + Cloudflare-domain/token part of the flow (it does not manage SSH keys; key provisioning lives in the `install`/`omahab-install-disk` path).
 
 ### 5.4 Strict appliance posture
 
@@ -226,12 +227,11 @@ The system remains an appliance: it does not adopt arbitrary existing servers. F
 
 ### 5.5 SSH-first setup and hardening
 
-sshd is hardened declaratively in the closure: pubkey-only, no password or keyboard-interactive authentication, no root login. SSH keys are runtime state (`~omahab/.ssh/authorized_keys`, seeded by the installer and extended as the first setup-checklist step or via `omahab setup`); GitHub import is one-time and never continuously synchronized. Because sshd configuration is atomic with the generation, the installer-era rollback timers are obsolete — `nixos-rebuild test`/`switch --rollback` is the recovery mechanism.
+sshd is hardened declaratively in the installed closure: pubkey-only, no password or keyboard-interactive authentication, no root login. SSH keys are runtime state (the configured admin user's `~/.ssh/authorized_keys`, from the installer's `--authorized-keys-file` when given and extended as the first setup-checklist step); GitHub import is one-time and never continuously synchronized. Because sshd configuration is atomic with the generation, the installer-era rollback timers are obsolete — `nixos-rebuild test`/`switch --rollback` is the recovery mechanism. The ISO-live environment (`PermitRootLogin prohibit-password`) and the dev VM (passwords re-enabled) deliberately weaken this; the absolute claim below applies to the installed system only.
 
-Default policy (from the module):
+Default policy (from the module; `PubkeyAuthentication` is left to the nixpkgs sshd default):
 
 ```text
-PubkeyAuthentication yes
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 PermitRootLogin no
@@ -240,10 +240,10 @@ PermitRootLogin no
 ### 5.6 Host security baseline
 
 - one NixOS closure, signed store paths, atomic generations with rollback;
-- nftables default-deny inbound (`table inet omahab`); TCP 8484 on tailscale0/lo plus LAN ranges on lan placement;
-- no direct application port publication; native services bind loopback, Caddy is the only edge;
+- nftables default-deny inbound (`table inet omahab`); TCP 8484 on tailscale0 plus (lan placement) RFC1918/ULA/link-local LAN ranges, generic `iifname lo accept`, `br-*` from 172.30.0.2 to 8484 (Caddy dashboard upstream), and TCP 80/443 on tailscale0 for Caddy;
+- no direct application port publication; native services bind loopback (Hermes runs with host networking and a loopback-only dashboard, not a published `127.0.0.1:8085` port mapping), Caddy is the only edge;
 - Cloudflare Tunnel uses outbound connections;
-- Docker socket available only to `omahabd`; CI builds use the rootless podman builder socket;
+- `omahabd` runs with `docker`/`podman` supplementary groups and CI builds use the rootless podman builder socket; the Docker socket is not restricted to `omahabd` alone in the closure;
 - root-owned secret material under `/var/lib/omahab` (0700/0600), per-bundle env files 0640 with service-user group;
 - key-only SSH; the 8-character panel token guards panel access on vps placement, while on lan placement LAN + tailnet (100.64.0.0/10) sources bypass it;
 - health and security checks through `omahab doctor`;
@@ -270,7 +270,7 @@ A platform bundle entry in the curated catalog declares:
 - `dependencies`, `secret_sources`, `pipeline_image`;
 - `units` (systemd units, required for every bundle).
 
-Domain-dependent units gate on their `appenv/<bundle>.env` file: before enrollment systemd skips them cleanly (condition-skip, not failure); `omahabd` renders the env file after enrollment and starts the units. Versions of native services track the nixpkgs pin — there is no per-app image update; `omahab system upgrade` switches the whole generation.
+Gated bundles (pocket-id, woodpecker, karakeep, litellm, hermes, restic, …) gate on their `appenv/<bundle>.env` file via `ConditionPathExists` (condition-skip, not failure); forgejo/immich/paperless/syncthing/ntfy/caddy instead read it as an optional `EnvironmentFile = [ "-..." ]` and still start. `omahabd` renders the env file after enrollment and starts the gated units. Versions of native services track the nixpkgs pin — there is no per-app image update; `omahab system upgrade` switches the whole generation.
 
 Users do not edit application configuration; everything flows through omahabd.
 
@@ -312,7 +312,7 @@ Edge topology:
 ```text
 Caddy/Omahab edge :80/:443
   ├── native platform services on 127.0.0.1:<port>
-  ├── hermes container on 127.0.0.1:8085
+  ├── hermes container (host networking, loopback-only dashboard; no published 127.0.0.1:8085 port mapping)
   └── ONCE Kamal Proxy on 127.0.0.1:8080
         └── project containers
 ```
@@ -403,13 +403,13 @@ Use official `cloudflared`. Do not add DockFlare as a second desired-state contr
 
 ### 7.4 Cloudflare credentials
 
-Use separate scoped tokens for:
+Prefer separate scoped tokens for:
 
 - DNS changes;
 - Tunnel and Access changes;
 - Email Worker/routing changes.
 
-Never request a global API key or one account-wide super-token.
+Never request a global API key. `OMAHAB_CF_API_TOKEN` is the one sanctioned single-token fallback: when set it populates the DNS, Tunnel, and Access credential holders together (`internal/controlplane/backend.go`); there is no separate Email-Worker token plumbing in `internal/cloudflare/clients.go`.
 
 ## 8. Identity and users
 
@@ -524,7 +524,7 @@ Gateway boundary:
 - Serve clients only through the private `https://models.<domain>` Caddy/Tailscale route (DNS-only `models.home.<domain>` → Tailscale IP; no Cloudflare Tunnel public exposure). Do not publish LiteLLM port 4000 to the host and do not permit `shared` or `public` exposure for the model gateway.
 - Keep the OpenAI-compatible endpoint at `https://models.<domain>/v1`; also preserve LiteLLM's native Anthropic-compatible `/v1/messages` endpoint for harnesses that support an Anthropic base URL.
 - Give Hermes (`default` profile), each enrolled companion device, and each separately registered harness a distinct LiteLLM virtual key with scoped aliases and per-key RPM/TPM/concurrency. Never give any client the LiteLLM master key or an upstream credential.
-- Keep `omahab/fast`, `omahab/balanced`, `omahab/reasoning`, and `omahab/embedding` as the stable model names. Alias changes update LiteLLM without changing client configuration.
+- Keep `omahab/fast`, `omahab/balanced`, `omahab/reasoning`, `omahab/embedding`, and `omahab/karakeep` as the stable model names. Alias changes update LiteLLM without changing client configuration. (`omahab/karakeep` routes Karakeep bookmark AI auto-tagging/summarization through the gateway; Karakeep sets both `INFERENCE_TEXT_MODEL` and `INFERENCE_IMAGE_MODEL` to it.)
 - Default to no cross-provider fallback. A subscription quota, entitlement failure, or `429` must not silently incur metered API charges; an administrator may explicitly add and order a paid fallback later through the alias configuration.
 - Treat provider quota dashboards as authoritative for subscription caps. LiteLLM tracks returned token usage, per-key RPM/TPM/concurrency, and API-key spend, but must not present estimated subscription cost as a provider quota balance.
 
@@ -545,6 +545,7 @@ omahab/fast
 omahab/balanced
 omahab/reasoning
 omahab/embedding
+omahab/karakeep
 ```
 
 No prompt-content logging by default. LiteLLM is configured with `general_settings.store_prompts_in_spend_logs: false` and `litellm_settings.turn_off_message_logging: true`; spend/error metadata needed for limits and diagnosis is retained, but no external callbacks are configured and prompts/responses are never persisted. The canary checked in verification is that a unique prompt canary never appears in LiteLLM container logs or spend rows.
@@ -679,16 +680,16 @@ Do not synthesize Electron `safeStorage` records or copy cookies. If automatic c
 
 The Omarchy companion can create an isolated remote runner for a project:
 
-1. Title → slug (`[a-z0-9-]`, ≤40) → branch `ws/<slug>-<id>` (4 hex, retry once on exists) and container name `ws-<slug>-<id>`; stored as `branch`, `title`, `instructions` (migration `workspaces-003`).
+1. Title → slug (`[a-z0-9-]`, ≤40) → branch `ws/<slug>-<id>` (4 hex, retry once on exists) and devcontainer name `ws-<slug>-<id>` (the DevPod runner itself is addressed by the opaque workspace row id); stored as `branch`, `title`, `instructions` (migration `workspaces-003`).
 2. `BranchCreator` creates the branch from `project.DefaultBranch`; on `ErrAlreadyExists`/`ErrConflict` retry once with new id.
-3. Per-workspace LiteLLM virtual key (`workspace-<id>`, scopes `omahab/fast`, `omahab/balanced`, `omahab/reasoning`, `omahab/embedding`, owner `harness:<id>`) – stored `gateway_key_id` for revocation on `Delete`/`ExpireIdle` (45m `INACTIVITY_TIMEOUT` via `omahab-devpod-init` docker provider).
+3. Per-workspace LiteLLM virtual key (`workspace-<id>`, scopes `omahab/fast`, `omahab/balanced`, `omahab/reasoning`, `omahab/embedding`, owner columns `OwnerKind="harness"` + `OwnerID=<id>`) – stored `gateway_key_id` for revocation on `Delete`/`ExpireIdle` (`DefaultIdleTimeout = 30m` in `internal/workspaces/service.go`, checked by `StartIdleExpirer`).
 4. Per-workspace Forgejo token (`ws-<id>`, `read:repository`+`write:repository`, `Repositories:[{owner,name}]`) – written to `~/.git-credentials` via `devpod ssh <id> --command 'printf ... > ~/.git-credentials && chmod 600 ...'` (token via credential helper, never in clone URL), revoked on `Delete`/`ExpireIdle`.
 5. `DevPodRunner.Up` clones `https://<forgejo>/<owner>/<repo>.git@<branch>` with `--workspace-env` (`OPENAI_BASE_URL=https://models.<domain>/v1`, `OPENAI_API_KEY=<virtualKey>`, `ANTHROPIC_BASE_URL=https://models.<domain>`, `ANTHROPIC_API_KEY=<same>`, `OMAHAB_WORKSPACE_ID=<id>`, `GIT_AUTHOR_NAME=omahab`/`EMAIL`, `GIT_COMMITTER_*`) and devcontainer (`{"name":"omahab-<name>","image":"mcr.microsoft.com/devcontainers/base:ubuntu","features":{"ghcr.io/devcontainers/features/node:1":{}},"postCreateCommand":"npm install -g @oh-my-pi/pi-coding-agent && git config --global credential.helper store"}` or repo `.devcontainer/devcontainer.json` when `DevcontainerSource=="devcontainer"` and present via `GetFile`).
 6. If `Instructions` non-empty, writes `/workspaces/<repo>/.omahab/TASK.md` (`mkdir -p $(ls -d /workspaces/*|head -1)/.omahab && echo <base64> | base64 -d > ...`); always `tmux new-session -d -s omp "omp"` and, when TASK present, `tmux send-keys -t omp "$(cat $(ls -d /workspaces/*|head -1)/.omahab/TASK.md)" Enter`. User and Hermes share the same `omp` tmux session.
 7. `workspace_send` (`POST /api/v1/workspaces/{id}/send {message}`, `MCP workspace_send`) → `DevPodRunner.Send` = `devpod ssh <id> --command "tmux send-keys -t omp '<shell-quoted message>' Enter"`. `RunPrint(id,prompt)` for Step 6 (`devpod ssh <id> --command 'cd $(ls -d /workspaces/*|head -1) && omp -p --mode json "<prompt>"'`).
-8. Attach: `ssh -t omahab@<tailscale-ip> sudo omahab runner attach <id>` re-execs via `sudo` if not root (`security.sudo.extraRules` `omahab NOPASSWD omahab runner attach *`, `DEVPOD_HOME=/var/lib/omahab/devpod` in `omahabd` unit and `DevPodRunner` `withDevPodEnv`), then `POST /api/v1/workspaces/{id}/attach` → `DevPodRunner.Attach` (`tmux new-session -A -s omahab-<id> devpod ssh <id> --tty`). `omahabd` runs devpod as root with `DEVPOD_HOME`.
+8. Attach: `ssh -t omahab@<tailscale-ip> sudo omahab workspace attach <id>` (`workspace` is canonical; `runner` remains a hidden CLI alias) re-execs via `sudo` if not root (`security.sudo.extraRules` `omahab NOPASSWD omahab runner attach *`, `DEVPOD_HOME=/var/lib/omahab/devpod` in `omahabd` unit and `DevPodRunner` `withDevPodEnv`), then `POST /api/v1/workspaces/{id}/attach` → `DevPodRunner.Attach` (`tmux new-session -A -s omahab-<id> devpod ssh <id> --tty`). `omahabd` runs devpod as root with `DEVPOD_HOME`.
 
-Companion: `workspace.create {project_slug, title}` → `POST /api/v1/companion/workspaces` (deviceAuth) → on `running` `Launcher.OpenTerminalCommand(["ssh","-t","omahab@"+ip,"sudo","omahab","runner","attach",id])` (`alacritty -e`, `kitty`, `gnome-terminal --`, `xterm -e` search); `runner.attach {id}` → same ssh; `runner.list` → `GET /api/v1/companion/workspaces`; `project.list` → existing. `Clientd.qml` `workspace.*` methods on newline-JSON socket; `Panel.qml` "New workspace…" picker (projects from `project.list`, title field) and live list (name, project, idle minutes) with Attach/Stop.
+Companion: `workspace.create {project_slug, title}` → `POST /api/v1/companion/workspaces` (deviceAuth) → on `running` `Launcher.OpenTerminalCommand(["ssh","-t","omahab@"+ip,"sudo","omahab","workspace","attach",id])` (`alacritty -e`, `kitty`, `gnome-terminal --`, `xterm -e` search); `workspace.attach {id}` → same ssh; `workspace.list` → `GET /api/v1/companion/workspaces`; `project.list` → existing. `Clientd.qml` `workspace.*` methods on newline-JSON socket; `Panel.qml` "New workspace…" picker (projects from `project.list`, title field) and live list (name, project, idle minutes) with Attach/Stop.
 
 Automated review (Step 6): same-repo PRs (`HeadRepoFullName == BaseRepoFullName`) get a review workspace (`review-pr-<index>`, `SkipBranchCreate` reusing the PR head branch, non-interactive `RunPrint` prompt `You are reviewing PR #<n> '<title>' in <owner>/<repo>. Base: <base>. ...` that posts a Forgejo review — `COMMENT`/`REQUEST_CHANGES` with inline comments (`path`, `new_position`, `body`), `APPROVED` rewritten as `COMMENT` with prefix `LGTM (automated review; merge manually)` and never merged; fork PRs are skipped with event `ci.review_skipped_untrusted` until the microVM worker exists; concurrency is one review per PR (`UNIQUE(project_id,branch)` blocks duplicates, `synchronized` stops the running one first); failures post `COMMENT` `Automated review failed: <reason>` and emit `ci.review_failed`; the workspace is deleted afterwards (20-minute `RunPrint` timeout, last JSON object from stdout parsed via `CreatePullReview`).
 ### 15.1 Paperless-ngx
@@ -889,7 +890,7 @@ Each Omarchy workstation gets its own append-only restic repository on the serve
 
 - `services.restic.server` (`nix/apps.nix`) listens on `127.0.0.1:8500`, `dataDir /srv/omahab/machine-backups`, `appendOnly true`, `privateRepos true`, `htpasswd-file /var/lib/omahab/machine-backups.htpasswd` (systemd socket `restic-rest-server.socket` → `restic-rest-server.service`, user `restic`). Caddy exposes it as `https://backup.<domain>` → `127.0.0.1:8500` via the catalog bundle `restic-server` (`route backup.{{.Domain}}`, `max_exposure private`, `units restic-rest-server.service`). The data directory is included in `backups.DefaultPaths()` so the server's nightly Hetzner backup ships every machine's history off-site.
 - At companion enrollment, `companion.EnrollDevice` creates an htpasswd entry `dev-<deviceID>` with a random 32-byte password (bcrypt via `golang.org/x/crypto/bcrypt`), rewrites `/var/lib/omahab/machine-backups.htpasswd` atomically, `systemctl reload restic-rest-server` (fallback `restart` if SIGHUP not supported), and returns once `{restic_repo:"rest:https://backup.<domain>/dev-<id>", restic_password:<random 32B>, rest_user, rest_password}`. The repo directory `/srv/omahab/machine-backups/dev-<id>` is kept on revocation (admin deletes it manually); `RevokeDevice` removes only the htpasswd line.
-- `omahab-clientd` stores those four values in the desktop keyring (`backup-repo`, `backup-password`, `backup-rest-user`, `backup-rest-password`, service `omahab`). `omahab backup-drive enable [--paths ~/Documents,~/Pictures]` writes `~/.config/omahab/backup-paths` (default `$HOME`, excluding `~/.cache`, `~/.local/share/Trash`, `**/node_modules`, `**/.git`) and installs a systemd **user** timer `omahab-machine-backup.timer` (`OnCalendar=daily`, `Persistent=true`) whose service runs `omahab backup-drive run` = `restic backup --exclude-file <generated> $(paths)` → `restic forget --keep-daily 14 --keep-weekly 8 --keep-monthly 12` (no `--prune` — the server is append-only, so `forget` only marks; growth is bounded by deleting `/srv/omahab/machine-backups/dev-<id>` for retired devices and surfaced by `host.disk_low`). `omahab backup-drive status` prints the last snapshot time from `restic snapshots --latest 1 --json`. Env for restic comes from the keyring at run time, never from files.
+- `omahab-clientd` stores those four values in the desktop keyring (`backup-repo`, `backup-password`, `backup-rest-user`, `backup-rest-password`, service `omahab`). `omahab backup-drive enable [--paths ~/Documents,~/Pictures]` writes `~/.config/omahab/backup-paths` (default `$HOME`, excluding `~/.cache`, `**/.cache`, `~/.local/share/Trash`, `**/node_modules`, `**/.git` plus the Trash basename — six patterns in `ExcludePatterns`) and installs a systemd **user** timer `omahab-machine-backup.timer` (`OnCalendar=daily`, `Persistent=true`) whose service runs `omahab backup-drive run` = `restic backup --exclude-file <generated> $(paths)` → `restic forget --keep-daily 14 --keep-weekly 8 --keep-monthly 12` (no `--prune` — the server is append-only, so `forget` only marks; growth is bounded by deleting `/srv/omahab/machine-backups/dev-<id…
 - `omahab-clientd` polls `StatusBackupDrive` every `backupInterval` (15 min) and surfaces `backup_last_snapshot`/`backup_error` in `DaemonStatus`; the Omarchy plugin shows “PC backup: <age>” and “Back up now” (`backup.run`/`backup.status` via the Unix socket).
 
 Syncthing versioning may provide a convenience buffer, but synchronization is not the off-site backup mechanism.
@@ -897,7 +898,7 @@ Syncthing versioning may provide a convenience buffer, but synchronization is no
 ## 20. Events and notifications
 
 Build a normalized event system, but do not enable phone push by default.
-Initial event types include:
+Full event vocabulary (producers across the control plane) includes:
 
 ```text
 backup.failed
@@ -913,6 +914,8 @@ syncthing.device_stale
 email.received
 email.quarantined
 ```
+
+The companion stream allowlist is narrower (`internal/api/sse.go`): `agent.awaiting_approval`, `deployment.completed`, `ci.failed`, `backup.failed`, `service.unhealthy`, `syncthing.conflict`, `environment.changed`, `companion.revoked`, plus `workspace.*`. The clientd badge counters track `agent.awaiting_approval` and Syncthing conflict/stale.
 
 Default surfaces:
 
@@ -947,10 +950,11 @@ omahab status
 omahab project create
 omahab project clone
 omahab project open
-omahab runner create
-omahab runner attach
-omahab runner send
-omahab runner stop
+omahab workspace create
+omahab workspace attach
+omahab workspace send
+omahab workspace stop
+(`runner` remains a hidden alias for the workspace commands.) Additional real commands not shown here: `workspace show|open|ssh-proxy`, `project list|show|rm`, `sync list|show|rm`, `hermes open --url`, `env`, `provider login`.
 omahab sync add
 omahab hermes open
 omahab backup-drive enable [--paths ~/Documents,~/Pictures]
@@ -977,10 +981,10 @@ Actions:
 - New workspace… (picker over projects from `project.list`, text field for title);
 - Open Omahab;
 - Sync tool variables;
-- Back up now (`backup.run` → `POST /api/v1/...` via `backupRunOnce` → `restic backup` + `forget`);
+- Back up now (`backup.run`/`backup.status` on the clientd Unix socket → local `restic backup` + `forget`; there is no `POST /api/v1/...` backup route);
 - Diagnose connection.
 
-Workspace list: each running workspace shows name, project, idle minutes with Attach (opens `ssh -t omahab@<ip> sudo omahab runner attach <id>` via `Launcher.OpenTerminalCommand` with terminal search `alacritty -e`, `kitty`, `gnome-terminal --`) and Stop. `Clientd.qml` implements `workspace.create` → `POST /api/v1/companion/workspaces` (deviceAuth) → on `running` attach, `workspace.attach` → same ssh, `workspace.list` → `GET /api/v1/companion/workspaces`, `project.list` → existing, plus `backup.run`/`backup.status` (`GET /api/v1/...` via `backupStatusOnce`/`backupRunOnce`).
+Workspace list: each running workspace shows name, project, idle minutes with Attach (opens `ssh -t omahab@<ip> sudo omahab workspace attach <id>` via `Launcher.OpenTerminalCommand` with terminal search `alacritty -e`, `kitty`, `gnome-terminal --`) and Stop. `Clientd.qml` implements `workspace.create` → `POST /api/v1/companion/workspaces` (deviceAuth) → on `running` attach, `workspace.attach` → same ssh, `workspace.list` → `GET /api/v1/companion/workspaces`, `project.list` → existing, plus `backup.run`/`backup.status` (Unix-socket methods driving local restic, not HTTP `backupStatusOnce`/`backupRunOnce` routes).
 The QML plugin talks only to `omahab-clientd` and stores no server or provider secrets.
 
 ### 21.4 Tailscale checks

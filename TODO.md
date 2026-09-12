@@ -2,7 +2,7 @@
 
 Generated 2026-08-21 from the DESIGN.md ↔ code gap audit (~350 discrete items across §1–§24).
 Pruned 2026-09-01: P0, P1-1, P1-2, P1-4, P1-5 (emitters+RTO), P1-6, P2/sqlc Wave A, P2/once patches 1–6,
-UX Trust, and TUI verified as implemented and removed. Only open items remain.
+UX Trust, and TUI verified as implemented and removed. Pruned 2026-09-12: P1-3 (knowledge UI: index options, pinned-model metadata, consent dialog in `web/src/views/knowledge.tsx`). Only open items remain.
 NixOS port 2026-09-02: Debian installer path deleted; host is a declarative
 NixOS closure (flake + nix/module.nix + nix/apps.nix). Ubuntu/Debian host
 support is retired — the intentional-deviation note below is obsolete.
@@ -16,14 +16,7 @@ Ordering: P1 closes specified-but-absent features, P2 adopts mandated tooling/up
 
 ## P1 — Specified features not yet implemented
 
-### P1-3. Knowledge (§15) — UI still missing (`web/src/views/administration.tsx:1` notes it)
-
-Control-plane routes `/api/v1/knowledge/*` and production `HTTPPaperlessClient` / `HTTPKarakeepClient`
-exist; only the web surface is missing:
-
-- [ ] Setup choice for local semantic indexing presenting exactly three options — Best English model / Best worldwide model / Full-text only — with no locale inference.
-- [ ] Render pinned-model metadata (model name, license, download size, expected memory) from `pinned_models.json` via API + UI.
-- [ ] Summarization consent dialog: show provider, require informed choice before remote document summarization (consent table + checks exist; no UI).
+(No open P1 items; P1-3 was verified implemented and pruned — see header.)
 
 ---
 
