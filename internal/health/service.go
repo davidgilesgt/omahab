@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -596,26 +597,43 @@ func componentToEventType(component string) string {
 	}
 }
 
-var sensitiveTokens = []string{"token", "secret", "password", "key", "auth", "credential", "private", "hmac", "bearer"}
+// redactPairRe matches credential key/value pairs such as `token=abc`,
+// `api_key: xyz` or `password="s3cret"`, redacting only the value so the
+// surrounding prose stays readable.
+var redactPairRe = regexp.MustCompile(`(?i)\b(api[_-]?key|tunnel[_-]?token|auth[_-]?token|secret|password|passwd|pwd|credentials?|bearer|hmac|token|auth|key)\s*([:=])\s*("[^"]*"|'[^']*'|[^\s,;]+)`)
 
-// RedactDetail sanitizes probe and setup details by replacing credential-keyword
-// matches with [REDACTED] and capping length at 200 characters.
+// redactSpacedRe matches space-separated `password <value>` / `secret <value>`
+// error-string forms (no `:`/`=`). The 20+ char value threshold keeps prose
+// like "token username mismatch" or "key exported" intact; only high-signal
+// keywords participate so generic words never trigger on bare spaces.
+var redactSpacedRe = regexp.MustCompile(`(?i)\b(password|passwd|pwd|secret|api[_-]?key|auth[_-]?token|tunnel[_-]?token)\s+([A-Za-z0-9_~+\-/=.]{20,})`)
+
+// redactBareTokenRe matches bare long secret-ish blobs (40+ chars without
+// whitespace): JWT segments, base64 tokens, long hex digests. The threshold
+// keeps short human words and IDs (e.g. 26-char ULIDs) intact.
+var redactBareTokenRe = regexp.MustCompile(`[A-Za-z0-9_+\-=]{40,}`)
+
+// redactBearerRe matches the `Bearer <token>` authorization header form where
+// the value is space-separated rather than `:`/`=`-separated. Dots are
+// included so a whole JWT is consumed, not just its first segment.
+var redactBearerRe = regexp.MustCompile(`(?i)\b(bearer)\s+([A-Za-z0-9_~+\-/=.]{8,})`)
+
+// RedactDetail sanitizes probe and setup details by redacting credential
+// values (key/secret/password/token/auth/credential/bearer pairs and bare
+// long secret-ish tokens) while keeping human prose intact, and capping
+// length at 200 characters.
 func RedactDetail(s string) string {
 	if s == "" {
 		return s
 	}
-	low := strings.ToLower(s)
-	for _, tok := range sensitiveTokens {
-		if strings.Contains(low, tok) {
-			return "[REDACTED]"
-		}
+	out := redactPairRe.ReplaceAllString(s, `$1$2[REDACTED]`)
+	out = redactSpacedRe.ReplaceAllString(out, `$1 [REDACTED]`)
+	out = redactBearerRe.ReplaceAllString(out, `$1 [REDACTED]`)
+	out = redactBareTokenRe.ReplaceAllString(out, `[REDACTED]`)
+	if len(out) > 200 {
+		return out[:200] + "...[TRUNCATED]"
 	}
-	// Also redact long base64-like strings > 40 chars without spaces
-	// To avoid leaking secrets in detail
-	if len(s) > 200 {
-		return s[:200] + "...[TRUNCATED]"
-	}
-	return s
+	return out
 }
 
 func formatDuration(d time.Duration) string {

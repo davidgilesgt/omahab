@@ -411,13 +411,20 @@ func (b *Backend) setupPhaseTunnel(ctx context.Context) error {
 	if creator == nil {
 		return fmt.Errorf("tunnel: failed to create tunnel client")
 	}
-	id, connectorToken, err := creator.EnsureTunnel(ctx, "omahab")
+	ensureWithTimeout := func(name string) (string, string, error) {
+		// Belt-and-suspenders with the EnsureTunnel-internal timeout: a hung
+		// Cloudflare token GET must not stall the 5-minute reconciler.
+		tctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+		return creator.EnsureTunnel(tctx, name)
+	}
+	id, connectorToken, err := ensureWithTimeout("omahab")
 	if err != nil && errors.Is(err, store.ErrConflict) {
 		fallback := "omahab"
 		if inst, ierr := b.store.Instance(ctx); ierr == nil {
 			fallback = tunnelFallbackName(string(inst.ID))
 		}
-		id, connectorToken, err = creator.EnsureTunnel(ctx, fallback)
+		id, connectorToken, err = ensureWithTimeout(fallback)
 	}
 	if err != nil {
 		return fmt.Errorf("ensure tunnel: %w", err)

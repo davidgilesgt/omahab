@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 )
@@ -148,8 +149,16 @@ func (l Loader) Ensure() ([32]byte, error) {
 	if l.Path == "" {
 		return [32]byte{}, fmt.Errorf("%w: master key path is required", ErrInvalidMasterKey)
 	}
-	if _, err := os.Stat(l.Path); err == nil {
-		return l.Load()
+	if fi, err := os.Stat(l.Path); err == nil {
+		if fi.Size() == 0 {
+			// A 0-byte file carries no key material (crashed write, bad
+			// volume init): treat it as missing and fall through to the
+			// root-gated creation path below instead of failing closed.
+			// Non-empty but wrong-sized files still fail closed via Load.
+			log.Printf("secrets: master key at %s is empty, regenerating", l.Path)
+		} else {
+			return l.Load()
+		}
 	} else if !os.IsNotExist(err) {
 		return [32]byte{}, fmt.Errorf("%w: stat master key: %w", ErrInvalidMasterKey, err)
 	}

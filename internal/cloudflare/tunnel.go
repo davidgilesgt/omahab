@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	cloudflare "github.com/cloudflare/cloudflare-go/v2"
 	"github.com/cloudflare/cloudflare-go/v2/option"
@@ -116,6 +117,11 @@ func (c *tunnelClient) EnsureTunnel(ctx context.Context, name string) (string, s
 	if c.client == nil {
 		return "", "", fmt.Errorf("cloudflare: tunnel client not configured")
 	}
+	// Bound the whole list → create → token-fetch chain so a hung
+	// Cloudflare token GET cannot stall the 5-minute setup reconciler.
+	// The caller's deadline still applies if it is earlier.
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
 
 	matches, err := c.listTunnels(ctx, name)
 	if err != nil {
