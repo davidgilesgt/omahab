@@ -108,7 +108,7 @@ func (b *Backend) ConfirmRecoveryKey(ctx context.Context, fingerprint string, ch
 	}
 	recoveryMu.Unlock()
 	if !ok {
-		return fmt.Errorf("%w: recovery phrase expired or not found; generate again", store.ErrValidation)
+		return fmt.Errorf("%w: recovery phrase expired or not found; generate again", store.ErrNotFound)
 	}
 	for idx, word := range challenge {
 		if idx < 0 || idx >= 24 {
@@ -142,7 +142,7 @@ func (b *Backend) ConfirmRecoveryKeySavedAck(ctx context.Context, fingerprint st
 	seed := pend.seed
 	recoveryMu.Unlock()
 	if !ok {
-		return fmt.Errorf("%w: recovery phrase expired or not found; generate again", store.ErrValidation)
+		return fmt.Errorf("%w: recovery phrase expired or not found; generate again", store.ErrNotFound)
 	}
 	return b.persistRecoveryKit(ctx, fingerprint, seed)
 }

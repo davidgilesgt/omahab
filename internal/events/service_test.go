@@ -64,3 +64,33 @@ func TestMarkAllReadByTypeRejectsUnknown(t *testing.T) {
 		t.Fatal("expected validation error")
 	}
 }
+
+func TestPublishAcceptsAppAndServiceTypes(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	if err := st.Migrate(ctx, store.Migrations()...); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Migrate(ctx, Migrations()...); err != nil {
+		t.Fatal(err)
+	}
+	svc := New(st.DB(), nil)
+	types := []string{
+		"app.installed", "app.install_failed",
+		"app.started", "app.start_failed",
+		"app.stopped", "app.stop_failed",
+		"app.updated", "app.update_failed",
+		"app.rolled_back", "app.rollback_failed",
+		"app.uninstalled", "app.uninstall_failed",
+		"service.healthy",
+	}
+	for _, typ := range types {
+		if _, err := svc.Publish(ctx, PublishInput{Type: typ, Severity: "info", Message: "test " + typ}); err != nil {
+			t.Fatalf("Publish(%q) rejected: %v", typ, err)
+		}
+	}
+}

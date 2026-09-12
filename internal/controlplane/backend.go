@@ -848,6 +848,15 @@ func translateError(err error) error {
 	if errors.Is(err, projects.ErrDeployInProgress) {
 		return fmt.Errorf("%w: %v", apitypes.ErrConflict, err)
 	}
+	if errors.Is(err, projects.ErrNoRollbackTarget) {
+		return fmt.Errorf("%w: %v", apitypes.ErrConflict, err)
+	}
+	if errors.Is(err, projects.ErrDeployFailed) || errors.Is(err, projects.ErrUndeployFailed) {
+		return fmt.Errorf("%w: %v", apitypes.ErrConflict, err)
+	}
+	if errors.Is(err, projects.ErrReleaseMismatch) {
+		return fmt.Errorf("%w: %v", apitypes.ErrConflict, err)
+	}
 	if errors.Is(err, projects.ErrUnauthorized) {
 		return fmt.Errorf("%w: %v", apitypes.ErrUnauthorized, err)
 	}

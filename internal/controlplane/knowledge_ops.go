@@ -115,7 +115,13 @@ func (b *Backend) KnowledgePinnedModels(ctx context.Context) ([]knowledge.ModelI
 	}
 	pinned, err := knowledge.PinnedModels()
 	if err != nil {
-		return nil, translateError(err)
+		// Display metadata only: a missing/unreadable backend file must
+		// not 500 /api/v1/knowledge/pinned-models. Worst case the UI
+		// shows "metadata not available yet" per model alias.
+		return []knowledge.ModelInfo{}, nil
+	}
+	if pinned == nil {
+		return []knowledge.ModelInfo{}, nil
 	}
 	return pinned, nil
 }

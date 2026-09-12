@@ -113,7 +113,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     function handleUnauthorized() {
-      setAuthError("Your session has expired or the token is invalid. Please sign in again.");
+      let enrolled = false;
+      try {
+        enrolled = sessionStorage.getItem(TOKEN_KEY) !== null;
+      } catch {}
+      setAuthError(enrolled
+        ? "Your session has expired or the token is invalid. Please sign in again."
+        : "This device is not set up yet. Complete setup first, then sign in.");
       signOut();
     }
     window.addEventListener("omahab:unauthorized", handleUnauthorized);
@@ -183,6 +189,7 @@ export function LoginPage() {
         <h1 id="login-title">Sign in to Omahab</h1>
         <p className="muted">Use the bearer token issued by your Omahab administrator. It remains in this browser tab only.</p>
         {displayError && <p className="inline-error" role="alert">{displayError}</p>}
+        <p className="muted">Find it on the host via <code className="mono">sudo cat /var/lib/omahab/api.token</code>, or reuse the admin token at <code className="mono">~/.config/omahab/token</code>.</p>
         <form onSubmit={submit} className="form-stack">
           <label>
             Access token

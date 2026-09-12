@@ -25,10 +25,23 @@ type EventSink interface {
 // Allowed event types (DESIGN §20). Validation rejects unknown types to keep
 // the inbox normalized and prevent unbounded growth.
 var allowedTypes = map[string]bool{
+	"app.installed":                true,
+	"app.install_failed":           true,
+	"app.started":                  true,
+	"app.start_failed":             true,
+	"app.stopped":                  true,
+	"app.stop_failed":              true,
+	"app.updated":                  true,
+	"app.update_failed":            true,
+	"app.rolled_back":              true,
+	"app.rollback_failed":          true,
+	"app.uninstalled":              true,
+	"app.uninstall_failed":         true,
 	"backup.failed":                true,
 	"backup.restored":              true,
 	"backup.created":               true,
 	"host.disk_low":                true,
+	"service.healthy":              true,
 	"service.unhealthy":            true,
 	"service.update_available":     true,
 	"ci.failed":                    true,
@@ -62,8 +75,18 @@ func isAllowedType(t string) bool {
 	if allowedTypes[t] {
 		return true
 	}
-	if strings.HasPrefix(t, "workspace.") {
-		return true
+	// Bounded subsystem namespaces with structured emitters. Prefix
+	// allow keeps the inbox normalized while ending silent drops of
+	// known-subsystem events. Truly unknown namespaces still fail closed.
+	for _, p := range []string{
+		"app.", "service.", "deployment.", "scm.", "knowledge.",
+		"provider.", "backups.", "backup.", "exposure.", "gateway.",
+		"environments.", "bootstrap.", "syncthing.", "project.",
+		"workspace.",
+	} {
+		if strings.HasPrefix(t, p) {
+			return true
+		}
 	}
 	return false
 }

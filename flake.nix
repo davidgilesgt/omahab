@@ -104,8 +104,14 @@ EOF
           vendorHash = "sha256-FUZb9WWkYKQR+ZIxNvUmjJMw07LOZw66EhO7Z3XSdVo=";
           subPackages = [ "cmd/omahab-clientd" ];
           env.CGO_ENABLED = "0";
-          env.GOOS = goos;
-          env.GOARCH = goarch;
+          # NOTE: env.GOOS/env.GOARCH do NOT work here — nixpkgs' go setup-hook
+          # re-exports GOOS/GOARCH from the host stdenv triple after env attrs
+          # are set, so darwin targets silently built as linux ELF. Exporting
+          # in preBuild runs after the hook and wins.
+          preBuild = ''
+            export GOOS=${goos}
+            export GOARCH=${goarch}
+          '';
           ldflags = ldflagsBase;
         };
         omahab-clientd-linux-amd64 = mkClientd { goos = "linux"; goarch = "amd64"; };

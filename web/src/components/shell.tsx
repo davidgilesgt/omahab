@@ -24,7 +24,7 @@ import { ThemePicker, THEMES } from "./themePicker";
 const NAVIGATION: ReadonlyArray<readonly [string, string, LucideIcon, string]> = [
   ["/", "Overview", Home, "Home overview"],
   ["/setup", "Setup", ListChecks, "Continue setup"],
-  ["/applications", "Services", LayoutGrid, "Platform services"],
+  ["/applications", "Applications", LayoutGrid, "Platform services"],
   ["/projects", "Projects", Rocket, "ONCE projects"],
   ["/backups", "Backups", Archive, "Backup status"],
   ["/events", "Inbox", Inbox, "Event inbox"],
@@ -37,25 +37,6 @@ const NAVIGATION: ReadonlyArray<readonly [string, string, LucideIcon, string]> =
   ["/ai", "AI", Sparkles, "Assistant knowledge"],
   ["/doctor", "Doctor", Stethoscope, "Diagnostics"],
 ];
-
-function aiDashboardUrl(): string {
-  if (typeof window === "undefined") return "https://ai.example.com";
-  const host = window.location.hostname;
-  if (!host || host === "localhost" || host === "127.0.0.1") return "https://ai.example.com";
-  const parts = host.split(".");
-  if (parts.length < 2) return "https://" + host;
-  // Replace first label with ai, or prepend ai if host looks like apex
-  if (parts[0] === "ai") return window.location.protocol + "//" + host;
-  // If host starts with www or omahab etc, replace first label with ai
-  // For e.g., omahab.example.com -> ai.example.com ; dashboard.example.com -> ai.example.com
-  // Keep suffix from second label onward if first label is not ai
-  // Common case: <something>.<domain>.<tld> -> ai.<domain>.<tld>
-  if (parts.length >= 3) {
-    return window.location.protocol + "//ai." + parts.slice(1).join(".");
-  }
-  // apex domain like example.com -> ai.example.com
-  return window.location.protocol + "//ai." + host;
-}
 
 export function AppShell({ children, basePath = "" }: { children: ReactNode; basePath?: string }) {
   const { client, signOut } = useAuth();
@@ -153,10 +134,6 @@ export function AppShell({ children, basePath = "" }: { children: ReactNode; bas
               {to.endsWith("/events") && unread > 0 && <span className="nav-badge" aria-label={`${unread} unread`}>{unread}</span>}
             </NavLink>
           ))}
-          <a href={aiDashboardUrl()} target="_blank" rel="noreferrer" className="nav-link" title="AI assistant (upstream Hermes dashboard)">
-            <Sparkles size={18} strokeWidth={1.75} aria-hidden className="nav-icon" />
-            <span>AI</span>
-          </a>
         </nav>
         <div className="sidebar-footer">
           <span className="privacy-indicator" aria-live="polite" title={unread > 0 ? `${unread} unread events` : "Private by default"}>

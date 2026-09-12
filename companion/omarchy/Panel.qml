@@ -46,10 +46,10 @@ Panel {
   property string newWorkspaceTitle: ""
   property string newWorkspaceProject: ""
 
-  readonly property var baseActions: [
-    { label: "Open AI", action: "open-ai", icon: "󰚩", requiresOnline: true },
+  readonly property var actions: [
+    { label: "Open AI", action: "ai.open", icon: "󰚩", requiresOnline: true },
     { label: "New workspace…", action: "workspace.new", icon: "󰆍", requiresOnline: true },
-    { label: "Open Omahab", action: "open-omahab", icon: "󰖟", requiresOnline: true },
+    { label: "Open Omahab", action: "dashboard.open", icon: "󰖟", requiresOnline: true },
     { label: "Sync tool variables", action: "environment.sync", icon: "󰑓", requiresOnline: true },
     { label: "Back up now", action: "backup.run", icon: "󰁯", requiresOnline: false },
     { label: "Diagnose Connection", action: "diagnose", icon: "󰒓", requiresOnline: false }

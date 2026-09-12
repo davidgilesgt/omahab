@@ -49,6 +49,13 @@ func (b *Backend) CreateProject(ctx context.Context, req apitypes.CreateProjectR
 	}
 	slug := strings.TrimSpace(req.Slug)
 	name := strings.TrimSpace(req.Name)
+	if slug == "" && name != "" {
+		derived, derr := projects.DeriveSlug(name)
+		if derr != nil {
+			return domain.Project{}, translateError(derr)
+		}
+		slug = derived
+	}
 	if name == "" {
 		name = slug
 	}

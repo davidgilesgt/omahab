@@ -84,9 +84,11 @@ function IndexSetupOptionsBlock() {
     onError: (err: unknown) => toast.error(err instanceof Error ? err.message : "Could not save choice"),
   });
 
-  if (optionsQuery.isLoading || modelsQuery.isLoading || choiceQuery.isLoading) return <LoadingState label="Loading index options" />;
+  // Pinned models are display metadata only: their failure must not take
+  // down the whole card. Index options + consent render regardless; a
+  // models failure surfaces as an inline notice scoped to this card.
+  if (optionsQuery.isLoading || choiceQuery.isLoading) return <LoadingState label="Loading index options" />;
   if (optionsQuery.isError) return <ErrorState error={optionsQuery.error} retry={() => void optionsQuery.refetch()} />;
-  if (modelsQuery.isError) return <ErrorState error={modelsQuery.error} retry={() => void modelsQuery.refetch()} />;
   if (choiceQuery.isError) return <ErrorState error={choiceQuery.error} retry={() => void choiceQuery.refetch()} />;
 
   const options = (optionsQuery.data ?? []) as IndexSetupOption[];
@@ -103,6 +105,15 @@ function IndexSetupOptionsBlock() {
 
   return (
     <div className="form-stack">
+      {modelsQuery.isError ? (
+        <p className="inline-error" role="alert">
+          Model details unavailable{modelsQuery.error instanceof Error ? `: ${modelsQuery.error.message}` : ""}{" "}
+          <button type="button" className="button secondary" onClick={() => void modelsQuery.refetch()}>
+            Retry
+          </button>
+        </p>
+      ) : null}
+      {modelsQuery.isLoading ? <p className="muted">Loading model details…</p> : null}
       <div className="resource-list inset" role="radiogroup" aria-label="Semantic index setup">
         {options.map((option) => {
           const alias = option.model_alias ?? null;

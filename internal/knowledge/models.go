@@ -2,12 +2,46 @@ package knowledge
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 )
 
+// embeddedPinnedModelsJSON mirrors
+// workers/embedding/pinned_models.json.example. go:embed patterns cannot
+// reference parent directories, so the example content is duplicated here
+// as the final fallback for production (no cwd, no env). models_test.go
+// asserts it stays in sync with the on-disk example.
+const embeddedPinnedModelsJSON = `{
+  "models": {
+    "omahab-embed-english": {
+      "model_id": "nomic-ai/nomic-embed-text-v1.5",
+      "revision": "e5a65b3c5f5a61234f1234567890abcd",
+      "artifact_path": "/var/lib/omahab/models/nomic-embed-text-v1.5",
+      "artifact_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "dimensions": 768,
+      "max_sequence_length": 8192,
+      "license": "Apache-2.0",
+      "size_bytes": 548000000,
+      "expected_memory_mb": 512
+    },
+    "omahab-embed-worldwide": {
+      "model_id": "Qwen/Qwen3-Embedding-0.6B",
+      "revision": "pinned-revision-abc123",
+      "artifact_path": "/var/lib/omahab/models/qwen3-embedding-0.6b",
+      "artifact_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "dimensions": 1024,
+      "max_sequence_length": 8192,
+      "license": "Apache-2.0",
+      "size_bytes": 1200000000,
+      "expected_memory_mb": 1024
+    }
+  },
+  "models_base_dir": "/var/lib/omahab/models",
+  "allow_test_adapter": false
+}`
+
+var embeddedPinnedModels = []byte(embeddedPinnedModelsJSON)
 // ModelInfo describes a pinned embedding model for UI display.
 type ModelInfo struct {
 	Alias              string `json:"alias"`
@@ -43,49 +77,62 @@ type pinnedFile struct {
 //  1. $PINNED_MODELS_PATH / $EMBEDDING_WORKER_CONFIG if set
 //  2. workers/embedding/pinned_models.json relative to cwd
 //  3. workers/embedding/pinned_models.json.example fallback (repo always has this)
+//  4. compiled-in copy of the example (final fallback: production has no
+//     cwd and no env, so this never returns 'not found')
 //
 // The example file is used in tests and when no real pinned_models.json is
-// present. Callers should treat the result as display metadata; the Python
-// worker is the source of truth for runtime artifact validation.
+// present. An embedded parse that yields zero models returns an empty slice
+// with a nil error — display metadata may be empty. Callers should treat the
+// result as display metadata; the Python worker is the source of truth for
+// runtime artifact validation.
 func PinnedModels() ([]ModelInfo, error) {
-	candidates := pinnedCandidates()
-	var lastErr error
-	for _, p := range candidates {
+	for _, p := range pinnedCandidates() {
 		b, err := os.ReadFile(p)
 		if err != nil {
-			lastErr = err
 			continue
 		}
-		var pf pinnedFile
-		if err := json.Unmarshal(b, &pf); err != nil {
-			lastErr = fmt.Errorf("%s: %w", p, err)
+		out, err := pinnedFromBytes(b)
+		if err != nil {
 			continue
 		}
-		var out []ModelInfo
-		for alias, m := range pf.Models {
-			out = append(out, ModelInfo{
-				Alias:             alias,
-				Name:              alias,
-				ModelID:           m.ModelID,
-				License:           m.License,
-				SizeBytes:         m.SizeBytes,
-				ExpectedMemoryMB:  m.ExpectedMemoryMB,
-				Dimensions:        m.Dimensions,
-				MaxSequenceLength: m.MaxSequenceLength,
-				ArtifactPath:      m.ArtifactPath,
-			})
-		}
-		sort.Slice(out, func(i, j int) bool { return out[i].Alias < out[j].Alias })
 		if len(out) == 0 {
-			lastErr = fmt.Errorf("%s: no models", p)
 			continue
 		}
 		return out, nil
 	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("no candidate")
+	// Final fallback: embedded example so production (no cwd, no env)
+	// never returns 'not found'. Display metadata may be empty: zero
+	// models (or even unparseable bytes, defensively) yield an empty
+	// slice with a nil error rather than a hard failure.
+	if out, err := pinnedFromBytes(embeddedPinnedModels); err == nil {
+		if out == nil {
+			out = []ModelInfo{}
+		}
+		return out, nil
 	}
-	return nil, fmt.Errorf("pinned models: not found (tried %v): %w", candidates, lastErr)
+	return []ModelInfo{}, nil
+}
+func pinnedFromBytes(b []byte) ([]ModelInfo, error) {
+	var pf pinnedFile
+	if err := json.Unmarshal(b, &pf); err != nil {
+		return nil, err
+	}
+	out := []ModelInfo{}
+	for alias, m := range pf.Models {
+		out = append(out, ModelInfo{
+			Alias:             alias,
+			Name:              alias,
+			ModelID:           m.ModelID,
+			License:           m.License,
+			SizeBytes:         m.SizeBytes,
+			ExpectedMemoryMB:  m.ExpectedMemoryMB,
+			Dimensions:        m.Dimensions,
+			MaxSequenceLength: m.MaxSequenceLength,
+			ArtifactPath:      m.ArtifactPath,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Alias < out[j].Alias })
+	return out, nil
 }
 func pinnedCandidates() []string {
 	var out []string
@@ -130,23 +177,5 @@ func PinnedModelsFromPath(path string) ([]ModelInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	var pf pinnedFile
-	if err := json.Unmarshal(b, &pf); err != nil {
-		return nil, err
-	}
-	var out []ModelInfo
-	for alias, m := range pf.Models {
-		out = append(out, ModelInfo{
-			Alias:            alias,
-			Name:             alias,
-			ModelID:          m.ModelID,
-			License:          m.License,
-			SizeBytes:        m.SizeBytes,
-			ExpectedMemoryMB: m.ExpectedMemoryMB,
-			Dimensions:       m.Dimensions,
-			ArtifactPath:     m.ArtifactPath,
-		})
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Alias < out[j].Alias })
-	return out, nil
+	return pinnedFromBytes(b)
 }

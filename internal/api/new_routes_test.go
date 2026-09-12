@@ -58,9 +58,9 @@ func TestReleaseTokenIssueVerifyRejectWrongProject(t *testing.T) {
 	req2.Header.Set("Authorization", "Bearer "+issue.Token)
 	rec2 := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec2, req2)
-	// With real backend and no omahab-once binary, this may return 400/500 instead of 201, but it must not be 401.
-	if rec2.Code != http.StatusCreated && rec2.Code != http.StatusBadRequest && rec2.Code != http.StatusInternalServerError {
-		t.Fatalf("release with correct token status %d, body %s, want 201, 400, or 500", rec2.Code, rec2.Body.String())
+	// With real backend and no omahab-once binary, this may return 400/409/500 instead of 201, but it must not be 401.
+	if rec2.Code != http.StatusCreated && rec2.Code != http.StatusBadRequest && rec2.Code != http.StatusConflict && rec2.Code != http.StatusInternalServerError {
+		t.Fatalf("release with correct token status %d, body %s, want 201, 400, 409, or 500", rec2.Code, rec2.Body.String())
 	}
 	if rec2.Code == http.StatusUnauthorized {
 		t.Fatalf("correct token should not be 401, got %d", rec2.Code)
