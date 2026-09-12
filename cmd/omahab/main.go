@@ -23,6 +23,7 @@ import (
 	"github.com/omahab/omahab/internal/apiclient"
 	"github.com/omahab/omahab/internal/apps"
 	"github.com/omahab/omahab/internal/domain"
+	"github.com/omahab/omahab/internal/netenv"
 	"github.com/omahab/omahab/internal/tui"
 )
 
@@ -277,7 +278,7 @@ func hintForError(err error) string {
 		return ""
 	}
 	// Pre-setup: bootstrap not yet complete -> guide to WebUI claim URL at LAN IP
-	// instead of dead-ending at login. Reuses console.go lanIPv4() pattern.
+	// instead of dead-ending at login. Empty on vps placement (tailscale-only).
 	bootstrapHint := ""
 	if isBootstrapPending() {
 		if url := bootstrapClaimURL(); url != "" {
@@ -523,7 +524,7 @@ func gatherWelcomeSnapshot(server string) welcomeSnapshot {
 	snap := welcomeSnapshot{Server: server}
 	snap.IsRemote = strings.TrimSpace(flagServer) != ""
 	// LAN discovery
-	snap.LANIP = lanIPv4()
+	snap.LANIP = netenv.LANIPv4()
 	h, _ := os.Hostname()
 	short := h
 	if idx := strings.Index(short, "."); idx != -1 {
@@ -663,9 +664,13 @@ func isBootstrapPending() bool {
 // bootstrapClaimURL returns the WebUI claim URL at the device LAN IP
 // (http://<lan-ip>:8484) for first-boot guidance, falling back to
 // http://<hostname>.local:8484 or empty when no address available.
-// Reuses console.go lanIPv4() pattern; never returns 127.0.0.1.
+// On vps placement there is no LAN URL: it returns "" so callers point
+// at SSH + `tailscale up` instead. Never returns 127.0.0.1.
 func bootstrapClaimURL() string {
-	if ip := lanIPv4(); ip != "" {
+	if consolePlacement() == "vps" {
+		return ""
+	}
+	if ip := netenv.LANIPv4(); ip != "" {
 		return fmt.Sprintf("http://%s:8484", ip)
 	}
 	if h, err := os.Hostname(); err == nil && strings.TrimSpace(h) != "" {

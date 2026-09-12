@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/omahab/omahab/internal/netenv"
 )
 
 // bootstrapDonePath is the sentinel file whose absence marks first boot.
@@ -109,6 +112,12 @@ func (g *BootstrapGate) Regenerate() (string, error) {
 // code is consumed (single-use). On per-IP rate-limit exhaustion it
 // returns a cooldown error without rotating the code; on global
 // exhaustion it rotates and propagates persistence failures.
+//
+// LAN exception: when placement is "lan" (OMAHAB_PLACEMENT, default lan),
+// an empty code from a LAN source address (RFC1918/ULA/link-local/loopback)
+// claims successfully and consumes the single-use code (first-claimer
+// wins). Every other mismatch — including empty codes from non-LAN sources
+// — fails closed with rate-limit accounting.
 func (g *BootstrapGate) Claim(code, sourceIP string) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -135,6 +144,12 @@ func (g *BootstrapGate) Claim(code, sourceIP string) error {
 		}
 		return fmt.Errorf("too many attempts; a new code has been generated")
 	}
+	if strings.TrimSpace(code) == "" && Placement() == "lan" && netenv.IsLANAddr(sourceIP) {
+		// LAN claim: consume the single-use code.
+		g.codeHash = nil
+		_ = os.Remove(bootstrapCodePath)
+		return nil
+	}
 	sum := sha256.Sum256([]byte(trimNewline(code)))
 	if subtleConstantTimeCompare(sum[:], g.codeHash) != 1 {
 		return fmt.Errorf("invalid code")
@@ -143,6 +158,16 @@ func (g *BootstrapGate) Claim(code, sourceIP string) error {
 	g.codeHash = nil
 	_ = os.Remove(bootstrapCodePath)
 	return nil
+}
+
+// Placement returns the daemon placement: "lan" or "vps".
+// It reads OMAHAB_PLACEMENT (same pattern as OMAHAB_LISTEN); unset or
+// anything besides "vps" means "lan" — the LAN stays open by default.
+func Placement() string {
+	if strings.TrimSpace(strings.ToLower(os.Getenv("OMAHAB_PLACEMENT"))) == "vps" {
+		return "vps"
+	}
+	return "lan"
 }
 
 // Complete writes the bootstrap-done sentinel.

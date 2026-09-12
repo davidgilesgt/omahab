@@ -93,6 +93,7 @@ func run() error {
 	dlDir := strings.TrimSpace(os.Getenv("OMAHAB_DL_DIR"))
 	srv, err := api.New(api.Config{
 		Backend:          backend,
+		Environments:     backend.Environments(),
 		Version:          version,
 		BearerToken:      token,
 		MCPToken:         mcpToken,

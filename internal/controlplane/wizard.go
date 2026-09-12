@@ -119,7 +119,40 @@ func (b *Backend) ConfirmRecoveryKey(ctx context.Context, fingerprint string, ch
 			return fmt.Errorf("%w: challenge word mismatch at position %d", store.ErrValidation, idx)
 		}
 	}
-	recoveryKey := secrets.DeriveRecoveryKey(pend.seed)
+	return b.persistRecoveryKit(ctx, fingerprint, pend.seed)
+}
+
+// ConfirmRecoveryKeySavedAck persists recovery.kit for the new client ritual:
+// the user ticks an explicit "I saved the phrase" ack and the client has
+// already verified a paste-back locally. No challenge words are sent; the
+// pending seed (held in memory for 15 minutes after generate) proves the
+// phrase was freshly generated in this session. Back-compat: the 3-word
+// challenge path via ConfirmRecoveryKey keeps working unchanged.
+func (b *Backend) ConfirmRecoveryKeySavedAck(ctx context.Context, fingerprint string) error {
+	fingerprint = strings.TrimSpace(strings.ToLower(fingerprint))
+	if fingerprint == "" {
+		return fmt.Errorf("%w: fingerprint is required", store.ErrValidation)
+	}
+	recoveryMu.Lock()
+	pend, ok := recoveryPend[fingerprint]
+	if ok && time.Now().After(pend.expires) {
+		delete(recoveryPend, fingerprint)
+		ok = false
+	}
+	seed := pend.seed
+	recoveryMu.Unlock()
+	if !ok {
+		return fmt.Errorf("%w: recovery phrase expired or not found; generate again", store.ErrValidation)
+	}
+	return b.persistRecoveryKit(ctx, fingerprint, seed)
+}
+
+// persistRecoveryKit wraps the master key with the derived recovery key and
+// persists recovery.kit (0600) plus the platform-app/recovery_fingerprint
+// secret. It consumes the pending entry and caches the seed for Hetzner
+// backup password derivation shortly after confirm.
+func (b *Backend) persistRecoveryKit(ctx context.Context, fingerprint string, seed [32]byte) error {
+	recoveryKey := secrets.DeriveRecoveryKey(seed)
 	wrapped := secrets.WrapMasterKey(b.masterKey, recoveryKey)
 	kit := struct {
 		Version       int    `json:"version"`
@@ -154,7 +187,7 @@ func (b *Backend) ConfirmRecoveryKey(ctx context.Context, fingerprint string, ch
 	}
 	recoveryMu.Lock()
 	// Cache seed for Hetzner backup password derivation shortly after confirm.
-	seedCopy := pend.seed
+	seedCopy := seed
 	lastConfirmedSeed = &seedCopy
 	lastConfirmedSeedTime = time.Now()
 	delete(recoveryPend, fingerprint)

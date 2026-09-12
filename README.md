@@ -215,12 +215,25 @@ nix build .#image-iso    # bootable installer ISO (console wizard on first boot)
 
 ## Installing to disk
 
-Boot the ISO and run as root (the script is also on the ISO as
-`omahab-install-disk`):
+Boot the ISO and run the installer wizard as root:
 
 ```sh
-sudo omahab-install-disk --disk /dev/disk/by-id/ata-SSD --yes
-sudo omahab-install-disk --disk /dev/sda --disk /dev/sdb --hostname haven --yes
+sudo omahab install
+```
+
+The wizard walks connection, placement, disks, administrator account, and
+SSH access, then requires an explicit ERASE confirmation at Review before
+anything is erased.
+
+Advanced: invoke the backend directly (it is also on the ISO as
+`omahab-install-disk`). The backend requires `--username` and
+`--password-hash-file` for any real install, so generate a yescrypt hash
+first (0600, never on the command line):
+
+```sh
+mkpasswd --method=yescrypt > /run/pwhash
+chmod 0600 /run/pwhash
+sudo omahab-install-disk --disk /dev/disk/by-id/ata-SSD --hostname haven --username admin --password-hash-file /run/pwhash --yes
 ```
 
 The first `--disk` is the system disk (GPT: 1 GiB ESP + rest root ext4);

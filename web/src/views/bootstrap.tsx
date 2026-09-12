@@ -6,7 +6,6 @@ import { CopyButton } from "../components/copyButton";
 import { useToast } from "../components/toast";
 import { useAuth } from "../auth";
 import { ApiClient } from "../api/client";
-import { useNavigate } from "react-router-dom";
 
 const STEPS: StepDef[] = [
   { id: "claim", label: "Claim" },
@@ -51,10 +50,10 @@ async function bootstrapFetch(path: string, token: string | null, body?: unknown
 export function BootstrapPage() {
   const toast = useToast();
   const auth = useAuth();
-  const navigate = useNavigate();
   const [step, setStep] = useState<Step>("claim");
   const [code, setCode] = useState("");
   const [codeError, setCodeError] = useState<string | null>(null);
+  const [lanClaim, setLanClaim] = useState(false);
   const [busy, setBusy] = useState(false);
   const [validating, setValidating] = useState(false);
   const pollRef = useRef<number | null>(null);
@@ -113,6 +112,22 @@ export function BootstrapPage() {
         } catch {}
       }
     } catch {}
+  }, []);
+  // Home-LAN skip: the server reports whether an empty code claims from here.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const resp = await fetch("/api/bootstrap/status");
+        const data = (await resp.json().catch(() => ({}))) as { lan_claim?: unknown };
+        if (!cancelled) setLanClaim(data.lan_claim === true);
+      } catch {
+        if (!cancelled) setLanClaim(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Refresh-resumable: if we have a stored token, validate via authenticated SSH-key read
@@ -198,6 +213,29 @@ export function BootstrapPage() {
     };
   }, [step, token]);
 
+  function claimToken(data: Record<string, unknown>): string | null {
+    if ("token" in data && typeof data.token === "string") return data.token;
+    return null;
+  }
+
+  async function submitLANClaim() {
+    setCodeError(null);
+    setBusy(true);
+    try {
+      const data = await bootstrapFetch("claim", null, { code: "" });
+      const t = claimToken(data);
+      if (!t) throw new Error("no token in response");
+      auth.signIn(t);
+      setStep("access");
+      toast.success("Claimed");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "claim failed";
+      setCodeError(msg);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function submitCode(e: FormEvent) {
     e.preventDefault();
     setCodeError(null);
@@ -270,7 +308,7 @@ export function BootstrapPage() {
     setTsStarting(true);
     setTsError(null);
     try {
-      const data = await bootstrapFetch("tailscale/up", token, undefined, ctrl.signal);
+      const data = await bootstrapFetch("tailscale/up", token, {}, ctrl.signal);
       if (tsReqRef.current !== req) return; // superseded by "Set up later"
       const url = typeof data.auth_url === "string" ? data.auth_url : "";
       setTsAuthUrl(url || null);
@@ -334,7 +372,7 @@ export function BootstrapPage() {
     setBusy(true);
     setFinishError(null);
     try {
-      await bootstrapFetch("complete", token);
+      await bootstrapFetch("complete", token, {});
       setStep("ready");
       toast.success("Setup complete");
     } catch (err) {
@@ -406,11 +444,12 @@ export function BootstrapPage() {
       <div className="onboarding-grid-bg" aria-hidden />
       <div className="bootstrap-wrap">
       <PageHeader
-        eyebrow="Omahab"
         title={step === "claim" ? "Claim your server" : step === "access" ? "Secure access" : "Ready"}
         description={
           step === "claim"
-            ? "Enter the one-time code shown on the server console."
+            ? lanClaim
+              ? "This server is on your home network — claim directly, or enter the one-time code from the console."
+              : "Enter the one-time code shown on the server console."
             : step === "access"
               ? "Add SSH keys and optionally connect to your tailnet. You can finish without keys — password login remains over local console/SSH."
               : "Your control panel is ready at this address."
@@ -448,6 +487,11 @@ export function BootstrapPage() {
               <button className="button primary" type="submit" disabled={busy || validating}>
                 {busy ? "Claiming…" : validating ? "Checking…" : "Claim"}
               </button>
+              {lanClaim && (
+                <button className="button secondary" type="button" onClick={() => void submitLANClaim()} disabled={busy || validating}>
+                  Claim without code
+                </button>
+              )}
             </div>
             <p className="muted" style={{ fontSize: "0.85em", overflowWrap: "anywhere" }}>
               If you lost the tab, your browser session will resume while setup is incomplete. If you need a new code, run <code className="mono">sudo systemctl restart omahabd</code> on the host — this issues a new code only while setup is incomplete. Never delete <code className="mono">control.db</code>, <code className="mono">api.token</code> or <code className="mono">bootstrap-done</code> to fix access; after completion, sign in with the provisioned owner token.
@@ -644,7 +688,7 @@ export function BootstrapPage() {
             <p className="muted" style={{ fontSize: "0.9em", maxWidth: "36rem", overflowWrap: "anywhere" }}>
               Bundled apps can require domain/HTTPS configuration — check the dashboard for “Not configured” hints. Backups are not configured yet; set them up next.
             </p>
-            <button className="button primary" type="button" onClick={() => navigate("/")}>
+            <button className="button primary" type="button" onClick={() => window.location.assign("/")}>
               Open control panel
             </button>
           </div>

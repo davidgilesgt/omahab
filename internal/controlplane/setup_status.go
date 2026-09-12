@@ -623,7 +623,7 @@ func applySetupCheckMeta(c apitypes.SetupCheck) apitypes.SetupCheck {
 	return c
 }
 func orderSetupChecks(checks []apitypes.SetupCheck) []apitypes.SetupCheck {
-	order := []string{"domain", "cloudflare_dns", "tailscale", "recovery_key", "backups_configured", "admin_passkeys", "storage_configured", "tunnel", "dashboard_dns", "core_apps", "woodpecker_connection", "automatic_reconciliation", "recovery_tested"}
+	order := []string{"domain", "cloudflare_dns", "tailscale", "recovery_key", "admin_passkeys", "backups_configured", "storage_configured", "tunnel", "dashboard_dns", "core_apps", "woodpecker_connection", "automatic_reconciliation", "recovery_tested"}
 	byID := make(map[string]apitypes.SetupCheck, len(checks))
 	for _, c := range checks {
 		byID[c.ID] = c

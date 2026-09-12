@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -22,6 +21,7 @@ import (
 	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 
+	"github.com/omahab/omahab/internal/netenv"
 	"github.com/omahab/omahab/internal/tui"
 )
 const bootstrapCodePath = "/run/omahab/bootstrap-code"
@@ -174,7 +174,7 @@ type consoleSnapshot struct {
 
 func gatherConsoleSnapshot() consoleSnapshot {
 	snap := consoleSnapshot{}
-	snap.LANIP = lanIPv4()
+	snap.LANIP = netenv.LANIPv4()
 	h, _ := os.Hostname()
 	snap.Hostname = h
 	short := h
@@ -323,6 +323,13 @@ func renderConsoleSnapshot(w io.Writer, caps tui.Caps, width int, snap consoleSn
 		return
 	}
 	if snap.LANIP == "" {
+		if consolePlacement() == "vps" {
+			fmt.Fprintln(w, "  No LAN address (tailscale-only box)")
+			fmt.Fprintln(w, "")
+			fmt.Fprintln(w, "    SSH in and run: sudo tailscale up")
+			fmt.Fprintln(w, "    Then open the dashboard from a device on the same tailnet.")
+			return
+		}
 		fmt.Fprintln(w, "  Waiting for a network address")
 		fmt.Fprintln(w, "")
 		fmt.Fprintln(w, "    Run nmcli device status")
@@ -404,6 +411,10 @@ func findLoginPath() string {
 }
 
 func renderFirstBoot(w io.Writer, caps tui.Caps, ip, code string) {
+	if consolePlacement() == "vps" {
+		renderFirstBootVPS(w, caps, code)
+		return
+	}
 	fmt.Fprintln(w, "  Complete setup from any device on this network:")
 	fmt.Fprintln(w, "")
 	if ip != "" {
@@ -428,32 +439,52 @@ func renderFirstBoot(w io.Writer, caps tui.Caps, ip, code string) {
 			hostname = hostname[:idx]
 		}
 		fmt.Fprintf(w, "      also: http://%s.local:8484\n", hostname)
-		if code != "" {
-			fmt.Fprintln(w, "")
-			fmt.Fprintln(w, "  One-time code:")
-			if caps.ColorEnabled {
-				codeStyle := lipgloss.NewStyle().Foreground(tui.NeutralFG).Background(tui.NeutralBG).Padding(0, 2).Bold(true)
-				rendered := codeStyle.Render(code)
-				if rendered == code {
-					rendered = "\x1b[1m  " + code + "  \x1b[0m"
-				}
-				fmt.Fprintf(w, "      %s\n", rendered)
-			} else {
-				fmt.Fprintf(w, "      %s\n", code)
-			}
-			if qr, err := qrcode.New("http://"+ip+":8484/#code="+code, qrcode.Medium); err == nil {
-				fmt.Fprintln(w, "")
-				fmt.Fprint(w, qr.ToSmallString(false))
-			}
-			fmt.Fprintln(w, "")
-			fmt.Fprintln(w, "  After Complete, CLI token at ~/.config/omahab/token (XDG-aware, 0600)")
-		} else {
-			fmt.Fprintln(w, "")
-			fmt.Fprintln(w, "  (waiting for the one-time code — omahabd is starting)")
-		}
+		renderFirstBootCode(w, caps, ip, code)
 	} else {
 		fmt.Fprintln(w, "      (waiting for a network address)")
 	}
+}
+
+// renderFirstBootVPS is the first-boot screen on tailscale-only boxes:
+// there is no LAN URL, so it points at SSH + `tailscale up` + the
+// tailnet dashboard instead of a "waiting for a network address" dead-end.
+func renderFirstBootVPS(w io.Writer, caps tui.Caps, code string) {
+	fmt.Fprintln(w, "  Complete setup from a device on your tailnet:")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "      1) SSH into this machine (or use your cloud console)")
+	fmt.Fprintln(w, "      2) Run: sudo tailscale up")
+	fmt.Fprintln(w, "      3) Open the dashboard from a device on the same tailnet")
+	renderFirstBootCode(w, caps, "", code)
+}
+
+// renderFirstBootCode shows the one-time code (and QR when a LAN URL
+// exists). With empty ip there is no URL to encode, so the QR is skipped.
+func renderFirstBootCode(w io.Writer, caps tui.Caps, ip, code string) {
+	if code == "" {
+		fmt.Fprintln(w, "")
+		fmt.Fprintln(w, "  (waiting for the one-time code — omahabd is starting)")
+		return
+	}
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "  One-time code:")
+	if caps.ColorEnabled {
+		codeStyle := lipgloss.NewStyle().Foreground(tui.NeutralFG).Background(tui.NeutralBG).Padding(0, 2).Bold(true)
+		rendered := codeStyle.Render(code)
+		if rendered == code {
+			rendered = "\x1b[1m  " + code + "  \x1b[0m"
+		}
+		fmt.Fprintf(w, "      %s\n", rendered)
+	} else {
+		fmt.Fprintf(w, "      %s\n", code)
+	}
+	if ip != "" {
+		if qr, err := qrcode.New("http://"+ip+":8484/#code="+code, qrcode.Medium); err == nil {
+			fmt.Fprintln(w, "")
+			fmt.Fprint(w, qr.ToSmallString(false))
+		}
+	}
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "  After Complete, CLI token at ~/.config/omahab/token (XDG-aware, 0600)")
 }
 
 func renderLiveStatus(w io.Writer, caps tui.Caps) {
@@ -462,9 +493,9 @@ func renderLiveStatus(w io.Writer, caps tui.Caps) {
 		hostname = "omahab"
 	}
 	tsIP := tailscaleIPv4()
-	lanIP := lanIPv4()
+	lanIP := netenv.LANIPv4()
 	// Dashboard URL: prefer Tailscale, then LAN IP / mDNS, never 127.0.0.1.
-	// Reuses lanIPv4() pattern per DISTRO-FIX-PLAN FIRST-BOOT surfaces.
+	// Reuses netenv.LANIPv4() per DISTRO-FIX-PLAN FIRST-BOOT surfaces.
 	dashURL := ""
 	shortHost := hostname
 	if idx := strings.Index(shortHost, "."); idx != -1 {
@@ -793,59 +824,15 @@ func apiGet(ctx context.Context, path, token string, out any) error {
 	return nil
 }
 
-type ifaceAddrs struct {
-	Name  string
-	Flags net.Flags
-	Addrs []net.Addr
-}
-
-func pickLANIPv4(ifaces []ifaceAddrs) string {
-	for _, iface := range ifaces {
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-		if strings.HasPrefix(iface.Name, "tailscale") ||
-			strings.HasPrefix(iface.Name, "docker") ||
-			strings.HasPrefix(iface.Name, "br-") ||
-			strings.HasPrefix(iface.Name, "veth") ||
-			strings.HasPrefix(iface.Name, "podman") ||
-			strings.HasPrefix(iface.Name, "virbr") ||
-			strings.HasPrefix(iface.Name, "cni") {
-			continue
-		}
-		for _, addr := range iface.Addrs {
-			ipnet, ok := addr.(*net.IPNet)
-			if !ok {
-				continue
-			}
-			ip4 := ipnet.IP.To4()
-			if ip4 == nil || ip4.IsLoopback() {
-				continue
-			}
-			if !ip4.IsPrivate() {
-				continue
-			}
-			return ip4.String()
-		}
+// consolePlacement reports where this machine serves the dashboard.
+// Mirrors services.omahab.placement, exported to the console environment
+// as OMAHAB_PLACEMENT. LAN stays open by default; vps means
+// tailscale-only with no LAN URL on first boot.
+func consolePlacement() string {
+	if strings.TrimSpace(os.Getenv("OMAHAB_PLACEMENT")) == "vps" {
+		return "vps"
 	}
-	return ""
-}
-
-// lanIPv4 returns the first non-loopback, private IPv4 address.
-func lanIPv4() string {
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return ""
-	}
-	var list []ifaceAddrs
-	for _, iface := range ifaces {
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-		list = append(list, ifaceAddrs{Name: iface.Name, Flags: iface.Flags, Addrs: addrs})
-	}
-	return pickLANIPv4(list)
+	return "lan"
 }
 
 // tailscaleIPv4 returns the tailscale IPv4 via `tailscale ip -4`.

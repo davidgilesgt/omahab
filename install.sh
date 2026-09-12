@@ -1,5 +1,9 @@
 #!/bin/sh
 # Omahab companion installer — Linux (Omarchy) and macOS.
+# NOTE: this is the companion (client) installer for an existing Omarchy
+# workstation — it installs omahab-clientd and enrolls with an Omahab server.
+# It is NOT the OS installer; bare-metal/ISO installs use `omahab install`
+# (wizard) or scripts/install-disk.sh (backend) instead.
 # Installs:
 #   binary -> ~/.local/bin/omahab-clientd
 #   user unit -> ~/.config/systemd/user/omahab-clientd.service (ExecStart %h/.local/bin/omahab-clientd)

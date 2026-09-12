@@ -150,10 +150,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 func (s *Server) buildRouter() chi.Router {
 	r := chi.NewRouter()
 
-	// Global middleware: request ID, recovery, real IP.
+	// Global middleware: request ID, recovery, real IP, CORS.
 	r.Use(requestIDMiddleware)
 	r.Use(safeRecovery)
 	r.Use(middleware.RealIP)
+	r.Use(corsMiddleware)
 	// Per-request timeout - skip SSE stream which is long-lived.
 	r.Use(s.timeoutMiddleware(30 * time.Second))
 
@@ -325,6 +326,11 @@ func (s *Server) buildRouter() chi.Router {
 
 		// Setup (first-run provisioning)
 		r.Get("/api/v1/setup", s.handleGetSetup)
+		r.Post("/api/v1/tailscale/up", s.handleTailscaleUp)
+		r.Get("/api/v1/tailscale/status", s.handleTailscaleStatus)
+		r.Get("/api/v1/network/status", s.handleNetworkStatus)
+		r.Post("/api/v1/network/close-lan", s.withBodyLimit(defaultBodyLimit, s.handleCloseLAN))
+		r.Post("/api/v1/network/open-lan", s.withBodyLimit(defaultBodyLimit, s.handleOpenLAN))
 		r.Post("/api/v1/recovery/generate", s.handleGenerateRecoveryKey)
 		r.Post("/api/v1/recovery/confirm", s.withBodyLimit(defaultBodyLimit, s.handleConfirmRecoveryKey))
 		r.Get("/api/v1/system/disks", s.handleListDisks)
@@ -597,6 +603,27 @@ func safeRecovery(next http.Handler) http.Handler {
 	})
 }
 
+// corsMiddleware allows cross-origin browser reads of unauthenticated
+// endpoints. The dashboard's tailnet/HTTPS path checks fetch
+// http://<tailnet-ip>:8484/up and https://<domain>/up from whatever origin
+// the window currently sits on (LAN IP, tailnet IP, public domain), and a
+// missing Access-Control-Allow-Origin surfaces as an opaque "failed to
+// fetch" while the same URL works in a plain tab. Credentialed traffic is
+// same-origin and unaffected by the wildcard.
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if r.Method == http.MethodOptions {
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+			w.Header().Set("Access-Control-Max-Age", "86400")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // timeoutMiddleware applies a per-request context timeout except for SSE and DL (large binaries).
 func (s *Server) timeoutMiddleware(d time.Duration) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
@@ -689,8 +716,10 @@ func (s *Server) deviceAuth(next http.Handler) http.Handler {
 			}
 		}
 		if s.environments == nil {
-			// No environments service (tests); allow any non-admin bearer through for now.
-			next.ServeHTTP(w, r)
+			// No environments service: fail closed. Production always wires
+			// Backend.Environments(); an unwired server must not accept
+			// arbitrary bearers on device endpoints.
+			writeError(w, r, errUnauthorized("device auth not configured"))
 			return
 		}
 		dev, err := s.environments.ValidateDeviceToken(r.Context(), token)

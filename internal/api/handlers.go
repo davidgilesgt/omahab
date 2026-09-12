@@ -2084,13 +2084,25 @@ func (s *Server) handleGenerateRecoveryKey(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, mat)
 }
 
-// handleConfirmRecoveryKey verifies the 3-word challenge and persists the kit.
+// handleConfirmRecoveryKey persists the recovery kit via either the new
+// saved-ack mode ({"fingerprint","saved_ack":true} — the client verified a
+// paste-back locally plus an explicit ack checkbox) or the legacy 3-word
+// challenge ({"fingerprint","challenge":{idx:word}x3}).
 func (s *Server) handleConfirmRecoveryKey(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Fingerprint string            `json:"fingerprint"`
 		Challenge   map[string]string `json:"challenge"`
+		SavedAck    bool              `json:"saved_ack"`
 	}
 	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.SavedAck {
+		if err := s.backend.ConfirmRecoveryKeySavedAck(r.Context(), req.Fingerprint); err != nil {
+			writeError(w, r, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"confirmed": true})
 		return
 	}
 	chal := make(map[int]string, len(req.Challenge))

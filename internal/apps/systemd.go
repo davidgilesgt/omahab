@@ -53,19 +53,56 @@ func (r *SystemdRunner) envPath(app domain.Application) string {
 }
 
 // writeEnvFile atomically writes the env projection as KEY=VALUE lines
-// (0600). This is the file the nix-defined units consume via
-// EnvironmentFile and gate on via ConditionPathExists.
+// (0600), merged over the existing file. omahabd's renderNativeAppEnv
+// writes secret-derived keys (e.g. pocket-id ENCRYPTION_KEY) that the
+// apps-service projection doesn't carry; a blind overwrite dropped them
+// and crash-looped the unit on the next reconcile Deploy. Existing keys
+// are preserved (spec entries win on conflict, appended in spec order).
+// This is the file the nix-defined units consume via EnvironmentFile and
+// gate on via ConditionPathExists.
 func (r *SystemdRunner) writeEnvFile(app domain.Application, spec DeploySpec) error {
 	if err := os.MkdirAll(r.envDir, 0o700); err != nil {
 		return fmt.Errorf("mkdir %s: %w", r.envDir, err)
 	}
-	var b strings.Builder
+	merged := map[string]string{}
+	order := []string{}
+	if raw, err := os.ReadFile(r.envPath(app)); err == nil {
+		for _, line := range strings.Split(string(raw), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			name, value, ok := strings.Cut(line, "=")
+			name = strings.TrimSpace(name)
+			if !ok || name == "" {
+				continue
+			}
+			if _, seen := merged[name]; !seen {
+				order = append(order, name)
+			}
+			merged[name] = strings.TrimSpace(value)
+		}
+	}
 	for _, kv := range spec.Env {
 		kv = strings.TrimSpace(kv)
 		if kv == "" {
 			continue
 		}
-		b.WriteString(kv)
+		name, value, ok := strings.Cut(kv, "=")
+		name = strings.TrimSpace(name)
+		if !ok || name == "" {
+			continue
+		}
+		if _, seen := merged[name]; !seen {
+			order = append(order, name)
+		}
+		merged[name] = strings.TrimSpace(value)
+	}
+	var b strings.Builder
+	for _, name := range order {
+		b.WriteString(name)
+		b.WriteByte('=')
+		b.WriteString(merged[name])
 		b.WriteByte('\n')
 	}
 	path := r.envPath(app)

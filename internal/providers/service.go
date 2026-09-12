@@ -1331,6 +1331,48 @@ func (s *Service) RevokeVirtualKey(ctx context.Context, id domain.ID) error {
 	return nil
 }
 
+// DeleteVirtualKey revokes a virtual key in the gateway (best-effort) and
+// deletes its metadata row. Returns ErrNotFound when no such row exists, so a
+// second DELETE of the same id surfaces 404 instead of a silent 204.
+func (s *Service) DeleteVirtualKey(ctx context.Context, id domain.ID) error {
+	if strings.TrimSpace(string(id)) == "" {
+		return fmt.Errorf("%w: id is required", ErrValidation)
+	}
+	vk, err := s.GetVirtualKey(ctx, id)
+	if err != nil {
+		return err
+	}
+	if vk.GatewayKeyID != nil && s.vkGateway != nil {
+		if err := s.vkGateway.RevokeVirtualKey(ctx, *vk.GatewayKeyID); err != nil {
+			now := s.nowUTC()
+			_ = s.sink.Emit(ctx, domain.Event{
+				ID:         domain.ID(newID()),
+				Type:       "provider.virtual_key.revoke_gateway_failed",
+				Severity:   "warn",
+				ResourceID: id,
+				Message:    fmt.Sprintf("virtual key gateway revoke failed: %v", err),
+				CreatedAt:  now,
+			})
+		}
+	}
+	res, err := s.db.ExecContext(ctx, `DELETE FROM provider_virtual_keys WHERE id = ?`, string(id))
+	if err != nil {
+		return fmt.Errorf("delete virtual key: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	_ = s.sink.Emit(ctx, domain.Event{
+		ID:         domain.ID(newID()),
+		Type:       "provider.virtual_key.deleted",
+		Severity:   "info",
+		ResourceID: id,
+		Message:    "virtual key deleted",
+		CreatedAt:  s.nowUTC(),
+	})
+	return nil
+}
+
 // ValidateVirtualKey validates a presented virtual-key token (hash check, expiry, revocation).
 // It does not mark the key as consumed; virtual keys are reusable until revoked/expired.
 //

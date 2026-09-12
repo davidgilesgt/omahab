@@ -25,6 +25,7 @@ LOG_FILE="${MANIFEST_DIR}/install.log"
 
 DISKS=()
 HOSTNAME="omahab"
+PLACEMENT="lan"
 FLAKE_SRC="$FLAKE_SRC_DEFAULT"
 YES=0
 DRY_RUN=0
@@ -52,6 +53,7 @@ Usage: $(basename "$0") --disk DEV [--disk DEV ...] [options]
   --disk DEV                 target disk (repeatable; FIRST is system disk, rest become data disks).
                              Accepts /dev/sdX, /dev/nvmeNnM or /dev/disk/by-id/... (stable across reboots).
   --hostname H               installed system hostname [omahab]
+  --placement lan|vps        where this machine lives [lan]
   --flake PATH               flake source to install from [$FLAKE_SRC_DEFAULT]
   --username NAME            Linux administrator username (required for real install)
   --password-hash-file PATH  file containing yescrypt hash (required for real install, 0600 root-owned)
@@ -524,6 +526,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --disk) DISKS+=("${2:?--disk needs a device}"); shift 2 ;;
     --hostname) HOSTNAME="${2:?--hostname needs a value}"; shift 2 ;;
+    --placement) PLACEMENT="${2:?--placement needs a value}"; shift 2 ;;
     --flake) FLAKE_SRC="${2:?--flake needs a path}"; shift 2 ;;
     --username) USERNAME="${2:?--username needs a value}"; shift 2 ;;
     --password-hash-file) PASSWORD_HASH_FILE="${2:?--password-hash-file needs a path}"; shift 2 ;;
@@ -648,8 +651,8 @@ if [[ "$RESUME_INSTALL" -eq 1 ]]; then
   progress "preflight" "running" "resuming install from previous session"
 
   # Only run nixos-install/account finalization
-  # Re-read manifest values
   HOSTNAME=$(jq -r '.hostname // "omahab"' "$MANIFEST_FILE")
+  PLACEMENT=$(jq -r '.placement // "lan"' "$MANIFEST_FILE")
   USERNAME=$(jq -r '.username // ""' "$MANIFEST_FILE")
   FLAKE_SRC=$(jq -r '.flake_src // "/etc/omahab-installer/flake"' "$MANIFEST_FILE")
   # Need to ensure password hash and keys handling for resume
@@ -731,6 +734,7 @@ if [[ "$RESUME_MODE" -eq 0 ]]; then
 
   [[ "$(id -u)" -eq 0 ]] || die "must run as root"
   if ! [[ "$HOSTNAME" =~ ^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$ ]]; then die "bad hostname: $HOSTNAME"; fi
+  if [[ "$PLACEMENT" != "lan" && "$PLACEMENT" != "vps" ]]; then die "bad placement: $PLACEMENT (want lan|vps)"; fi
   [[ -d "$FLAKE_SRC" ]] || die "flake source not found: $FLAKE_SRC (boot the installer ISO?)"
   [[ -f "$FLAKE_SRC/flake.nix" ]] || die "not a flake: $FLAKE_SRC"
   if [[ -f "$FLAKE_SRC/flake.lock" && ! -r "$FLAKE_SRC/flake.lock" ]]; then die "flake.lock not readable: $FLAKE_SRC/flake.lock"; fi
@@ -1095,7 +1099,7 @@ if [[ "$RESUME_MODE" -eq 0 ]]; then
     echo "+ mount by device under $MNT, nixos-generate-config --root $MNT" >&2
     echo "+ install flake to /mnt/etc/omahab/flake, write hardware/local nix files" >&2
     echo "+ nixos-install --root $MNT --flake /mnt/etc/omahab/flake#$FLAKE_ATTR --no-root-passwd" >&2
-    echo "+ install-local.nix would contain: networking.hostName = \"$HOSTNAME\"; services.omahab.adminUser = \"$USERNAME\" ..." >&2
+    echo "+ install-local.nix would contain: networking.hostName = \"$HOSTNAME\"; services.omahab.adminUser = \"$USERNAME\"; services.omahab.placement = \"$PLACEMENT\" ..." >&2
     progress "done" "complete" "dry-run complete"
     exit 0
   fi
@@ -1214,12 +1218,13 @@ if [[ "$RESUME_MODE" -eq 0 ]]; then
     --arg boot "$boot_id" \
     --arg mnt "$MNT" \
     --arg hostname "$HOSTNAME" \
+    --arg placement "$PLACEMENT" \
     --arg username "$USERNAME" \
     --arg flake "$FLAKE_SRC" \
     --arg firmware "$FIRMWARE" \
     --argjson disks "$manifest_disks_json" \
     --arg stage "preflight" \
-    '{boot_id: $boot, mnt: $mnt, hostname: $hostname, username: $username, flake_src: $flake, firmware: $firmware, disks: $disks, stage: $stage, created: now}' > "$MANIFEST_FILE"
+    '{boot_id: $boot, mnt: $mnt, hostname: $hostname, placement: $placement, username: $username, flake_src: $flake, firmware: $firmware, disks: $disks, stage: $stage, created: now}' > "$MANIFEST_FILE"
   chmod 0600 "$MANIFEST_FILE"
 
   # Set up stage-aware trap and logging
@@ -1594,6 +1599,7 @@ configure_stage() {
     echo "  networking.hostName = \"$escaped_hostname\";"
     echo "  services.omahab.enable = true;"
     echo "  services.omahab.adminUser = \"$escaped_username\";"
+    echo "  services.omahab.placement = \"$PLACEMENT\";"
     echo "  users.mutableUsers = true;"
     echo "  system.stateVersion = \"$STATE_VERSION\";"
     if [[ "$FIRMWARE" == uefi ]]; then
@@ -1867,20 +1873,20 @@ account_stage() {
 # Verification stage
 verify_stage() {
   local target_auth target_auth2 root_uuid target_shadow uuid
-  progress "account" "running" "verifying installation"
+  progress "verify" "running" "verifying installation"
   # Verify target account exists, wheel membership, non-locked password, keys, UUID mounts, bootloader
   if ! nixos-enter --root "$MNT" -- id "$USERNAME" >/dev/null 2>&1; then
-    progress "account" "failed" "verification: user $USERNAME missing in target"
+    progress "verify" "failed" "verification: user $USERNAME missing in target"
     die "verification failed: user $USERNAME missing"
   fi
   if ! nixos-enter --root "$MNT" -- groups "$USERNAME" 2>/dev/null | grep -qw wheel; then
-    progress "account" "failed" "verification: $USERNAME not in wheel"
+    progress "verify" "failed" "verification: $USERNAME not in wheel"
     die "verification failed: $USERNAME not in wheel"
   fi
   # Check password not locked
   target_shadow=$(nixos-enter --root "$MNT" -- cat /etc/shadow 2>/dev/null | grep "^${USERNAME}:" || true)
   if [[ "$target_shadow" == *":!:"* || "$target_shadow" == *":*:"* ]]; then
-    progress "account" "failed" "verification: password locked for $USERNAME"
+    progress "verify" "failed" "verification: password locked for $USERNAME"
     die "verification failed: password locked"
   fi
   # Check authorized keys if provided
@@ -1893,7 +1899,7 @@ verify_stage() {
       if [[ -n "$target_auth2" && -f "$MNT$target_auth2" ]]; then target_auth="$MNT$target_auth2"; fi
     fi
     if [[ ! -f "$target_auth" ]]; then
-      progress "account" "failed" "verification: authorized_keys not found for $USERNAME"
+      progress "verify" "failed" "verification: authorized_keys not found for $USERNAME"
       die "verification failed: authorized_keys missing"
     fi
     # Check perms 600 and owner via nixos-enter stat
@@ -1923,7 +1929,7 @@ verify_stage() {
   fi
   # Check install-local contains adminUser
   if ! grep -q "services.omahab.adminUser" "$TARGET_FLAKE/nix/install-local.nix" 2>/dev/null; then
-    progress "account" "failed" "verification: adminUser not in install-local.nix"
+    progress "verify" "failed" "verification: adminUser not in install-local.nix"
     die "verification failed: adminUser missing"
   fi
   # Check that no password hash in flake/store
@@ -1931,7 +1937,7 @@ verify_stage() {
     die "verification failed: password hash leaked into flake"
   fi
 
-  progress "account" "complete" "verification passed"
+  progress "verify" "complete" "verification passed"
 }
 
 # -------------------------------------------------------------------

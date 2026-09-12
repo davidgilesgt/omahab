@@ -158,6 +158,12 @@ in
     systemd.services.paperless-consumer = gate "paperless-ngx";
     systemd.services.paperless-scheduler = gate "paperless-ngx";
     systemd.services."paperless-task-queue" = gate "paperless-ngx";
+    # Gotenberg defaults to :3000, colliding with Forgejo (catalog probe,
+    # native ports, and the omahabd fallback URL all expect Forgejo on 3000;
+    # the loser serves nothing while systemd reports active). Paperless
+    # derives PAPERLESS_TIKA_GOTENBERG_ENDPOINT from this port, so the move
+    # follows automatically.
+    services.gotenberg.port = 3001;
 
     # ----------------------------------------------------------------
     # Karakeep — bookmarks. Domain-gated (NextAuth + OIDC).
@@ -165,6 +171,9 @@ in
     services.karakeep = {
       enable = true;
       environmentFile = "${appEnv}/karakeep.env";
+      # Upstream defaults to :3000, colliding with Forgejo. Native-port
+      # contract (internal/apps/native_ports.go) assigns karakeep :3010.
+      extraEnvironment.PORT = "3010";
     };
     systemd.services.karakeep-web = {
       partOf = lib.mkForce [ ];
@@ -205,9 +214,39 @@ in
     # ----------------------------------------------------------------
     # LiteLLM — model gateway. Config rendered by omahabd; its env file
     # carries the master key + DB URL. Domain-gated.
+    #
+    # fastapi pin: litellm 1.97.0 imports the private helper
+    # get_flat_dependant from fastapi (proxy/management_v1/common.py),
+    # which fastapi removed in 0.140.7, while litellm's stated requirement
+    # (fastapi>=0.136.3,<1.0) still admits the locked 0.141.1 — so the
+    # stock package fails at import. 0.140.6 is the newest fastapi that
+    # still ships get_flat_dependant with the call signature litellm uses
+    # (skip_repeats=... returning .query_params), and it satisfies both
+    # litellm's floor and its own (starlette>=0.46.0). Scoped to this
+    # service via overrideScope so no other closure changes.
     # ----------------------------------------------------------------
     services.litellm = {
       enable = true;
+      # Native-port contract (internal/apps/native_ports.go + gateway
+      # BaseURL 127.0.0.1:4000): the nixpkgs module defaults to 8080,
+      # which collides with the ONCE proxy convention and breaks the
+      # health probe, core_apps, and the admin-invite gate.
+      port = 4000;
+      package = pkgs.litellm.override {
+        python3Packages = pkgs.python3Packages.overrideScope (
+          _self: super: {
+            fastapi = super.fastapi.overridePythonAttrs (_old: rec {
+              version = "0.140.6";
+              src = pkgs.fetchFromGitHub {
+                owner = "tiangolo";
+                repo = "fastapi";
+                tag = version;
+                hash = "sha256-ZWLXNHmM2uGE5y7hLYW4zNSeCGo9d9X2KNT70aXK6W0=";
+              };
+            });
+          }
+        );
+      };
       environmentFile = "${appEnv}/litellm.env";
     };
     systemd.services.litellm = gate "litellm";

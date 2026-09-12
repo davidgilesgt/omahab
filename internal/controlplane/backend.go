@@ -166,6 +166,9 @@ func New(ctx context.Context, st *store.Store, opts Options) (*Backend, error) {
 	// First-boot: generate the one-time claim code eagerly so the console
 	// can display it immediately.
 	_ = b.bootstrapGate()
+	// Close-LAN is explicit and sticky: re-apply the nft deletion while
+	// the sentinel is present (best-effort, never fails startup).
+	b.reapplyLANClosedAtStartup()
 	// Start setup reconciler in background (best-effort, single-flight).
 	go func() {
 		bg := context.Background()

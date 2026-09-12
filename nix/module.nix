@@ -91,6 +91,12 @@ in
       description = "omahabd listen address. nftables is the admission boundary.";
     };
 
+    placement = mkOption {
+      type = types.enum [ "lan" "vps" ];
+      default = "lan";
+      description = "Where this machine lives. lan keeps the dashboard open on the local network; vps serves tailscale-only with no LAN URL on first boot.";
+    };
+
     releaseRef = mkOption {
       type = types.str;
       default = "github:davidgilesgt/omahab/${self.rev or self.dirtyRev or "master"}";
@@ -251,6 +257,7 @@ in
         OMAHAB_STATE_DIR = stateDir;
         OMAHAB_DATA_DIR = dataDir;
         OMAHAB_LISTEN = cfg.listen;
+        OMAHAB_PLACEMENT = cfg.placement;
         OMAHAB_CATALOG = "${cfg.catalogPackage}/catalog.json";
         OMAHAB_WEB_DIR = "${cfg.webPackage}";
         # B2: distribution bundle for /dl/* and /install.sh (public on LAN, no auth).
@@ -615,6 +622,10 @@ in
       after = [ "systemd-user-sessions.service" "getty-pre.target" "omahabd.service" ];
       wants = [ "omahabd.service" ];
       unitConfig = {
+        # Only take over tty1 when a local virtual console exists. On
+        # headless/serial-only machines this condition fails and the unit
+        # stays inactive; local fallback is the getty@tty2 service kept
+        # enabled below (plus serial gettys), then run `omahab` after login.
         ConditionPathExists = "/dev/tty0";
       };
       serviceConfig = {
@@ -633,6 +644,7 @@ in
       environment = {
         TERM = "linux";
         OMAHAB_ADMIN_USER = cfg.adminUser;
+        OMAHAB_PLACEMENT = cfg.placement;
       };
     };
     systemd.services."getty@tty1".enable = lib.mkForce false;
@@ -671,9 +683,11 @@ in
           iifname "tailscale0" tcp dport 8484 accept comment "omahab dashboard via tailscale"
           iifname "br-*" ip saddr 172.30.0.2 tcp dport 8484 accept comment "caddy dashboard upstream"
           iifname "tailscale0" tcp dport { 80, 443 } accept comment "caddy https via tailscale"
+          ${lib.optionalString (cfg.placement == "lan") ''
           tcp dport 8484 ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } accept comment "omahab dashboard LAN"
           ip6 saddr fc00::/7 tcp dport 8484 accept comment "omahab dashboard ULA"
           ip6 saddr fe80::/10 tcp dport 8484 accept comment "omahab dashboard link-local"
+          ''}
           icmp type { destination-unreachable, time-exceeded, parameter-problem, echo-request } limit rate 10/second accept
           ip6 nexthdr ipv6-icmp icmpv6 type { destination-unreachable, time-exceeded, parameter-problem, echo-request, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } limit rate 20/second accept
         }
@@ -744,6 +758,6 @@ in
       devpod
       tmux
     ];
-    systemd.services.omahabd.path = [ omahabOncePkg pkgs.tailscale pkgs.docker pkgs.systemd pkgs.restic ];
+    systemd.services.omahabd.path = [ omahabOncePkg pkgs.tailscale pkgs.docker pkgs.systemd pkgs.restic pkgs.nftables ];
   };
 }

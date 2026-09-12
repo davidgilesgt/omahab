@@ -29,7 +29,10 @@ paths:
         one-time code shown on the tty1 console for the administrator API
         token. Single-use; 5 attempts/min per host and 20 total, after which
         the code rotates. Inert once bootstrap is complete.
-      operationId: claimBootstrap
+        LAN exception: when placement is lan (the default), an empty code
+        from a LAN source address claims successfully and consumes the
+        single-use code (first-claimer wins); empty codes from non-LAN
+        sources fail with 401.
       security: []
       requestBody:
         required: true
@@ -55,7 +58,7 @@ paths:
   /api/bootstrap/status:
     get:
       summary: Bootstrap active status
-      description: Public (no auth), always available. Returns whether first-boot bootstrap is still active. Cache-Control no-store.
+      description: "Public (no auth), always available. Returns whether first-boot bootstrap is still active plus lan_claim (true when the caller may claim with an empty code: lan placement and a LAN source address). Cache-Control no-store."
       operationId: bootstrapStatus
       security: []
       responses:
@@ -65,9 +68,10 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [active]
+                required: [active, lan_claim]
                 properties:
                   active: { type: boolean }
+                  lan_claim: { type: boolean }
 
 
   /api/bootstrap/ssh-keys:
@@ -200,10 +204,92 @@ paths:
                   detail: { type: string }
         '400': { $ref: '#/components/responses/Error' }
 
+  /api/v1/tailscale/up:
+    post:
+      summary: Start Tailscale enrollment (authenticated)
+      description: Authenticated mirror of POST /api/bootstrap/tailscale/up; runs `tailscale up` and returns the printed auth URL ("" when already enrolled). Available any time with the admin bearer token; not gated on first-boot.
+      operationId: tailscaleUp
+      responses:
+        '200':
+          description: Enrollment started
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  auth_url: { type: string }
+        '502': { $ref: '#/components/responses/Error' }
+
+  /api/v1/tailscale/status:
+    get:
+      summary: Poll Tailscale enrollment state (authenticated)
+      description: Authenticated mirror of GET /api/bootstrap/tailscale/status. Available any time with the admin bearer token.
+      operationId: tailscaleStatus
+      responses:
+        '200':
+          description: Current state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  running: { type: boolean }
+                  ip: { type: string }
+                  state: { type: string }
+
+  /api/v1/network/status:
+    get:
+      summary: Home-LAN placement and close-LAN state
+      description: Authenticated. Returns the daemon placement (lan or vps), whether the LAN ingress rules are explicitly closed, and whether Tailscale is running.
+      operationId: networkStatus
+      responses:
+        '200':
+          description: Current network state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  placement: { type: string, enum: [lan, vps] }
+                  lan_closed: { type: boolean }
+                  tailscale_running: { type: boolean }
+
+  /api/v1/network/close-lan:
+    post:
+      summary: Close LAN ingress to the dashboard
+      description: Authenticated explicit action (never automatic). Deletes the three LAN :8484 nftables rules (matched by their stable comments) and writes the /var/lib/omahab/lan-closed sentinel so the closure survives reboots. SSH :22 is untouched.
+      operationId: networkCloseLan
+      responses:
+        '200':
+          description: LAN closed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  closed: { type: boolean, example: true }
+        '502': { $ref: '#/components/responses/Error' }
+
+  /api/v1/network/open-lan:
+    post:
+      summary: Reopen LAN ingress to the dashboard
+      description: Authenticated explicit action. Clears the lan-closed sentinel and restarts nftables.service to restore the module table including the LAN rules.
+      operationId: networkOpenLan
+      responses:
+        '200':
+          description: LAN reopened
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  closed: { type: boolean, example: false }
+        '502': { $ref: '#/components/responses/Error' }
+
   /api/v1/recovery/generate:
     post:
       summary: Generate a recovery phrase (one-time)
-      description: Creates a 24-word BIP39 recovery phrase. The phrase is shown exactly once and never persisted; the seed is held in memory keyed by fingerprint for 15 minutes until /api/v1/recovery/confirm verifies a 3-word challenge and persists recovery.kit.
+      description: Creates a 24-word BIP39 recovery phrase. The phrase is shown exactly once and never persisted; the seed is held in memory keyed by fingerprint for 15 minutes until /api/v1/recovery/confirm persists recovery.kit via either saved-ack or a 3-word challenge.
       operationId: generateRecoveryKey
       responses:
         '200':
@@ -220,7 +306,7 @@ paths:
   /api/v1/recovery/confirm:
     post:
       summary: Confirm the saved recovery phrase
-      description: Verifies 3 words from the generated phrase (map of 0-based index to word), wraps the master key with the derived recovery key, persists it at /var/lib/omahab/recovery.kit (0600) as {version:1,fingerprint,master_wrapped base64,created_at RFC3339}, and stores platform-app/recovery_fingerprint.
+      description: Persists recovery.kit at /var/lib/omahab/recovery.kit (0600) as {version 1, fingerprint, master_wrapped base64, created_at RFC3339} and stores platform-app/recovery_fingerprint. Two modes - saved-ack with fingerprint plus saved_ack true for the new client ritual (explicit ack checkbox plus client-local paste-back verify, no challenge words sent), or legacy fingerprint plus challenge map of 0-based index to word verifying 3 words from the generated phrase. Fingerprint always required; saved_ack true skips challenge verification, otherwise a 3-entry challenge is required.
       operationId: confirmRecoveryKey
       requestBody:
         required: true
@@ -228,10 +314,11 @@ paths:
           application/json:
             schema:
               type: object
-              required: [fingerprint, challenge]
+              required: [fingerprint]
               properties:
                 fingerprint: { type: string, example: "a1b2c3d4" }
-                challenge: { type: object, additionalProperties: { type: string }, description: "3 entries: index (0-23) -> word", minProperties: 3, maxProperties: 3 }
+                challenge: { type: object, additionalProperties: { type: string }, description: "Legacy mode - 3 entries, index (0-23) to word", minProperties: 3, maxProperties: 3 }
+                saved_ack: { type: boolean, description: "New client ritual - true confirms the phrase was saved (client verified paste-back locally); skips challenge verification" }
       responses:
         '200':
           description: Kit stored

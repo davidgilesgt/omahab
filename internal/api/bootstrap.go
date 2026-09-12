@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"github.com/omahab/omahab/internal/apitypes"
+	"github.com/omahab/omahab/internal/controlplane"
+	"github.com/omahab/omahab/internal/netenv"
 )
 
 type BootstrapGate = apitypes.BootstrapGate
@@ -29,10 +31,10 @@ func (s *Server) handleBootstrapClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	code := strings.TrimSpace(req.Code)
-	if code == "" {
-		writeError(w, r, errBadRequest("code is required"))
-		return
-	}
+	// No empty-code rejection here: the gate decides. An empty code from
+	// a LAN source on lan placement claims successfully (first-claimer
+	// wins); every other empty/wrong code fails with 401 plus rate-limit
+	// accounting inside Claim.
 	if err := s.bootstrap.Claim(code, clientIP(r)); err != nil {
 		// Rate-limit exhaustion rotates the code; both cases are 429.
 		if strings.Contains(err.Error(), "too many attempts") {
@@ -140,11 +142,16 @@ func (s *Server) handleBootstrapComplete(w http.ResponseWriter, r *http.Request)
 }
 
 // handleBootstrapStatus reports whether first-boot bootstrap is still active.
-// Public (no auth), always available, with no-store.
+// Public (no auth), always available, with no-store. Also reports lan_claim:
+// true when the caller may claim with an empty code (lan placement and a
+// LAN source address) — the wizard uses it to offer a no-code claim button.
 func (s *Server) handleBootstrapStatus(w http.ResponseWriter, r *http.Request) {
 	active := s.bootstrap != nil && s.bootstrap.Active()
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, map[string]bool{"active": active})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"active":    active,
+		"lan_claim": active && controlplane.Placement() == "lan" && netenv.IsLANAddr(clientIP(r)),
+	})
 }
 
 // requireBootstrapToken validates the admin bearer obtained from claim.

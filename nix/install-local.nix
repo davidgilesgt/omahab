@@ -10,4 +10,8 @@
   system.stateVersion = "25.05";
   boot.loader.systemd-boot.enable = true;
   boot.loader.efi.canTouchEfiVariables = true;
+  # Home-LAN box by default; the installer asks to confirm this
+  # (auto-detected) value and writes it into the generated file.
+  # "vps" serves the dashboard over Tailscale only, with no LAN URL.
+  services.omahab.placement = "lan";
 }

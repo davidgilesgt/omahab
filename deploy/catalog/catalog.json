@@ -103,7 +103,7 @@
       "max_exposure": "public",
       "health_check": {
         "kind": "http",
-        "path": "/-/healthz",
+        "path": "/api/healthz",
         "port": 3000
       },
       "data": [
@@ -343,13 +343,13 @@
     {
       "id": "karakeep",
       "name": "Karakeep",
-      "port": 3000,
+      "port": 3010,
       "default_exposure": "private",
       "max_exposure": "shared",
       "health_check": {
         "kind": "http",
         "path": "/api/health",
-        "port": 3000
+        "port": 3010
       },
       "data": [
         {
@@ -605,7 +605,7 @@
       "health_check": {
         "kind": "http",
         "path": "/api/status",
-        "port": 9119
+        "port": 8085
       },
       "data": [
         {

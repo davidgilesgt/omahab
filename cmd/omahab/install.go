@@ -18,6 +18,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/omahab/omahab/internal/diskinstall"
+	"github.com/omahab/omahab/internal/netenv"
 	"github.com/omahab/omahab/internal/sshkeys"
 	"github.com/omahab/omahab/internal/tui"
 )
@@ -219,6 +220,7 @@ type wizardState struct {
 
 	networkFile string // path to staged network file (root-owned 0600)
 	networkMode string // cached mode
+	placement   string // lan (LAN open) or vps (tailscale-only)
 }
 
 func runInstallWizard(cmd *cobra.Command) error {
@@ -270,8 +272,7 @@ func runInstallWizard(cmd *cobra.Command) error {
 	// Cleanup secrets on exit
 	defer state.cleanupSecrets()
 
-	steps := []string{"Welcome", "Connection", "Disks", "Administrator", "SSH access", "Review", "Install", "Ready"}
-	_ = steps // for progress rendering
+	steps := []string{"Welcome", "Connection", "Placement", "Disks", "Administrator", "SSH access", "Review", "Install", "Ready"}
 
 	// Step index for back navigation
 	stepIdx := 0
@@ -290,6 +291,8 @@ func runInstallWizard(cmd *cobra.Command) error {
 			err, back, quit = state.stepWelcome()
 		case "Connection":
 			err, back, quit = state.stepConnection()
+		case "Placement":
+			err, back, quit = state.stepPlacement()
 		case "Disks":
 			err, back, quit = state.stepDisks()
 		case "Administrator":
@@ -329,7 +332,7 @@ func runInstallWizard(cmd *cobra.Command) error {
 					return nil
 				}
 				// Return to Review for retry/edits
-				stepIdx = 5 // Review
+				stepIdx = 6 // Review
 				continue
 			}
 			return err
@@ -466,6 +469,14 @@ func (s *wizardState) cleanupSecrets() {
 // ---------- steps ----------
 
 func (s *wizardState) stepWelcome() (error, bool, bool) {
+	// Fail fast on Secure Boot before the user answers the wizard prompts:
+	// the unsigned ISO and installed system require it disabled (the
+	// backend re-checks at destructive time; this surfaces it up front).
+	if msg, ok := checkSecureBoot(); !ok {
+		fmt.Fprintln(s.out, "")
+		fmt.Fprintln(s.out, msg)
+		return fmt.Errorf("secure boot enabled"), false, false
+	}
 	printHeading(s.out, s.caps)
 	fmt.Fprintln(s.out, "")
 	fmt.Fprintln(s.out, "This installer will erase the selected disks and install Omahab.")
@@ -738,6 +749,40 @@ func (s *wizardState) tryStageNetworkProfile() (diskinstall.NetworkFile, string)
 		return diskinstall.NetworkFile{}, ""
 	}
 	return nf, path
+}
+
+func (s *wizardState) stepPlacement() (error, bool, bool) {
+	fmt.Fprintln(s.out, "")
+	fmt.Fprintln(s.out, "Where does this machine live?")
+	detected := netenv.AutoPlacement()
+	if detected != "lan" && detected != "vps" {
+		detected = "lan"
+	}
+	fmt.Fprintf(s.out, "Auto-detected: %s\n", detected)
+	fmt.Fprintln(s.out, "  lan — home network: the dashboard stays open on the LAN.")
+	fmt.Fprintln(s.out, "  vps — cloud server: the dashboard serves over Tailscale only, with no LAN URL.")
+	fmt.Fprintln(s.out, "You can change this later from the dashboard (network settings).")
+	for {
+		line, back := s.readLineWithBack(fmt.Sprintf("Placement [lan/vps, default %s]: ", detected), true)
+		if back {
+			return nil, true, false
+		}
+		if s.isQuitInput(line) {
+			return nil, false, true
+		}
+		trimmed := strings.ToLower(strings.TrimSpace(line))
+		if trimmed == "" {
+			trimmed = detected
+		}
+		switch trimmed {
+		case "lan", "vps":
+			s.placement = trimmed
+			fmt.Fprintf(s.out, "Placement: %s.\n", trimmed)
+			return nil, false, false
+		default:
+			fmt.Fprintln(s.out, "Please enter lan, vps, back, or quit.")
+		}
+	}
 }
 
 func (s *wizardState) stepDisks() (error, bool, bool) {
@@ -1405,10 +1450,21 @@ func (s *wizardState) stepReview() (error, bool, bool) {
 	fmt.Fprintf(s.out, "Administrator: %s\n", s.username)
 	// Connection
 	if s.networkMode == "profile" {
-		fmt.Fprintf(s.out, "Network: profile (%s on %s)\n", s.networkFile, s.networkMode)
+		// Show the connection identity (UUID/interface), never the
+		// staging path under the session dir.
+		if nf, err := diskinstall.ReadNetworkFile(s.networkFile); err == nil {
+			fmt.Fprintf(s.out, "Network: profile (%s on %s)\n", nf.ConnectionUUID, nf.Interface)
+		} else {
+			fmt.Fprintln(s.out, "Network: profile (saved connection)")
+		}
 	} else {
 		fmt.Fprintln(s.out, "Network: wired DHCP")
 	}
+	placement := s.placement
+	if placement == "" {
+		placement = "lan"
+	}
+	fmt.Fprintf(s.out, "Placement: %s\n", placement)
 	// SSH
 	switch s.sshChoice.Mode {
 	case "defer":
@@ -1443,7 +1499,7 @@ func (s *wizardState) stepReview() (error, bool, bool) {
 	fmt.Fprintln(s.out, strings.Repeat("-", 40))
 	fmt.Fprintln(s.out, "You can edit before confirming:")
 	fmt.Fprintln(s.out, "  type 'back' to revise, 'quit' to exit, or edit specific step:")
-	fmt.Fprintln(s.out, "  'edit disks' / 'edit admin' / 'edit ssh' / 'edit network' / 'edit hostname'")
+	fmt.Fprintln(s.out, "  'edit disks' / 'edit admin' / 'edit ssh' / 'edit network' / 'edit placement' / 'edit hostname'")
 	fmt.Fprintln(s.out, "")
 
 	selected := []diskinstall.Disk{}
@@ -1499,6 +1555,13 @@ func (s *wizardState) stepReview() (error, bool, bool) {
 		case "edit network", "edit connection":
 			fmt.Fprintln(s.out, "Re-entering network setup...")
 			if _, back, quit := s.stepConnection(); quit {
+				return nil, false, true
+			} else if back {
+			}
+			return s.stepReview()
+		case "edit placement":
+			fmt.Fprintln(s.out, "Re-entering placement...")
+			if _, back, quit := s.stepPlacement(); quit {
 				return nil, false, true
 			} else if back {
 			}
@@ -1630,6 +1693,11 @@ func (s *wizardState) stepInstall() (error, bool, bool) {
 		s.networkFile = path
 	}
 
+	// Default placement when the wizard step was skipped (tests, resume paths).
+	if s.placement == "" {
+		s.placement = "lan"
+	}
+
 	// Find backend
 	backend, err := findBackend()
 	if err != nil {
@@ -1654,6 +1722,7 @@ func (s *wizardState) stepInstall() (error, bool, bool) {
 	// Create command
 	args := []string{
 		"--hostname", s.hostname,
+		"--placement", s.placement,
 		"--username", s.username,
 		"--password-hash-file", hashFile,
 		"--selection-file", selectionFile,
@@ -1682,7 +1751,7 @@ func (s *wizardState) stepInstall() (error, bool, bool) {
 
 	fmt.Fprintln(s.out, "Invoking installer backend... (log follows)")
 	fmt.Fprintf(s.out, "Log: %s\n", s.logPath)
-	fmt.Fprintln(s.out, "Stages: preflight, partition, format, mount, configure, install, account, unmount, done")
+	fmt.Fprintln(s.out, "Stages: preflight, partition, format, mount, configure, install, account, verify, unmount, done")
 	fmt.Fprintln(s.out, "This may take several minutes. Elapsed time will be shown.")
 
 	// Start backend
@@ -1782,10 +1851,10 @@ func (s *wizardState) stepInstall() (error, bool, bool) {
 				fmt.Fprintf(s.out, "Stage: %s\n", lastStage)
 				fmt.Fprintf(s.out, "Log: %s\n", s.logPath)
 				fmt.Fprintln(s.out, "Installation is incomplete. Mounted target preserved for diagnosis until you exit.")
-				fmt.Fprintln(s.out, "You may view the log, fix the issue, and retry (Retry uses --resume-install for install/account failures).")
+				fmt.Fprintln(s.out, "You may view the log, fix the issue, and retry (Retry uses --resume-install for install/account/verify failures).")
 				// Offer log view and retry
 				for {
-					fmt.Fprintln(s.out, "Options: [v]iew log  [r]etry (if install/account failure)  [q]uit")
+					fmt.Fprintln(s.out, "Options: [v]iew log  [r]etry (if install/account/verify failure)  [q]uit")
 					line, _ := s.readLineWithBack("Choice [v/r/q]: ", true)
 					if s.isQuitInput(line) {
 						// Cleanup secrets already via defer, but preserve mounts? Backend preserves mounts.
@@ -1817,10 +1886,10 @@ func (s *wizardState) stepInstall() (error, bool, bool) {
 						}
 						fmt.Fprintln(s.out, "--- end log ---")
 					case "r", "retry":
-						// Try resume-install if failure was in install/account stages
-						// Check if lastStage is install/account/unmount
-						if lastStage != "install" && lastStage != "account" && lastStage != "configure" {
-							fmt.Fprintf(s.out, "Retry with --resume-install is only for install/account failures (current failure stage: %s). A fresh wizard is required for partition/format failures.\n", lastStage)
+						// Try resume-install if failure was in install/account/verify stages
+						// Check if lastStage is install/account/verify/unmount
+						if lastStage != "install" && lastStage != "account" && lastStage != "verify" && lastStage != "configure" {
+							fmt.Fprintf(s.out, "Retry with --resume-install is only for install/account/verify failures (current failure stage: %s). A fresh wizard is required for partition/format failures.\n", lastStage)
 							continue
 						}
 						fmt.Fprintln(s.out, "Retrying with --resume-install...")
@@ -2001,6 +2070,15 @@ func (s *wizardState) stepReady() (error, bool, bool) {
 // ---------- helpers ----------
 
 func findBackend() (string, error) {
+	// The ISO exports OMAHAB_INSTALL_DISK pointing at the backend binary
+	// (nix/installer.nix), which may not be on PATH if it was sanitized.
+	if p := strings.TrimSpace(os.Getenv("OMAHAB_INSTALL_DISK")); p != "" {
+		if _, err := os.Stat(p); err == nil {
+			return p, nil
+		}
+		// Env set but target missing: fall through to PATH + candidates
+		// rather than failing outright (dev shells, tests).
+	}
 	if p, err := exec.LookPath("omahab-install-disk"); err == nil {
 		return p, nil
 	}
@@ -2016,6 +2094,38 @@ func findBackend() (string, error) {
 		}
 	}
 	return "", fmt.Errorf("omahab-install-disk not found in PATH")
+}
+
+// checkSecureBoot runs omahab-check-secureboot (ISO closure, nix/installer.nix)
+// before any destructive write. It reports whether installation may proceed:
+// ok is false only when Secure Boot is positively detected as enabled, with
+// a message telling the user to disable it in firmware setup. A missing
+// binary (non-ISO environments, dev shells, tests) means skip, not failure.
+func checkSecureBoot() (msg string, ok bool) {
+	path, err := exec.LookPath("omahab-check-secureboot")
+	if err != nil {
+		for _, p := range []string{"/run/current-system/sw/bin/omahab-check-secureboot"} {
+			if _, e := os.Stat(p); e == nil {
+				path = p
+				err = nil
+				break
+			}
+		}
+		if err != nil {
+			return "", true
+		}
+	}
+	var stderr strings.Builder
+	cmd := exec.Command(path)
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		msg = strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = "Secure Boot is enabled. This unsigned ISO and the installed system require Secure Boot disabled. Please disable Secure Boot in firmware setup before installing."
+		}
+		return msg, false
+	}
+	return "", true
 }
 
 func stagePasswordHash(password, dest string) error {
