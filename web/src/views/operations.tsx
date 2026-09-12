@@ -267,28 +267,52 @@ export function ApplicationsPage() {
   });
   const applications = query.data ?? [];
 
+  const runningCount = applications.filter((a) => a.observed_state === "running").length;
+  const attentionCount = applications.filter((a) => a.health === "unhealthy" || a.health === "degraded").length;
+
   return (
     <div className="page">
-      <PageHeader eyebrow="Platform" title="Services" description="Platform services — health, restarts, and exposure." />
-      {query.isLoading ? <LoadingState label="Loading services" /> : query.isError ? <ErrorState error={query.error} retry={() => void query.refetch()} /> : !applications.length ? (
-        <EmptyState title="No services" description="No platform services are currently reported." />
+      <PageHeader eyebrow="Platform" title="Applications" description="Platform services — health, restarts, and exposure." />
+      {query.isLoading ? <LoadingState label="Loading applications" /> : query.isError ? <ErrorState error={query.error} retry={() => void query.refetch()} /> : !applications.length ? (
+        <EmptyState title="No applications" description="No platform services are currently reported." />
       ) : (
-        <div className="resource-list">
-          {applications.map((application) => {
-            const running = application.observed_state === "running";
-            return (
-              <article className="resource-row" key={application.id}>
-                <div className="resource-main"><div className="resource-title"><h2>{application.name}</h2><StatusPill value={application.health} /><StatusPill value={application.exposure} /></div><p className="mono">{application.hostname || application.image} <CopyButton text={application.hostname || application.image} label="Copy" /></p><small>Version <span className="mono" title={application.digest}>{shortDigest(application.digest)}</span> <CopyButton text={application.digest} label="Copy digest" /></small><small>Desired {application.desired_state} · observed {application.observed_state} · updated {formatDate(application.updated_at)}</small></div>
-                <div className="row-actions">
-                  <button className="button secondary" type="button" disabled={mutation.isPending} onClick={() => mutation.mutate({ id: application.id, action: running ? "restart" : "start" })}>{running ? "Restart" : "Start"}</button>
-                  {running && <button className="button ghost" type="button" disabled={mutation.isPending} onClick={() => setPendingAction({ id: application.id, action: "stop", hostname: application.hostname || application.image, name: application.name })}>Stop</button>}
-                  <button className="button secondary" type="button" onClick={() => setReview(application)}>Exposure</button>
-                </div>
-              </article>
-            );
-          })}
+        <>
+          <p className="app-statusline" role="status">
+            $ omahab apps list — <strong>{applications.length} svcs</strong> · {runningCount} running · {attentionCount} need attention
+          </p>
+          <div className="table-wrap">
+            <table className="app-table">
+              <thead>
+                <tr><th scope="col">app</th><th scope="col">health</th><th scope="col">exposure</th><th scope="col">route</th><th scope="col">version</th><th scope="col">state</th><th scope="col">updated</th><th scope="col"><span className="sr-only">Actions</span></th></tr>
+              </thead>
+              <tbody>
+                {applications.map((application) => {
+                  const running = application.observed_state === "running";
+                  const url = application.hostname ? `https://${application.hostname}` : null;
+                  return (
+                    <tr key={application.id}>
+                      <td className="app-name">{url ? <a href={url} target="_blank" rel="noreferrer" title={url}>{application.name}</a> : application.name}</td>
+                      <td><StatusPill value={application.health} /></td>
+                      <td><StatusPill value={application.exposure} /></td>
+                      <td>{application.hostname || "—"} {application.hostname ? <CopyButton text={application.hostname} label="Copy" /> : null}</td>
+                      <td title={application.digest}>{shortDigest(application.digest)} <CopyButton text={application.digest} label="Copy digest" /></td>
+                      <td>{application.desired_state}→{application.observed_state}</td>
+                      <td>{formatDate(application.updated_at)}</td>
+                      <td className="cell-actions">
+                        <div className="row-actions">
+                          <button className="button secondary" type="button" disabled={mutation.isPending} onClick={() => mutation.mutate({ id: application.id, action: running ? "restart" : "start" })}>{running ? "restart" : "start"}</button>
+                          {running && <button className="button ghost" type="button" disabled={mutation.isPending} onClick={() => setPendingAction({ id: application.id, action: "stop", hostname: application.hostname || application.image, name: application.name })}>stop</button>}
+                          <button className="button secondary" type="button" onClick={() => setReview(application)}>exposure</button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
           <MutationNotice error={mutation.error} />
-        </div>
+        </>
       )}
       {review && <ExposureReview resource="applications" item={review} onClose={() => setReview(null)} />}
       {pendingAction && (
