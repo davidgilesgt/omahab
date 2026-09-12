@@ -1207,8 +1207,12 @@ func (b *Backend) renderNativeAppEnv(ctx context.Context, dnsToken, domainName s
 	}, "ntfy-sh"); err != nil {
 		return fmt.Errorf("ntfy: %w", err)
 	}
+	gitHost := "git." + domainName
 	if err := b.writeAppEnv("forgejo", map[string]string{
-		"FORGEJO__packages__ENABLED": "true",
+		"FORGEJO__packages__ENABLED":  "true",
+		"FORGEJO__server__ROOT_URL":   "https://git." + domainName,
+		"FORGEJO__server__DOMAIN":     gitHost,
+		"FORGEJO__server__SSH_DOMAIN": gitHost,
 	}, "forgejo"); err != nil {
 		return fmt.Errorf("forgejo: %w", err)
 	}
