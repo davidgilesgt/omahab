@@ -576,11 +576,10 @@ in
           "AF_INET6"
           "AF_UNIX"
         ];
-        RestrictFileSystems = [
-          "ext4"
-          "tmpfs"
-          "procfs"
-        ];
+        # No RestrictFileSystems allowlist: it forces a BPF filesystem filter
+        # that fails to install on kernels/VMs without BPF map support
+        # (spawn dies 244/BPF before exec — live 2026-09-12). Every other
+        # unit leaves it unset; ProtectSystem=strict still confines mounts.
         UMask = "0077";
         LimitNOFILE = 65536;
         TimeoutStopSec = 15;
