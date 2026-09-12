@@ -277,8 +277,8 @@ func hintForError(err error) string {
 	if err == nil {
 		return ""
 	}
-	// No token needed on the home network (lan placement + LAN source);
-	// elsewhere the 8-character panel token authenticates.
+	// No token needed on a home-LAN install (lan placement + LAN/tailnet source);
+	// on vps placement the 8-character panel token authenticates everywhere.
 	if apiErr, ok := err.(*apiclient.APIError); ok {
 		switch apiErr.StatusCode {
 		case http.StatusUnauthorized, http.StatusForbidden:

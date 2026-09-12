@@ -71,7 +71,7 @@ function consumeFragmentToken(): void {
 interface AuthContextValue {
   token: string | null;
   // True when the server accepts this browser without a token (lan placement
-  // + LAN source address). Null while the probe is in flight.
+  // + LAN or tailnet source address). Null while the probe is in flight.
   lanBypass: boolean | null;
   client: ApiClient;
   authError: string | null;
@@ -115,7 +115,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }), []);
 
   // LAN bypass probe: without a token, GET /api/v1/status succeeds only when
-  // the server trusts this source address (lan placement + LAN). Raw fetch on
+  // the server trusts this source address (lan placement + LAN or tailnet). Raw fetch on
   // purpose — a 401 here must not fire the global unauthorized handler.
   const [lanBypass, setLanBypass] = useState<boolean | null>(null);
   useEffect(() => {
@@ -237,7 +237,7 @@ export function LoginPage() {
       <section className="login-card" aria-labelledby="login-title">
         <p className="eyebrow">Private control plane</p>
         <h1 id="login-title">Sign in to Omahab</h1>
-        <p className="muted">Enter the 8-character panel token shown on the server console. It remains in this browser tab only. On your home network no token is needed.</p>
+        <p className="muted">Enter the 8-character panel token shown on the server console. It remains in this browser tab only. On a home-LAN install no token is needed, on the LAN or the tailnet.</p>
         {displayError && <p className="inline-error" role="alert">{displayError}</p>}
         <p className="muted">Find it on the host via <code className="mono">sudo cat /var/lib/omahab/api.token</code>, or reuse the token at <code className="mono">~/.config/omahab/token</code>.</p>
         <form onSubmit={submit} className="form-stack">

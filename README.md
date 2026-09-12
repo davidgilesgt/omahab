@@ -39,8 +39,7 @@ The console (tty1) shows the LAN panel URL and the 8-character panel token:
 ```
 
 Open the URL on any device in the same LAN (mDNS `omahab.local` also works, best-effort).
-On your home network no token is needed; from the tailnet or elsewhere, enter the
-panel token. The token lives at `/var/lib/omahab/api.token` (root 0600) and is
+On a home-LAN install (lan placement, the default) no token is needed, on the LAN or the tailnet. On a vps install, enter the panel token on every source. The token lives at `/var/lib/omahab/api.token` (root 0600) and is
 provisioned to `~/.config/omahab/token` at daemon startup.
 
 Then work through the setup checklist at `http://<lan-ip>:8484/setup`:
@@ -155,7 +154,7 @@ omahab project rollback demo
 ## Security model
 
 - `omahabd` binds `0.0.0.0:8484`; the nftables table `inet omahab` is the admission boundary: TCP 8484 on `tailscale0`, `lo`, and (lan placement) RFC1918/ULA/link-local LAN ranges.
-- On lan placement (the ISO-installer default), LAN sources reach the panel without a token; tailnet/remote access requires the 8-character panel token.
+- On lan placement (the ISO-installer default), LAN and tailnet (100.64.0.0/10) sources reach the panel without a token; on vps placement every source needs the 8-character panel token.
 - Default-deny inbound; SSH 22, Tailscale UDP 41641, and 80/443 on `tailscale0` are the only other accepts.
 - sshd: no passwords, no root login; config is atomic with the generation.
 - Secrets live under `/var/lib/omahab/secrets` (0700) and per-bundle `appenv` files (0640, service-user group); a `.nix` file never holds a secret.
@@ -253,8 +252,8 @@ only matches if the hostname names an upstream output.
 
 | Message | Cause and solution |
 | --- | --- |
-| Panel asks for a token on the LAN | LAN bypass needs lan placement and a LAN source address. Check `OMAHAB_PLACEMENT` (vps disables it) and that the client is on RFC1918/ULA/link-local |
-| `invalid bearer token` on the tailnet | Read the 8-character token on the tty1 console or via `sudo cat /var/lib/omahab/api.token` |
+| Panel asks for a token on the LAN or tailnet (lan placement) | Should not happen — both are trusted on lan placement. Check `OMAHAB_PLACEMENT` (vps disables the bypass) and that the client is on RFC1918/ULA/link-local or 100.64.0.0/10 |
+| `invalid bearer token` on the tailnet (vps placement) | vps placement needs the token on every source. Read the 8-character token on the tty1 console or via `sudo cat /var/lib/omahab/api.token` |
 | `omahabd` health check timed out | `journalctl -u omahabd -n 50 --no-pager`; the daemon did not return `200` on `http://127.0.0.1:8484/up` |
 | Domain-gated service inactive | Expected before domain enrollment: the unit waits for `/var/lib/omahab/appenv/<bundle>.env` |
 | `omahab system upgrade` rolled back | The new generation failed the 120s health gate; check `journalctl -u omahabd` on the previous generation |

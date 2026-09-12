@@ -324,7 +324,7 @@ func renderPanelToken(w io.Writer, caps tui.Caps, width int, url, token string) 
 	}
 	fmt.Fprintln(w, "")
 	if url != "" {
-		fmt.Fprintln(w, "    No token needed on this network — the token guards tailnet/remote access.")
+		fmt.Fprintln(w, "    No token needed on the LAN or tailnet (lan placement); the token guards panel access on vps placement.")
 	}
 	fmt.Fprintln(w, "    Also at ~/.config/omahab/token (XDG-aware, 0600)")
 }
@@ -416,7 +416,9 @@ func renderFirstBootCode(w io.Writer, caps tui.Caps, ip, token string) {
 		}
 	}
 	fmt.Fprintln(w, "")
-	fmt.Fprintln(w, "  No token needed on this network — the token guards tailnet/remote access.")
+	if ip != "" {
+		fmt.Fprintln(w, "  No token needed on the LAN or tailnet (lan placement).")
+	}
 	fmt.Fprintln(w, "  CLI token at ~/.config/omahab/token (XDG-aware, 0600)")
 }
 
