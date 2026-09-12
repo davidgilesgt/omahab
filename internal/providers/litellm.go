@@ -336,16 +336,23 @@ func (g *litellmGateway) ReconcileModels(ctx context.Context, aliases []Alias, c
 				continue // skip generic suffix handling
 			case credType == CredentialTypeAPIKey && mb == ManagedByOmahab:
 				model := mdl
-				if !strings.Contains(model, "/") {
-					switch provider {
-					case ProviderOpenAI:
-						model = "openai/" + model
-					case ProviderAnthropic:
-						model = "anthropic/" + model
-					case ProviderOpenRouter:
-						model = "openrouter/" + model
-					default:
-						model = provider + "/" + model
+				lower := strings.ToLower(model)
+				switch provider {
+				case ProviderOpenAI:
+					if !strings.HasPrefix(lower, "openai/") {
+						model = "openai/" + strings.TrimPrefix(model, "/")
+					}
+				case ProviderAnthropic:
+					if !strings.HasPrefix(lower, "anthropic/") {
+						model = "anthropic/" + strings.TrimPrefix(model, "/")
+					}
+				case ProviderOpenRouter:
+					if !strings.HasPrefix(lower, "openrouter/") {
+						model = "openrouter/" + strings.TrimPrefix(model, "/")
+					}
+				default:
+					if !strings.HasPrefix(lower, provider+"/") {
+						model = provider + "/" + strings.TrimPrefix(model, "/")
 					}
 				}
 				sb.WriteString(fmt.Sprintf("      model: %s\n", yamlEscape(model)))

@@ -513,8 +513,37 @@ func (b *Backend) CreateProviderCredential(ctx context.Context, req apitypes.Cre
 					prevCredVals = append(prevCredVals, *c)
 				}
 			}
-			_ = b.gateway.ReconcileModels(ctx, prevVals, prevCredVals)
+			if rerr := b.gateway.ReconcileModels(ctx, prevVals, prevCredVals); rerr == nil {
+				_ = b.reloadLiteLLMGateway(ctx)
+			}
 			return apitypes.ProviderCredential{}, translateError(fmt.Errorf("gateway reconcile failed: %w", err))
+		}
+		if err := b.reloadLiteLLMGateway(ctx); err != nil {
+			_ = b.providers.DeleteCredential(ctx, cred.ID)
+			if managedBy == providers.ManagedByOmahab && secretID != "" {
+				_ = b.secrets.Delete(ctx, secretID)
+				if secretName != "" {
+					_ = b.secrets.DeleteByName(ctx, "provider", secretName)
+				}
+			}
+			prevAliases, _ := b.providers.ListAliases(ctx)
+			prevCreds, _ := b.providers.ListCredentials(ctx)
+			var prevVals3 []providers.Alias
+			for _, a := range prevAliases {
+				if a != nil {
+					prevVals3 = append(prevVals3, *a)
+				}
+			}
+			var prevCredVals3 []providers.Credential
+			for _, c := range prevCreds {
+				if c != nil {
+					prevCredVals3 = append(prevCredVals3, *c)
+				}
+			}
+			if rerr := b.gateway.ReconcileModels(ctx, prevVals3, prevCredVals3); rerr == nil {
+				_ = b.reloadLiteLLMGateway(ctx)
+			}
+			return apitypes.ProviderCredential{}, translateError(err)
 		}
 		if err := b.gateway.Health(ctx); err != nil {
 			_ = b.providers.DeleteCredential(ctx, cred.ID)
@@ -538,7 +567,9 @@ func (b *Backend) CreateProviderCredential(ctx context.Context, req apitypes.Cre
 					prevCredVals2 = append(prevCredVals2, *c)
 				}
 			}
-			_ = b.gateway.ReconcileModels(ctx, prevVals2, prevCredVals2)
+			if rerr := b.gateway.ReconcileModels(ctx, prevVals2, prevCredVals2); rerr == nil {
+				_ = b.reloadLiteLLMGateway(ctx)
+			}
 			return apitypes.ProviderCredential{}, translateError(err)
 		}
 	}
@@ -600,6 +631,9 @@ func (b *Backend) DeleteProviderCredential(ctx context.Context, id domain.ID) er
 		if err := b.gateway.ReconcileModels(ctx, aliasVals, remainingCredVals); err != nil {
 			return translateError(fmt.Errorf("gateway reconcile failed: %w", err))
 		}
+		if err := b.reloadLiteLLMGateway(ctx); err != nil {
+			return translateError(err)
+		}
 	}
 	// Delete metadata.
 	if err := b.providers.DeleteCredential(ctx, id); err != nil {
@@ -613,6 +647,38 @@ func (b *Backend) DeleteProviderCredential(ctx context.Context, id domain.ID) er
 			_ = b.secrets.Delete(ctx, cred.SecretID)
 		}
 		_ = b.secrets.DeleteByName(ctx, "provider", secretName)
+	}
+	return nil
+}
+// reloadLiteLLMGateway restarts the litellm app so a freshly reconciled config
+// file goes live (the gateway never reloads its static config on its own).
+// It is a no-op when the apps service is unavailable (unit tests) or litellm is
+// not installed. A restart failure is a real failure: the config is not live.
+func (b *Backend) reloadLiteLLMGateway(ctx context.Context) error {
+	if b.apps == nil {
+		return nil
+	}
+	list, err := b.apps.List(ctx)
+	if err != nil {
+		return translateError(err)
+	}
+	var id domain.ID
+	found := false
+	for _, st := range list {
+		if st.BundleID == "litellm" {
+			id = st.ID
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil
+	}
+	if _, err := b.apps.Stop(ctx, id); err != nil {
+		return translateError(err)
+	}
+	if _, err := b.apps.Start(ctx, id); err != nil {
+		return translateError(err)
 	}
 	return nil
 }
@@ -670,6 +736,9 @@ func (b *Backend) SetModelAlias(ctx context.Context, name string, req apitypes.S
 		}
 		if err := b.gateway.ReconcileModels(ctx, aliasVals, credVals); err != nil {
 			return apitypes.ModelAlias{}, translateError(fmt.Errorf("gateway reconcile failed: %w", err))
+		}
+		if err := b.reloadLiteLLMGateway(ctx); err != nil {
+			return apitypes.ModelAlias{}, translateError(err)
 		}
 		if err := b.gateway.Health(ctx); err != nil {
 			return apitypes.ModelAlias{}, translateError(err)

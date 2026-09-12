@@ -69,6 +69,38 @@ func TestRecoveryConfirmSavedAckAndChallenge(t *testing.T) {
 	}
 }
 
+func TestRecoveryConfirmNegativeCodes(t *testing.T) {
+	backend := newRealBackend(t, nil)
+	srv := newRealServer(t, backend)
+
+	// Unknown fingerprint: 404, stable code, no internal leak.
+	bogus := `{"fingerprint":"ffffffff","saved_ack":true}`
+	rec := doAuthed(srv, http.MethodPost, "/api/v1/recovery/confirm", bogus)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown fingerprint status %d, body %s, want 404", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"code":"not_found"`) {
+		t.Fatalf("unknown fingerprint code = %s, want not_found", rec.Body.String())
+	}
+
+	// Empty body: 400.
+	rec = doAuthed(srv, http.MethodPost, "/api/v1/recovery/confirm", `{}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("empty confirm status %d, body %s, want 400", rec.Code, rec.Body.String())
+	}
+
+	// Consumed pending entry: second confirm 404.
+	mat := genRecovery(t, srv)
+	ackBody := `{"fingerprint":` + strconv.Quote(mat.Fingerprint) + `,"saved_ack":true}`
+	if rec := doAuthed(srv, http.MethodPost, "/api/v1/recovery/confirm", ackBody); rec.Code != http.StatusOK {
+		t.Fatalf("first confirm status %d, body %s", rec.Code, rec.Body.String())
+	}
+	rec = doAuthed(srv, http.MethodPost, "/api/v1/recovery/confirm", ackBody)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("second confirm status %d, body %s, want 404", rec.Code, rec.Body.String())
+	}
+}
+
 func TestTailscaleV1RoutesAuthAndPresence(t *testing.T) {
 	backend := newRealBackend(t, nil)
 	srv := newRealServer(t, backend)
