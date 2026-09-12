@@ -115,6 +115,10 @@ in
       self.packages.${pkgs.system}.omahab
       self.packages.${pkgs.system}.omahab-embedding-worker
       self.packages.${pkgs.system}.omahab-once
+      # The 4 clientd binaries: their per-target Go module graphs are GBs of
+      # sandbox tmpfs during install (OOM on small machines). Prebuilt here,
+      # reused by identical store path in the guest.
+      self.packages.${pkgs.system}.omahab-dl
     ]
   );
 
