@@ -370,6 +370,10 @@ func (b *Backend) ensureKarakeepOIDC(ctx context.Context, domainName string) err
 		"OAUTH_WELLKNOWN_URL": "https://id." + domainName + "/.well-known/openid-configuration",
 		"OAUTH_SCOPE":         "openid email profile",
 		"OAUTH_ALLOW_DANGEROUS_EMAIL_ACCOUNT_LINKING": "true",
+		// Password login disabled: Pocket ID is the only auth path.
+		// OAUTH_AUTO_REDIRECT skips the login page and bounces straight to Pocket ID.
+		"DISABLE_PASSWORD_AUTH": "true",
+		"OAUTH_AUTO_REDIRECT":   "true",
 	}, "karakeep"); err != nil {
 		return fmt.Errorf("write karakeep appenv: %w", err)
 	}
