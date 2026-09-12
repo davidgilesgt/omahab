@@ -55,6 +55,10 @@ const (
 	AliasBalanced  = "omahab/balanced"
 	AliasReasoning = "omahab/reasoning"
 	AliasEmbedding = "omahab/embedding"
+	// AliasKarakeep routes Karakeep bookmark AI (auto-tagging, summarization)
+	// through the gateway. Admins map it to a vision-capable model; Karakeep
+	// uses it for both INFERENCE_TEXT_MODEL and INFERENCE_IMAGE_MODEL.
+	AliasKarakeep = "omahab/karakeep"
 )
 
 // ManagedBy values for provider_credentials.managed_by.
@@ -106,6 +110,7 @@ var allowedAliases = map[string]bool{
 	AliasBalanced:  true,
 	AliasReasoning: true,
 	AliasEmbedding: true,
+	AliasKarakeep:  true,
 }
 
 // Rejected substrings for cookie/session exfiltration.
@@ -144,7 +149,7 @@ func SupportedProviders() []string {
 
 // SupportedAliases returns the routed alias list.
 func SupportedAliases() []string {
-	return []string{AliasFast, AliasBalanced, AliasReasoning, AliasEmbedding}
+	return []string{AliasFast, AliasBalanced, AliasReasoning, AliasEmbedding, AliasKarakeep}
 }
 
 // IsEntitlementError reports whether err is an entitlement (403) failure distinct from token corruption.

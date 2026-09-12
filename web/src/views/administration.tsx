@@ -559,7 +559,7 @@ const SUPPORTED_PROVIDERS = [
   { value: "xai", label: "xAI Grok (subscription)", kinds: ["oauth"] as const },
 ] as const;
 
-const ALIAS_NAMES: ModelAliasName[] = ["omahab/fast", "omahab/balanced", "omahab/reasoning", "omahab/embedding"];
+const ALIAS_NAMES: ModelAliasName[] = ["omahab/fast", "omahab/balanced", "omahab/reasoning", "omahab/embedding", "omahab/karakeep"];
 
 function EntitlementPill({ value }: { value?: string | null }) {
   const v = (value ?? "unknown").toLowerCase();

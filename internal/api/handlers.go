@@ -994,7 +994,7 @@ func (s *Server) handleSetModelAlias(w http.ResponseWriter, r *http.Request) {
 	if decoded, err := url.PathUnescape(raw); err == nil {
 		name = decoded
 	}
-	if name != "omahab/fast" && name != "omahab/balanced" && name != "omahab/reasoning" && name != "omahab/embedding" {
+	if name != "omahab/fast" && name != "omahab/balanced" && name != "omahab/reasoning" && name != "omahab/embedding" && name != "omahab/karakeep" {
 		writeError(w, r, errBadRequest("invalid alias name"))
 		return
 	}

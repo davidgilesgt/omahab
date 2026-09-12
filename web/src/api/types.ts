@@ -144,7 +144,7 @@ export interface ProviderCredential {
   updated_at: string;
 }
 
-export type ModelAliasName = "omahab/fast" | "omahab/balanced" | "omahab/reasoning" | "omahab/embedding";
+export type ModelAliasName = "omahab/fast" | "omahab/balanced" | "omahab/reasoning" | "omahab/embedding" | "omahab/karakeep";
 
 export interface ModelAlias {
   name: ModelAliasName;

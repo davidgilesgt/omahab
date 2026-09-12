@@ -374,7 +374,14 @@ func (b *Backend) ensureKarakeepOIDC(ctx context.Context, domainName string) err
 	if err := upsertSecret(ctx, b.secrets, "platform-app", "karakeep_oidc_client_secret", clientSecret); err != nil {
 		return fmt.Errorf("store karakeep_oidc_client_secret: %w", err)
 	}
-	if err := b.writeAppEnv("karakeep", map[string]string{
+	// Read-modify-write: writeAppEnv replaces the whole file, so carry the
+	// AI keys (OPENAI_*/INFERENCE_*, owned by ensureKarakeepLiteLLMKey) across
+	// OIDC re-ensures. Converged files skip the rewrite and the restart.
+	existing, err := b.readAppEnv("karakeep")
+	if err != nil {
+		return fmt.Errorf("read karakeep appenv: %w", err)
+	}
+	want := map[string]string{
 		"NEXTAUTH_URL":        "https://keep." + domainName,
 		"OAUTH_PROVIDER_NAME": "Pocket ID",
 		"OAUTH_CLIENT_ID":     clientID,
@@ -386,11 +393,26 @@ func (b *Backend) ensureKarakeepOIDC(ctx context.Context, domainName string) err
 		// OAUTH_AUTO_REDIRECT skips the login page and bounces straight to Pocket ID.
 		"DISABLE_PASSWORD_AUTH": "true",
 		"OAUTH_AUTO_REDIRECT":   "true",
-	}, "karakeep"); err != nil {
-		return fmt.Errorf("write karakeep appenv: %w", err)
 	}
-	if err := b.redeployBundle(ctx, "karakeep"); err != nil {
-		return fmt.Errorf("reload karakeep config: %w", err)
+	for _, k := range karakeepAIKeys {
+		if v := strings.TrimSpace(existing[k]); v != "" {
+			want[k] = v
+		}
+	}
+	converged := true
+	for k, v := range want {
+		if existing[k] != v {
+			converged = false
+			existing[k] = v
+		}
+	}
+	if !converged {
+		if err := b.writeAppEnv("karakeep", existing, "karakeep"); err != nil {
+			return fmt.Errorf("write karakeep appenv: %w", err)
+		}
+		if err := b.redeployBundle(ctx, "karakeep"); err != nil {
+			return fmt.Errorf("reload karakeep config: %w", err)
+		}
 	}
 	log.Printf("setup oidc: karakeep client ensured")
 	return nil

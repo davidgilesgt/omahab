@@ -1306,7 +1306,10 @@ func (b *Backend) setupPhaseDependentApps(ctx context.Context) error {
 			log.Printf("setup dependent_apps: woodpecker bundle not found, skipping")
 		}
 		// Woodpecker skipped, but hermes still needs its key + install.
-		return b.ensureHermesDependentApp(ctx)
+		if err := b.ensureHermesDependentApp(ctx); err != nil {
+			return err
+		}
+		return b.ensureKarakeepLiteLLMKey(ctx)
 	}
 	dir := filepath.Join(b.cfg.StateDir, "secrets")
 	if strings.TrimSpace(b.cfg.StateDir) == "" {
@@ -1411,6 +1414,11 @@ func (b *Backend) setupPhaseDependentApps(ctx context.Context) error {
 	// client_id and LiteLLM key exist in its env.
 	if err := b.ensureHermesDependentApp(ctx); err != nil {
 		return err
+	}
+	// Karakeep AI is additive (bookmarks work without it), but a broken render
+	// must fail loudly like the hermes key above — never run silently AI-less.
+	if err := b.ensureKarakeepLiteLLMKey(ctx); err != nil {
+		return fmt.Errorf("karakeep litellm key: %w", err)
 	}
 	return nil
 }

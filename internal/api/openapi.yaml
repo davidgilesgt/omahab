@@ -1085,7 +1085,7 @@ paths:
         - name: name
           in: path
           required: true
-          schema: { type: string, enum: [omahab/fast, omahab/balanced, omahab/reasoning, omahab/embedding] }
+          schema: { type: string, enum: [omahab/fast, omahab/balanced, omahab/reasoning, omahab/embedding, omahab/karakeep] }
           description: Alias name
       requestBody:
         required: true
@@ -2459,7 +2459,7 @@ components:
       description: Stable omahab alias routed via LiteLLM.
       required: [name, credential_id, model, updated_at]
       properties:
-        name: { type: string, enum: [omahab/fast, omahab/balanced, omahab/reasoning, omahab/embedding] }
+        name: { type: string, enum: [omahab/fast, omahab/balanced, omahab/reasoning, omahab/embedding, omahab/karakeep] }
         credential_id: { type: string }
         model: { type: string, description: Upstream model, e.g. gpt-4o, anthropic/claude-3-5-sonnet, xai/grok-4, chatgpt/gpt-4o }
         fallback_order: { type: array, items: { type: string }, nullable: true, description: Ordered fallback credential IDs or model names; empty means no fallback } 
@@ -2497,7 +2497,7 @@ components:
         name: { type: string, minLength: 1, maxLength: 128 }
         owner_kind: { type: string, enum: [hermes, device, harness] }
         owner_id: { type: string, minLength: 1 }
-        scopes: { type: array, items: { type: string, enum: [omahab/fast, omahab/balanced, omahab/reasoning, omahab/embedding] } }
+        scopes: { type: array, items: { type: string, enum: [omahab/fast, omahab/balanced, omahab/reasoning, omahab/embedding, omahab/karakeep] } }
         rpm: { type: integer, minimum: 1 }
         tpm: { type: integer, minimum: 1 }
         concurrency: { type: integer, minimum: 1 }

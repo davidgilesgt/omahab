@@ -22,6 +22,7 @@ import (
 	"github.com/omahab/omahab/internal/events"
 	"github.com/omahab/omahab/internal/exposure"
 	"github.com/omahab/omahab/internal/identity"
+	"github.com/omahab/omahab/internal/providers"
 	"github.com/omahab/omahab/internal/secrets"
 	"github.com/omahab/omahab/internal/store"
 )
@@ -1504,5 +1505,324 @@ func TestFinalExposureIncludesNonDefaultInstalled(t *testing.T) {
 	}
 	if _, ok := edge.routes["omahab.omahab.com"]; !ok {
 		t.Fatalf("missing omahab.omahab.com route: %v", edge.routes)
+	}
+}
+
+func TestMergeKarakeepAIEnv(t *testing.T) {
+	base := map[string]string{
+		"NEXTAUTH_URL":    "https://keep.omahab.com",
+		"OAUTH_CLIENT_ID": "cid",
+	}
+	merged, changed := mergeKarakeepAIEnv(base, "sk-karakeep-1")
+	if !changed {
+		t.Fatal("fresh token must report changed")
+	}
+	for k, want := range map[string]string{
+		"OPENAI_BASE_URL":       "http://127.0.0.1:4000/v1",
+		"OPENAI_API_KEY":        "sk-karakeep-1",
+		"INFERENCE_TEXT_MODEL":  "omahab/karakeep",
+		"INFERENCE_IMAGE_MODEL": "omahab/karakeep",
+		"NEXTAUTH_URL":          "https://keep.omahab.com",
+		"OAUTH_CLIENT_ID":       "cid",
+	} {
+		if merged[k] != want {
+			t.Fatalf("merged[%s] = %q, want %q", k, merged[k], want)
+		}
+	}
+	if _, changed := mergeKarakeepAIEnv(merged, "sk-karakeep-1"); changed {
+		t.Fatal("same token must converge")
+	}
+	rotated, changed := mergeKarakeepAIEnv(merged, "sk-karakeep-2")
+	if !changed || rotated["OPENAI_API_KEY"] != "sk-karakeep-2" {
+		t.Fatalf("rotation must report changed, got %v", rotated["OPENAI_API_KEY"])
+	}
+	untouched, changed := mergeKarakeepAIEnv(base, "")
+	if changed || len(untouched) != len(base) {
+		t.Fatal("empty token must leave the map unchanged (AI stays off)")
+	}
+}
+
+// recordingGateway stands in for LiteLLM key issuance in karakeep setup tests.
+type recordingGateway struct {
+	mu     sync.Mutex
+	issues []providers.VirtualKey
+	token  string
+}
+
+func (g *recordingGateway) IssueVirtualKey(_ context.Context, vk providers.VirtualKey) (string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.issues = append(g.issues, vk)
+	return g.token, nil
+}
+
+func (g *recordingGateway) RevokeVirtualKey(_ context.Context, _, _ string) error { return nil }
+
+func (g *recordingGateway) issueCount() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return len(g.issues)
+}
+
+func karakeepTestProviders(t *testing.T, b *Backend, gw *recordingGateway) {
+	t.Helper()
+	ctx := context.Background()
+	if err := b.store.Migrate(ctx, providers.Migrations()...); err != nil {
+		t.Fatal(err)
+	}
+	psvc := providers.New(b.db, nil)
+	psvc.SetVirtualKeyGateway(gw)
+	b.providers = psvc
+}
+
+func karakeepTestCatalog(t *testing.T, b *Backend, runner *scriptedRunner, digest string) apps.Bundle {
+	t.Helper()
+	ctx := context.Background()
+	kb := testSetupBundle("karakeep", digest, domain.ExposurePrivate, "keep", []string{"caddy", "pocket-id"})
+	kb.Units = []string{"karakeep-web.service"}
+	cat, err := apps.NewCatalog(
+		testSetupBundle("caddy", digest, domain.ExposurePublic, "", nil),
+		testSetupBundle("pocket-id", digest, domain.ExposurePrivate, "id", []string{"caddy"}),
+		kb,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := apps.NewService(b.db, apps.Options{Catalog: cat, Runner: runner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.apps = svc
+	if err := b.ensureDefaultApp(ctx, kb, "omahab.com"); err != nil {
+		t.Fatalf("install karakeep: %v", err)
+	}
+	return kb
+}
+
+// Without a mapped omahab/karakeep alias the render is a silent no-op: AI
+// stays off, nothing is issued, the OIDC-only env is untouched.
+func TestEnsureKarakeepLiteLLMKeySkipsWhenAliasUnmapped(t *testing.T) {
+	ctx := context.Background()
+	digest := "sha256:" + strings.Repeat("a", 64)
+	runner := &scriptedRunner{health: domain.HealthHealthy}
+	b := newAppsBackend(t, runner, digest)
+	stateRoot := t.TempDir()
+	b.cfg.StateDir = filepath.Join(stateRoot, "state")
+	b.cfg.DataDir = filepath.Join(stateRoot, "data")
+	gw := &recordingGateway{token: "sk-unused"}
+	karakeepTestProviders(t, b, gw)
+	karakeepTestCatalog(t, b, runner, digest)
+	oidc := map[string]string{"NEXTAUTH_URL": "https://keep.omahab.com", "OAUTH_CLIENT_ID": "cid"}
+	if err := b.writeAppEnv("karakeep", oidc, "karakeep"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.ensureKarakeepLiteLLMKey(ctx); err != nil {
+		t.Fatalf("unmapped alias must skip, got %v", err)
+	}
+	if gw.issueCount() != 0 {
+		t.Fatal("no virtual key may be issued without a mapped alias")
+	}
+	if _, err := b.secrets.RevealByName(ctx, "platform-app", "karakeep_litellm_key"); err == nil {
+		t.Fatal("no key secret may be stored without a mapped alias")
+	}
+	env, err := b.readAppEnv("karakeep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(env) != len(oidc) {
+		t.Fatalf("env must stay OIDC-only, got %v", env)
+	}
+	if runner.startCount != 0 {
+		t.Fatal("no redeploy may happen on skip")
+	}
+}
+
+// Mapped alias, enrolled Karakeep: issue once, render OIDC+AI, converge after.
+func TestEnsureKarakeepLiteLLMKeyIssuesAndRenders(t *testing.T) {
+	ctx := context.Background()
+	digest := "sha256:" + strings.Repeat("a", 64)
+	runner := &scriptedRunner{health: domain.HealthHealthy}
+	b := newAppsBackend(t, runner, digest)
+	stateRoot := t.TempDir()
+	b.cfg.StateDir = filepath.Join(stateRoot, "state")
+	b.cfg.DataDir = filepath.Join(stateRoot, "data")
+	gw := &recordingGateway{token: "sk-karakeep-test-1"}
+	karakeepTestProviders(t, b, gw)
+	karakeepTestCatalog(t, b, runner, digest)
+	if _, err := b.providers.CreateCredential(ctx, providers.CreateCredentialInput{
+		ID:             "cred-karakeep",
+		Provider:       providers.ProviderOpenAI,
+		CredentialType: providers.CredentialTypeAPIKey,
+		DisplayName:    "karakeep test",
+		SecretID:       "test-secret-id",
+		ManagedBy:      providers.ManagedByOmahab,
+	}); err != nil {
+		t.Fatalf("create credential: %v", err)
+	}
+	if _, err := b.providers.SetAlias(ctx, providers.SetAliasInput{
+		Name:         providers.AliasKarakeep,
+		CredentialID: "cred-karakeep",
+		Model:        "gpt-4o-mini",
+	}); err != nil {
+		t.Fatalf("set alias: %v", err)
+	}
+	oidc := map[string]string{"NEXTAUTH_URL": "https://keep.omahab.com", "OAUTH_CLIENT_ID": "cid"}
+	if err := b.writeAppEnv("karakeep", oidc, "karakeep"); err != nil {
+		t.Fatal(err)
+	}
+	startsBefore := runner.startCount
+	if err := b.ensureKarakeepLiteLLMKey(ctx); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if gw.issueCount() != 1 {
+		t.Fatalf("issues = %d, want 1", gw.issueCount())
+	}
+	gw.mu.Lock()
+	scopes := append([]string(nil), gw.issues[0].Scopes...)
+	ownerKind, ownerID := "", ""
+	if gw.issues[0].OwnerKind != nil {
+		ownerKind = *gw.issues[0].OwnerKind
+	}
+	if gw.issues[0].OwnerID != nil {
+		ownerID = *gw.issues[0].OwnerID
+	}
+	gw.mu.Unlock()
+	if len(scopes) != 1 || scopes[0] != providers.AliasKarakeep {
+		t.Fatalf("key scopes = %v, want [omahab/karakeep]", scopes)
+	}
+	if ownerKind != providers.OwnerKindHarness || ownerID != "karakeep" {
+		t.Fatalf("key owner = %s:%s, want harness:karakeep", ownerKind, ownerID)
+	}
+	stored, err := b.secrets.RevealByName(ctx, "platform-app", "karakeep_litellm_key")
+	if err != nil || strings.TrimSpace(stored) == "" {
+		t.Fatalf("stored key missing err = %v", err)
+	}
+	env, err := b.readAppEnv("karakeep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The service-minted virtual key is what consumers present (same contract
+	// as hermes/devices); broker and env must agree on it.
+	if env["OPENAI_API_KEY"] != stored {
+		t.Fatalf("env key = %q, broker key = %q, must agree", env["OPENAI_API_KEY"], stored)
+	}
+	for k, want := range map[string]string{
+		"NEXTAUTH_URL":          "https://keep.omahab.com",
+		"OAUTH_CLIENT_ID":       "cid",
+		"OPENAI_BASE_URL":       "http://127.0.0.1:4000/v1",
+		"INFERENCE_TEXT_MODEL":  "omahab/karakeep",
+		"INFERENCE_IMAGE_MODEL": "omahab/karakeep",
+	} {
+		if env[k] != want {
+			t.Fatalf("env[%s] = %q, want %q (full env: %v)", k, env[k], want, env)
+		}
+	}
+	if got := runner.startCount - startsBefore; got != 1 {
+		t.Fatalf("starts after render = %d, want 1", got)
+	}
+	// Converged re-run reuses the key: no new issuance, no redeploy.
+	if err := b.ensureKarakeepLiteLLMKey(ctx); err != nil {
+		t.Fatalf("re-ensure: %v", err)
+	}
+	if gw.issueCount() != 1 {
+		t.Fatalf("issues after re-ensure = %d, want still 1", gw.issueCount())
+	}
+	if got := runner.startCount - startsBefore; got != 1 {
+		t.Fatalf("starts after re-ensure = %d, want still 1", got)
+	}
+}
+
+// OIDC re-ensures must carry the AI keys (writeAppEnv replaces the file) and
+// converged re-runs must not bounce the units.
+func TestSetupPhaseOIDCKarakeepPreservesAIKeys(t *testing.T) {
+	ctx := context.Background()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "application-configuration"):
+			_ = json.NewEncoder(w).Encode([]any{})
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/api/oidc/clients"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}})
+		case strings.Contains(r.URL.Path, "/api/user-groups"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
+				map[string]any{"id": "1", "name": "admins", "friendlyName": "admins"},
+				map[string]any{"id": "2", "name": "members", "friendlyName": "members"},
+				map[string]any{"id": "3", "name": "guests", "friendlyName": "guests"},
+			}})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/oidc/clients":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": "oidc-karakeep", "name": "karakeep",
+				"clientId": "karakeep-client", "clientSecret": "karakeep-secret",
+			})
+		}
+	}))
+	t.Cleanup(srv.Close)
+	digest := "sha256:" + strings.Repeat("a", 64)
+	runner := &scriptedRunner{health: domain.HealthHealthy}
+	b := newAppsBackend(t, runner, digest)
+	stateRoot := t.TempDir()
+	b.cfg.StateDir = filepath.Join(stateRoot, "state")
+	b.cfg.DataDir = filepath.Join(stateRoot, "data")
+	kb := testSetupBundle("karakeep", digest, domain.ExposurePrivate, "keep", []string{"caddy", "pocket-id"})
+	kb.Units = []string{"karakeep-web.service"}
+	cat, err := apps.NewCatalog(
+		testSetupBundle("caddy", digest, domain.ExposurePublic, "", nil),
+		testSetupBundle("pocket-id", digest, domain.ExposurePrivate, "id", []string{"caddy"}),
+		kb,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := apps.NewService(b.db, apps.Options{Catalog: cat, Runner: runner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.apps = svc
+	if err := b.ensureDefaultApp(ctx, kb, "omahab.com"); err != nil {
+		t.Fatalf("install karakeep: %v", err)
+	}
+	seed := map[string]string{
+		"NEXTAUTH_URL":          "https://keep.omahab.com",
+		"OAUTH_CLIENT_ID":       "stale-client",
+		"OPENAI_BASE_URL":       "http://127.0.0.1:4000/v1",
+		"OPENAI_API_KEY":        "sk-karakeep-kept",
+		"INFERENCE_TEXT_MODEL":  "omahab/karakeep",
+		"INFERENCE_IMAGE_MODEL": "omahab/karakeep",
+	}
+	if err := b.writeAppEnv("karakeep", seed, "karakeep"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.secrets.Put(ctx, "platform-app", "pocketid_api_key", "test-key"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OMAHAB_POCKETID_URL", srv.URL)
+	startsBefore := runner.startCount
+	if err := b.setupPhaseOIDC(ctx); err != nil {
+		t.Fatalf("oidc: %v", err)
+	}
+	env, err := b.readAppEnv("karakeep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, want := range map[string]string{
+		"OAUTH_CLIENT_ID":       "karakeep-client",
+		"OAUTH_CLIENT_SECRET":   "karakeep-secret",
+		"OPENAI_API_KEY":        "sk-karakeep-kept",
+		"OPENAI_BASE_URL":       "http://127.0.0.1:4000/v1",
+		"INFERENCE_TEXT_MODEL":  "omahab/karakeep",
+		"INFERENCE_IMAGE_MODEL": "omahab/karakeep",
+	} {
+		if env[k] != want {
+			t.Fatalf("env[%s] = %q, want %q (full env: %v)", k, env[k], want, env)
+		}
+	}
+	if got := runner.startCount - startsBefore; got != 1 {
+		t.Fatalf("starts after OIDC render = %d, want 1", got)
+	}
+	if err := b.setupPhaseOIDC(ctx); err != nil {
+		t.Fatalf("oidc rerun: %v", err)
+	}
+	if got := runner.startCount - startsBefore; got != 1 {
+		t.Fatalf("starts after converged rerun = %d, want still 1", got)
 	}
 }
