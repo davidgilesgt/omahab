@@ -559,6 +559,127 @@ func TestSetupPhaseOIDCEnsuresImmichClient(t *testing.T) {
 	}
 }
 
+func TestSetupPhaseOIDCEnsuresLitellmClient(t *testing.T) {
+	ctx := context.Background()
+	var createdName string
+	var createdCallbacks []any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "application-configuration"):
+			_ = json.NewEncoder(w).Encode([]any{})
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/api/oidc/clients"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}})
+		case strings.Contains(r.URL.Path, "/api/user-groups"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
+				map[string]any{"id": "1", "name": "admins", "friendlyName": "admins"},
+				map[string]any{"id": "2", "name": "members", "friendlyName": "members"},
+				map[string]any{"id": "3", "name": "guests", "friendlyName": "guests"},
+			}})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/oidc/clients":
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			createdName, _ = body["name"].(string)
+			createdCallbacks, _ = body["callbackUrls"].([]any)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": "oidc-litellm", "name": "litellm",
+				"clientId": "litellm-client", "clientSecret": "litellm-secret",
+			})
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		}
+	}))
+	t.Cleanup(srv.Close)
+	discovery := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"issuer":                 "https://id.omahab.com",
+			"authorization_endpoint": "https://id.omahab.com/authorize",
+			"token_endpoint":         "https://id.omahab.com/api/oidc/token",
+			"userinfo_endpoint":      "https://id.omahab.com/api/oidc/userinfo",
+		})
+	}))
+	t.Cleanup(discovery.Close)
+
+	digest := "sha256:" + strings.Repeat("a", 64)
+	runner := &scriptedRunner{health: domain.HealthHealthy}
+	b := newAppsBackend(t, runner, digest)
+	stateRoot := t.TempDir()
+	b.cfg.StateDir = filepath.Join(stateRoot, "state")
+	b.cfg.DataDir = filepath.Join(stateRoot, "data")
+	cat, err := apps.NewCatalog(
+		testSetupBundle("caddy", digest, domain.ExposurePublic, "", nil),
+		testSetupBundle("pocket-id", digest, domain.ExposurePrivate, "id", []string{"caddy"}),
+		testSetupBundle("litellm", digest, domain.ExposurePrivate, "models", []string{"caddy", "pocket-id"}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := apps.NewService(b.db, apps.Options{Catalog: cat, Runner: runner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.apps = svc
+	litellm := testSetupBundle("litellm", digest, domain.ExposurePrivate, "models", []string{"caddy", "pocket-id"})
+	litellm.Units = []string{"litellm.service"}
+	if err := b.ensureDefaultApp(ctx, litellm, "omahab.com"); err != nil {
+		t.Fatalf("install litellm: %v", err)
+	}
+	// Seed platform vars: the SSO render must preserve them.
+	if err := b.writeAppEnv("litellm", map[string]string{"LITELLM_MASTER_KEY": "mk-test"}, "litellm"); err != nil {
+		t.Fatalf("seed litellm env: %v", err)
+	}
+	if _, err := b.secrets.Put(ctx, "platform-app", "pocketid_api_key", "test-key"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OMAHAB_POCKETID_URL", srv.URL)
+	t.Setenv("OMAHAB_OIDC_DISCOVERY_URL", discovery.URL)
+	startsBefore := runner.startCount
+	if err := b.setupPhaseOIDC(ctx); err != nil {
+		t.Fatalf("oidc: %v", err)
+	}
+	if createdName != "litellm" {
+		t.Fatalf("created client name = %q", createdName)
+	}
+	found := false
+	for _, c := range createdCallbacks {
+		if c == "https://models.omahab.com/sso/callback" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("callbacks = %v want models sso callback", createdCallbacks)
+	}
+	id, err := b.secrets.RevealByName(ctx, "platform-app", "litellm_oidc_client_id")
+	if err != nil || id != "litellm-client" {
+		t.Fatalf("client id = %q err=%v", id, err)
+	}
+	env, err := b.readAppEnv("litellm")
+	if err != nil {
+		t.Fatalf("read litellm env: %v", err)
+	}
+	for k, want := range map[string]string{
+		"LITELLM_MASTER_KEY":              "mk-test",
+		"GENERIC_CLIENT_ID":               "litellm-client",
+		"GENERIC_CLIENT_SECRET":           "litellm-secret",
+		"GENERIC_AUTHORIZATION_ENDPOINT":  "https://id.omahab.com/authorize",
+		"GENERIC_TOKEN_ENDPOINT":          "https://id.omahab.com/api/oidc/token",
+		"GENERIC_USERINFO_ENDPOINT":       "https://id.omahab.com/api/oidc/userinfo",
+		"PROXY_BASE_URL":                  "https://models.omahab.com",
+	} {
+		if env[k] != want {
+			t.Fatalf("litellm env[%s] = %q, want %q (full env: %v)", k, env[k], want, env)
+		}
+	}
+	// Converged re-run must not bounce the gateway.
+	if err := b.setupPhaseOIDC(ctx); err != nil {
+		t.Fatalf("oidc rerun: %v", err)
+	}
+	if got := runner.startCount - startsBefore; got != 1 {
+		t.Fatalf("litellm starts across two oidc runs = %d, want 1 (converged rerun restarts)", got)
+	}
+}
+
 func testSetupBundle(id, digest string, exp domain.Exposure, route string, deps []string) apps.Bundle {
 	max := exp
 	if max == "" {

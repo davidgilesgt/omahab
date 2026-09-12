@@ -496,7 +496,9 @@
         ]
       },
       "oidc": {
-        "supported": false
+        "supported": true,
+        "mode": "native",
+        "provider": "pocket-id"
       },
       "resources": {
         "memory_mb": 512

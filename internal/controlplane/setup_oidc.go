@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -97,7 +98,10 @@ func (b *Backend) setupPhaseOIDC(ctx context.Context) error {
 	}
 	needPaperless := bundleRunning("paperless-ngx")
 	needKarakeep := bundleRunning("karakeep")
-	if !needImmich && !needHermes && !needForgejo && !needPaperless && !needKarakeep {
+	// LiteLLM is a core bundle installed before this phase, so running
+	// implies installed (same strict check as karakeep/immich/paperless).
+	needLitellm := bundleRunning("litellm")
+	if !needImmich && !needHermes && !needForgejo && !needPaperless && !needKarakeep && !needLitellm {
 		return nil
 	}
 
@@ -122,6 +126,11 @@ func (b *Backend) setupPhaseOIDC(ctx context.Context) error {
 	}
 	if needKarakeep {
 		if err := b.ensureKarakeepOIDC(ctx, domainName); err != nil {
+			return err
+		}
+	}
+	if needLitellm {
+		if err := b.ensureLitellmOIDC(ctx, domainName); err != nil {
 			return err
 		}
 	}
@@ -381,6 +390,114 @@ func (b *Backend) ensureKarakeepOIDC(ctx context.Context, domainName string) err
 		return fmt.Errorf("reload karakeep config: %w", err)
 	}
 	log.Printf("setup oidc: karakeep client ensured")
+	return nil
+}
+
+// oidcDiscoveryBase returns the issuer base URL whose .well-known document
+// describes Pocket ID's OAuth endpoints. OMAHAB_OIDC_DISCOVERY_URL overrides
+// it for tests (same seam family as OMAHAB_POCKETID_URL).
+func oidcDiscoveryBase(domainName string) string {
+	if v := strings.TrimSpace(os.Getenv("OMAHAB_OIDC_DISCOVERY_URL")); v != "" {
+		return strings.TrimRight(v, "/")
+	}
+	return "https://id." + strings.TrimSpace(domainName)
+}
+
+// fetchOIDCEndpoints reads the authorize/token/userinfo endpoints from the
+// issuer's discovery document instead of hardcoding Pocket ID's paths, so a
+// Pocket ID upgrade that moves them converges automatically. Fail-closed:
+// any fetch, status, or parse error aborts the caller.
+func fetchOIDCEndpoints(ctx context.Context, discoveryBase string) (authorize, token, userinfo string, err error) {
+	u := strings.TrimRight(strings.TrimSpace(discoveryBase), "/") + "/.well-known/openid-configuration"
+	cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(cctx, http.MethodGet, u, nil)
+	if err != nil {
+		return "", "", "", fmt.Errorf("build discovery request: %w", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", "", "", fmt.Errorf("fetch discovery document: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", "", "", fmt.Errorf("discovery document status %d", resp.StatusCode)
+	}
+	var doc struct {
+		AuthorizationEndpoint string `json:"authorization_endpoint"`
+		TokenEndpoint         string `json:"token_endpoint"`
+		UserinfoEndpoint      string `json:"userinfo_endpoint"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
+		return "", "", "", fmt.Errorf("decode discovery document: %w", err)
+	}
+	if strings.TrimSpace(doc.AuthorizationEndpoint) == "" || strings.TrimSpace(doc.TokenEndpoint) == "" || strings.TrimSpace(doc.UserinfoEndpoint) == "" {
+		return "", "", "", fmt.Errorf("discovery document missing endpoints")
+	}
+	return strings.TrimSpace(doc.AuthorizationEndpoint), strings.TrimSpace(doc.TokenEndpoint), strings.TrimSpace(doc.UserinfoEndpoint), nil
+}
+
+// ensureLitellmOIDC wires LiteLLM Admin UI SSO (generic OIDC) to Pocket ID.
+// Without these env vars the UI renders "Login with SSO" disabled with
+// "Please configure SSO to log in with SSO." The write is a
+// read-modify-write over litellm.env so the master key, DB URL, and provider
+// vars survive; a converged file skips the rewrite and the restart so
+// re-running setup never bounces the gateway.
+func (b *Backend) ensureLitellmOIDC(ctx context.Context, domainName string) error {
+	proxyBase := "https://models." + strings.TrimSpace(domainName)
+	callback := proxyBase + "/sso/callback"
+	clientID, clientSecret, err := b.pocketClient.EnsureOIDCClient(ctx, "litellm", []string{callback})
+	if err != nil {
+		return fmt.Errorf("ensure oidc client litellm: %w", err)
+	}
+	if strings.TrimSpace(clientID) == "" {
+		return fmt.Errorf("oidc client litellm returned empty clientID")
+	}
+	clientSecret, err = reuseStoredOIDCSecret(ctx, b.secrets, "litellm_oidc_client_secret", clientSecret)
+	if err != nil {
+		clientSecret, err = b.pocketClient.CreateOIDCClientSecret(ctx, clientID)
+		if err != nil {
+			return fmt.Errorf("litellm oidc client secret: %w", err)
+		}
+	}
+	if err := upsertSecret(ctx, b.secrets, "platform-app", "litellm_oidc_client_id", clientID); err != nil {
+		return fmt.Errorf("store litellm_oidc_client_id: %w", err)
+	}
+	if err := upsertSecret(ctx, b.secrets, "platform-app", "litellm_oidc_client_secret", clientSecret); err != nil {
+		return fmt.Errorf("store litellm_oidc_client_secret: %w", err)
+	}
+	authorizeEP, tokenEP, userinfoEP, err := fetchOIDCEndpoints(ctx, oidcDiscoveryBase(domainName))
+	if err != nil {
+		return fmt.Errorf("litellm oidc discovery: %w", err)
+	}
+	want := map[string]string{
+		"GENERIC_CLIENT_ID":            clientID,
+		"GENERIC_CLIENT_SECRET":        clientSecret,
+		"GENERIC_AUTHORIZATION_ENDPOINT": authorizeEP,
+		"GENERIC_TOKEN_ENDPOINT":         tokenEP,
+		"GENERIC_USERINFO_ENDPOINT":      userinfoEP,
+		"PROXY_BASE_URL":                 proxyBase,
+	}
+	existing, err := b.readAppEnv("litellm")
+	if err != nil {
+		return fmt.Errorf("read litellm appenv: %w", err)
+	}
+	converged := true
+	for k, v := range want {
+		if existing[k] != v {
+			converged = false
+			existing[k] = v
+		}
+	}
+	if !converged {
+		if err := b.writeAppEnv("litellm", existing, "litellm"); err != nil {
+			return fmt.Errorf("write litellm appenv: %w", err)
+		}
+		if err := b.redeployBundle(ctx, "litellm"); err != nil {
+			return fmt.Errorf("reload litellm config: %w", err)
+		}
+	}
+	log.Printf("setup oidc: litellm client ensured")
 	return nil
 }
 
