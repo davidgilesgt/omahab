@@ -845,6 +845,24 @@ func (b *Backend) setupPhaseSecrets(ctx context.Context) error {
 		}
 		_ = os.Chmod(path, 0o644)
 	}
+	// Mirror file-backed woodpecker secrets into the broker: the OIDC phase
+	// renders the native appenv from RevealByName (platform-app scope), which
+	// never sees the compose-legacy files above. Without the mirror the agent
+	// secret and DB URL render empty and the agent cannot authenticate
+	// (live 2026-09-12). Only non-empty values are mirrored, so placeholders
+	// never shadow real credentials.
+	if b.secrets != nil {
+		for _, name := range []string{"woodpecker_db_password", "woodpecker_db_url", "woodpecker_grpc_secret", "woodpecker_agent_secret"} {
+			if _, err := b.secrets.RevealByName(ctx, "platform-app", name); err == nil {
+				continue
+			}
+			raw, rerr := os.ReadFile(filepath.Join(dir, name))
+			if rerr != nil || strings.TrimSpace(string(raw)) == "" {
+				continue
+			}
+			_ = upsertSecret(ctx, b.secrets, "platform-app", name, strings.TrimSpace(string(raw)))
+		}
+	}
 	return nil
 }
 
@@ -1289,6 +1307,11 @@ func (b *Backend) setupPhaseDependentApps(ctx context.Context) error {
 	if err := b.ensureOmahabNetwork(ctx); err != nil {
 		return err
 	}
+	// Sync the postgres role password before install: the native server needs
+	// TCP scram auth (DynamicUser rules out socket peer auth).
+	if err := b.ensureWoodpeckerPostgresAuth(ctx); err != nil {
+		return fmt.Errorf("woodpecker postgres auth: %w", err)
+	}
 	if err := b.ensureDefaultApp(ctx, *woodpeckerBundle, domainName); err != nil {
 		return fmt.Errorf("woodpecker: %w", err)
 	}
@@ -1312,7 +1335,13 @@ func (b *Backend) setupPhaseDependentApps(ctx context.Context) error {
 	if err := b.waitAppHealthy(ctx, appID, 120*time.Second); err != nil {
 		return fmt.Errorf("woodpecker server health: %w", err)
 	}
-	if err := b.waitWoodpeckerContainersHealthy(ctx, 90*time.Second); err != nil {
+	// Native bundles have no compose containers: the label-based check below
+	// can never succeed. Gate on the bundle's systemd units instead.
+	if isNativeBundle(*woodpeckerBundle) {
+		if err := b.waitNativeUnitsActive(ctx, woodpeckerBundle.Units, 90*time.Second); err != nil {
+			return fmt.Errorf("woodpecker agent health: %w", err)
+		}
+	} else if err := b.waitWoodpeckerContainersHealthy(ctx, 90*time.Second); err != nil {
 		if isDockerNotAvailable(err) {
 			log.Printf("setup dependent_apps: docker not available for container health, assuming healthy: %s", health.RedactDetail(err.Error()))
 		} else {
@@ -1378,6 +1407,45 @@ func (b *Backend) ensureHermesDependentApp(ctx context.Context) error {
 // (scopes omahab/fast|balanced|reasoning), caches the token under the
 // platform-app/hermes_litellm_key secret, and renders it into the hermes
 // appenv. Order: litellm healthy -> key -> hermes start.
+
+// waitNativeUnitsActive polls `systemctl is-active` for every unit until all
+// report active or the timeout elapses. Native counterpart of
+// waitWoodpeckerContainersHealthy for bundles without compose containers.
+func (b *Backend) waitNativeUnitsActive(ctx context.Context, units []string, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = 90 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		var inactive []string
+		for _, u := range units {
+			u = strings.TrimSpace(u)
+			if u == "" {
+				continue
+			}
+			out, err := exec.CommandContext(ctx, "systemctl", "is-active", u).Output()
+			if err != nil || strings.TrimSpace(string(out)) != "active" {
+				inactive = append(inactive, u)
+			}
+		}
+		if len(inactive) == 0 {
+			return nil
+		}
+		lastErr = fmt.Errorf("units not active: %s", strings.Join(inactive, ", "))
+		if time.Now().After(deadline) {
+			return lastErr
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
 
 func (b *Backend) waitWoodpeckerContainersHealthy(ctx context.Context, timeout time.Duration) error {
 	if timeout <= 0 {

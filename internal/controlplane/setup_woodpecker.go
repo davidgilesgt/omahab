@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -318,6 +319,7 @@ func (b *Backend) pingPodmanEndpoint(ctx context.Context, socketPath, url string
 }
 
 var _ = store.ErrNotFound
+
 func (b *Backend) SetupWoodpecker(ctx context.Context, req apitypes.SetupWoodpeckerRequest) error {
 	username := strings.TrimSpace(req.Username)
 	token := strings.TrimSpace(req.Token)
@@ -419,4 +421,52 @@ func (b *Backend) SetupWoodpecker(ctx context.Context, req apitypes.SetupWoodpec
 	return nil
 }
 
+// pgPasswordCharset bounds the generated DB password alphabet
+// (generateRandomBase64URL). The sync below interpolates the password into a
+// SQL literal; anything outside this alphabet is refused rather than quoted.
+const pgPasswordCharset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
 
+func validPostgresPassword(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if !strings.ContainsRune(pgPasswordCharset, r) {
+			return false
+		}
+	}
+	return true
+}
+
+// ensureWoodpeckerPostgresAuth syncs the woodpecker-server role password with
+// the materialized secret so TCP scram auth works on native placement. The
+// native server runs under DynamicUser (ephemeral UID), so socket peer auth
+// is impossible; the role/DB themselves come from the NixOS postgres module.
+// Idempotent: ALTER ROLE is a plain assignment. The password never appears in
+// errors (only its presence is reported).
+func (b *Backend) ensureWoodpeckerPostgresAuth(ctx context.Context) error {
+	password := ""
+	if b.secrets != nil {
+		if v, err := b.secrets.RevealByName(ctx, "platform-app", "woodpecker_db_password"); err == nil {
+			password = strings.TrimSpace(v)
+		}
+	}
+	if password == "" {
+		dir := filepath.Join(b.cfg.StateDir, "secrets")
+		if strings.TrimSpace(b.cfg.StateDir) == "" {
+			dir = "/var/lib/omahab/secrets"
+		}
+		if raw, err := os.ReadFile(filepath.Join(dir, "woodpecker_db_password")); err == nil {
+			password = strings.TrimSpace(string(raw))
+		}
+	}
+	if !validPostgresPassword(password) {
+		return fmt.Errorf("woodpecker_db_password missing or outside safe alphabet")
+	}
+	stmt := "ALTER ROLE \"woodpecker-server\" WITH PASSWORD '" + password + "'"
+	out, err := systemdRunAsUser(ctx, "postgres", "postgres", "/tmp", []string{"HOME=/tmp"}, "psql", "-d", "woodpecker", "-c", stmt)
+	if err != nil {
+		return fmt.Errorf("alter woodpecker-server role: %s", health.RedactDetail(strings.TrimSpace(out+" "+err.Error())))
+	}
+	return nil
+}

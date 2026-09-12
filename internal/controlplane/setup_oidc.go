@@ -227,25 +227,37 @@ func (b *Backend) setupPhaseOIDC(ctx context.Context) error {
 		// units consume it; the file's existence gates the units).
 		grpcSecret := ""
 		agentSecret := ""
-		dbURL := ""
+		dbPassword := ""
 		if v, verr := b.secrets.RevealByName(ctx, "platform-app", "woodpecker_grpc_secret"); verr == nil {
 			grpcSecret = strings.TrimSpace(v)
 		}
 		if v, verr := b.secrets.RevealByName(ctx, "platform-app", "woodpecker_agent_secret"); verr == nil {
 			agentSecret = strings.TrimSpace(v)
 		}
-		if v, verr := b.secrets.RevealByName(ctx, "platform-app", "woodpecker_db_url"); verr == nil {
-			dbURL = strings.TrimSpace(v)
+		if v, verr := b.secrets.RevealByName(ctx, "platform-app", "woodpecker_db_password"); verr == nil {
+			dbPassword = strings.TrimSpace(v)
 		}
 		woodpeckerEnv := map[string]string{
-			"WOODPECKER_HOST":                "https://ci." + domainName,
-			"WOODPECKER_FORGEJO":             "true",
-			"WOODPECKER_FORGEJO_URL":         "https://git." + domainName,
-			"WOODPECKER_FORGEJO_CLIENT":      wClientID,
-			"WOODPECKER_FORGEJO_SECRET":      wClientSecret,
-			"WOODPECKER_OPEN":                "true",
-			"WOODPECKER_ADMIN":               "omahab-bot",
-			"WOODPECKER_DATABASE_DATASOURCE": dbURL,
+			"WOODPECKER_HOST":           "https://ci." + domainName,
+			"WOODPECKER_FORGEJO":        "true",
+			"WOODPECKER_FORGEJO_URL":    "https://git." + domainName,
+			"WOODPECKER_FORGEJO_CLIENT": wClientID,
+			"WOODPECKER_FORGEJO_SECRET": wClientSecret,
+			"WOODPECKER_OPEN":           "true",
+			"WOODPECKER_ADMIN":          "omahab-bot",
+			// Native postgres over TCP scram: the server runs under DynamicUser
+			// (socket peer auth impossible) and --db-driver is NOT derived from
+			// the URL scheme — sqlite is the default and eats any datasource as
+			// a file path (live 2026-09-12). The role/DB come from the NixOS
+			// postgres module; the daemon syncs the role password at install.
+			// base64url is URL-safe, so no escaping is needed.
+			"WOODPECKER_DATABASE_DRIVER": "postgres",
+			// The agent's healthcheck defaults to :3000 (forgejo's port);
+			// move it to loopback so the agent unit can start.
+			"WOODPECKER_HEALTHCHECK_ADDR": fmt.Sprintf("127.0.0.1:%d", apps.NativePortWoodpeckerAgent),
+		}
+		if validPostgresPassword(dbPassword) {
+			woodpeckerEnv["WOODPECKER_DATABASE_DATASOURCE"] = "postgresql://woodpecker-server:" + dbPassword + "@127.0.0.1:5432/woodpecker?sslmode=disable"
 		}
 		if grpcSecret != "" {
 			woodpeckerEnv["WOODPECKER_GRPC_SECRET"] = grpcSecret

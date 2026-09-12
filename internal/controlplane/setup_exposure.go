@@ -210,7 +210,9 @@ func (b *Backend) setupPhaseExposure(ctx context.Context) error {
 			routes[hostname] = upstream
 		}
 	}
-	routes["omahab."+domainName] = "http://host.docker.internal:8484"
+	// Native loopback: omahabd listens on the host, not in a container —
+	// host.docker.internal does not resolve here (live 2026-09-12: 502s).
+	routes["omahab."+domainName] = "http://127.0.0.1:8484"
 	return b.exposeRoutes(ctx, routes)
 }
 
@@ -228,7 +230,8 @@ func (b *Backend) setupPhaseLoginExposure(ctx context.Context) error {
 		return fmt.Errorf("domain not configured")
 	}
 	routes := map[string]string{
-		"omahab." + domainName: "http://host.docker.internal:8484",
+		// Native loopback, see setupPhaseExposure.
+		"omahab." + domainName: "http://127.0.0.1:8484",
 	}
 	if b.apps != nil {
 		installed := map[string]bool{}

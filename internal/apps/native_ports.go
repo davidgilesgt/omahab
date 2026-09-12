@@ -12,13 +12,17 @@ const (
 	NativePortForgejo      = 3000
 	NativePortWoodpecker   = 8000 // woodpecker server
 	NativePortWoodpeckerGr = 9000 // woodpecker grpc (agent)
-	NativePortImmich       = 2283
-	NativePortPaperless    = 28981
-	NativePortKarakeep     = 3010
-	NativePortSyncthingGUI = 8384
-	NativePortNtfy         = 2586
-	NativePortLiteLLM      = 4000
-	NativePortHermes       = 8085 // oci-container published to loopback
+	// NativePortWoodpeckerAgent is the woodpecker agent healthcheck listener.
+	// The agent defaults to :3000, which collides with forgejo on native
+	// placement (live 2026-09-12); the rendered appenv moves it here.
+	NativePortWoodpeckerAgent = 3900
+	NativePortImmich          = 2283
+	NativePortPaperless       = 28981
+	NativePortKarakeep        = 3010
+	NativePortSyncthingGUI    = 8384
+	NativePortNtfy            = 2586
+	NativePortLiteLLM         = 4000
+	NativePortHermes          = 8085 // oci-container published to loopback
 )
 
 // NativePort returns the loopback port for a bundle ID, if the bundle is

@@ -161,6 +161,19 @@ func TestWoodpeckerConnectionOKWithMocks(t *testing.T) {
 	}
 }
 
+func TestValidPostgresPassword(t *testing.T) {
+	t.Parallel()
+	// Generated secrets are base64url: always accepted for SQL interpolation.
+	if !validPostgresPassword("ELe1phhhYbEvEzd0nEcpz_a54fHLfGw3JNxkh0YPkA8") {
+		t.Fatal("base64url password must be accepted")
+	}
+	for _, bad := range []string{"", "has space", "quote'here", "semi;colon", "dq\"x", "back\\slash", "dollar$ign"} {
+		if validPostgresPassword(bad) {
+			t.Fatalf("must refuse %q (would break SQL literal interpolation)", bad)
+		}
+	}
+}
+
 func TestWoodpeckerConnectionRedactsTokenDetail(t *testing.T) {
 	ctx := context.Background()
 	b, _ := newSetupBackend(t, nil)
