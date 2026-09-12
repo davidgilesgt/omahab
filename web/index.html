@@ -12,22 +12,22 @@
     <link rel="preload" href="/fonts/ibm-plex-mono-500.woff2" as="font" type="font/woff2" crossorigin />
     <title>Omahab</title>
     <script>
+      // First paint: stored choice wins ("system" leaves data-theme unset so
+      // CSS follows the OS); with no stored choice default to matte-black.
       (function() {
         try {
           var t = localStorage.getItem("omahab.theme");
           if (t && t !== "system") {
             document.documentElement.dataset.theme = t;
           } else if (!t) {
-            // Respect system preference for initial paint when no explicit choice
-            if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
-              document.documentElement.dataset.theme = "dark";
-            }
+            document.documentElement.dataset.theme = "matte-black";
           }
           // Sync theme-color meta to match
           var meta = document.querySelector('meta[name="theme-color"]');
           if (meta) {
             var theme = document.documentElement.dataset.theme;
-            if (theme === "dark") meta.content = "#0f0f0f";
+            if (theme === "matte-black") meta.content = "#090909";
+            else if (theme === "dark" || !theme) meta.content = "#171815";
             else if (theme === "light") meta.content = "#f4f1e9";
           }
         } catch (e) {}

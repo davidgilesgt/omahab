@@ -60,7 +60,8 @@ export function AppShell({ children, basePath = "" }: { children: ReactNode; bas
         }
       }
     } catch {}
-    return localStorage.getItem("omahab.theme") ?? "system";
+    // Default to matte-black (Omarchy); "system" stays available in the picker.
+    return localStorage.getItem("omahab.theme") ?? "matte-black";
   });
   const [query, setQuery] = useState("");
   const [showResults, setShowResults] = useState(false);
@@ -77,14 +78,21 @@ export function AppShell({ children, basePath = "" }: { children: ReactNode; bas
     });
   }, [setupQuery.data, basePath]);
   useEventStream();
-  // Keep theme in sync without flash - useLayoutEffect would be ideal but useEffect is okay with inline script
+  // Keep theme in sync without flash - useLayoutEffect would be ideal but useEffect is okay with inline script.
+  // "system" (and no choice) leaves data-theme unset so CSS follows the OS;
+  // any other value pins the matching palette (see styles.css).
   useEffect(() => {
-    document.documentElement.dataset.theme = theme;
+    if (theme === "system") {
+      delete document.documentElement.dataset.theme;
+    } else {
+      document.documentElement.dataset.theme = theme;
+    }
     localStorage.setItem("omahab.theme", theme);
     const meta = document.querySelector('meta[name="theme-color"]');
     if (meta) {
-      if (theme === "dark") meta.setAttribute("content", "#0f0f0f");
-      else if (theme === "light") meta.setAttribute("content", "#f4f1e9");
+      if (theme === "light") meta.setAttribute("content", "#f4f1e9");
+      else if (theme === "matte-black") meta.setAttribute("content", "#090909");
+      else if (theme === "dark") meta.setAttribute("content", "#171815");
       else meta.setAttribute("content", "#171815");
     }
   }, [theme]);
