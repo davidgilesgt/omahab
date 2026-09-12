@@ -71,6 +71,16 @@ type ONCERunner interface {
 	Undeploy(ctx context.Context, in UndeployInput) error
 }
 
+// UpdateRunner is an optional ONCERunner extension for in-place redeploy of an
+// already-deployed hostname. Runners that support `omahab-once update`
+// implement it; deployProject falls back to it when Deploy reports the
+// hostname as already in use, so re-deploy and rollback of existing hostnames
+// go through update instead of failing on deploy-only. The input carries the
+// same loopback/secrets-file contract as DeployInput.
+type UpdateRunner interface {
+	Update(ctx context.Context, in DeployInput) (DeployResult, error)
+}
+
 // ReleaseTokenVerifier authorizes Woodpecker-initiated releases with a
 // narrowly scoped per-project release token. Woodpecker holds one token per
 // project and never a host SSH key or Omahab administrator credential

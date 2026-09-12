@@ -188,11 +188,21 @@ func Diagnose(ctx context.Context, cfg *Config, remote *RemoteClient, checker Ta
 	}
 	var checks []DiagnosticCheck
 	add := func(name string, ok bool, msg string) {
+		if !ok && strings.TrimSpace(msg) == "" {
+			msg = "check failed (no detail)"
+		}
 		checks = append(checks, DiagnosticCheck{Name: name, OK: ok, Message: msg})
 	}
-
-	// 1. Tailscale installed
+	serverURL := strings.TrimSpace(cfg.ServerURL)
+	probedBase := serverURL
+	if remote != nil {
+		probedBase = strings.TrimSpace(remote.BaseURL())
+	}
+	// 1. Tailscale installed (probed binary: tailscale in PATH)
 	ok, msg := checker.IsInstalled(ctx)
+	if !ok && strings.TrimSpace(msg) != "" {
+		msg = fmt.Sprintf("%s (probed %q in PATH)", msg, "tailscale")
+	}
 	add("tailscale_installed", ok, msg)
 
 	// 2. Tailscale logged in
@@ -208,9 +218,9 @@ func Diagnose(ctx context.Context, cfg *Config, remote *RemoteClient, checker Ta
 	if cfg.ExpectedTailnet != "" {
 		tn, err := checker.Tailnet(ctx)
 		if err != nil {
-			add("tailscale_tailnet", false, fmt.Sprintf("tailnet check failed: %v", err))
+			add("tailscale_tailnet", false, fmt.Sprintf("tailnet check failed (probed tailscale status): %v", err))
 		} else if tn != cfg.ExpectedTailnet {
-			add("tailscale_tailnet", false, fmt.Sprintf("tailnet mismatch: got %s want %s", tn, cfg.ExpectedTailnet))
+			add("tailscale_tailnet", false, fmt.Sprintf("tailnet mismatch: got %q want %q (probed tailscale status)", tn, cfg.ExpectedTailnet))
 		} else {
 			add("tailscale_tailnet", true, fmt.Sprintf("tailnet %s", tn))
 		}
@@ -218,8 +228,11 @@ func Diagnose(ctx context.Context, cfg *Config, remote *RemoteClient, checker Ta
 		add("tailscale_tailnet", true, "no expected tailnet pinned")
 	}
 
-	// 4. Server node visible
+	// 4. Server node visible (probed tailscale status)
 	vis, vmsg := checker.ServerNodeVisible(ctx, cfg.ExpectedServerNode)
+	if !vis && cfg.ExpectedServerNode != "" && !strings.Contains(vmsg, cfg.ExpectedServerNode) {
+		vmsg = fmt.Sprintf("%s (expected node %q not in tailscale status)", vmsg, cfg.ExpectedServerNode)
+	}
 	add("server_node_visible", vis, vmsg)
 
 	// 5. DNS resolves to expected Tailscale IP in private mode
@@ -249,13 +262,16 @@ func Diagnose(ctx context.Context, cfg *Config, remote *RemoteClient, checker Ta
 			}
 		}
 	} else if tipErr != nil {
-		add("dns_resolves_to_tailscale_ip", false, fmt.Sprintf("tailscale ip unavailable: %v", tipErr))
+		add("dns_resolves_to_tailscale_ip", false, fmt.Sprintf("tailscale ip unavailable (probed tailscale ip): %v", tipErr))
 	} else {
 		add("dns_resolves_to_tailscale_ip", true, "skipped (http or no host)")
 	}
 
-	// 6. TLS certificate valid
+	// 6. TLS certificate valid (probed server_url)
 	tok, tmsg := tlsChecker.CheckTLS(ctx, cfg.ServerURL)
+	if !tok && !strings.Contains(tmsg, serverURL) && serverURL != "" {
+		tmsg = fmt.Sprintf("%s (probed %s)", tmsg, serverURL)
+	}
 	add("tls_certificate_valid", tok, tmsg)
 
 	// 7. Pocket ID reachable (via server health; pocketid is proxied behind omahabd edge)
@@ -266,12 +282,12 @@ func Diagnose(ctx context.Context, cfg *Config, remote *RemoteClient, checker Ta
 		// We probe /api/instance which the edge should gate via Pocket ID session.
 		err := remote.CheckPocketID(pctx)
 		if err != nil {
-			add("pocketid_reachable", false, fmt.Sprintf("pocket-id check failed: %v", err))
+			add("pocketid_reachable", false, fmt.Sprintf("pocket-id check failed (probed %s/api/instance): %v", strings.TrimRight(probedBase, "/"), err))
 		} else {
 			add("pocketid_reachable", true, "pocket-id reachable via omahabd")
 		}
 	} else {
-		add("pocketid_reachable", false, "no remote client")
+		add("pocketid_reachable", false, fmt.Sprintf("no remote client (probed %s/api/instance)", strings.TrimRight(probedBase, "/")))
 	}
 
 	// 8. Instance ID match (pinning)
@@ -286,15 +302,15 @@ func Diagnose(ctx context.Context, cfg *Config, remote *RemoteClient, checker Ta
 			if isInstanceMismatch(err) {
 				add("instance_id_match", false, fmt.Sprintf("instance mismatch: %v", err))
 			} else {
-				add("instance_id_match", false, fmt.Sprintf("instance fetch failed: %v", err))
+				add("instance_id_match", false, fmt.Sprintf("instance fetch failed (probed %s/api/instance): %v", strings.TrimRight(probedBase, "/"), err))
 			}
 		} else if string(inst.ID) != cfg.PinnedInstanceID {
-			add("instance_id_match", false, fmt.Sprintf("instance mismatch: got %s want %s", inst.ID, cfg.PinnedInstanceID))
+			add("instance_id_match", false, fmt.Sprintf("instance mismatch: got %s want %s (probed %s/api/instance)", inst.ID, cfg.PinnedInstanceID, strings.TrimRight(probedBase, "/")))
 		} else {
 			add("instance_id_match", true, fmt.Sprintf("instance %s", inst.ID))
 		}
 	} else {
-		add("instance_id_match", false, "no remote client")
+		add("instance_id_match", false, fmt.Sprintf("no remote client (expected pinned %s)", cfg.PinnedInstanceID))
 	}
 
 	overall := true

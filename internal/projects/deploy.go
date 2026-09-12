@@ -266,7 +266,9 @@ func (s *Service) deployProject(ctx context.Context, proj *Project, rawCommit, r
 	}
 	deployCtx := ctx
 	// Deploy with no secrets in logs — the input only carries paths.
-	res, derr := s.runner.Deploy(deployCtx, in)
+	// Re-deploy/rollback of an existing hostname goes through in-place update
+	// when the runner supports it: deploy-only would fail with hostname in use.
+	res, derr := s.deployOrUpdate(deployCtx, in)
 	if derr == nil {
 		ok, detail := s.awaitHealth(deployCtx, proj)
 		if !ok {
@@ -300,6 +302,32 @@ func (s *Service) deployProject(ctx context.Context, proj *Project, rawCommit, r
 			fmt.Sprintf("project %q deployed %s", proj.Slug, digest), data)
 	}
 	return rel, nil
+}
+
+// deployOrUpdate runs one runner deployment, falling back to in-place update
+// when the hostname is already deployed. Deploy-only would fail re-deploy and
+// rollback of existing hostnames with hostname-in-use; runners implementing
+// UpdateRunner redeploy via `omahab-once update` instead.
+func (s *Service) deployOrUpdate(ctx context.Context, in DeployInput) (DeployResult, error) {
+	res, err := s.runner.Deploy(ctx, in)
+	if err == nil {
+		return res, nil
+	}
+	ur, ok := s.runner.(UpdateRunner)
+	if !ok || !isHostnameInUse(err) {
+		return res, err
+	}
+	return ur.Update(ctx, in)
+}
+
+// isHostnameInUse reports whether a runner deploy error means the hostname is
+// already deployed (docker.ErrHostnameInUse, "hostname already in use", from
+// the omahab-once fork's deploy/hostname check).
+func isHostnameInUse(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "hostname already in use")
 }
 
 func (s *Service) awaitHealth(ctx context.Context, proj *Project) (bool, string) {

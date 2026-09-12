@@ -95,7 +95,53 @@ func (r *CommandOnceRunner) Deploy(ctx context.Context, in projects.DeployInput)
 	return projects.DeployResult{Version: res.Version}, nil
 }
 
-// Health probes via HTTP loopback and optionally via binary status command.
+// Update re-deploys an already-deployed hostname via `omahab-once update`.
+// It carries the same image/loopback/secrets-file contract as Deploy so a
+// re-deploy or rollback of an existing hostname preserves proxy and secret
+// wiring instead of failing on deploy-only hostname checks.
+func (r *CommandOnceRunner) Update(ctx context.Context, in projects.DeployInput) (projects.DeployResult, error) {
+	if _, err := exec.LookPath(r.Binary); err != nil {
+		return projects.DeployResult{}, fmt.Errorf("%w: omahab-once binary %q not found: %v", ErrNotConfigured, r.Binary, err)
+	}
+	bind := in.ProxyBind
+	if bind == "" {
+		bind = r.ProxyBind
+	}
+	args := []string{
+		"update", in.Hostname,
+		"--image", in.Image,
+		"--proxy-bind", bind,
+		"--tls", string(in.TLS),
+		"--json",
+	}
+	if in.SecretsFile != "" {
+		args = append(args, "--secrets-file", in.SecretsFile)
+	}
+	cmd := exec.CommandContext(ctx, r.Binary, args...)
+	var out bytes.Buffer
+	var errBuf bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errBuf
+	// Never log secret file contents; only path is in args
+	if err := cmd.Run(); err != nil {
+		return projects.DeployResult{}, fmt.Errorf("omahab-once update failed: %w: %s", err, errBuf.String())
+	}
+	// Parse JSON result: expected {"version":"...","status":"ok"}
+	var res struct {
+		Version string `json:"version"`
+		Status  string `json:"status"`
+		Error   string `json:"error"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		// If output is not JSON, treat as success with raw version
+		return projects.DeployResult{Version: string(bytes.TrimSpace(out.Bytes()))}, nil
+	}
+	if res.Error != "" {
+		return projects.DeployResult{}, fmt.Errorf("omahab-once update error: %s", res.Error)
+	}
+	return projects.DeployResult{Version: res.Version}, nil
+}
+
 func (r *CommandOnceRunner) Health(ctx context.Context, in projects.HealthInput) (projects.HealthResult, error) {
 	// First try HTTP probing via loopback proxy
 	bind := in.ProxyBind
@@ -169,3 +215,4 @@ func (r *CommandOnceRunner) Undeploy(ctx context.Context, in projects.UndeployIn
 }
 
 var _ projects.ONCERunner = (*CommandOnceRunner)(nil)
+var _ projects.UpdateRunner = (*CommandOnceRunner)(nil)

@@ -177,7 +177,7 @@ func isCredentialNotFound(err error) bool {
 }
 
 func runEnroll() error {
-	cfg, _, err := loadConfig()
+	cfg, cfgFile, err := loadConfig()
 	if err != nil {
 		return err
 	}
@@ -255,10 +255,52 @@ func runEnroll() error {
 	// E1: write omp MCP client config + OMAHAB_MCP_URL export.
 	_ = client.EnsureMCPConfig(strings.TrimSpace(cfg.ServerURL), token)
 	fmt.Fprintln(os.Stderr, "MCP client config written to "+client.MCPConfigPath()+" (OMAHAB_MCP_URL).")
+	// Pin the server instance ID so the instance_id_match diagnose check passes.
+	// Device-authed companion status first (works on any placement), then
+	// GetInstance (works on LAN bypass). Warn-only: the code is single-use, so
+	// enroll must succeed even if the pin probe fails transiently.
+	if pinErr := pinInstanceID(cfg, cfgFile, ks); pinErr != nil {
+		fmt.Fprintln(os.Stderr, "warning: could not pin instance id: "+pinErr.Error()+" — run enroll/diagnose again once the server is reachable")
+	}
 	fmt.Fprintln(os.Stderr, "Enrolled successfully. Device token stored in keyring (service \"omahab\", account \"device-token\").")
 	for i := range []byte(code) {
 		_ = i
 	}
+	return nil
+}
+
+// pinInstanceID fetches the server instance ID with the freshly stored device
+// token and persists it to cfg.PinnedInstanceID via SaveConfig.
+func pinInstanceID(cfg *client.Config, cfgFile string, ks client.CredentialStore) error {
+	rc, err := client.NewRemoteClient(client.RemoteClientConfig{
+		ServerURL:       cfg.ServerURL,
+		CredentialStore: ks,
+	})
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if st, err := rc.GetCompanionStatus(ctx); err == nil && strings.TrimSpace(string(st.InstanceID)) != "" {
+		cfg.PinnedInstanceID = strings.TrimSpace(string(st.InstanceID))
+		if err := client.SaveConfig(cfgFile, cfg); err != nil {
+			return fmt.Errorf("save pinned instance id: %w", err)
+		}
+		fmt.Fprintln(os.Stderr, "Pinned instance "+cfg.PinnedInstanceID)
+		return nil
+	}
+	inst, err := rc.GetInstance(ctx)
+	if err != nil {
+		return fmt.Errorf("fetch instance id: %w", err)
+	}
+	if strings.TrimSpace(string(inst.ID)) == "" {
+		return fmt.Errorf("server returned empty instance id")
+	}
+	cfg.PinnedInstanceID = strings.TrimSpace(string(inst.ID))
+	if err := client.SaveConfig(cfgFile, cfg); err != nil {
+		return fmt.Errorf("save pinned instance id: %w", err)
+	}
+	fmt.Fprintln(os.Stderr, "Pinned instance "+cfg.PinnedInstanceID)
 	return nil
 }
 

@@ -205,17 +205,17 @@ export class ApiClient {
   deleteToolVariable = (name: string) =>
     this.request<void>(`/tool-environment/${encodeURIComponent(name)}`, { method: "DELETE", body: JSON.stringify({}) });
 
-  // Companion enrollment & devices (admin)
-  companionDevices = () => this.list<CompanionDevice>("/companion-devices");
+  // Companion enrollment & devices (admin) — real routes: GET /companion/devices, DELETE /companion/devices/{id}, PUT .../{id}/allow-oauth.
+  companionDevices = () => this.list<CompanionDevice>("/companion/devices");
   createCompanionEnrollment = () =>
     this.request<CreateCompanionEnrollmentResponse>("/companion-enrollments", { method: "POST", body: JSON.stringify({}) });
-  updateCompanionDevice = (id: string, input: { allow_provider_oauth?: boolean; granted?: boolean }) =>
-    this.request<CompanionDevice>(`/companion-devices/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(input) });
+  setDeviceAllowOAuth = (id: string, allow: boolean) =>
+    this.request<CompanionDevice>(`/companion/devices/${encodeURIComponent(id)}/allow-oauth`, {
+      method: "PUT",
+      body: JSON.stringify({ allow, allow_provider_oauth: allow }),
+    });
   revokeCompanionDevice = (id: string) =>
-    this.request<void>(`/companion-devices/${encodeURIComponent(id)}`, { method: "DELETE", body: JSON.stringify({}) });
-  toolEnvironmentDevices = () => this.list<CompanionDevice>("/tool-environment/devices");
-  setToolEnvironmentGrant = (deviceId: string, granted: boolean) =>
-    this.request<void>(`/tool-environment/grants/${encodeURIComponent(deviceId)}`, { method: granted ? "PUT" : "DELETE", body: JSON.stringify({}) });
+    this.request<void>(`/companion/devices/${encodeURIComponent(id)}`, { method: "DELETE", body: JSON.stringify({}) });
 
   // Phone notifications (ntfy) — admin
   ntfyConfig = () => this.request<NtfyConfig>("/ntfy");

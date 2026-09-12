@@ -1086,7 +1086,7 @@ paths:
           in: path
           required: true
           schema: { type: string, enum: [omahab/fast, omahab/balanced, omahab/reasoning, omahab/embedding] }
-          description: Alias name
+          description: Alias name. Contains a slash — clients MUST percent-encode it as %2F (e.g. omahab%2Ffast) when building the request path.
       requestBody:
         required: true
         content:

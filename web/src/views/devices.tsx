@@ -49,6 +49,14 @@ export function DevicesPage() {
     },
     onError: (err) => toast.error(err instanceof Error ? err.message : "Revoke failed"),
   });
+  const allowOAuth = useMutation({
+    mutationFn: ({ id, allow }: { id: string; allow: boolean }) => client.setDeviceAllowOAuth(id, allow),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["companion-devices"] });
+      toast.success("Device OAuth permission updated");
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Update failed"),
+  });
 
   const serverVersion = statusQuery.data?.version ?? null;
   const devices = devicesQuery.data ?? [];
@@ -98,6 +106,15 @@ export function DevicesPage() {
                     <div className="muted" style={{ fontSize: "0.8rem", marginTop: "0.2rem" }}>created {formatDate(d.created_at)} · updated {formatDate(d.updated_at)}</div>
                   </div>
                   <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", minWidth: "140px", alignItems: "flex-end" }}>
+                    <label style={{ display: "inline-flex", gap: "0.4rem", alignItems: "center", fontSize: "0.85rem" }}>
+                      <input
+                        type="checkbox"
+                        checked={d.allow_provider_oauth}
+                        disabled={allowOAuth.isPending}
+                        onChange={(e) => allowOAuth.mutate({ id: d.id, allow: e.target.checked })}
+                      />
+                      Allow OAuth
+                    </label>
                     <button className="button danger" type="button" disabled={revoke.isPending} onClick={() => setRevokeId(d.id)}>
                       Revoke
                     </button>

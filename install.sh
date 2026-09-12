@@ -148,7 +148,7 @@ else
   echo "macOS detected — skipping systemd user unit (use launchd; binary installed to $BIN_DST)" >&2
 fi
 
-# Quickshell / Omarchy plugin (best-effort). Tries common locations; first writable wins.
+# Quickshell / Omarchy plugin (best-effort). Authoritative Omarchy dir first, then fallbacks.
 # The plugin is `companion/omarchy` (Panel.qml, Clientd.qml, manifest.json).
 if [ "$OS" = "linux" ]; then
   echo "Downloading $SERVER/dl/omarchy-plugin.tar.gz ..." >&2
@@ -166,21 +166,29 @@ if [ "$OS" = "linux" ]; then
       fi
     fi
     if [ -n "${EXPECTED_PLUGIN:-}" ] || [ -z "$EXPECTED_PLUGIN" ]; then
-      # Candidate plugin dirs (Omarchy's plugin manager varies by install; try all).
+      # Authoritative Omarchy plugin dir first; fallbacks only if it is not writable.
       PLUGIN_INSTALLED=0
-      for base in "${HOME}/.config/quickshell" "${HOME}/.local/share/quickshell" "${HOME}/.config/omarchy/quickshell" "${HOME}/.config/omarchy" "${HOME}/.local/share/omarchy"; do
+      for base in "${HOME}/.config/omarchy/plugins" "${HOME}/.config/quickshell" "${HOME}/.local/share/quickshell" "${HOME}/.config/omarchy/quickshell" "${HOME}/.config/omarchy" "${HOME}/.local/share/omarchy"; do
         if mkdir -p "$base" 2>/dev/null; then
           dest="$base/omahab.status"
           mkdir -p "$dest"
           if tar -xzf "$TMP_PLUGIN" -C "$dest" 2>/dev/null; then
-            echo "Installed Quickshell plugin to $dest" >&2
-            PLUGIN_INSTALLED=1
-            break
+            # Avoid double-nest when the tarball already contains a top-level omahab.status dir.
+            if [ ! -f "$dest/Panel.qml" ] && [ -f "$dest/omahab.status/Panel.qml" ]; then
+              mv "$dest/omahab.status" "$dest.__unnest" 2>/dev/null && rm -rf "$dest" && mv "$dest.__unnest" "$dest" || true
+            fi
+            if [ -f "$dest/Panel.qml" ]; then
+              echo "Installed Quickshell plugin to $dest (Panel.qml verified)" >&2
+              PLUGIN_INSTALLED=1
+              break
+            else
+              echo "warning: plugin extracted to $dest but Panel.qml missing — trying next location" >&2
+            fi
           fi
         fi
       done
       if [ "$PLUGIN_INSTALLED" -eq 0 ]; then
-        echo "warning: could not install Quickshell plugin (no writable candidate dir)" >&2
+        echo "warning: could not install Quickshell plugin (no writable candidate dir with verified Panel.qml)" >&2
       fi
     fi
   else
