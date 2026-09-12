@@ -118,12 +118,10 @@ func (b *Backend) runForgejoAdminCommand(ctx context.Context, args ...string) (s
 }
 
 // runNativeForgejoAdmin runs `gitea admin <args>` as the forgejo service
-// user via runuser. The server binary is resolved from
-// `systemctl show forgejo.service -p ExecStart` so runuser receives an
-// absolute path (runuser does not search PATH for the target user).
-// Fallbacks are the NixOS wrappers under /run/current-system/sw/bin, with
-// exec.LookPath only as a last resort. An error is returned when no binary
-// or the forgejo user is absent (compose-placed deployments).
+// user. The server binary is resolved from
+// `systemctl show forgejo.service -p ExecStart` so the spawn receives an
+// absolute path. An error is returned when no binary or the forgejo user is
+// absent (compose-placed deployments).
 func (b *Backend) runNativeForgejoAdmin(ctx context.Context, args ...string) (string, error) {
 	gitea, err := resolveNativeForgejoBinary(ctx)
 	if err != nil {
@@ -135,20 +133,84 @@ func (b *Backend) runNativeForgejoAdmin(ctx context.Context, args ...string) (st
 	}
 	// Mirror the service environment: the forgejo CLI resolves its work dir,
 	// custom path, and HOME from env (the unit sets FORGEJO_WORK_DIR/HOME and
-	// WorkingDirectory=/var/lib/forgejo). A bare runuser inherits omahabd's
-	// CWD (/var/lib/omahab) and root's env, so the CLI cannot find app.ini
-	// and fails — which the container fallback then masks.
+	// WorkingDirectory=/var/lib/forgejo). A bare spawn inherits omahabd's
+	// CWD (/var/lib/omahab) and root's env, so the CLI cannot find app.ini.
 	workDir := forgejoServiceWorkingDir(ctx)
 	if workDir == "" {
 		workDir = usr.HomeDir
 	}
+	// Spawn via systemd-run: the transient unit is created by PID 1 outside
+	// omahabd's seccomp sandbox. runuser cannot work here — omahabd sets
+	// RestrictSUIDSGID, so runuser's setuid dies with SIGSYS (live
+	// 2026-09-12, coredump proves runuser as the crashed exe) — but keep it
+	// as a fallback for hosts without systemd.
+	if out, err := systemdRunForgejoAdmin(ctx, gitea, workDir, usr.HomeDir, args...); err == nil {
+		return out, nil
+	} else if out, ferr := runuserForgejoAdmin(ctx, gitea, workDir, usr.HomeDir, args...); ferr == nil {
+		return out, nil
+	} else {
+		return "", fmt.Errorf("native forgejo admin: systemd-run: %s; runuser: %s",
+			health.RedactDetail(strings.TrimSpace(err.Error())),
+			health.RedactDetail(strings.TrimSpace(ferr.Error())))
+	}
+}
+
+// systemdRunAsUser executes bin/args as uid:gid in a transient unit spawned
+// by PID 1, outside the caller's seccomp sandbox. stdio pipes through; the
+// service exit code propagates via --wait.
+func systemdRunAsUser(ctx context.Context, uid, gid, workDir string, env []string, bin string, args ...string) (string, error) {
+	runArgs := []string{
+		"--pipe", "--wait", "--quiet",
+		"--uid=" + uid, "--gid=" + gid,
+		"-p", "WorkingDirectory=" + workDir,
+	}
+	for _, e := range env {
+		if strings.TrimSpace(e) == "" {
+			continue
+		}
+		runArgs = append(runArgs, "--setenv="+e)
+	}
+	runArgs = append(runArgs, "--", bin)
+	runArgs = append(runArgs, args...)
+	cmd := exec.CommandContext(ctx, "systemd-run", runArgs...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		combined := strings.TrimSpace(strings.TrimSpace(stdout.String()) + "\n" + strings.TrimSpace(stderr.String()))
+		if combined == "" {
+			combined = err.Error()
+		}
+		return "", errors.New(combined)
+	}
+	out := strings.TrimSpace(stdout.String())
+	if out == "" {
+		out = strings.TrimSpace(stderr.String())
+	}
+	return out, nil
+}
+
+// systemdRunForgejoAdmin executes `gitea admin <args>` as the forgejo service
+// user in a transient unit. --pipe wires stdio through; the service exit
+// code propagates via --wait.
+func systemdRunForgejoAdmin(ctx context.Context, gitea, workDir, home string, args ...string) (string, error) {
+	return systemdRunAsUser(ctx, "forgejo", "forgejo", workDir, []string{
+		"FORGEJO_WORK_DIR=" + workDir,
+		"FORGEJO_CUSTOM=" + workDir + "/custom",
+		"HOME=" + home,
+	}, gitea, append([]string{"admin"}, args...)...)
+}
+
+// runuserForgejoAdmin executes `gitea admin <args>` via runuser. Only viable
+// where the caller's sandbox permits setuid (not under RestrictSUIDSGID).
+func runuserForgejoAdmin(ctx context.Context, gitea, workDir, home string, args ...string) (string, error) {
 	fullArgs := append([]string{"-u", "forgejo", "--", gitea, "admin"}, args...)
 	cmd := exec.CommandContext(ctx, "runuser", fullArgs...)
 	cmd.Dir = workDir
 	cmd.Env = append(os.Environ(),
 		"FORGEJO_WORK_DIR="+workDir,
 		"FORGEJO_CUSTOM="+workDir+"/custom",
-		"HOME="+usr.HomeDir,
+		"HOME="+home,
 	)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -158,7 +220,7 @@ func (b *Backend) runNativeForgejoAdmin(ctx context.Context, args ...string) (st
 		if combined == "" {
 			combined = err.Error()
 		}
-		return "", fmt.Errorf("native forgejo admin: %s", health.RedactDetail(combined))
+		return "", errors.New(combined)
 	}
 	out := strings.TrimSpace(stdout.String())
 	if out == "" {
@@ -534,6 +596,13 @@ func (b *Backend) ensureForgejoOrgTeams(ctx context.Context, baseURL, token stri
 		{"members", "write"},
 	}
 	for _, d := range desired {
+		// Forgejo 15 rejects permission-only teams ("units permission should
+		// not be empty", live 2026-09-12): send an explicit units_map carrying
+		// the level. The server derives the team permission from the map.
+		unitsMap := map[string]string{}
+		for _, u := range []string{"repo.code", "repo.issues", "repo.pulls", "repo.releases", "repo.wiki", "repo.projects", "repo.packages", "repo.actions"} {
+			unitsMap[u] = d.permission
+		}
 		if existing, ok := teamByName[strings.ToLower(d.name)]; ok {
 			// Check permission and includes_all_repositories
 			perm := ""
@@ -561,6 +630,7 @@ func (b *Backend) ensureForgejoOrgTeams(ctx context.Context, baseURL, token stri
 				"permission":                d.permission,
 				"includes_all_repositories": true,
 				"can_create_org_repo":       false,
+				"units_map":                 unitsMap,
 			}
 			patchPath := fmt.Sprintf("/api/v1/teams/%d", id)
 			if _, perr := b.forgejoAPIRequest(ctx, baseURL, token, http.MethodPatch, patchPath, payload, nil); perr != nil {
@@ -571,14 +641,14 @@ func (b *Backend) ensureForgejoOrgTeams(ctx context.Context, baseURL, token stri
 			}
 			continue
 		}
-		// Create team
+		// Create team (verified shape against Forgejo 15: no bare permission
+		// key, level carried by units_map).
 		payload := map[string]any{
 			"name":                      d.name,
 			"description":               fmt.Sprintf("Omahab %s", d.name),
-			"permission":                d.permission,
 			"can_create_org_repo":       false,
 			"includes_all_repositories": true,
-			"units":                     []string{},
+			"units_map":                 unitsMap,
 		}
 		var created map[string]any
 		if _, cerr := b.forgejoAPIRequest(ctx, baseURL, token, http.MethodPost, teamsPath, payload, &created); cerr != nil {
@@ -685,7 +755,9 @@ func (b *Backend) ensureForgejoAuthSource(ctx context.Context, domain, clientID,
 
 	baseArgs := []string{
 		"--name", "PocketID",
-		"--provider", "openIDConnect",
+		// Lowercase d: Forgejo matches "openidConnect" exactly; "openIDConnect"
+		// fails with the misleading "auth source is not activated" (live 2026-09-12).
+		"--provider", "openidConnect",
 		"--key", strings.TrimSpace(clientID),
 		"--secret", strings.TrimSpace(clientSecret),
 		"--auto-discover-url", discovery,
@@ -693,7 +765,9 @@ func (b *Backend) ensureForgejoAuthSource(ctx context.Context, domain, clientID,
 		"--group-claim-name", groupClaim,
 		"--admin-group", adminGroup,
 		"--group-team-map", teamMap,
-		"--group-team-map-removal-enabled",
+		// No -enabled suffix: Forgejo 15 names it --group-team-map-removal
+		// (verified via `forgejo admin auth add-oauth --help`, live 2026-09-12).
+		"--group-team-map-removal",
 	}
 	// Also try alternative flag names if needed: --groups-claim-name, --group-team-map etc.
 	// We will attempt with current flags; if error indicates unknown flag, retry with alternatives.
@@ -711,7 +785,7 @@ func (b *Backend) ensureForgejoAuthSource(ctx context.Context, domain, clientID,
 				// Try alternative flag set: use --group-claim-name vs --groups-claim-name, etc.
 				altArgs := []string{
 					"--name", "PocketID",
-					"--provider", "openIDConnect",
+					"--provider", "openidConnect",
 					"--key", strings.TrimSpace(clientID),
 					"--secret", strings.TrimSpace(clientSecret),
 					"--auto-discover-url", discovery,
@@ -719,7 +793,7 @@ func (b *Backend) ensureForgejoAuthSource(ctx context.Context, domain, clientID,
 					"--groups-claim-name", groupClaim,
 					"--admin-group", adminGroup,
 					"--group-team-map", teamMap,
-					"--group-team-map-removal-enabled",
+					"--group-team-map-removal",
 				}
 				var altFull []string
 				if isUpdate {
@@ -729,7 +803,9 @@ func (b *Backend) ensureForgejoAuthSource(ctx context.Context, domain, clientID,
 				}
 				_, aerr2 := b.runForgejoAdminCommand(ctx, altFull...)
 				if aerr2 != nil {
-					return aerr2
+					// Keep the first failure: it names the flag this binary
+					// actually rejects; the alt error alone misleads.
+					return fmt.Errorf("oauth flags rejected (first: %s; alt: %s)", aerr, aerr2)
 				}
 				return nil
 			}
