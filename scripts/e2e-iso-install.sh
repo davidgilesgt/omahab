@@ -42,6 +42,11 @@ HTTP_PORT=8485
 SSH_PORT=2223
 INSTALL_TIMEOUT=2700
 BOOT_TIMEOUT=300
+# Guest RAM: nixos-install builds flake-local packages (incl. darwin clientds'
+# Go module graph) in sandbox tmpfs, which scales with RAM. 4G starves it
+# ("no space left on device" in go-modules drv); 6G is the floor. Override
+# with E2E_MEM_MB when the host cannot spare it.
+MEM_MB="${E2E_MEM_MB:-6144}"
 MARKER="$WORKDIR/iso-commit"
 QEMU_PID=""
 
@@ -105,7 +110,7 @@ log "fresh disk: $DISK"
 
 # --- Phase 1: boot the ISO, drive the installer over the serial console.
 log "phase 1: booting ISO (install)"
-"$QEMU" -enable-kvm -cpu host -m 4096 -smp 4 \
+"$QEMU" -enable-kvm -cpu host -m "$MEM_MB" -smp 4 \
   -cdrom "$ISO_FILE" -drive "file=$DISK,format=qcow2,if=virtio" \
   -boot order=d -display none -daemonize \
   -pidfile "$WORKDIR/qemu-install.pid" \
@@ -206,7 +211,7 @@ log "phase 1: installed"
 
 # --- Phase 2: boot the installed system (no ISO), probe the setup flow.
 log "phase 2: booting installed system"
-"$QEMU" -enable-kvm -cpu host -m 4096 -smp 4 \
+"$QEMU" -enable-kvm -cpu host -m "$MEM_MB" -smp 4 \
   -drive "file=$DISK,format=qcow2,if=virtio" \
   -boot order=c -display none -daemonize \
   -pidfile "$WORKDIR/qemu-test.pid" \
