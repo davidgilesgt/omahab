@@ -445,6 +445,13 @@ in
     machineBios.succeed("grep -q 'by-uuid' /mnt/etc/omahab/flake/nix/installed-hardware.nix || grep -q 'by-uuid' /mnt/etc/nixos/hardware-configuration.nix")
     machineBios.succeed("! grep -q 'OMAHAB-ROOT' /mnt/etc/nixos/hardware-configuration.nix | grep -q 'device =' || echo 'labels not in hardware config, good'")
 
+    # Single-disk install: no data disks means no data mounts (regression:
+    # an empty-array expansion iterated once with an empty device and mount
+    # "" failed with "Can't lookup blockdev" at stage mount).
+    machineBios.succeed(f"umount -R /mnt 2>/dev/null || true; rm -rf /mnt; mkdir -p /mnt; omahab-install-disk --disk {devsB[0]} --hostname singletest --yes --no-install --flake /etc/omahab-test-flake 2>&1 || (echo '--- installer log ---'; tail -60 /run/omahab-installer/install.log 2>/dev/null; exit 1)")
+    machineBios.succeed("findmnt -no SOURCE /mnt | grep -q '/dev/'")
+    machineBios.succeed("! mountpoint -q /mnt/srv/omahab/data1")
+
     # (Eligibility asserts moved before the destructive run above.)
 
     # Clean BIOS mounts

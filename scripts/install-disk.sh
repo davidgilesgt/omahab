@@ -1436,7 +1436,7 @@ if [[ "$RESUME_MODE" -eq 0 ]]; then
   i=1
   # Track data mounts
   declare -a DATA_UUIDS=()
-  for p in "${DATA_PARTS[@]:-}"; do
+  for p in "${DATA_PARTS[@]}"; do
     mkdir -p "$MNT/srv/omahab/data${i}"
     if ! mount "$p" "$MNT/srv/omahab/data${i}" 2>>"$LOG_FILE"; then die "mount $p -> $MNT/srv/omahab/data${i} failed"; fi
     track_mount "$MNT/srv/omahab/data${i}"
