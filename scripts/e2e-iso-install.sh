@@ -136,6 +136,11 @@ def connect():
 s = connect()
 buf = b""
 PROMPT = re.compile(rb"\[root@[A-Za-z0-9-]+:[^\]]*\]# ")
+# The live ISO's colored prompt embeds CSI color codes and an OSC window-title
+# sequence (\x1b]0;...\x07) between the tokens, so match against the buffer
+# with terminal escapes stripped. Offsets then refer to cleaned text, so drain
+# the raw buffer on match and return the cleaned prefix for debug output.
+ESC = re.compile(rb"\x1b\][^\x07]*\x07|\x1b\[[0-9;?]*[A-Za-z]|\x07|\r")
 
 def read_until(pat, timeout_s, send_nl=True):
     global buf
@@ -157,12 +162,13 @@ def read_until(pat, timeout_s, send_nl=True):
             continue
         log.write(chunk.decode("utf-8", "replace"))
         buf += chunk
-        m = pat.search(buf)
+        clean = ESC.sub(b"", buf)
+        m = pat.search(clean)
         if m:
-            out = buf[:m.start()]
-            buf = buf[m.end():]
+            out = clean[:m.start()]
+            buf = b""
             return out
-    raise SystemExit(f"serial: timeout waiting for {pat.pattern!r}\n--- tail ---\n" + buf[-2000:].decode("utf-8", "replace"))
+    raise SystemExit(f"serial: timeout waiting for {pat.pattern!r}\n--- tail ---\n" + ESC.sub(b"", buf[-4000:]).decode("utf-8", "replace"))
 
 def run(cmd, timeout_s, expect_exit=None):
     global buf
