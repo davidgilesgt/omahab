@@ -266,7 +266,7 @@ func (b *Backend) setupPhaseOIDC(ctx context.Context) error {
 			"WOODPECKER_HEALTHCHECK_ADDR": fmt.Sprintf("127.0.0.1:%d", apps.NativePortWoodpeckerAgent),
 		}
 		if validPostgresPassword(dbPassword) {
-			woodpeckerEnv["WOODPECKER_DATABASE_DATASOURCE"] = "postgresql://woodpecker-server:" + dbPassword + "@127.0.0.1:5432/woodpecker?sslmode=disable"
+			woodpeckerEnv["WOODPECKER_DATABASE_DATASOURCE"] = "postgresql://woodpecker-server:" + dbPassword + "@127.0.0.1:5432/woodpecker-server?sslmode=disable"
 		}
 		if grpcSecret != "" {
 			woodpeckerEnv["WOODPECKER_GRPC_SECRET"] = grpcSecret

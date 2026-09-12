@@ -464,7 +464,7 @@ func (b *Backend) ensureWoodpeckerPostgresAuth(ctx context.Context) error {
 		return fmt.Errorf("woodpecker_db_password missing or outside safe alphabet")
 	}
 	stmt := "ALTER ROLE \"woodpecker-server\" WITH PASSWORD '" + password + "'"
-	out, err := systemdRunAsUser(ctx, "postgres", "postgres", "/tmp", []string{"HOME=/tmp"}, "psql", "-d", "woodpecker", "-c", stmt)
+	out, err := systemdRunAsUser(ctx, "postgres", "postgres", "/tmp", []string{"HOME=/tmp"}, "psql", "-d", "woodpecker-server", "-c", stmt)
 	if err != nil {
 		return fmt.Errorf("alter woodpecker-server role: %s", health.RedactDetail(strings.TrimSpace(out+" "+err.Error())))
 	}

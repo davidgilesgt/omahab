@@ -509,7 +509,7 @@ in
     # ----------------------------------------------------------------
     services.postgresql = {
       enable = true;
-      ensureDatabases = [ "litellm" "woodpecker" ];
+      ensureDatabases = [ "litellm" "woodpecker-server" ];
       ensureUsers = [
         {
           name = "litellm";
