@@ -1982,7 +1982,7 @@ if [[ "$RESUME_MODE" -eq 0 ]]; then
 install-disk: done.
   System installed from $SYS_DEV; admin $USERNAME; hostname $HOSTNAME
   Data volumes: ${#DATAS[@]} at /srv/omahab/data1..${#DATAS[@]}
-  Bootloader: $FIRMWARE; reboot, remove the ISO, and the tty1 console wizard (http://<lan-ip>:8485) takes it from there.
+  Bootloader: $FIRMWARE; reboot, remove the ISO, and the tty1 console wizard (http://<lan-ip>:8484) takes it from there.
   SSH: $(if [[ -n "${auth_keys_src:-}" && -f "$auth_keys_src" ]]; then echo "ssh ${USERNAME}@${HOSTNAME}.local (keys installed)"; else echo "SSH deferred — add keys via WebUI after first boot; local password login works"; fi)
 EOF
   # Final cleanup will remove password hash and manifest
