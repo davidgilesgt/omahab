@@ -335,12 +335,17 @@ func (b *Backend) ensurePaperlessOIDC(ctx context.Context, domainName string) er
 		"PAPERLESS_URL":                     "https://archive." + domainName,
 		"PAPERLESS_APPS":                    "allauth.socialaccount.providers.openid_connect",
 		"PAPERLESS_SOCIALACCOUNT_PROVIDERS": paperlessOIDCEnv(domainName, clientID, clientSecret),
-		// Skip the initial-user setup: first OIDC login auto-provisions the
-		// account from Pocket ID claims instead of showing the signup form
-		// (PAPERLESS_SOCIALACCOUNT_ALLOW_SIGNUPS already defaults true).
-		// New users are plain users; grant admin via createsuperuser or the
-		// SYNC_SUPERUSER_GROUP claim once Pocket ID emits groups.
-		"PAPERLESS_SOCIAL_AUTO_SIGNUP": "true",
+		// SSO-only auth (mirrors Forgejo/Immich): first OIDC login
+		// auto-provisions the account from Pocket ID claims instead of
+		// showing the local signup form, the password form is hidden, and
+		// the login page redirects straight to Pocket ID — no password is
+		// ever set here. Django admin login (/admin/) is unaffected, so
+		// grant admin via createsuperuser if needed (new SSO users are
+		// plain users).
+		"PAPERLESS_SOCIAL_AUTO_SIGNUP":          "true",
+		"PAPERLESS_SOCIALACCOUNT_ALLOW_SIGNUPS": "true",
+		"PAPERLESS_DISABLE_REGULAR_LOGIN":       "true",
+		"PAPERLESS_REDIRECT_LOGIN_TO_SSO":       "true",
 	}, "paperless"); err != nil {
 		return fmt.Errorf("write paperless appenv: %w", err)
 	}
