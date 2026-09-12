@@ -28,19 +28,18 @@ import (
 //go:embed openapi.yaml
 var openAPISpec []byte
 
-
 // Server is the Chi HTTP server for omahabd.
 type Server struct {
-	backend      *controlplane.Backend
-	environments *companion.Service
-	tokenHash    []byte // SHA256 of bearer token, nil means auth disabled (tests only)
-	mcpTokenHash []byte // SHA256 of hermes_mcp_token, nil means MCP auth disabled
-	emailHMACKey []byte
+	backend          *controlplane.Backend
+	environments     *companion.Service
+	tokenHash        []byte // SHA256 of bearer token, nil means auth disabled (tests only)
+	mcpTokenHash     []byte // SHA256 of hermes_mcp_token, nil means MCP auth disabled
+	emailHMACKey     []byte
 	scmWebhookSecret []byte
-	version      string
-	startedAt    time.Time
-	router       chi.Router
-	httpServer   *http.Server
+	version          string
+	startedAt        time.Time
+	router           chi.Router
+	httpServer       *http.Server
 
 	// dlDir is the filesystem directory for /dl/* and /install.sh.
 	dlDirPath string
@@ -55,18 +54,18 @@ type Server struct {
 	mcpHandler http.Handler
 }
 type Config struct {
-	Backend      *controlplane.Backend
-	Environments *companion.Service
-	Version      string
-	BearerToken  string // raw token; hashed with SHA256 and compared constant-time
-	MCPToken     string // raw hermes_mcp_token; hashed and checked by mcpAuth
-	MCPHandler   http.Handler
-	EmailHMACKey string // raw HMAC key for email webhook; empty disables HMAC check (tests)
+	Backend          *controlplane.Backend
+	Environments     *companion.Service
+	Version          string
+	BearerToken      string // raw token; hashed with SHA256 and compared constant-time
+	MCPToken         string // raw hermes_mcp_token; hashed and checked by mcpAuth
+	MCPHandler       http.Handler
+	EmailHMACKey     string // raw HMAC key for email webhook; empty disables HMAC check (tests)
 	SCMWebhookSecret string // raw HMAC key for Forgejo webhook (platform-app/forgejo_webhook_secret)
-	ReadTimeout  time.Duration
-	WriteTimeout time.Duration
-	IdleTimeout  time.Duration
-	BodyLimit    int64 // max JSON body bytes (default 1MiB)
+	ReadTimeout      time.Duration
+	WriteTimeout     time.Duration
+	IdleTimeout      time.Duration
+	BodyLimit        int64 // max JSON body bytes (default 1MiB)
 
 	// DLDir is the directory serving /dl/* and /install.sh. If empty, OMAHAB_DL_DIR env or ./dist/dl fallback is used.
 	DLDir string
@@ -74,7 +73,6 @@ type Config struct {
 	// Bootstrap enables the first-boot route group. Nil disables it.
 	Bootstrap BootstrapGate
 }
-
 
 const (
 	defaultBodyLimit    int64 = 1 << 20 // 1 MiB
@@ -216,7 +214,6 @@ func (s *Server) buildRouter() chi.Router {
 		})
 	})
 
-
 	// Authenticated API group.
 	r.Group(func(r chi.Router) {
 		r.Use(s.bearerAuth)
@@ -341,9 +338,9 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/api/v1/backup-repositories", s.handleListBackupRepositories)
 		r.Post("/api/v1/backup-repositories", s.withBodyLimit(defaultBodyLimit, s.handleCreateBackupRepository))
 		r.Delete("/api/v1/backup-repositories/{id}", s.handleDeleteBackupRepository)
-	r.Post("/api/v1/setup/reconcile", s.withBodyLimit(defaultBodyLimit, s.handleTriggerSetupReconcile))
-	r.Post("/api/v1/setup/verify-cloudflare", s.withBodyLimit(defaultBodyLimit, s.handleVerifyCloudflareToken))
- 	r.Put("/api/v1/setup/woodpecker", s.withBodyLimit(defaultBodyLimit, s.handleSetupWoodpecker))
+		r.Post("/api/v1/setup/reconcile", s.withBodyLimit(defaultBodyLimit, s.handleTriggerSetupReconcile))
+		r.Post("/api/v1/setup/verify-cloudflare", s.withBodyLimit(defaultBodyLimit, s.handleVerifyCloudflareToken))
+		r.Put("/api/v1/setup/woodpecker", s.withBodyLimit(defaultBodyLimit, s.handleSetupWoodpecker))
 
 		// Users / identity recovery
 		r.Get("/api/v1/users", s.handleListUsers)
@@ -446,14 +443,14 @@ func (s *Server) dlDir() string {
 
 // allowedDLFiles is the allowlist for /dl/{file}. Keep in sync with flake.nix omahab-dl.
 var allowedDLFiles = map[string]bool{
-	"omahab-clientd-linux-amd64":    true,
-	"omahab-clientd-linux-arm64":     true,
-	"omahab-clientd-darwin-arm64":    true,
-	"omahab-clientd-darwin-amd64":    true,
+	"omahab-clientd-linux-amd64":        true,
+	"omahab-clientd-linux-arm64":        true,
+	"omahab-clientd-darwin-arm64":       true,
+	"omahab-clientd-darwin-amd64":       true,
 	"omahab-clientd-linux-amd64.sha256": true, // not used but allow
-	"omarchy-plugin.tar.gz":          true,
-	"install.sh":                     true,
-	"SHA256SUMS":                     true,
+	"omarchy-plugin.tar.gz":             true,
+	"install.sh":                        true,
+	"SHA256SUMS":                        true,
 }
 
 func (s *Server) handleDL(w http.ResponseWriter, r *http.Request) {
