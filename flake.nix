@@ -112,7 +112,16 @@ EOF
             export GOOS=${goos}
             export GOARCH=${goarch}
           '';
-          ldflags = ldflagsBase;
+          # Cross builds install to $out/bin/<goos>_<goarch>/ (buildGoModule
+          # GOBIN layout); hoist to $out/bin/ so omahab-dl can copy all 4
+          # targets uniformly. Native-layout outputs are untouched.
+          postInstall = ''
+            if [ ! -f "$out/bin/omahab-clientd" ]; then
+              f=$(find "$out/bin" -mindepth 2 -name omahab-clientd | head -n 1)
+              if [ -n "$f" ]; then cp "$f" "$out/bin/omahab-clientd"; fi
+            fi
+          '';
+           ldflags = ldflagsBase;
         };
         omahab-clientd-linux-amd64 = mkClientd { goos = "linux"; goarch = "amd64"; };
         omahab-clientd-linux-arm64 = mkClientd { goos = "linux"; goarch = "arm64"; };
