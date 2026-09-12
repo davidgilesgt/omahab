@@ -1208,11 +1208,22 @@ func (b *Backend) renderNativeAppEnv(ctx context.Context, dnsToken, domainName s
 		return fmt.Errorf("ntfy: %w", err)
 	}
 	gitHost := "git." + domainName
+	// Pocket ID is the only login path: hide the internal password form and
+	// direct registration so the Forgejo login page offers just
+	// "Sign in with PocketID". External (auth-source) registration stays
+	// enabled so first Pocket ID login auto-provisions the account into the
+	// mapped omahab teams; no password is required for it. Automation is
+	// unaffected (omahab-bot via admin CLI + API token, never password).
 	if err := b.writeAppEnv("forgejo", map[string]string{
-		"FORGEJO__packages__ENABLED":  "true",
-		"FORGEJO__server__ROOT_URL":   "https://git." + domainName,
-		"FORGEJO__server__DOMAIN":     gitHost,
-		"FORGEJO__server__SSH_DOMAIN": gitHost,
+		"FORGEJO__packages__ENABLED":                               "true",
+		"FORGEJO__server__ROOT_URL":                                "https://git." + domainName,
+		"FORGEJO__server__DOMAIN":                                  gitHost,
+		"FORGEJO__server__SSH_DOMAIN":                              gitHost,
+		"FORGEJO__service__DISABLE_REGISTRATION":                   "false",
+		"FORGEJO__service__ALLOW_ONLY_EXTERNAL_REGISTRATION":       "true",
+		"FORGEJO__service__SHOW_REGISTRATION_BUTTON":               "false",
+		"FORGEJO__service__ENABLE_INTERNAL_SIGNIN":                 "false",
+		"FORGEJO__service__REQUIRE_EXTERNAL_REGISTRATION_PASSWORD": "false",
 	}, "forgejo"); err != nil {
 		return fmt.Errorf("forgejo: %w", err)
 	}
