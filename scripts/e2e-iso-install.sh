@@ -46,6 +46,8 @@ SERIAL_PORT="${E2E_SERIAL_PORT:-4445}"
 HTTP_PORT="${E2E_HTTP_PORT:-8485}"
 # 2223 collides with host sshd on dev machines; 2222 with `nix run .#vm`.
 SSH_PORT="${E2E_SSH_PORT:-2229}"
+INSTALL_TIMEOUT=2700
+BOOT_TIMEOUT=300
 # Guest RAM: nixos-install builds flake-local packages (incl. darwin clientds'
 # Go module graph) in sandbox tmpfs, which scales with RAM. 4G starves it
 # ("no space left on device" in go-modules drv); 6G is the floor. Override
