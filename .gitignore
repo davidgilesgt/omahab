@@ -1,5 +1,9 @@
 node_modules/
 dist/
+result*
+iso-result
+*.iso
+*.qcow2
 coverage/
 *.sqlite
 *.sqlite-shm
