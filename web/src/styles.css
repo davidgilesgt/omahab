@@ -534,7 +534,6 @@ td.cell-actions { text-align: right; }
 .chat-page { height: calc(100vh - 8rem); grid-template-rows: auto auto minmax(28rem, 1fr); }
 .chat-shell { display: grid; min-height: 0; grid-template-rows: auto minmax(0, 1fr) auto auto; overflow: hidden; border: var(--border) solid var(--line); border-radius: var(--radius-md); background: var(--surface); }
 .chat-status { display: flex; align-items: center; justify-content: space-between; padding: var(--space-3) var(--space-4); border-bottom: var(--border) solid var(--line); }
-.chat-empty h2 { margin: var(--space-4) 0 var(--space-2); color: var(--ink); font-size: 0.9375rem; }
 .chat-status > div > div { display: flex; flex-direction: column; }
 .transcript { overflow-y: auto; padding: var(--space-5); scroll-behavior: smooth; }
 .chat-empty { display: grid; place-items: center; align-content: center; min-height: 100%; color: var(--ink-muted); text-align: center; }

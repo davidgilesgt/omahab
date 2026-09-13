@@ -362,6 +362,8 @@ function ProjectReleases({ project }: { project: Project }) {
 
 export function ProjectsPage() {
   const { client } = useAuth();
+  const { pathname } = useLocation();
+  const adminPrefix = pathname.startsWith("/admin") ? "/admin" : "";
   const queryClient = useQueryClient();
   const toast = useToast();
   const query = useQuery({ queryKey: ["projects"], queryFn: client.projects });
@@ -372,7 +374,7 @@ export function ProjectsPage() {
   const [slug, setSlug] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
   const projects = query.data ?? [];
-  const domain = (instanceQuery.data?.domain ?? "").trim();
+  const domain = (instanceQuery.data?.domain ?? "").trim().toLowerCase();
   const domainReady = domain !== "" && domain !== "example.com" && domain !== "not-configured.invalid";
   const creationBlocked = instanceQuery.isSuccess && !domainReady;
   const create = useMutation({
@@ -403,6 +405,10 @@ export function ProjectsPage() {
       setFormError("Name must be 100 characters or fewer.");
       return;
     }
+    if (trimmedSlug && !/^[a-z0-9-]+$/.test(trimmedSlug)) {
+      setFormError("Slug may only contain lowercase letters, numbers, and hyphens.");
+      return;
+    }
     if (trimmedSlug.length > 63) {
       setFormError("Slug must be 63 characters or fewer.");
       return;
@@ -415,7 +421,7 @@ export function ProjectsPage() {
       <PageHeader title="Projects" actions={<button className="button primary" type="button" disabled={creationBlocked || create.isPending} onClick={openForm}>New project</button>} />
       {showForm && (
         <form className="form-stack" aria-label="New project" onSubmit={submit}>
-          {instanceQuery.isLoading ? <LoadingState label="Checking setup" /> : instanceQuery.isError ? <ErrorState error={instanceQuery.error} retry={() => void instanceQuery.refetch()} /> : !domainReady ? <p className="muted">Set up a domain before creating projects. <Link to="/setup">Continue setup</Link></p> : (
+          {instanceQuery.isLoading ? <LoadingState label="Checking setup" /> : instanceQuery.isError ? <ErrorState error={instanceQuery.error} retry={() => void instanceQuery.refetch()} /> : !domainReady ? <p className="muted">Set up a domain before creating projects. <Link to={`${adminPrefix}/setup`}>Continue setup</Link></p> : (
             <>
               <label>Name<input value={name} onChange={(e) => setName(e.target.value)} required maxLength={100} disabled={create.isPending} /></label>
               <label>Slug (optional)<input value={slug} onChange={(e) => setSlug(e.target.value)} maxLength={63} placeholder="Derived from name" disabled={create.isPending} /></label>
@@ -429,7 +435,7 @@ export function ProjectsPage() {
           <MutationNotice error={create.error} />
         </form>
       )}
-      {query.isLoading ? <LoadingState label="Loading projects" /> : query.isError ? <ErrorState error={query.error} retry={() => void query.refetch()} /> : !projects.length ? <EmptyState title="No projects" description="Create a project to connect a Forgejo repository and deployment pipeline." action={<div className="form-stack"><button className="button primary" type="button" disabled={creationBlocked || create.isPending} onClick={openForm}>New project</button>{creationBlocked ? <p className="muted">Set up a domain before creating projects. <Link to="/setup">Continue setup</Link></p> : null}</div>} /> : (
+      {query.isLoading ? <LoadingState label="Loading projects" /> : query.isError ? <ErrorState error={query.error} retry={() => void query.refetch()} /> : !projects.length ? <EmptyState title="No projects" description="Create a project to connect a Forgejo repository and deployment pipeline." action={<div className="form-stack"><button className="button primary" type="button" disabled={creationBlocked || create.isPending} onClick={openForm}>New project</button>{creationBlocked ? <p className="muted">Set up a domain before creating projects. <Link to={`${adminPrefix}/setup`}>Continue setup</Link></p> : null}</div>} /> : (
         <div className="table-wrap"><table><thead><tr><th scope="col">Project</th><th scope="col">Repository</th><th scope="col">Host</th><th scope="col">Exposure</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead><tbody>{projects.map((project) => <Fragment key={project.id}><tr><td><strong>{project.name}</strong></td><td className="cell-wrap">{project.repository_url}</td><td className="cell-wrap">{project.hostname} <CopyButton text={project.hostname} label="Copy" /></td><td><StatusPill value={project.exposure} /></td><td className="cell-actions"><button className="button secondary" type="button" onClick={() => setReview(project)}>Exposure</button></td></tr><tr className="detail-row"><td colSpan={5}><details><summary>Releases</summary><ProjectReleases project={project} /></details></td></tr></Fragment>)}</tbody></table></div>
       )}
       {review && <ExposureReview resource="projects" item={review} onClose={() => setReview(null)} />}
@@ -501,12 +507,13 @@ export function EventsPage() {
     onError: (err) => toast.error(err instanceof Error ? err.message : "Could not update ntfy"),
   });
   const grouped = useMemo(() => query.data?.slice().sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at)), [query.data]);
+  const unreadCount = query.data?.filter((event) => !event.read_at).length ?? 0;
   const ntfy = ntfyQuery.data;
   const topic = ntfy?.topic ?? "";
   const ntfyUrl = topic ? `http://${typeof window !== "undefined" ? window.location.hostname : "omahab"}:2586/${topic}` : "";
   return (
     <div className="page">
-      <PageHeader title="Events" actions={<button className="button secondary" type="button" disabled={markAll.isPending} onClick={() => markAll.mutate()}>{markAll.isPending ? "Marking…" : "Mark all read"}</button>} />
+      <PageHeader title="Events" actions={<button className="button secondary" type="button" disabled={markAll.isPending || unreadCount === 0} onClick={() => markAll.mutate()}>{markAll.isPending ? "Marking…" : "Mark all read"}</button>} />
       <Section title="Phone notifications" description="Send warning and error notifications to your phone.">
         {ntfyQuery.isLoading ? <LoadingState label="Loading ntfy" /> : ntfyQuery.isError ? <ErrorState error={ntfyQuery.error} retry={() => void ntfyQuery.refetch()} /> : (
           <div style={{ display: "flex", gap: "1rem", alignItems: "flex-start", flexWrap: "wrap" }}>

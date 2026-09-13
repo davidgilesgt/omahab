@@ -1,9 +1,3 @@
-// P1-3 integrator note: No dedicated knowledge/assistant settings view exists in web/src/views.
-// The required UI (three semantic-index options: Best English / Best worldwide / Full-text only,
-// pinned-model metadata from pinned_models.json, and summarization-consent dialog with provider
-// and informed choice) should be implemented as a new route (e.g., /knowledge or /ai/settings)
-// or integrated into the Sync folders view once API routes /api/v1/knowledge/* are available.
-// Workers/embedding/pinned_models.json.example contains the model metadata shape.
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../auth";
@@ -167,7 +161,7 @@ export function SyncFoldersPage() {
 
   return (
     <div className="page">
-      <PageHeader title="Sync" />
+      <PageHeader title="Sync folders" />
       <div className="split-grid wide-primary">
         <Section title="Folders" description="Sharing with AI permits the default assistant to list, search, and read this folder.">
           {query.isLoading ? <LoadingState label="Loading folders" /> : query.isError ? <ErrorState error={query.error} retry={() => void query.refetch()} /> : !folders.length ? <EmptyState title="No synchronized folders" description="Add a server folder to begin syncing it with trusted devices." /> : (

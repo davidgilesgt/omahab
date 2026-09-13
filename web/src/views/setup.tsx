@@ -1021,7 +1021,7 @@ export function SetupPage() {
           <ProvidersSetupBox status={modelsQuery.data} isLoading={modelsQuery.isLoading} isError={modelsQuery.isError} error={modelsQuery.error} onRetry={() => void modelsQuery.refetch()} />
         </Box>
         <Box title="Document search" done={doneMap.knowledge} open={openId === "knowledge"} onToggle={() => toggle("knowledge")}>
-          <IndexSetupControl />
+          <IndexSetupControl onSaved={advance} />
         </Box>
         {otherApps.map((a) => (
           <Box key={`core-${a.bundle_id}`} title={a.bundle_id} done={a.status === "running"} open={coreOpen === a.bundle_id} onToggle={() => setCoreOpen(coreOpen === a.bundle_id ? null : a.bundle_id)}>

@@ -18,7 +18,7 @@ function formatBytes(value: number): string {
   return `${formatted} ${units[unitIndex]}`;
 }
 
-export function IndexSetupControl() {
+export function IndexSetupControl({ onSaved }: { onSaved?: () => void }) {
   const { client } = useAuth();
   const toast = useToast();
   const queryClient = useQueryClient();
@@ -27,9 +27,11 @@ export function IndexSetupControl() {
   const choiceQuery = useQuery({ queryKey: ["knowledge", "index-setup"], queryFn: client.knowledgeGetIndexSetup });
 
   const rawChoice = choiceQuery.data?.choice ?? "";
-  // Legacy rows store "fulltext"; the server normalizes to "full_text" on
-  // write, but reads return the raw value, so display must accept both.
-  const persisted = rawChoice === "fulltext" ? "full_text" : rawChoice;
+  // Mirror the server normalization (setup_status.go): trim, lowercase,
+  // legacy "fulltext" reads as "full_text". Raw SQL rows may carry any
+  // casing/whitespace the validated setter would never write.
+  const normalized = rawChoice.trim().toLowerCase();
+  const persisted = normalized === "fulltext" ? "full_text" : normalized;
 
   // Draft selection with an explicit dirty flag. The draft initializes when
   // the persisted choice first arrives and re-syncs to later persisted
@@ -47,6 +49,7 @@ export function IndexSetupControl() {
     mutationFn: (choice: string) => client.knowledgeSetIndexSetup(choice),
     onSuccess: (_data, choice) => {
       setDirty(false);
+      onSaved?.();
       void queryClient.invalidateQueries({ queryKey: ["knowledge", "index-setup"] });
       void queryClient.invalidateQueries({ queryKey: ["setup"] });
       const opts = optionsQuery.data ?? [];
@@ -117,6 +120,7 @@ export function IndexSetupControl() {
       {selected && !alias ? (
         <p className="muted">No download · No additional memory · Text matching only</p>
       ) : null}
+      {selected?.description ? <p className="muted">{selected.description}</p> : null}
       {selected && alias && model ? (
         <p className="muted">
           Model <span className="mono">{model.name}</span> · License <strong>{model.license}</strong> · Download {formatBytes(model.size_bytes)} · Memory {model.expected_memory_mb} MB
