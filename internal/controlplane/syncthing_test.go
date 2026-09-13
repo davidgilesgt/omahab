@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/omahab/omahab/internal/apitypes"
 )
 
 func writeSyncthingConfig(t *testing.T, dataDir, apiKey string) {
@@ -84,5 +86,52 @@ func TestEnsureDefaultSyncFolders(t *testing.T) {
 	}
 	if dr.ShareWithAI {
 		t.Fatal("drops must not share with AI (router output is indexed once by its target app)")
+	}
+}
+
+func TestCreateCompanionSyncFolderEnrollsExisting(t *testing.T) {
+	ctx := context.Background()
+	b := newTestBackend(t, nil)
+	if b.syncer == nil {
+		t.Fatal("syncer not wired")
+	}
+
+	// Pre-provisioned folder (as ensureDefaultSyncFolders leaves it).
+	b.ensureDefaultSyncFolders(ctx)
+	pre, err := b.syncer.GetByName(ctx, "obsidian")
+	if err != nil {
+		t.Fatalf("obsidian folder: %v", err)
+	}
+
+	// Device enrollment into the existing folder must succeed, not conflict.
+	share := true
+	f, err := b.CreateCompanionSyncFolder(ctx, apitypes.CreateCompanionSyncFolderRequest{
+		Name:        "obsidian",
+		ShareWithAI: &share,
+		DeviceID:    "DEVICE123456789012345678901234567890123456789012345",
+		DeviceName:  "test-device",
+	})
+	if err != nil {
+		t.Fatalf("enroll into existing folder: %v", err)
+	}
+	if f.ID != pre.ID {
+		t.Fatalf("returned folder %q, want pre-provisioned %q", f.ID, pre.ID)
+	}
+	devs, err := b.syncer.ListDevices(ctx, string(f.ID))
+	if err != nil {
+		t.Fatalf("list devices: %v", err)
+	}
+	if len(devs) != 1 {
+		t.Fatalf("enrolled devices = %d, want 1", len(devs))
+	}
+
+	// Repeat enrollment is idempotent.
+	if _, err := b.CreateCompanionSyncFolder(ctx, apitypes.CreateCompanionSyncFolderRequest{
+		Name:        "obsidian",
+		ShareWithAI: &share,
+		DeviceID:    "DEVICE123456789012345678901234567890123456789012345",
+		DeviceName:  "test-device",
+	}); err != nil {
+		t.Fatalf("repeat enroll: %v", err)
 	}
 }

@@ -49,6 +49,8 @@ Panel {
   readonly property var actions: [
     { label: "Open AI", action: "ai.open", icon: "󰚩", requiresOnline: true },
     { label: "New workspace…", action: "workspace.new", icon: "󰆍", requiresOnline: true },
+    { label: "Sync drops folder", action: "sync.add.drops", icon: "󰝰", requiresOnline: true },
+    { label: "Sync notes (Obsidian)", action: "sync.add.obsidian", icon: "󰈙", requiresOnline: true },
     { label: "Open Omahab", action: "dashboard.open", icon: "󰖟", requiresOnline: true },
     { label: "Sync tool variables", action: "environment.sync", icon: "󰑓", requiresOnline: true },
     { label: "Back up now", action: "backup.run", icon: "󰁯", requiresOnline: false },
@@ -94,9 +96,16 @@ Panel {
       showNewWorkspacePicker = true
       return
     }
-    client.runAction(action.action, action.label)
-    if (action.action !== "diagnose") root.close()
-  }
+    if (action.action === "sync.add.drops") {
+      client.syncAdd("drops", "", false)
+      root.close()
+      return
+    }
+    if (action.action === "sync.add.obsidian") {
+      client.syncAdd("obsidian", "", true)
+      root.close()
+      return
+    }
 
   function activateCursor() {
     ensureCursor()

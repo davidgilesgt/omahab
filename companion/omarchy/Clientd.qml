@@ -171,6 +171,13 @@ Item {
     enqueue("backup.run", {}, "action", "Back up now")
   }
 
+  function syncAdd(name, localPath, shareWithAI) {
+    if (actionBusy) return
+    actionBusy = true
+    actionStatus = ""
+    enqueue("sync.add", {name: name, local_path: (localPath || ""), share_with_ai: (shareWithAI === true)}, "action", "Sync " + name)
+  }
+
   function backupStatus() {
     enqueue("backup.status", {}, "backup_status", "")
   }

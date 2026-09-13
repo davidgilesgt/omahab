@@ -628,8 +628,14 @@ func (d *Daemon) dispatchSocket(req SocketRequest) SocketResponse {
 		if name == "" {
 			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "bad_request", Message: "name required"}}
 		}
+		// Omakase default: well-known folders land at ~/<name> unless the
+		// caller passes an explicit local_path (or path alias).
 		if localPath == "" {
-			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "bad_request", Message: "local_path required"}}
+			home, _ := os.UserHomeDir()
+			if home == "" {
+				home = os.Getenv("HOME")
+			}
+			localPath = filepath.Join(home, name)
 		}
 		// Expand ~ for local path
 		if strings.HasPrefix(localPath, "~/") {

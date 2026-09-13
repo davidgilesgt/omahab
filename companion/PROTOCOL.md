@@ -75,7 +75,7 @@ Socket aliases from pre-A1 (`hermes.open`, `project_clone`, `runner.*`, `env.syn
 | `environment.status` | `{}` | `{"revision": int, "variable_count": int, "synced_at": *time.Time, "error": string}` | — | Redacted; never includes values. |
 | `backup.run` | `{}` | `{"result":"backup completed"}` | `internal` | Runs `backupDrive` (`RunBackupDrive`) synchronously (10m ctx). |
 | `backup.status` | `{}` | `{"last_snapshot": *time.Time, "error": string}` | — | Refreshes via `StatusBackupDrive`, returns cached `backupLastSnapshot`/`backupError`. (The richer `BackupDriveStatus` with `snapshot_id` is CLI-only in `omahab backup-drive status`; the socket shape stays narrow.) |
-| `sync.add` | `{"name": string, "local_path"?: string, ...}` | folder state | `bad_request`, `internal` | Implemented in `dispatchSocket` (Syncthing enrollment); not removed. |
+| `sync.add` | `{"name": string, "local_path"?: string, "share_with_ai"?: bool}`<br>`local_path` defaults to `~/<name>` (lowercase); `path` is accepted as an alias. | folder state | `bad_request` (name required), `internal` (not connected, Syncthing unavailable, enrollment failed) | Enrolls this device's Syncthing ID via `POST /api/v1/companion/sync/folders` (device token), then adds the folder locally. Pre-provisioned folders (`obsidian`, `drops`) enroll instead of failing. One-click call sites: Omarchy panel "Sync drops folder" (`drops`, unshared) and "Sync notes (Obsidian)" (`obsidian`, shared with AI). |
 | `app.open` | `{"app": string}` | `{"app": string, "url": string}` | `bad_request`, `internal` | Opens a platform-app URL. Served by the daemon but intentionally outside the QML call sites below. |
 | `workspace.openInEditor` | `{"id"?: string, "workspace_id"?: string, ...}` | editor result | `bad_request`, `internal` | Opens a workspace in the configured editor. Served by the daemon but intentionally outside the QML call sites below. |
 | `subscribe` | `{}` | streams `{"event":"status","data":DaemonStatus}` frames | — | Holds the connection open (no deadline), sends the current status immediately, then pushes on every `broadcastStatus`; closed only when the client disconnects. |
@@ -163,7 +163,7 @@ function refresh() { enqueue("status", {}, "status", ""); enqueue("workspace.lis
 function workspaceStop(id) { enqueue("workspace.stop", {id: id}, "action", "Stop workspace") }
 ```
 
-*No* `OMAHAB_SOCKET` — renamed to `OMAHAB_CLIENTD_SOCKET` in A1. `Clientd.qml` call sites use `status`, `diagnose`, `ai.open`, `dashboard.open`, `project.list`, `project.clone`, `project.open`, `workspace.list`, `workspace.create`, `workspace.attach`, `workspace.stop`, `environment.*`, `backup.*`, `subscribe`. (`sync.add` is served by the daemon but has no QML call site; `app.open` and `workspace.openInEditor` are both served and called from QML.)
+*No* `OMAHAB_SOCKET` — renamed to `OMAHAB_CLIENTD_SOCKET` in A1. `Clientd.qml` call sites use `status`, `diagnose`, `ai.open`, `dashboard.open`, `project.list`, `project.clone`, `project.create`, `project.open`, `workspace.list`, `workspace.create`, `workspace.attach`, `workspace.stop`, `environment.*`, `backup.*`, `sync.add`, `subscribe`. (`app.open` and `workspace.openInEditor` are both served and called from QML.)
 
 ## Device HTTP API (complementary)
 

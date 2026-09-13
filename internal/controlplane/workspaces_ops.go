@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -93,6 +94,23 @@ func (b *Backend) CreateCompanionSyncFolder(ctx context.Context, req apitypes.Cr
 	// Sanitize: ensure no traversal; syncer will validate
 	f, err := b.syncer.Create(ctx, syncer.CreateInput{Name: name, ServerPath: serverPath, ShareWithAI: share})
 	if err != nil {
+		// Pre-provisioned folders (obsidian, drops) already exist with
+		// server-chosen flags: enroll the device instead of failing.
+		// translateError wraps service errors, so match on text too.
+		if errors.Is(err, syncer.ErrAlreadyExists) || strings.Contains(strings.ToLower(err.Error()), "already exists") {
+			existing, gerr := b.syncer.GetByName(ctx, name)
+			if gerr != nil {
+				return domain.SyncFolder{}, translateError(gerr)
+			}
+			if _, eerr := b.syncer.EnrollDevice(ctx, string(existing.ID), deviceID, deviceName); eerr != nil && !strings.Contains(strings.ToLower(eerr.Error()), "already") {
+				_, _ = b.events.Publish(ctx, events.PublishInput{
+					Type:     "syncthing.enroll_failed",
+					Severity: "warning",
+					Message:  fmt.Sprintf("enroll device %s to folder %s failed: %v", deviceID, name, eerr),
+				})
+			}
+			return *existing, nil
+		}
 		return domain.SyncFolder{}, translateError(err)
 	}
 	if _, err := b.syncer.EnrollDevice(ctx, string(f.ID), deviceID, deviceName); err != nil {
