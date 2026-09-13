@@ -21,6 +21,15 @@ let
   dataDir = "/srv/omahab";
   litellmConfigDir = "${dataDir}/apps/litellm/config";
   litellmConfig = "${litellmConfigDir}/litellm.yaml";
+  # LiteLLM stays on Python 3.13 while the default is 3.14: the prebuilt
+  # Prisma client is a 25MB types.py (~77k TypedDicts), and on 3.14 every
+  # TypedDict creation goes through typing_extensions'
+  # annotationlib.call_annotate_function (~5 min of 100% CPU per import,
+  # paid 3+ times per startup by the server and its `prisma` children),
+  # so :4000 never opens and the app reports unhealthy.
+  litellmPython = pkgs.python313;
+  litellmPyPackages = pkgs.python313Packages;
+
   # Seed mirrors the native DB-ownership bootstrap (internal/controlplane/setup_models.go):
   # no models, DB-owned, prompts never stored, no message logging, no retries/fallbacks.
   # Prebuilt Prisma client for litellm's schema. prisma-client-py shells
@@ -29,7 +38,7 @@ let
   # hashed tree is copied into the prisma package in the litellm python
   # override below and the final closure stays hermetic. Bump the name +
   # hash with litellm.
-  litellmPrismaSchema = "${pkgs.python3Packages.litellm}/${pkgs.python3.sitePackages}/litellm/proxy/schema.prisma";
+  litellmPrismaSchema = "${litellmPyPackages.litellm}/${litellmPython.sitePackages}/litellm/proxy/schema.prisma";
   litellmPrismaClient = pkgs.stdenv.mkDerivation {
     name = "litellm-prisma-client-1.97.0";
     outputHashAlgo = "sha256";
@@ -39,7 +48,7 @@ let
       pkgs.cacert
       pkgs.nodejs
       pkgs.prisma-engines_6
-      (pkgs.python3.withPackages (ps: [ ps.prisma ]))
+      (litellmPython.withPackages (ps: [ ps.prisma ]))
     ];
     buildCommand = ''
       # Fixed-output sandboxes start without $out: create it (the
@@ -405,7 +414,7 @@ in
       # health probe, core_apps, and the admin-invite gate.
       port = 4000;
       package = pkgs.litellm.override {
-        python3Packages = pkgs.python3Packages.overrideScope (
+        python3Packages = litellmPyPackages.overrideScope (
           _self: super: {
             fastapi = super.fastapi.overridePythonAttrs (_old: rec {
               version = "0.140.6";
@@ -418,7 +427,7 @@ in
             });
             # a2a-sdk 0.3.26: its suite runs at build time via
             # installCheckPhase (doInstallCheck defaults true), and one
-            # telemetry assertion fails on Linux/python3.14 in this pin:
+            # telemetry assertion fails on Linux in this pin (seen on 3.14, kept for 3.13):
             # tests/utils/test_telemetry.py::
             # test_trace_function_sync_attribute_extractor_error_logged.
             # Same test is already disabled on Darwin upstream, so this
