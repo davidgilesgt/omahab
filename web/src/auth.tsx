@@ -194,7 +194,6 @@ export function LoginPage() {
     return (
       <main className="login-page">
         <section className="login-card" aria-labelledby="login-title">
-          <p className="eyebrow">Private control plane</p>
           <h1 id="login-title">Sign in to Omahab</h1>
           <div className="state-message" role="status">
             <span className="spinner" aria-hidden="true" /> Checking access…
@@ -235,7 +234,6 @@ export function LoginPage() {
   return (
     <main className="login-page">
       <section className="login-card" aria-labelledby="login-title">
-        <p className="eyebrow">Private control plane</p>
         <h1 id="login-title">Sign in to Omahab</h1>
         <p className="muted">Enter the 8-character panel token shown on the server console. It remains in this browser tab only. On a home-LAN install no token is needed, on the LAN or the tailnet.</p>
         {displayError && <p className="inline-error" role="alert">{displayError}</p>}

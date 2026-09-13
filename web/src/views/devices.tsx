@@ -63,7 +63,7 @@ export function DevicesPage() {
 
   return (
     <div className="page">
-      <PageHeader eyebrow="Companion" title="Devices" description="Enrolled companion devices — version, last seen, environment, and PC backup. Revoke per-device; Forgejo access is per-device revocable." />
+      <PageHeader title="Devices" description="Enrolled companion devices — version, last seen, environment, and PC backup. Revoke per-device; Forgejo access is per-device revocable." />
       {devicesQuery.isLoading ? (
         <LoadingState label="Loading devices" />
       ) : devicesQuery.isError ? (
@@ -134,7 +134,6 @@ export function DevicesPage() {
         <dialog className="modal" open aria-labelledby="revoke-title">
           <header>
             <div>
-              <p className="eyebrow">Confirm</p>
               <h2 id="revoke-title">Revoke device</h2>
             </div>
             <button type="button" className="icon-button" onClick={() => setRevokeId(null)} aria-label="Close">

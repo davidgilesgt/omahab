@@ -59,9 +59,7 @@ export function DoctorPage() {
   return (
     <div className="page">
       <PageHeader
-        eyebrow="Diagnostics"
         title="Doctor"
-        description="Nine probes run on the server. Healthy is quiet; degraded needs attention soon; unhealthy needs action now."
         actions={
           <>
             <button className="button secondary" type="button" onClick={() => void query.refetch()} disabled={query.isFetching}>
@@ -79,16 +77,16 @@ export function DoctorPage() {
         <StatusPill value={report.healthy ? "healthy" : "attention"} />
       </p>
 
-      <Section title="Checks" description="Each row is one probe. Remediation is the next step if the status is not healthy.">
+      <Section title="Checks">
         <div className="check-list" style={{ display: "grid", gap: 12 }}>
           {report.checks.map((check) => (
             <article
               key={check.name}
               style={{
-                border: "1px solid var(--line)",
-                borderRadius: "var(--radius, 12px)",
+                border: "var(--border) solid var(--line)",
+                borderRadius: 2,
                 padding: 12,
-                background: "var(--surface, #fff)",
+                background: "var(--surface)",
                 display: "grid",
                 gap: 6,
               }}
@@ -113,7 +111,7 @@ export function DoctorPage() {
         </div>
       </Section>
 
-      <Section title="About these checks" description="The same nine checks power omahab doctor --json.">
+      <Section title="About these checks">
         <ul className="list">
           <li>
             <span className="mono">disk</span> — data volume usage

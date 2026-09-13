@@ -130,7 +130,7 @@ export function AppShell({ children, basePath = "" }: { children: ReactNode; bas
       <aside className="sidebar">
         <NavLink to={basePath ? `${basePath}/` : "/"} className="brand" aria-label="Omahab overview">
           <span className="brand-mark">O</span>
-          <span><strong>Omahab</strong><small>Control plane</small></span>
+          <span><strong>Omahab</strong></span>
         </NavLink>
         <nav aria-label="Primary navigation">
           {visibleNavigation.map(([to, label, Icon, title]) => (
@@ -175,10 +175,10 @@ export function AppShell({ children, basePath = "" }: { children: ReactNode; bas
             />
             <kbd>Ctrl K</kbd>
             {showResults && filtered.length > 0 && (
-              <ul id="quick-nav-listbox" role="listbox" style={{ position: "absolute", top: "100%", left: 0, right: 0, background: "var(--surface, #fff)", border: "var(--border) solid var(--line)", borderRadius: 6, marginTop: 4, padding: 4, listStyle: "none", zIndex: 20 }}>
+              <ul id="quick-nav-listbox" role="listbox" className="quick-nav-results">
                 {filtered.map(([to, label, Icon]) => (
-                  <li key={to} role="option" aria-selected={false} onMouseDown={(e) => { e.preventDefault(); chooseDestination(to); }} style={{ padding: "6px 8px", cursor: "pointer", display: "flex", gap: 8, alignItems: "center" }}>
-                    <Icon size={16} strokeWidth={1.75} aria-hidden className="nav-icon" /> {label} <small style={{ marginLeft: "auto", opacity: 0.6 }}>{to}</small>
+                  <li key={to} role="option" aria-selected={false} onMouseDown={(e) => { e.preventDefault(); chooseDestination(to); }}>
+                    <Icon size={16} strokeWidth={1.75} aria-hidden className="nav-icon" /> {label} <small>{to}</small>
                   </li>
                 ))}
               </ul>

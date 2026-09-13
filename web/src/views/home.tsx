@@ -54,8 +54,6 @@ function HealthDot({ health }: { health: string }) {
         height: 10,
         borderRadius: "50%",
         background: color,
-        boxShadow: `0 0 0 2px color-mix(in srgb, ${color} 20%, transparent)`,
-        transition: "background 300ms ease, box-shadow 300ms ease",
         flexShrink: 0,
       }}
     />
@@ -83,9 +81,7 @@ export function HomePage() {
     <div className="page">
       <header className="page-header">
         <div>
-          <p className="eyebrow">Home</p>
           <h1>Welcome home</h1>
-          <p>Your private apps — all on your tailnet, none on the public internet unless you choose.</p>
         </div>
         <div className="page-actions">
           <a className="button secondary" href="/admin">
@@ -100,7 +96,7 @@ export function HomePage() {
         <ErrorState error={query.error} retry={() => void query.refetch()} />
       ) : null}
 
-      <Section title="Everyday" description="Photos, documents, saves and sync — for everyone at home.">
+      <Section title="Everyday">
         <div className="tile-grid">
           {everyday.map((tile) => {
             const h = healthById.get(tile.id) ?? "unknown";
@@ -123,7 +119,7 @@ export function HomePage() {
         </div>
       </Section>
 
-      <Section title="Build" description="Code, CI and workspaces — for makers. Pocket ID gates each app.">
+      <Section title="Build">
         <div className="tile-grid">
           {build.map((tile) => {
             const h = healthById.get(tile.id) ?? "unknown";
@@ -151,15 +147,6 @@ export function HomePage() {
         Health dots are live and refresh every 15 seconds. Access is controlled by Pocket ID — your tailnet membership is the gate.
       </p>
 
-      <style>{`
-        .tile-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px,1fr)); gap: 12px; }
-        .tile { display: grid; gap: 6px; padding: 16px; border: 1px solid var(--line, #e5e7eb); border-radius: 12px; background: var(--surface, #fff); text-decoration: none; color: inherit; transition: border-color 150ms ease, transform 150ms ease; }
-        .tile:hover { border-color: var(--ink-muted, #9ca3af); transform: translateY(-1px); }
-        .tile-head { display:flex; justify-content: space-between; align-items: center; }
-        .tile-icon { font-size: 1.25rem; line-height: 1; }
-        .tile-status { margin-top: 4px; }
-        @media (prefers-reduced-motion: reduce) { .tile { transition: none; } }
-      `}</style>
     </div>
   );
 }

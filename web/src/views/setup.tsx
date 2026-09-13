@@ -144,7 +144,7 @@ function ProvidersSetupBox({ status, isLoading, isError, error, onRetry }: { sta
   return (
     <div className="form-stack">
       <p>Add a provider and model in LiteLLM, then refresh. Defaults share a credential; edit models and credentials in LiteLLM.</p>
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+      <div className="setup-actions">
         {status?.management_url ? (
           <a className="button secondary" href={status.management_url} target="_blank" rel="noreferrer">Open LiteLLM</a>
         ) : (
@@ -186,12 +186,12 @@ function ProvidersSetupBox({ status, isLoading, isError, error, onRetry }: { sta
       {seed.isError ? (
         <p className="inline-error" role="alert">{seed.error instanceof Error ? seed.error.message : "Could not create default aliases"}</p>
       ) : null}
-      <ul style={{ listStyle: "none", padding: 0, display: "grid", gap: 4 }}>
+      <ul className="setup-alias-list">
         {VISIBLE_SETUP_ALIASES.map((name) => {
           const alias = aliases.find((a) => a.name === name);
           const configured = alias?.configured === true;
           return (
-            <li key={name} style={{ display: "flex", gap: 8, alignItems: "baseline", fontSize: "0.9em" }}>
+            <li key={name}>
               <code className="mono">{name}</code>
               <span className="muted">{configured ? `configured${alias && alias.providers.length ? ` (${alias.providers.join(", ")})` : ""}` : "missing"}</span>
             </li>
@@ -751,17 +751,6 @@ export function SetupPage() {
 
   return (
     <div className="page">
-      <style>{`
-        .setup-accordion { display: grid; gap: 10px; margin-top: 12px; }
-        .setup-divider { border: none; border-top: 1px solid var(--line); margin: 12px 0 0; }
-        .setup-box { background: #111418; color: #d7dce2; border: 1px solid #2a3138; border-radius: 8px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85rem; }
-        .setup-box input, .setup-box textarea, .setup-box button { font-family: inherit; }
-        .setup-box-head { display: flex; align-items: center; justify-content: flex-start; gap: 8px; width: 100%; padding: 10px 12px; background: none; border: none; color: inherit; font-size: inherit; cursor: pointer; text-align: left; }
-        .setup-box-title { font-weight: 600; }
-        .setup-tag[data-tone="done"] { color: #4ade80; }
-        .setup-tag[data-tone="todo"] { color: #f87171; }
-        .setup-box-body { padding: 0 12px 12px; display: grid; gap: 8px; }
-      `}</style>
       <header className="page-header">
         <div>
           <h1>Setup &amp; Connect Services</h1>
@@ -1011,7 +1000,7 @@ export function SetupPage() {
           )}
 
           {enrollmentUrl && (
-            <div style={{ marginTop: 12, padding: 12, border: "var(--border) solid var(--line)", borderRadius: 6 }}>
+            <div className="enroll-box">
               <p>
                 <strong>Enrollment link:</strong> <a href={enrollmentUrl} target="_blank" rel="noreferrer">{enrollmentUrl}</a>{" "}
                 <CopyButton text={enrollmentUrl} label="Copy" />
@@ -1062,10 +1051,10 @@ export function SetupPage() {
             </div>
           ) : (
             <div className="form-stack">
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, background: "var(--surface-raised)", padding: 12, borderRadius: 6 }}>
+              <div className="recovery-grid">
                 {recovery.phrase.map((w, i) => (
-                  <div key={i} style={{ display: "flex", gap: 6, alignItems: "center", fontFamily: "monospace", fontSize: "0.9em" }}>
-                    <span style={{ opacity: 0.6, minWidth: 20 }}>{i + 1}.</span>
+                  <div key={i}>
+                    <span>{i + 1}.</span>
                     <span>{w}</span>
                   </div>
                 ))}
@@ -1173,16 +1162,16 @@ export function SetupPage() {
               <p className="inline-error" role="alert">{repoMutation.error instanceof Error ? repoMutation.error.message : "Configure failed"}</p>
             )}
             <p>Run on the server as root to test recovery for {recoveryEmail}:</p>
-            <div style={{ display: "flex", gap: 8, alignItems: "center", background: "var(--surface-raised)", padding: 8, borderRadius: 6 }}>
-              <code style={{ flex: 1, wordBreak: "break-all" }}>ssh {sshHost} sudo omahab identity recover {recoveryEmail}</code>
+            <div className="code-strip">
+              <code>ssh {sshHost} sudo omahab identity recover {recoveryEmail}</code>
               <CopyButton text={`ssh ${sshHost} sudo omahab identity recover ${recoveryEmail}`} label="Copy" />
             </div>
           </div>
         </Box>
 
         <Box title="Storage (optional)" done={doneMap.storage} open={openId === "storage"} onToggle={() => toggle("storage")}>
-          <div style={{ display: "flex", gap: 8, alignItems: "center", background: "var(--surface-raised)", padding: 8, borderRadius: 6 }}>
-            <code style={{ flex: 1, wordBreak: "break-all" }}>curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8484/api/v1/system/disks</code>
+          <div className="code-strip">
+            <code>curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8484/api/v1/system/disks</code>
             <CopyButton text='curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8484/api/v1/system/disks' label="Copy" />
           </div>
         </Box>

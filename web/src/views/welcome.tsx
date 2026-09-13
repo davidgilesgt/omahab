@@ -26,11 +26,7 @@ export function WelcomePage() {
 
   return (
     <div className="page">
-      <PageHeader
-        eyebrow="Welcome"
-        title="You’re invited to Omahab"
-        description="Four quick steps to get you inside the home — no technical knowledge needed."
-      />
+      <PageHeader title="You’re invited to Omahab" />
 
       <div className="welcome-grid" style={{ display: "grid", gap: 16 }}>
         <Section title="1 · Install Tailscale" description="Tailscale connects your device to the home tailnet (the private network).">

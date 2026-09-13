@@ -78,7 +78,7 @@ function DestructiveConfirm({
   const confirmed = input === confirmValue;
   return (
     <dialog ref={dialogRef} className="modal" aria-labelledby="confirm-title" onCancel={(event) => { event.preventDefault(); onClose(); }}>
-      <header><div><p className="eyebrow">Confirm</p><h2 id="confirm-title">{title}</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="Close">×</button></header>
+      <header><div><h2 id="confirm-title">{title}</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="Close">×</button></header>
       <div className="form-stack">
         <p>{description}</p>
         <div className="danger-zone">
@@ -167,7 +167,7 @@ export function SyncFoldersPage() {
 
   return (
     <div className="page">
-      <PageHeader eyebrow="Knowledge" title="Sync folders" description="Manage server-side Syncthing folders and their explicit AI reading permission." />
+      <PageHeader title="Sync" />
       <div className="split-grid wide-primary">
         <Section title="Folders" description="Sharing with AI permits the default assistant to list, search, and read this folder.">
           {query.isLoading ? <LoadingState label="Loading folders" /> : query.isError ? <ErrorState error={query.error} retry={() => void query.refetch()} /> : !folders.length ? <EmptyState title="No synchronized folders" description="Add a server folder to begin syncing it with trusted devices." /> : (
@@ -223,17 +223,17 @@ export function WorkspacesPage() {
 
   return (
     <div className="page">
-      <PageHeader eyebrow="Remote development" title="Workspaces" description="Isolated, expiring project environments without production secrets or Docker socket access." />
+      <PageHeader title="Workspaces" description="Isolated, expiring project environments without production secrets or Docker socket access." />
       <div className="split-grid wide-primary">
         <Section title="Active and recent">
           {workspaces.isLoading ? <LoadingState label="Loading workspaces" /> : workspaces.isError ? <ErrorState error={workspaces.error} retry={() => void workspaces.refetch()} /> : !workspaceItems.length ? <EmptyState title="No workspaces" description="Create one for a project when you need an isolated coding environment." /> : (
-            <div className="resource-list inset">{workspaceItems.map((workspace) => {
+            <div className="table-wrap"><table><thead><tr><th scope="col">Project</th><th scope="col">Branch</th><th scope="col">Agent</th><th scope="col">Status</th><th scope="col">Last active</th><th scope="col">Expires</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead><tbody>{workspaceItems.map((workspace) => {
               const project = projectItems.find((item) => item.id === workspace.project_id);
-              return <article className="resource-row" key={workspace.id}><div><div className="resource-title"><strong>{project?.name ?? workspace.project_id}</strong><StatusPill value={workspace.status} /></div><p><span className="mono">{workspace.branch}</span> <CopyButton text={workspace.branch} label="Copy" /> · {workspace.agent}</p><small>Last active {formatDate(workspace.last_active_at)}{workspace.expires_at ? ` · expires ${formatDate(workspace.expires_at)}` : ""}</small></div>{workspace.status !== "stopped" && <button className="button secondary" type="button" disabled={stop.isPending} onClick={() => setStopConfirm(workspace)}>Stop</button>}</article>})}</div>
+              return <tr key={workspace.id}><td><strong>{project?.name ?? workspace.project_id}</strong></td><td>{workspace.branch} <CopyButton text={workspace.branch} label="Copy" /></td><td>{workspace.agent}</td><td><StatusPill value={workspace.status} /></td><td>{formatDate(workspace.last_active_at)}</td><td>{workspace.expires_at ? formatDate(workspace.expires_at) : "—"}</td><td className="cell-actions">{workspace.status !== "stopped" && <button className="button secondary" type="button" disabled={stop.isPending} onClick={() => setStopConfirm(workspace)}>Stop</button>}</td></tr>})}</tbody></table></div>
           )}
           <OperationError error={stop.error} />
         </Section>
-        <Section title="New workspace" description="Uses the selected project repository and development container.">
+        <Section title="New workspace">
           {projects.isLoading ? <LoadingState label="Loading projects" /> : projects.isError ? <ErrorState error={projects.error} /> : (
             <form className="form-stack" onSubmit={submit}>
               <label>Project<select name="project" required disabled={!projectItems.length}>{projectItems.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
@@ -396,7 +396,7 @@ export function PeoplePage() {
 
   return (
     <div className="page">
-      <PageHeader eyebrow="Identity" title="People and recovery" description="Pocket ID enrollment and short-lived recovery. Omahab never verifies passwords or passkeys itself." />
+      <PageHeader title="People and recovery" description="Pocket ID enrollment and short-lived recovery. Omahab never verifies passwords or passkeys itself." />
       {recovery && <section className="recovery-banner" role="status"><div><strong>Recovery session created</strong><p>Expires {formatDate(recovery.expires_at)}. Share it only with the intended person over a trusted channel.</p>{recovery.login_url && <a href={recovery.login_url} target="_blank" rel="noreferrer">Open recovery sign-in</a>}{recovery.code && <><output className="recovery-code" aria-label="One-time recovery code">{recovery.code}</output> <CopyButton text={recovery.code} label="Copy code" /></>}</div><button className="icon-button" type="button" onClick={() => setRecovery(null)} aria-label="Dismiss">×</button></section>}
       {enrollmentUrl && (
         <section className="recovery-banner" role="status">
@@ -537,7 +537,7 @@ function EditGroupsDialog({
   }, []);
   return (
     <dialog ref={dialogRef} className="modal" aria-labelledby="groups-title" onCancel={(event) => { event.preventDefault(); onClose(); }}>
-      <header><div><p className="eyebrow">Groups</p><h2 id="groups-title">Groups for {user.name}</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="Close">×</button></header>
+      <header><div><h2 id="groups-title">Groups for {user.name}</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="Close">×</button></header>
       <div className="form-stack">
         <p className="muted">{user.email}</p>
         <GroupMultiSelect values={groups} onChange={onChange} idPrefix={`edit-${user.id}`} />

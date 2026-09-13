@@ -38,7 +38,6 @@ function ConsentDialog({
     <dialog ref={dialogRef} className="modal" aria-labelledby="consent-title" onCancel={(e) => { e.preventDefault(); onClose(); }}>
       <header>
         <div>
-          <p className="eyebrow">Remote summarization</p>
           <h2 id="consent-title">Allow {provider} to summarize private documents?</h2>
         </div>
         <button type="button" className="icon-button" onClick={onClose} aria-label="Close">×</button>
@@ -248,7 +247,7 @@ function HermesTokenBlock() {
         </button>
       </div>
       {rotate.data?.token ? (
-        <div className="banner-card" style={{ background: "var(--warning-bg)", border: "1px solid var(--warning)", padding: 12, borderRadius: 8 }}>
+        <div className="token-banner">
           <strong>New token (copy now — shown once):</strong>
           <p className="mono" style={{ wordBreak: "break-all" }}>{rotate.data.token}</p>
           <CopyButton text={rotate.data.token} label="Copy new token" />
@@ -267,16 +266,10 @@ export function AssistantKnowledgePanel() {
     <div className="page">
       <PageHeader title="AI" description="Local document search and remote summarization consent." />
       <div style={{ display: "grid", gap: "1.5rem" }}>
-        <Section
-          title="Assistant"
-          description="Name, domain, and URL for the home assistant."
-        >
+        <Section title="Assistant">
           <AssistantInfoBlock />
         </Section>
-        <Section
-          title="Assistant knowledge"
-          description="Choose how private sources are indexed for semantic search. Model details come from the server’s pinned models."
-        >
+        <Section title="Assistant knowledge">
           <IndexSetupControl />
         </Section>
         <Section

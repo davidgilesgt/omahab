@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../auth";
@@ -47,7 +47,7 @@ function DestructiveConfirm({
   const confirmed = input === confirmValue;
   return (
     <dialog ref={dialogRef} className="modal" aria-labelledby="confirm-title" onCancel={(event) => { event.preventDefault(); onClose(); }}>
-      <header><div><p className="eyebrow">Confirm</p><h2 id="confirm-title">{title}</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="Close">×</button></header>
+      <header><div><h2 id="confirm-title">{title}</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="Close">×</button></header>
       <div className="form-stack">
         <p>{description}</p>
         <div className="danger-zone">
@@ -91,7 +91,7 @@ export function OverviewPage() {
 
   return (
     <div className="page">
-      <PageHeader title="Overview" description="Health, recovery readiness, and changes that need attention." />
+      <PageHeader title="Overview" />
       <section className="launcher-strip" aria-label="Installed apps">
         {applications.isLoading ? <LoadingState label="Loading app launchers" /> : applications.isError ? (
           <ErrorState error={applications.error} retry={() => void applications.refetch()} />
@@ -127,7 +127,7 @@ export function OverviewPage() {
         <article><span>Verified recovery</span><strong>{latestBackup?.verified_at ? "Current" : "Not verified"}</strong><small>{latestBackup?.verified_at ? formatDate(latestBackup.verified_at) : "Run a restore verification"}</small></article>
       </div>
       <div className="split-grid">
-        <Section title="Needs attention" description="Degraded services and unread high-priority events.">
+        <Section title="Needs attention">
           {applications.isLoading || events.isLoading ? <LoadingState label="Checking services and events" /> : applications.isError || events.isError ? (
             <ErrorState error={applications.error ?? events.error} />
           ) : unhealthy.length === 0 && unread.length === 0 ? (
@@ -139,7 +139,7 @@ export function OverviewPage() {
             </ul>
           )}
         </Section>
-        <Section title="Recovery posture" description="A backup is healthy only after a successful restore verification.">
+        <Section title="Recovery posture">
           {backups.isLoading ? <LoadingState label="Loading backups" /> : backups.isError ? <ErrorState error={backups.error} /> : latestBackup ? (
             <dl className="definition-list">
               <div><dt>Last backup</dt><dd>{formatDate(latestBackup.finished_at ?? latestBackup.started_at)}</dd></div>
@@ -150,13 +150,6 @@ export function OverviewPage() {
           ) : <EmptyState title="No backups yet" description="Create the first encrypted backup from the Backups page, then verify it can be restored." />}
         </Section>
       </div>
-      <style>{`
-        .launcher-strip ul { display: flex; flex-wrap: wrap; gap: 8px; list-style: none; margin: 0 0 16px; padding: 0; }
-        .launcher-strip a { display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; border: 1px solid var(--line, #e5e7eb); border-radius: 8px; background: var(--surface, #fff); text-decoration: none; color: inherit; }
-        .launcher-strip a:hover { border-color: var(--ink-muted, #9ca3af); }
-        .launcher-strip small { opacity: 0.7; }
-        .setup-notice { margin: 0 0 16px; }
-      `}</style>
     </div>
   );
 }
@@ -196,7 +189,7 @@ function ExposureReview({ resource, item, onClose }: ExposureReviewProps) {
 
   return (
     <dialog ref={dialogRef} className="modal" aria-labelledby="exposure-title" onCancel={(event) => { event.preventDefault(); onClose(); }}>
-        <header><div><p className="eyebrow">Review change</p><h2 id="exposure-title">Exposure for {item.name}</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="Close">×</button></header>
+        <header><div><h2 id="exposure-title">Exposure for {item.name}</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="Close">×</button></header>
         <div className="form-stack">
           <label>Exposure mode
             <select value={mode} onChange={(event) => { setMode(event.currentTarget.value as Exposure); setConfirmation(""); }} autoFocus>
@@ -259,7 +252,7 @@ export function ApplicationsPage() {
 
   return (
     <div className="page">
-      <PageHeader eyebrow="Platform" title="Applications" description="Platform services — health, restarts, and exposure." />
+      <PageHeader title="Applications" />
       {query.isLoading ? <LoadingState label="Loading applications" /> : query.isError ? <ErrorState error={query.error} retry={() => void query.refetch()} /> : !applications.length ? (
         <EmptyState title="No applications" description="No platform services are currently reported." />
       ) : (
@@ -419,7 +412,7 @@ export function ProjectsPage() {
   }
   return (
     <div className="page">
-      <PageHeader eyebrow="Build & deploy" title="Projects and releases" description="Inspect immutable releases and deliberately select what is active." actions={<button className="button primary" type="button" disabled={creationBlocked || create.isPending} onClick={openForm}>New project</button>} />
+      <PageHeader title="Projects" actions={<button className="button primary" type="button" disabled={creationBlocked || create.isPending} onClick={openForm}>New project</button>} />
       {showForm && (
         <form className="form-stack" aria-label="New project" onSubmit={submit}>
           {instanceQuery.isLoading ? <LoadingState label="Checking setup" /> : instanceQuery.isError ? <ErrorState error={instanceQuery.error} retry={() => void instanceQuery.refetch()} /> : !domainReady ? <p className="muted">Set up a domain before creating projects. <Link to="/setup">Continue setup</Link></p> : (
@@ -437,7 +430,7 @@ export function ProjectsPage() {
         </form>
       )}
       {query.isLoading ? <LoadingState label="Loading projects" /> : query.isError ? <ErrorState error={query.error} retry={() => void query.refetch()} /> : !projects.length ? <EmptyState title="No projects" description="Create a project to connect a Forgejo repository and deployment pipeline." action={<div className="form-stack"><button className="button primary" type="button" disabled={creationBlocked || create.isPending} onClick={openForm}>New project</button>{creationBlocked ? <p className="muted">Set up a domain before creating projects. <Link to="/setup">Continue setup</Link></p> : null}</div>} /> : (
-        <div className="resource-list">{projects.map((project) => <article className="resource-row project-row" key={project.id}><div className="resource-main"><div className="resource-title"><h2>{project.name}</h2><StatusPill value={project.exposure} /></div><p>{project.repository_url}</p><small className="mono">{project.hostname} <CopyButton text={project.hostname} label="Copy" /></small><details><summary>Releases</summary><ProjectReleases project={project} /></details></div><div className="row-actions"><button className="button secondary" type="button" onClick={() => setReview(project)}>Exposure</button></div></article>)}</div>
+        <div className="table-wrap"><table><thead><tr><th scope="col">Project</th><th scope="col">Repository</th><th scope="col">Host</th><th scope="col">Exposure</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead><tbody>{projects.map((project) => <Fragment key={project.id}><tr><td><strong>{project.name}</strong></td><td className="cell-wrap">{project.repository_url}</td><td className="cell-wrap">{project.hostname} <CopyButton text={project.hostname} label="Copy" /></td><td><StatusPill value={project.exposure} /></td><td className="cell-actions"><button className="button secondary" type="button" onClick={() => setReview(project)}>Exposure</button></td></tr><tr className="detail-row"><td colSpan={5}><details><summary>Releases</summary><ProjectReleases project={project} /></details></td></tr></Fragment>)}</tbody></table></div>
       )}
       {review && <ExposureReview resource="projects" item={review} onClose={() => setReview(null)} />}
     </div>
@@ -468,7 +461,7 @@ export function BackupsPage() {
   const backups = query.data ?? [];
   return (
     <div className="page">
-      <PageHeader eyebrow="Recovery" title="Backups" description="Encrypted snapshots and evidence that they can actually be restored." actions={<button className="button primary" type="button" disabled={create.isPending} onClick={() => create.mutate()}>{create.isPending ? "Starting…" : "Back up now"}</button>} />
+      <PageHeader title="Backups" actions={<button className="button primary" type="button" disabled={create.isPending} onClick={() => create.mutate()}>{create.isPending ? "Starting…" : "Back up now"}</button>} />
       <MutationNotice error={create.error ?? verify.error} />
       {query.isLoading ? <LoadingState label="Loading backup history" /> : query.isError ? <ErrorState error={query.error} retry={() => void query.refetch()} /> : !backups.length ? <EmptyState title="No backup history" description="Start an encrypted backup, then run restore verification before relying on it." action={<button className="button primary" type="button" disabled={create.isPending} onClick={() => create.mutate()}>{create.isPending ? "Starting…" : "Back up now"}</button>} /> : (
         <div className="table-wrap"><table><thead><tr><th>Status</th><th>Snapshot</th><th>Started</th><th>Restore verification</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>{backups.map((backup) => <tr key={backup.id}><td><StatusPill value={backup.status} />{backup.error && <span className="cell-error">{backup.error}</span>}</td><td className="mono">{backup.snapshot_id ? <><span>{shortDigest(backup.snapshot_id)}</span> <CopyButton text={backup.snapshot_id} label="Copy" /></> : "—"}</td><td>{formatDate(backup.started_at)}</td><td>{backup.verified_at ? <><StatusPill value="verified" /><small>{formatDate(backup.verified_at)}</small></> : <StatusPill value="not verified" />}</td><td><button className="button secondary" type="button" disabled={!backup.snapshot_id || verify.isPending} onClick={() => verify.mutate(backup.id)}>Verify restore</button></td></tr>)}</tbody></table></div>
@@ -513,8 +506,8 @@ export function EventsPage() {
   const ntfyUrl = topic ? `http://${typeof window !== "undefined" ? window.location.hostname : "omahab"}:2586/${topic}` : "";
   return (
     <div className="page">
-      <PageHeader eyebrow="Operational inbox" title="Events" description="A live, durable record of health changes and actions across your server." actions={<button className="button secondary" type="button" disabled={markAll.isPending} onClick={() => markAll.mutate()}>{markAll.isPending ? "Marking…" : "Mark all read"}</button>} />
-      <Section title="Phone notifications" description="Forward warning and error events to ntfy (mako/ntfy) on 127.0.0.1:2586 when enabled. Topic is random 24 chars, stored platform-app/ntfy_topic. Default off (DESIGN §20:919).">
+      <PageHeader title="Events" actions={<button className="button secondary" type="button" disabled={markAll.isPending} onClick={() => markAll.mutate()}>{markAll.isPending ? "Marking…" : "Mark all read"}</button>} />
+      <Section title="Phone notifications" description="Send warning and error notifications to your phone.">
         {ntfyQuery.isLoading ? <LoadingState label="Loading ntfy" /> : ntfyQuery.isError ? <ErrorState error={ntfyQuery.error} retry={() => void ntfyQuery.refetch()} /> : (
           <div style={{ display: "flex", gap: "1rem", alignItems: "flex-start", flexWrap: "wrap" }}>
             <div style={{ flex: 1, minWidth: "260px" }}>
@@ -544,7 +537,7 @@ export function EventsPage() {
         )}
       </Section>
       {query.isLoading ? <LoadingState label="Loading events" /> : query.isError ? <ErrorState error={query.error} retry={() => void query.refetch()} /> : !grouped?.length ? <EmptyState title="Inbox is clear" description="New operational events will appear here as they happen." /> : (
-        <ol className="event-list">{grouped.map((event) => <li key={event.id} className={event.read_at ? "read" : "unread"}><span className="event-dot" aria-hidden="true" /><div><div className="resource-title"><StatusPill value={event.severity} /><strong>{event.message}</strong></div><p>{event.type.replaceAll(".", " · ")}</p><small>{formatDate(event.created_at)}</small></div>{!event.read_at && <button className="button ghost" type="button" disabled={read.isPending} onClick={() => read.mutate(event.id)}>Mark read</button>}</li>)}</ol>
+        <ol className="event-list">{grouped.map((event) => <li key={event.id} className={event.read_at ? "read" : "unread"}><span className="event-time">{formatDate(event.created_at)}</span><StatusPill value={event.severity} /><div className="event-message"><strong>{event.message}</strong><p>{event.type.replaceAll(".", " · ")}</p></div>{!event.read_at && <button className="button ghost" type="button" disabled={read.isPending} onClick={() => read.mutate(event.id)}>Mark read</button>}</li>)}</ol>
       )}
       <MutationNotice error={read.error ?? markAll.error} />
     </div>

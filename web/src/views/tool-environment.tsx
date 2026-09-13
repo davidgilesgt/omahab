@@ -111,7 +111,7 @@ export function ToolEnvironmentPage() {
 
   return (
     <div className="page">
-      <PageHeader eyebrow="Agent environment" title="Tool environment" description="Server-authoritative synchronized environment agent-tools. Devices never upload; every mutation bumps one revision. Reserved model keys/URLs are composed per device at fetch. See Devices for enrolled companions." />
+      <PageHeader title="Tool environment" description="Values are write-only and never returned. Devices never upload; every mutation bumps one revision." />
       <div className="split-grid wide-primary">
         <Section title="Variables" description="Names/versions only — values are write-only and never returned. Browser never calls the device environment endpoint.">
           {varsQuery.isLoading ? <LoadingState label="Loading variables" /> : varsQuery.isError ? <ErrorState error={varsQuery.error} retry={() => void varsQuery.refetch()} /> : !variables.length ? <EmptyState title="No variables" description="Create a variable; it will be delivered to granted companion devices on next sync." /> : (
@@ -158,9 +158,9 @@ export function ToolEnvironmentPage() {
               const quotedInstall = origin ? shellQuote(origin + "/install.sh") : "'/install.sh'";
               const oneLiner = `curl -fsSL ${quotedInstall} | OMAHAB_SERVER=${quotedOrigin} sh`;
               return (
-                <div className="callout" role="status" style={{ border: "var(--border) solid var(--line)", borderRadius: "0.5rem", padding: "0.75rem", background: "var(--surface-raised)" }}>
+                <div className="callout" role="status">
                   <strong>One-liner (Omarchy) — paste on the device</strong>
-                  <pre className="mono" style={{ whiteSpace: "pre-wrap", wordBreak: "break-all", margin: "0.5rem 0", padding: "0.5rem", background: "var(--surface)", borderRadius: "0.25rem", fontSize: "0.85rem" }}>{oneLiner}</pre>
+                  <pre className="mono">{oneLiner}</pre>
                   <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
                     <CopyButton text={oneLiner} label="Copy one-liner" />
                     <small className="muted">Installs binary to ~/.local/bin, unit to ~/.config/systemd/user/omahab-clientd.service (ExecStart %h/.local/bin/omahab-clientd), Quickshell plugin to Omarchy plugin dir, then prompts for the enrollment code. Code single-use, 10m. Paste the code at the hidden prompt.</small>
