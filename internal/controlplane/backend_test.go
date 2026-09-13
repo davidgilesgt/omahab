@@ -52,6 +52,28 @@ func TestCreateBackupDoesNotPersistFakePendingRun(t *testing.T) {
 	}
 }
 
+// bindSCM must derive base URLs from the instance domain: nothing writes the
+// *_base_url secrets on native placement and the unit env sets no
+// OMAHAB_*_URL, so secret-or-env alone left both clients nil and every bind
+// failed with "forgejo client is required" (live 2026-09-13: SetupWoodpecker
+func TestBindSCMDerivesBaseURLsFromDomain(t *testing.T) {
+	t.Parallel()
+	b, _ := newSetupBackend(t, nil)
+	ctx := context.Background()
+	if err := upsertSecret(ctx, b.secrets, "platform-app", "forgejo_token", "ftok"); err != nil {
+		t.Fatalf("store forgejo token: %v", err)
+	}
+	if err := upsertSecret(ctx, b.secrets, "platform-app", "woodpecker_token", "wtok"); err != nil {
+		t.Fatalf("store woodpecker token: %v", err)
+	}
+	if err := b.bindSCM(ctx); err != nil {
+		t.Fatalf("bindSCM: %v", err)
+	}
+	if b.scm == nil {
+		t.Fatal("scm not bound")
+	}
+}
+
 const catalogFixture = `{"bundles":[{
 	"id": "demo", "name": "demo", "units": ["demo.service"],
 	"max_exposure": "shared",

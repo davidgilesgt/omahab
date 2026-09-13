@@ -600,9 +600,27 @@ func (b *Backend) bindSCM(ctx context.Context) error {
 		}
 		return strings.TrimSpace(os.Getenv(env))
 	}
+	inst, _ := b.store.Instance(ctx)
+	domain := ""
+	if inst.Domain != "" {
+		domain = strings.TrimSpace(inst.Domain)
+	}
+	// Base URLs fall back to the instance domain (https://git./ci.<domain>):
+	// nothing ever writes the *_base_url secrets on native placement and the
+	// unit env does not set OMAHAB_*_URL, so secret-or-env alone left both
+	// clients nil and every bind failed with "forgejo client is required"
+	// (live 2026-09-13: SetupWoodpecker 500 "internal error" after an
+	// otherwise successful PAT handoff). Pre-enrollment (no real domain) the
+	// helpers yield ""/loopback and binding still defers as before.
 	forgejoBase := secretOrEnv("forgejo_base_url", "OMAHAB_FORGEJO_URL")
+	if forgejoBase == "" && domain != "" && domain != "example.com" && domain != "not-configured.invalid" {
+		forgejoBase = b.forgejoBaseURL(ctx, domain)
+	}
 	forgejoToken := secretOrEnv("forgejo_token", "OMAHAB_FORGEJO_TOKEN")
 	woodpeckerBase := secretOrEnv("woodpecker_base_url", "OMAHAB_WOODPECKER_URL")
+	if woodpeckerBase == "" {
+		woodpeckerBase = b.woodpeckerBaseURLForCheck(ctx, domain)
+	}
 	woodpeckerToken := secretOrEnv("woodpecker_token", "OMAHAB_WOODPECKER_TOKEN")
 	var forgejoClient scm.ForgejoClient
 	var woodpeckerClient scm.WoodpeckerClient
