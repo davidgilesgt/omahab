@@ -1844,7 +1844,7 @@ func (s *Server) handlePublicStatus(w http.ResponseWriter, r *http.Request) {
 		default:
 			health = "down"
 		}
-		out = append(out, apitypes.PublicAppStatus{ID: string(app.ID), Name: app.Name, Health: health})
+		out = append(out, apitypes.PublicAppStatus{ID: string(app.ID), Name: app.Name, Health: health, LaunchURL: app.LaunchURL})
 	}
 	writeJSON(w, http.StatusOK, apitypes.PublicStatusResponse{Apps: out})
 }

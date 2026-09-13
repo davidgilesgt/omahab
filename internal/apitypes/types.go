@@ -10,7 +10,6 @@ import (
 	"github.com/omahab/omahab/internal/scm"
 )
 
-
 // Pagination controls list endpoints.
 type Pagination struct {
 	Limit  int `json:"limit"`
@@ -32,7 +31,6 @@ type ExposureState struct {
 	Exposure     domain.Exposure `json:"exposure"`
 	UpdatedAt    time.Time       `json:"updated_at"`
 }
-
 
 // ModelSetupDeployment is one selectable native LiteLLM deployment: only
 // global database deployments with a known provider and chat/responses mode.
@@ -387,7 +385,6 @@ type UpdateUserRequest struct {
 	Disabled *bool     `json:"disabled,omitempty"`
 }
 
-
 type EmailIngestRequest struct {
 	From      string `json:"from"`
 	To        string `json:"to"`
@@ -488,11 +485,13 @@ type Source = knowledge.Source
 type IndexSetupOption = knowledge.IndexSetupOption
 type ModelInfo = knowledge.ModelInfo
 
-// Public status (unauthenticated, tailnet-only) — minimal per-app health only.
+// Public status (unauthenticated, tailnet-only) — per-app health plus the
+// computed browser destination (empty when the bundle has no web interface).
 type PublicAppStatus struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Health string `json:"health"` // healthy|degraded|down|unknown
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Health    string `json:"health"` // healthy|degraded|down|unknown
+	LaunchURL string `json:"launch_url,omitempty"`
 }
 
 type PublicStatusResponse struct {

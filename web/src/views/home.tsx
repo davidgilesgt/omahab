@@ -70,8 +70,12 @@ export function HomePage() {
   });
 
   const healthById = new Map<string, string>();
+  const launchById = new Map<string, string>();
   if (query.data?.apps) {
-    for (const app of query.data.apps) healthById.set(app.id, app.health);
+    for (const app of query.data.apps) {
+      healthById.set(app.id, app.health);
+      if (app.launch_url) launchById.set(app.id, app.launch_url);
+    }
   }
 
   const everyday = TILES.filter((t) => t.group === "everyday");
@@ -100,8 +104,9 @@ export function HomePage() {
         <div className="tile-grid">
           {everyday.map((tile) => {
             const h = healthById.get(tile.id) ?? "unknown";
+            const href = launchById.get(tile.id) ?? tileHref(tile);
             return (
-              <a key={tile.id} className="tile" href={tileHref(tile)} target="_blank" rel="noreferrer">
+              <a key={tile.id} className="tile" href={href} target="_blank" rel="noreferrer">
                 <div className="tile-head">
                   <span className="tile-icon" aria-hidden="true">
                     <AppIcon bundleId={tile.id} size={20} />
@@ -123,8 +128,9 @@ export function HomePage() {
         <div className="tile-grid">
           {build.map((tile) => {
             const h = healthById.get(tile.id) ?? "unknown";
+            const href = launchById.get(tile.id) ?? tileHref(tile);
             return (
-              <a key={tile.id} className="tile" href={tileHref(tile)} target="_blank" rel="noreferrer">
+              <a key={tile.id} className="tile" href={href} target="_blank" rel="noreferrer">
                 <div className="tile-head">
                   <span className="tile-icon" aria-hidden="true">
                     <AppIcon bundleId={tile.id} size={20} />

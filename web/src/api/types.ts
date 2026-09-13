@@ -305,6 +305,7 @@ export interface PublicAppStatus {
   id: string;
   name: string;
   health: "healthy" | "degraded" | "down" | "unknown";
+  launch_url?: string;
 }
 
 export interface PublicStatusResponse {
