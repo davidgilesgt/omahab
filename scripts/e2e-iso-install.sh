@@ -53,8 +53,14 @@ BOOT_TIMEOUT=300
 # ("no space left on device" in go-modules drv); 6G is the floor. Override
 # with E2E_MEM_MB when the host cannot spare it.
 MEM_MB="${E2E_MEM_MB:-6144}"
+# Ephemeral binary cache for the guest installer: the guest rebuilds every
+# custom closure from scratch over slirp (the prisma client change took a
+# 4-minute install to 17). Served from the host store at the slirp gateway
+# so nixos-install substitutes instead. Override the port if it collides.
+CACHE_PORT="${E2E_CACHE_PORT:-8490}"
 MARKER="$WORKDIR/iso-commit"
 QEMU_PID=""
+CACHE_PID=""
 
 log() { printf '[e2e] %s\n' "$*"; }
 die() { printf '[e2e] FATAL: %s\n' "$*" >&2; exit 1; }
@@ -64,6 +70,9 @@ cleanup() {
     kill "$QEMU_PID" 2>/dev/null || true
     sleep 2
     kill -9 "$QEMU_PID" 2>/dev/null || true
+  fi
+  if [[ -n "$CACHE_PID" ]] && kill -0 "$CACHE_PID" 2>/dev/null; then
+    kill "$CACHE_PID" 2>/dev/null || true
   fi
 }
 trap cleanup EXIT
@@ -109,6 +118,25 @@ ISO_FILE="$(ls "$(readlink -f "$ISO")"/iso/*.iso 2>/dev/null | head -1 || true)"
 [[ -n "$ISO_FILE" && -f "$ISO_FILE" ]] || die "no ISO image under $ISO (want $ISO/iso/*.iso, cf. release.yml)"
 log "iso: $ISO_FILE"
 
+# --- Ephemeral binary cache: sign the host store once and serve it so the
+# guest installer substitutes custom closures instead of rebuilding them
+# over slirp. Key and server die with this run (trap cleanup EXIT).
+CACHE_KEY="$WORKDIR/cache.sec"
+nix key generate-secret --key-name "e2e-cache" > "$CACHE_KEY" 2>/dev/null
+chmod 600 "$CACHE_KEY"
+CACHE_PUB="$(nix key convert-secret-to-public < "$CACHE_KEY" 2>/dev/null)"
+[[ -n "$CACHE_PUB" ]] || die "could not derive cache public key"
+log "signing host store for guest substitution"
+nix store sign --key-file "$CACHE_KEY" --all >/dev/null
+nix run nixpkgs#nix-serve -- --port "$CACHE_PORT" >/dev/null 2>&1 &
+CACHE_PID=$!
+for _ in $(seq 1 30); do
+  curl -sf "http://127.0.0.1:$CACHE_PORT/nix-cache-info" >/dev/null && break
+  sleep 1
+done
+curl -sf "http://127.0.0.1:$CACHE_PORT/nix-cache-info" >/dev/null || die "binary cache failed to start on $CACHE_PORT"
+log "binary cache serving at http://10.0.2.2:$CACHE_PORT ($CACHE_PUB)"
+
 # --- Fresh VM disk, always (never reuse installed state across runs).
 rm -f "$DISK"
 "$QEMU_IMG" create -f qcow2 "$DISK" "${DISK_GB}G" >/dev/null
@@ -127,10 +155,11 @@ QEMU_PID="$(cat "$WORKDIR/qemu-install.pid")"
 
 SERIAL_LOG="$WORKDIR/serial-install.log"
 INSTALL_EXIT=0
-python3 - "$SERIAL_PORT" "$SERIAL_LOG" "$INSTALL_TIMEOUT" <<'PYEOF' || INSTALL_EXIT=$?
+python3 - "$SERIAL_PORT" "$SERIAL_LOG" "$INSTALL_TIMEOUT" "http://10.0.2.2:$CACHE_PORT" "$CACHE_PUB" <<'PYEOF' || INSTALL_EXIT=$?
 import re, socket, sys, time
 
 port, logpath, timeout = int(sys.argv[1]), sys.argv[2], int(sys.argv[3])
+cache_url, cache_pub = sys.argv[4], sys.argv[5]
 deadline = time.time() + timeout
 log = open(logpath, "w", buffering=1)
 
@@ -198,8 +227,12 @@ def run(cmd, timeout_s, expect_exit=None):
 read_until(PROMPT, 600)  # autologin root on ttyS0, no password
 run("lsblk -dn -o NAME,TYPE | grep -q vda", 30, expect_exit=0)
 run("umask 077; mkpasswd --method=yescrypt 'e2e-test-pass-01' > /run/pwhash && chmod 600 /run/pwhash", 30, expect_exit=0)
-run("${OMAHAB_INSTALL_DISK:-omahab-install-disk} --disk /dev/vda --hostname e2e --username admin --password-hash-file /run/pwhash --yes",
-    timeout, expect_exit=0)
+install_cmd = (
+    f"OMAHAB_EXTRA_SUBSTITUTERS={cache_url} "
+    f"OMAHAB_EXTRA_TRUSTED_KEYS='{cache_pub}' "
+    "${OMAHAB_INSTALL_DISK:-omahab-install-disk} --disk /dev/vda --hostname e2e --username admin --password-hash-file /run/pwhash --yes"
+)
+run(install_cmd, timeout, expect_exit=0)
 s.sendall(b"poweroff\n")
 print("install complete, guest powering off")
 PYEOF
@@ -261,7 +294,7 @@ log "phase 2: all probes passed"
 if [[ $KEEP -eq 0 ]]; then
   cleanup
   QEMU_PID=""
-  rm -f "$DISK" "$WORKDIR"/qemu-*.pid
+  rm -f "$DISK" "$WORKDIR"/qemu-*.pid "$WORKDIR"/cache.sec
   log "workdir cleaned (disk removed); logs kept in $WORKDIR"
 else
   log "kept: $WORKDIR (disk + logs)"

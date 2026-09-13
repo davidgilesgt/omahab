@@ -1791,7 +1791,18 @@ install_stage() {
   # time); the few heavy ones (initrd compress) use both cores.
   # --option http-connections 50: guest downloads average ~1.4 MB/s per
   # flow (slirp per-flow overhead dominates), so more flows raise aggregate.
-  if ! nixos-install --root "$MNT" --flake "$TARGET_FLAKE#$FLAKE_ATTR" --no-root-passwd --option sandbox false --max-jobs 2 --cores 2 --option http-connections 50 2>>"$LOG_FILE"; then
+  # Optional extra binary cache (e.g. a host serving its store so the
+  # installer substitutes custom closures instead of rebuilding them):
+  # OMAHAB_EXTRA_SUBSTITUTERS=http://host:8485
+  # OMAHAB_EXTRA_TRUSTED_KEYS=<base64 pubkey>
+  extra_subst=()
+  if [[ -n "${OMAHAB_EXTRA_SUBSTITUTERS:-}" ]]; then
+    extra_subst+=(--option extra-substituters "${OMAHAB_EXTRA_SUBSTITUTERS}")
+  fi
+  if [[ -n "${OMAHAB_EXTRA_TRUSTED_KEYS:-}" ]]; then
+    extra_subst+=(--option extra-trusted-public-keys "${OMAHAB_EXTRA_TRUSTED_KEYS}")
+  fi
+  if ! nixos-install --root "$MNT" --flake "$TARGET_FLAKE#$FLAKE_ATTR" --no-root-passwd --option sandbox false --max-jobs 2 --cores 2 --option http-connections 50 "${extra_subst[@]}" 2>>"$LOG_FILE"; then
     progress "install" "failed" "nixos-install failed — see $LOG_FILE"
     die "nixos-install failed"
   fi
