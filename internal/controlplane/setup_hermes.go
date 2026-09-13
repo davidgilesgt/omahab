@@ -171,6 +171,13 @@ Rules: archive, never delete; never force-push, never delete a branch, never mer
 
 Never delete documents; no delete tool exists.
 
+## Notes (Obsidian vault via notesmd-cli)
+
+The vault is bind-mounted read/write at `+"`/vault`"+`; the CLI is at `+"`/opt/notesmd/notesmd-cli`"+`. Prefer the CLI over raw file writes. One-time setup: `+"`notesmd-cli add-vault /vault --set-default`"+` (re-run it whenever `+"`list-vaults`"+` comes back empty; registration lives in the container config dir).
+- `+"`search-content <query>`"+` / `+"`search <name>`"+` / `+"`print <note>`"+` / `+"`list`"+` — find and read
+- `+"`create <note>`"+` / `+"`daily`"+` / `+"`move <src> <dst>`"+` / `+"`frontmatter <note>`"+` — write and organize
+- Never touch `+"`/vault/.obsidian/`"+`, `+"`/vault/.trash/`"+`, or `+"`.stversions/`"+`. Never delete notes; archive by moving into an `+"`archive/`"+` folder.
+
 ## Project, CI, workspace, and status tools
 
 - `+"`projects_list/project_get(slug)`"+` / `+"`releases_list(slug)`"+` / `+"`ci_runs(slug, limit)`"+` / `+"`ci_run_logs(slug, number)`"+` — project and pipeline state

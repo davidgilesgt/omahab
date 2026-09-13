@@ -62,6 +62,22 @@ let
         autoPatchelf $out
       '';
     };
+  # notesmd-cli (Yakitrak/notesmd-cli, MIT): Obsidian vault CLI that works
+  # headless — no Obsidian app needed. Mounted into the Hermes container
+  # next to the /vault bind so Hermes edits notes through the CLI, not raw
+  # file writes. Pinned v0.3.7; upstream vendors its Go modules
+  # (vendorHash = null). Verified with `notesmd-cli --help` at pin time.
+  notesmdCli = pkgs.buildGoModule {
+    pname = "notesmd-cli";
+    version = "0.3.7";
+    src = pkgs.fetchFromGitHub {
+      owner = "Yakitrak";
+      repo = "notesmd-cli";
+      rev = "v0.3.7";
+      hash = "sha256-dENOPkEeKTYPFf467Isoi7kaa8Bh78PqNyzjU8Q6BEc=";
+    };
+    vendorHash = null;
+  };
 
 
   # Seed mirrors the native DB-ownership bootstrap (internal/controlplane/setup_models.go):
@@ -568,7 +584,7 @@ in
       };
       cmd = [ "gateway" "run" ];
       environmentFiles = [ "${appEnv}/hermes.env" ];
-      volumes = [ "/var/lib/omahab/hermes:/opt/data" "${dataDir}/sync/obsidian:/vault:rw" ];
+      volumes = [ "/var/lib/omahab/hermes:/opt/data" "${dataDir}/sync/obsidian:/vault:rw" "${notesmdCli}/bin:/opt/notesmd:ro" ];
       # Host networking: the gateway must fetch OIDC discovery from the
       # public issuer (https://id.<domain>, a Tailscale IP) exactly like
       # native services do — from the default bridge that fetch times out
