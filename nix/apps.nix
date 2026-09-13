@@ -29,6 +29,40 @@ let
   # so :4000 never opens and the app reports unhealthy.
   litellmPython = pkgs.python313;
   litellmPyPackages = pkgs.python313Packages;
+  # Prisma engines matching prisma-client-py 0.15.0 (expects CLI 5.17.0,
+  # engines commit 393aa359). nixpkgs only ships engines_6/_7, whose
+  # schema-engine speaks a newer schemaPush protocol (missing field
+  # `filters`), so `prisma db push` fails and fresh installs never get
+  # tables. Prebuilt upstream binaries for debian-openssl-3.0.x — the same
+  # files client-py downloads at runtime — patchelf'd for NixOS.
+  litellmPrismaEngines =
+    let
+      commit = "393aa359c9ad4a4bb28630fb5613f9c281cde053";
+      platform = "debian-openssl-3.0.x";
+      base = "https://binaries.prisma.sh/all_commits/${commit}/${platform}";
+      fetchEngine = name: sha256: pkgs.fetchurl { url = "${base}/${name}.gz"; inherit sha256; };
+      engines = {
+        query-engine = fetchEngine "query-engine" "9bc857debe0d5760c571ee6271076223d94be981c29a22401de681f3f70e067d";
+        schema-engine = fetchEngine "schema-engine" "98ad433fd64da2ea1eb6d565553a9a4339ecf30f1c211b28b69690f591269a41";
+        prisma-fmt = fetchEngine "prisma-fmt" "e6bf23db1e7fe456ae167f4744a71dfad9075727ce6d0f65582a5bee5fe8793f";
+        libquery_engine = fetchEngine "libquery_engine.so.node" "125d75739bd7fcdb8eabb5428355b5be00f540043e6bc1f5b30268947afab1bd";
+      };
+    in
+    pkgs.stdenv.mkDerivation {
+      name = "litellm-prisma-engines-5.17.0";
+      nativeBuildInputs = [ pkgs.autoPatchelfHook ];
+      buildInputs = [ pkgs.openssl pkgs.zlib pkgs.stdenv.cc.cc.lib ];
+      buildCommand = ''
+        mkdir -p $out/bin $out/lib
+        gunzip -c ${engines."query-engine"} > $out/bin/query-engine
+        gunzip -c ${engines."schema-engine"} > $out/bin/schema-engine
+        gunzip -c ${engines."prisma-fmt"} > $out/bin/prisma-fmt
+        chmod +x $out/bin/query-engine $out/bin/schema-engine $out/bin/prisma-fmt
+        gunzip -c ${engines.libquery_engine} > $out/lib/libquery_engine.node
+        autoPatchelf $out
+      '';
+    };
+
 
   # Seed mirrors the native DB-ownership bootstrap (internal/controlplane/setup_models.go):
   # no models, DB-owned, prompts never stored, no message logging, no retries/fallbacks.
@@ -468,18 +502,22 @@ in
       {
         # Generated client loads engines at connect time; the store and a
         # DynamicUser home are both unusable for prisma's cache lookup, so
-        # point it at the vendored engines (same set generate used).
+        # point it at the vendored 5.17.0 engines above.
         environment = {
-          PRISMA_QUERY_ENGINE_LIBRARY = "${lib.getLib pkgs.prisma-engines_6}/lib/libquery_engine.node";
-          PRISMA_QUERY_ENGINE_BINARY = "${lib.getBin pkgs.prisma-engines_6}/bin/query-engine";
-          PRISMA_SCHEMA_ENGINE_BINARY = "${lib.getBin pkgs.prisma-engines_6}/bin/schema-engine";
-          PRISMA_FMT_BINARY = "${lib.getBin pkgs.prisma-engines_6}/bin/prisma-fmt";
+          PRISMA_QUERY_ENGINE_LIBRARY = "${litellmPrismaEngines}/lib/libquery_engine.node";
+          PRISMA_QUERY_ENGINE_BINARY = "${litellmPrismaEngines}/bin/query-engine";
+          PRISMA_SCHEMA_ENGINE_BINARY = "${litellmPrismaEngines}/bin/schema-engine";
+          PRISMA_FMT_BINARY = "${litellmPrismaEngines}/bin/prisma-fmt";
+          # The Prisma JS CLI (used by `prisma db push` at startup) does not
+          # know the nixos platform; pin its engine downloads to the same
+          # debian-openssl-3.0.x binaries vendored above.
+          PRISMA_CLI_BINARY_TARGETS = "debian-openssl-3.0.x";
         };
-        # prisma-client-py resolves its query-engine binary at connect
-        # time by execing `openssl version` (binaries/platform); the
-        # default unit PATH lacks it, so connect() raises FileNotFound
-        # and the gateway dies during lifespan startup.
-        path = [ pkgs.openssl.bin ];
+        # Runtime subprocess deps: `openssl` for prisma's engine-platform
+        # detection (without it connect() raises FileNotFound and the
+        # gateway dies during lifespan startup), `node` so the `prisma`
+        # CLI can run `db push` without bootstrapping nodeenv.
+        path = [ pkgs.openssl.bin pkgs.nodejs ];
         serviceConfig = {
           # DynamicUser allocates an ephemeral UID and refuses a static
           # Group= ("already exists"); a static *supplementary* group is
