@@ -250,6 +250,11 @@ func (b *Backend) setupPhaseOIDC(ctx context.Context) error {
 		if v, verr := b.secrets.RevealByName(ctx, "platform-app", "woodpecker_db_password"); verr == nil {
 			dbPassword = strings.TrimSpace(v)
 		}
+		// Snapshot before rendering: woodpecker-server reads its Forgejo
+		// OAuth secret once at startup, so a changed file needs a restart
+		// below (live 2026-09-13: rotated secret, stale server, "invalid
+		// client secret" on every login until manual restart).
+		prevWoodpeckerEnv, _ := b.readAppEnv("woodpecker")
 		woodpeckerEnv := map[string]string{
 			"WOODPECKER_HOST":           "https://ci." + domainName,
 			"WOODPECKER_FORGEJO":        "true",
@@ -280,6 +285,10 @@ func (b *Backend) setupPhaseOIDC(ctx context.Context) error {
 		}
 		if err := b.writeAppEnv("woodpecker", woodpeckerEnv, "woodpecker"); err != nil {
 			log.Printf("setup oidc: warn write woodpecker appenv: %s", health.RedactDetail(err.Error()))
+		} else if appEnvChanged(prevWoodpeckerEnv, woodpeckerEnv) {
+			if err := b.redeployBundle(ctx, "woodpecker"); err != nil {
+				log.Printf("setup oidc: warn woodpecker redeploy after credential change: %s", health.RedactDetail(err.Error()))
+			}
 		}
 		log.Printf("setup oidc: forgejo client ensured")
 	}
@@ -340,9 +349,11 @@ func (b *Backend) ensurePaperlessOIDC(ctx context.Context, domainName string) er
 		// auto-provisions the account from Pocket ID claims instead of
 		// showing the local signup form, the password form is hidden, and
 		// the login page redirects straight to Pocket ID — no password is
-		// ever set here. Django admin login (/admin/) is unaffected, so
-		// grant admin via createsuperuser if needed (new SSO users are
-		// plain users).
+		// ever set here. The initial admin is seeded by
+		// ensurePaperlessInitialAdmin (password in
+		// platform-app/paperless_admin_password, usable at /admin/, whose
+		// login is unaffected); later SSO users are plain users, promote
+		// them via /admin/.
 		"PAPERLESS_SOCIAL_AUTO_SIGNUP":          "true",
 		"PAPERLESS_SOCIALACCOUNT_ALLOW_SIGNUPS": "true",
 		"PAPERLESS_DISABLE_REGULAR_LOGIN":       "true",
@@ -352,6 +363,12 @@ func (b *Backend) ensurePaperlessOIDC(ctx context.Context, domainName string) er
 	}
 	if err := b.redeployBundle(ctx, "paperless-ngx"); err != nil {
 		return fmt.Errorf("reload paperless config: %w", err)
+	}
+	// Retire the FIRST_INSTALL funnel (zero users + zero docs forwards every
+	// visitor to local signup, beating the SSO auto-redirect): without an
+	// initial admin, SSO never engages by default (live 2026-09-13).
+	if err := b.ensurePaperlessInitialAdmin(ctx); err != nil {
+		return fmt.Errorf("ensure paperless initial admin: %w", err)
 	}
 	log.Printf("setup oidc: paperless client ensured")
 	return nil

@@ -1022,6 +1022,21 @@ func (b *Backend) readAppEnv(bundleID string) (map[string]string, error) {
 	return out, nil
 }
 
+// appEnvChanged reports whether the rendered env differs from the previously
+// written file, so callers restart only daemons that read credentials once
+// at startup (woodpecker-server holds its Forgejo OAuth secret in memory).
+func appEnvChanged(prev, next map[string]string) bool {
+	if len(prev) != len(next) {
+		return true
+	}
+	for k, v := range next {
+		if prev[k] != v {
+			return true
+		}
+	}
+	return false
+}
+
 func generateRandomBase64URL(nBytes int) string {
 	b := make([]byte, nBytes)
 	if _, err := rand.Read(b); err != nil {

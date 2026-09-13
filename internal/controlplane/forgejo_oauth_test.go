@@ -96,3 +96,40 @@ func TestEnsureWoodpeckerOAuthAppMigratesPublicClient(t *testing.T) {
 		t.Fatalf("patch payload confidential_client = %v (%v), want true", conf, gotPatch)
 	}
 }
+
+// A converged Woodpecker app (redirect + confidential already correct) must
+// reuse the stored secret without PATCHing: Forgejo's list response omits
+// client_secret, and every update bumps updated_unix and rotates the secret
+// (Forgejo 15), which orphaned the running server on each setup re-run (live
+// 2026-09-13: "invalid client secret" until manual restart).
+func TestEnsureWoodpeckerOAuthAppReusesStoredSecret(t *testing.T) {
+	t.Parallel()
+	patched := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/user/applications/oauth2":
+			// Converged app, secret hidden as Forgejo does.
+			_, _ = w.Write([]byte(`[{"id":7,"name":"Woodpecker","client_id":"cid-7","client_secret":"","confidential_client":true,"redirect_uris":["https://ci.example.com/authorize"]}]`))
+		default:
+			patched = true
+			http.Error(w, "must not patch a converged app", http.StatusBadRequest)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	b, _ := newSetupBackend(t, nil)
+	if err := upsertSecret(context.Background(), b.secrets, "platform-app", "woodpecker_forgejo_client_secret", "stored-sec"); err != nil {
+		t.Fatalf("store secret: %v", err)
+	}
+	cid, sec, err := b.ensureWoodpeckerOAuthApp(context.Background(), srv.URL, "tok", "example.com")
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if cid != "cid-7" || sec != "stored-sec" {
+		t.Fatalf("credentials = %q %q, want cid-7 stored-sec", cid, sec)
+	}
+	if patched {
+		t.Fatal("converged app was patched; stored secret must be reused without update")
+	}
+}

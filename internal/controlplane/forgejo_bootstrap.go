@@ -879,8 +879,20 @@ func (b *Backend) ensureWoodpeckerOAuthApp(ctx context.Context, baseURL, token, 
 		// "invalid_request: PKCE is required for public clients" when the app
 		// is public, so publicity alone forces an update even when the
 		// redirect URI already matches (live 2026-09-12).
-		if hasRedirect && cid != "" && sec != "" && existing.ConfidentialClient {
-			return cid, sec, nil
+		if hasRedirect && cid != "" && existing.ConfidentialClient {
+			if sec != "" {
+				return cid, sec, nil
+			}
+			// Forgejo's list response omits client_secret. Reuse the stored
+			// secret instead of PATCHing: an update bumps updated_unix and
+			// rotates the secret (Forgejo 15), which orphaned the running
+			// server on every setup re-run (live 2026-09-13: token exchange
+			// failed with "invalid client secret" until manual restart).
+			if stored, serr := reuseStoredOIDCSecret(ctx, b.secrets, "woodpecker_forgejo_client_secret", ""); serr == nil {
+				return cid, stored, nil
+			}
+			// No stored secret (e.g. wiped secrets DB): fall through to the
+			// update path, which rotates and reveals a fresh one.
 		}
 		// Need to update redirect URIs (and possibly get secret). Always send
 		// confidential_client: the field defaults to false (public) when
@@ -919,8 +931,18 @@ func (b *Backend) ensureWoodpeckerOAuthApp(ctx context.Context, baseURL, token, 
 					cid2 = v
 				}
 			}
-			if strings.TrimSpace(sec2) == "" {
-				sec2 = sec
+		}
+		if strings.TrimSpace(sec2) == "" {
+			sec2 = sec
+		}
+		if strings.TrimSpace(sec2) == "" {
+			// The API revealed no secret (older Forgejo omits it on every
+			// endpoint); reuse the stored one rather than failing setup.
+			// A rotation the API hides would desync us, but Forgejo returns
+			// the fresh secret on update (live 2026-09-13), so a hidden
+			// secret here means nothing rotated.
+			if stored, serr := reuseStoredOIDCSecret(ctx, b.secrets, "woodpecker_forgejo_client_secret", ""); serr == nil {
+				sec2 = stored
 			}
 		}
 		if strings.TrimSpace(cid2) == "" || strings.TrimSpace(sec2) == "" {
