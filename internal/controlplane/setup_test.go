@@ -715,6 +715,7 @@ func TestSetupPhaseOIDCEnsuresLitellmClient(t *testing.T) {
 		"GENERIC_TOKEN_ENDPOINT":         "https://id.omahab.com/api/oidc/token",
 		"GENERIC_USERINFO_ENDPOINT":      "https://id.omahab.com/api/oidc/userinfo",
 		"PROXY_BASE_URL":                 "https://models.omahab.com",
+		"GENERIC_USER_ID_ATTRIBUTE":      "sub",
 		"AUTO_REDIRECT_UI_LOGIN_TO_SSO":  "true",
 	} {
 		if env[k] != want {

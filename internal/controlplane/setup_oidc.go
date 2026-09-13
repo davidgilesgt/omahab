@@ -519,6 +519,9 @@ func (b *Backend) ensureLitellmOIDC(ctx context.Context, domainName string) erro
 		// this flag; 1.97 has no env to remove the field itself, and the key
 		// stays for service/API use).
 		"AUTO_REDIRECT_UI_LOGIN_TO_SSO": "true",
+		// LiteLLM defaults user_id to preferred_username, but PROXY_ADMIN_ID
+		// carries the OIDC subject: pin sub so the admin bootstrap matches.
+		"GENERIC_USER_ID_ATTRIBUTE": "sub",
 	}
 	// Preserve the catalog's admins-only application access for the models UI.
 	if err := b.pocketClient.EnsureOIDCClientGroupAccess(ctx, clientID, []string{"admins"}); err != nil {
