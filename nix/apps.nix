@@ -166,6 +166,9 @@ in
       "d ${dataDir}/sync 0755 syncthing syncthing - -"
       "d ${dataDir}/sync/obsidian 0750 syncthing syncthing - -"
       "d ${dataDir}/sync/drops 0750 syncthing syncthing - -"
+      "d ${dataDir}/sync/drops/inbox 0750 syncthing syncthing - -"
+      "d ${dataDir}/sync/drops/photos 0750 syncthing syncthing - -"
+      "d ${dataDir}/sync/drops/media 0750 syncthing syncthing - -"
       "d ${stateDir}/hermes 0700 10000 10000 - -"
       # Immich uses a non-default mediaLocation the module never creates
       # (its `e` rule only repairs existing dirs): pre-create config +

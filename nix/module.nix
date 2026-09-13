@@ -735,6 +735,26 @@ in
       wantedBy = [ "timers.target" ];
     };
 
+    # Drops router: fan inbox files out to Paperless consume / photos /
+    # media staging every 15 minutes. Best-effort; unknown files stay put.
+    systemd.services.omahab-drops-route = {
+      description = "Omahab drops inbox router";
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = "${cfg.package}/bin/omahab drops route";
+        User = "root";
+      };
+    };
+    systemd.timers.omahab-drops-route = {
+      description = "Omahab drops inbox router — every 15 minutes";
+      timerConfig = {
+        OnCalendar = "*:0/15";
+        Persistent = true;
+        Unit = "omahab-drops-route.service";
+      };
+      wantedBy = [ "timers.target" ];
+    };
+
     # mDNS: best-effort omahab.local on the LAN (IP URL is primary).
     services.avahi = {
       enable = true;

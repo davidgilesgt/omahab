@@ -98,6 +98,7 @@ Use --server to target a different control plane (env OMAHAB_SERVER, then ~/.con
 	root.AddCommand(newExposureCmd())
 	root.AddCommand(newBackupCmd())
 	root.AddCommand(newBackupDriveCmd())
+	root.AddCommand(newDropsCmd())
 	root.AddCommand(newEventCmd())
 	root.AddCommand(newSyncCmd())
 	root.AddCommand(newRunnerCmd())
