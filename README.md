@@ -142,7 +142,7 @@ omahab project rollback <project-id> <release-id>
 
 | Path | Content |
 | `/var/lib/omahab` | State: `control.db`, `secrets/`, `appenv/`, `caddy/`, `cloudflared/`, `dumps/`, `master.key`, `recovery.kit`, `backup.env` |
-| `/var/lib/omahab/appenv/<bundle>.env` | Per-bundle env file; gated bundles (pocket-id, woodpecker, karakeep, litellm, hermes, restic, …) refuse to start without it, while forgejo/immich/paperless/syncthing/ntfy/caddy read it as an optional `EnvironmentFile` |
+| `/var/lib/omahab/appenv/<bundle>.env` | Per-bundle env file; gated bundles (pocket-id, woodpecker, karakeep, litellm, hermes, forgejo, immich, paperless, ntfy — plus restic on its htpasswd) refuse to start without it, while caddy/syncthing read appenv as an optional `EnvironmentFile` (or need none) and still start |
 | `/var/lib/omahab/master.key` | Master key (0600, sealed with TPM2 when available) |
 | `/var/lib/omahab/recovery.kit` | Recovery kit JSON `{version:1,fingerprint,master_wrapped base64,created_at}` (0600) |
 | `/var/lib/omahab/backup.env` | Backup env (if restic SFTP/REST credentials needed) |
@@ -253,7 +253,7 @@ Rebuild later with `nixos-rebuild switch --flake /etc/omahab/flake#omahab-instal
 | Panel asks for a token on the LAN or tailnet (lan placement) | Should not happen — both are trusted on lan placement. Check `OMAHAB_PLACEMENT` (vps disables the bypass) and that the client is on RFC1918/ULA/link-local or 100.64.0.0/10 |
 | `invalid bearer token` on the tailnet (vps placement) | vps placement needs the token on every source. Read the 8-character token on the tty1 console or via `sudo cat /var/lib/omahab/api.token` |
 | `omahabd` health check timed out | `journalctl -u omahabd -n 50 --no-pager`; the daemon did not return `200` on `http://127.0.0.1:8484/up` |
-| Domain-gated service inactive | Expected before domain enrollment on gated bundles: the unit waits for `/var/lib/omahab/appenv/<bundle>.env` (forgejo/immich/paperless/syncthing/ntfy/caddy treat it as optional and still start) |
+| Domain-gated service inactive | Expected before domain enrollment on gated bundles: the unit waits for `/var/lib/omahab/appenv/<bundle>.env` (only caddy/syncthing treat appenv as optional and still start) |
 | `omahab system upgrade` rolled back | The new generation failed the 120s health gate; check `journalctl -u omahabd` on the previous generation |
 
 ## License

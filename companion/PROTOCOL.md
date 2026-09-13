@@ -135,8 +135,8 @@ printf '{"id":"3","method":"workspace.stop","params":{"id":"abc123"}}\n' | socat
 Unknown method:
 
 ```sh
-printf '{"id":"99","method":"sync.add","params":{"name":"Notes"}}\n' | socat - ...
-# -> {"id":"99","error":{"code":"unknown_method","message":"unknown method \"sync.add\""}}
+printf '{"id":"99","method":"frobnicate","params":{}}\n' | socat - ...
+# -> {"id":"99","error":{"code":"unknown_method","message":"unknown method \"frobnicate\""}}
 ```
 
 Typed Go client (`internal/apiclient`):
@@ -162,7 +162,7 @@ function refresh() { enqueue("status", {}, "status", ""); enqueue("workspace.lis
 function workspaceStop(id) { enqueue("workspace.stop", {id: id}, "action", "Stop workspace") }
 ```
 
-*No* `OMAHAB_SOCKET` — renamed to `OMAHAB_CLIENTD_SOCKET` in A1. `Clientd.qml` call sites use `status`, `diagnose`, `ai.open`, `dashboard.open`, `project.list`, `project.clone`, `project.open`, `workspace.list`, `workspace.create`, `workspace.attach`, `workspace.stop`, `environment.*`, `backup.*`, `subscribe`. (`sync.add`, `app.open`, and `workspace.openInEditor` are served by the daemon but have no QML call site.)
+*No* `OMAHAB_SOCKET` — renamed to `OMAHAB_CLIENTD_SOCKET` in A1. `Clientd.qml` call sites use `status`, `diagnose`, `ai.open`, `dashboard.open`, `project.list`, `project.clone`, `project.open`, `workspace.list`, `workspace.create`, `workspace.attach`, `workspace.stop`, `environment.*`, `backup.*`, `subscribe`. (`sync.add` is served by the daemon but has no QML call site; `app.open` and `workspace.openInEditor` are both served and called from QML.)
 
 ## Device HTTP API (complementary)
 

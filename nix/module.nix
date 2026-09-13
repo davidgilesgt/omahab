@@ -611,6 +611,10 @@ in
             command = "${cfg.package}/bin/omahab runner attach *";
             options = [ "NOPASSWD" ];
           }
+          {
+            command = "${cfg.package}/bin/omahab workspace attach *";
+            options = [ "NOPASSWD" ];
+          }
         ];
       }
     ];

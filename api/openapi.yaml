@@ -1423,7 +1423,7 @@ paths:
   /api/v1/companion/mcp:
     get:
       summary: Device-scoped MCP endpoint
-      description: Device-only MCP handler when configured. Admin bearer rejected.
+      description: Device-only MCP handler when configured. Admin bearer rejected. The trailing-slash variant `/api/v1/companion/mcp/` is also served.
       operationId: companionMcp
       security: [{ deviceAuth: [] }]
       responses:
