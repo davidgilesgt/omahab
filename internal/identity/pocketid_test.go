@@ -910,3 +910,45 @@ func TestEnsureOIDCClientSkipsMintWhenSecretsExist(t *testing.T) {
 		t.Fatalf("id=%q secret=%q", id, secret)
 	}
 }
+
+func TestOwnerCandidatePicksAdminWithEmail(t *testing.T) {
+	t.Parallel()
+	c, srv := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/users" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[
+			{"id":"00000000-0000-0000-0000-000000000000","username":"static-api-user-X","email":null,"displayName":"Static API User","isAdmin":true,"disabled":false},
+			{"id":"u2","username":"guest","email":"guest@example.com","displayName":"Guest","isAdmin":false,"disabled":false},
+			{"id":"u1","username":"david","email":"David@Example.com","displayName":"David","isAdmin":true,"disabled":false}
+		]}`))
+	})
+	t.Cleanup(srv.Close)
+	username, email, err := c.OwnerCandidate(context.Background())
+	if err != nil {
+		t.Fatalf("OwnerCandidate: %v", err)
+	}
+	if username != "david" || email != "david@example.com" {
+		t.Fatalf("owner = %q %q, want david david@example.com", username, email)
+	}
+}
+
+func TestOwnerCandidateNotFoundWithoutHumans(t *testing.T) {
+	t.Parallel()
+	c, srv := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/users" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[
+			{"id":"00000000-0000-0000-0000-000000000000","username":"static-api-user-X","email":null,"displayName":"Static API User","isAdmin":true,"disabled":false}
+		]}`))
+	})
+	t.Cleanup(srv.Close)
+	if _, _, err := c.OwnerCandidate(context.Background()); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}

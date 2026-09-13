@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/omahab/omahab/internal/identity"
 )
 
 // Golden vector produced by Django 5.2's real PBKDF2PasswordHasher
@@ -125,5 +127,92 @@ func TestEnsurePaperlessInitialAdminSkipsWhenUsersExist(t *testing.T) {
 	}
 	if _, err := b.secrets.RevealByName(context.Background(), "platform-app", "paperless_admin_password"); err == nil {
 		t.Fatal("password stored despite existing users")
+	}
+}
+
+// With an enrolled Pocket ID owner, the seeded row carries their username
+// and email instead of the fallback.
+func TestEnsurePaperlessInitialAdminUsesOwnerIdentity(t *testing.T) {
+	b, _ := newSetupBackend(t, nil)
+	b.cfg.StateDir = t.TempDir()
+	oldLookup := paperlessOwnerLookup
+	paperlessOwnerLookup = func(context.Context, *identity.PocketIDClient) (string, string, error) {
+		return "david", "david@davidgiles.net", nil
+	}
+	t.Cleanup(func() { paperlessOwnerLookup = oldLookup })
+	var stmts []string
+	insertHash := ""
+	oldAlter := runPostgresAlterRole
+	runPostgresAlterRole = func(_ context.Context, db, stmt string) (string, error) {
+		stmts = append(stmts, stmt)
+		switch {
+		case strings.Contains(stmt, "count(*)"):
+			return " count \n-------\n     0\n(1 row)\n", nil
+		case strings.HasPrefix(stmt, "INSERT INTO auth_user"):
+			idx := strings.Index(stmt, "pbkdf2_sha256$")
+			rest := stmt[idx+len("pbkdf2_sha256$"):]
+			insertHash = "pbkdf2_sha256$" + rest[:strings.Index(rest, "'")]
+			return "INSERT 0 1\n", nil
+		case strings.Contains(stmt, "SELECT password"):
+			return " password \n----------\n " + insertHash + "\n(1 row)\n", nil
+		default:
+			return "", errors.New("unexpected stmt " + stmt)
+		}
+	}
+	t.Cleanup(func() { runPostgresAlterRole = oldAlter })
+
+	if err := b.ensurePaperlessInitialAdmin(context.Background()); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	var insert string
+	for _, s := range stmts {
+		if strings.HasPrefix(s, "INSERT INTO auth_user") {
+			insert = s
+		}
+	}
+	for _, want := range []string{"'david'", "'david@davidgiles.net'"} {
+		if !strings.Contains(insert, want) {
+			t.Fatalf("insert missing %q:\n%s", want, insert)
+		}
+	}
+	if strings.Contains(insert, "'admin'") {
+		t.Fatalf("insert must not use fallback admin:\n%s", insert)
+	}
+}
+
+// A lookup failure (or unusable name) falls back to 'admin' rather than
+// failing setup.
+func TestEnsurePaperlessInitialAdminFallsBackWithoutOwner(t *testing.T) {
+	b, _ := newSetupBackend(t, nil)
+	b.cfg.StateDir = t.TempDir()
+	oldLookup := paperlessOwnerLookup
+	paperlessOwnerLookup = func(context.Context, *identity.PocketIDClient) (string, string, error) {
+		return "", "", errors.New("no users enrolled")
+	}
+	t.Cleanup(func() { paperlessOwnerLookup = oldLookup })
+	oldAlter := runPostgresAlterRole
+	var insertHash string
+	runPostgresAlterRole = func(_ context.Context, _, stmt string) (string, error) {
+		if strings.Contains(stmt, "count(*)") {
+			return " count \n-------\n     0\n(1 row)\n", nil
+		}
+		if strings.HasPrefix(stmt, "INSERT INTO auth_user") {
+			if !strings.Contains(stmt, "'admin'") {
+				return "", errors.New("expected fallback admin")
+			}
+			idx := strings.Index(stmt, "pbkdf2_sha256$")
+			rest := stmt[idx+len("pbkdf2_sha256$"):]
+			insertHash = "pbkdf2_sha256$" + rest[:strings.Index(rest, "'")]
+			return "INSERT 0 1\n", nil
+		}
+		if strings.Contains(stmt, "SELECT password") {
+			return " password \n----------\n " + insertHash + "\n(1 row)\n", nil
+		}
+		return "", errors.New("unexpected stmt " + stmt)
+	}
+	t.Cleanup(func() { runPostgresAlterRole = oldAlter })
+
+	if err := b.ensurePaperlessInitialAdmin(context.Background()); err != nil {
+		t.Fatalf("ensure: %v", err)
 	}
 }

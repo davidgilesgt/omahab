@@ -501,6 +501,48 @@ func (c *PocketIDClient) ListUsers(ctx context.Context) ([]domain.User, error) {
 	return out, nil
 }
 
+// OwnerCandidate returns the username and email of the human owner account:
+// the first enabled Pocket ID admin with a nonempty email (service accounts
+// such as static-api-user carry no email and never match). It seeds
+// downstream superusers (paperless) with the owner's identity so their first
+// SSO login can attach to an admin row instead of an orphaned fallback.
+// ErrNotFound when no human user enrolled yet; callers use a fallback name.
+func (c *PocketIDClient) OwnerCandidate(ctx context.Context) (username, email string, err error) {
+	if err := c.ensureConfigured(); err != nil {
+		return "", "", err
+	}
+	var paginated paginatedUsersDto
+	if err := c.doJSON(ctx, http.MethodGet, "/api/users", nil, &paginated); err != nil {
+		return "", "", err
+	}
+	match := func(adminOnly bool) (string, string, bool) {
+		for _, u := range paginated.Data {
+			if u.Disabled || strings.TrimSpace(u.Username) == "" {
+				continue
+			}
+			if adminOnly && !u.IsAdmin {
+				continue
+			}
+			email := ""
+			if u.Email != nil {
+				email = strings.ToLower(strings.TrimSpace(*u.Email))
+			}
+			if email == "" {
+				continue
+			}
+			return strings.TrimSpace(u.Username), email, true
+		}
+		return "", "", false
+	}
+	if username, email, ok := match(true); ok {
+		return username, email, nil
+	}
+	if username, email, ok := match(false); ok {
+		return username, email, nil
+	}
+	return "", "", store.ErrNotFound
+}
+
 // DisableUser enables or disables a Pocket ID user.
 func (c *PocketIDClient) DisableUser(ctx context.Context, userID string, disabled bool) error {
 	if strings.TrimSpace(userID) == "" {
