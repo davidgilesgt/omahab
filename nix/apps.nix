@@ -512,6 +512,10 @@ in
           # know the nixos platform; pin its engine downloads to the same
           # debian-openssl-3.0.x binaries vendored above.
           PRISMA_CLI_BINARY_TARGETS = "debian-openssl-3.0.x";
+          # The Prisma CLI downloads its JS bundle on first run, but HOME
+          # is / (read-only) under DynamicUser: keep caches in state.
+          PRISMA_HOME_DIR = "${config.services.litellm.stateDir}/prisma-home";
+          npm_config_cache = "${config.services.litellm.stateDir}/npm-cache";
         };
         # Runtime subprocess deps: `openssl` for prisma's engine-platform
         # detection (without it connect() raises FileNotFound and the
