@@ -527,7 +527,11 @@ in
           ReadOnlyPaths = [ litellmConfigDir ];
           ExecStart = mkForce (
             let l = config.services.litellm; in
-            "${l.package}/bin/litellm --host ${l.host} --port ${toString l.port} --config ${litellmConfig}"
+            # --use_prisma_db_push: without it the gateway takes the
+            # `prisma migrate deploy` path via the enterprise
+            # litellm-proxy-extras package (not installed), which fails
+            # instantly and silently; db push is the supported path.
+            "${l.package}/bin/litellm --host ${l.host} --port ${toString l.port} --config ${litellmConfig} --use_prisma_db_push"
           );
         };
       }
