@@ -15,6 +15,13 @@
 }:
 
 let
+  # ISO file name: omahab-<version>-<arch>.iso instead of the
+  # installation-cd-minimal default (nixos-<nixos-label>-<arch>.iso).
+  # Version tracks the repo `version` file (the same string stamped into
+  # the Go binaries via flake ldflags); arch is the target platform so
+  # x86_64 and aarch64 builds never collide.
+  omahabVersion = lib.strings.trim (builtins.readFile ../version);
+  isoArch = pkgs.stdenv.hostPlatform.system;
   # Resolve flake-provided omahab package (includes `omahab install`);
   # fallback to pkgs.omahab for standalone evaluation.
   flakePkgs = if self ? packages then self.packages.${pkgs.system} or { } else { };
@@ -90,6 +97,12 @@ let
   '';
 in
 {
+  # Upstream builds the file as "${image.baseName}.iso" (iso-image.nix
+  # passes isoName = baseName.iso to make-iso9660-image); fileName only
+  # feeds the generic image.filePath. So baseName carries the full name.
+  image.baseName = lib.mkForce "omahab-${omahabVersion}-${isoArch}";
+  image.fileName = "${config.image.baseName}.iso";
+  isoImage.volumeID = lib.toUpper (lib.replaceStrings [ "." "-" ] [ "_" "_" ] "omahab_${omahabVersion}_${isoArch}");
   # Boot both BIOS and UEFI for the live ISO.
   isoImage.makeEfiBootable = true;
   isoImage.makeUsbBootable = true;
