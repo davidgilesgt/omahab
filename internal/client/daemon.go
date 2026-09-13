@@ -458,6 +458,74 @@ func (d *Daemon) dispatchSocket(req SocketRequest) SocketResponse {
 		return SocketResponse{ID: req.ID, Result: map[string]string{"result": "opened omahab"}}
 	case "project.list":
 		return SocketResponse{ID: req.ID, Result: d.projects.List()}
+	case "project.create":
+		name, _ := req.Params["name"].(string)
+		name = strings.TrimSpace(name)
+		slug, _ := req.Params["slug"].(string)
+		slug = strings.TrimSpace(slug)
+		if name == "" && slug == "" {
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "bad_request", Message: "name or slug required"}}
+		}
+		kind, _ := req.Params["kind"].(string)
+		kind = strings.ToLower(strings.TrimSpace(kind))
+		if kind == "" {
+			kind = "code"
+		}
+		dir, _ := req.Params["dir"].(string)
+		dir = strings.TrimSpace(dir)
+		explicitDir := dir != ""
+		if !explicitDir {
+			home, _ := os.UserHomeDir()
+			if home == "" {
+				home = os.Getenv("HOME")
+			}
+			dir = filepath.Join(home, "projects", slug)
+		}
+		if d.remote == nil {
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: "not connected to server"}}
+		}
+		ctx2, cancel := context.WithTimeout(d.ctx, 60*time.Second)
+		proj, err := d.remote.CreateCompanionProject(ctx2, name, slug, kind)
+		cancel()
+		if err != nil {
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: err.Error()}}
+		}
+		slug = proj.Slug
+		if !explicitDir {
+			home, _ := os.UserHomeDir()
+			if home == "" {
+				home = os.Getenv("HOME")
+			}
+			dir = filepath.Join(home, "projects", slug)
+		}
+		cancel()
+		if err != nil {
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: err.Error()}}
+		}
+		cloneURL := strings.TrimSpace(proj.RepositoryURL)
+		if cloneURL == "" {
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: "project has no repository_url"}}
+		}
+		if _, err := os.Stat(dir); err == nil {
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "conflict", Message: fmt.Sprintf("destination %q already exists", dir)}}
+		}
+		if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: err.Error()}}
+		}
+		ctx3, cancel3 := context.WithTimeout(d.ctx, 2*time.Minute)
+		cmd := exec.CommandContext(ctx3, "git", "clone", cloneURL, dir)
+		out, err := cmd.CombinedOutput()
+		cancel3()
+		if err != nil {
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: fmt.Sprintf("git clone failed: %v: %s", err, string(out))}}
+		}
+		if d.projects != nil {
+			d.projects.Upsert(*proj, dir)
+		}
+		if err := d.launcher.OpenTerminal(dir); err != nil {
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: err.Error()}}
+		}
+		return SocketResponse{ID: req.ID, Result: map[string]string{"project_id": string(proj.ID), "slug": slug, "dir": dir, "clone_url": cloneURL}}
 	case "project.clone":
 		slug, _ := req.Params["slug"].(string)
 		slug = strings.TrimSpace(slug)

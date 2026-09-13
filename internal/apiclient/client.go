@@ -325,6 +325,7 @@ func (c *Client) SetProjectExposure(ctx context.Context, projectID, exposure str
 type CreateProjectRequest struct {
 	Name string `json:"name"`
 	Slug string `json:"slug,omitempty"`
+	Kind string `json:"kind,omitempty"`
 }
 
 func (c *Client) ListProjects(ctx context.Context) ([]domain.Project, error) {

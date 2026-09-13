@@ -78,6 +78,14 @@ func (b *Backend) CreateProject(ctx context.Context, req apitypes.CreateProjectR
 	if exposure == "" {
 		exposure = domain.ExposurePrivate
 	}
+	kind := strings.ToLower(strings.TrimSpace(req.Kind))
+	if kind == "" {
+		kind = "code"
+	}
+	if kind != "code" && kind != "docs" {
+		return domain.Project{}, translateError(fmt.Errorf("%w: kind must be code or docs", store.ErrValidation))
+	}
+	docsOnly := kind == "docs"
 	pr, err := b.projects.Create(ctx, projects.CreateParams{
 		Slug:          slug,
 		Name:          name,
@@ -89,9 +97,9 @@ func (b *Backend) CreateProject(ctx context.Context, req apitypes.CreateProjectR
 	if err != nil {
 		return domain.Project{}, translateError(err)
 	}
-	// Issue release token first so it can be handed to SCM provision for Woodpecker secret.
+	// Docs projects are versioned-only: no release token, no CI.
 	releaseToken := ""
-	if b.projects != nil {
+	if !docsOnly && b.projects != nil {
 		if tok, err := b.projects.IssueReleaseToken(ctx, pr.ID); err != nil {
 			_, _ = b.events.Publish(ctx, events.PublishInput{Type: "service.unhealthy", Severity: "warning", Message: "release token issue failed: " + err.Error(), ResourceID: string(pr.ID)})
 		} else {
@@ -130,6 +138,7 @@ func (b *Backend) CreateProject(ctx context.Context, req apitypes.CreateProjectR
 			ReleaseToken:       releaseToken,
 			WebhookURL:         webhookURL,
 			WebhookSecret:      webhookSecret,
+			DocsOnly:           docsOnly,
 		}
 		if provRes, err := b.scm.Provision(ctx, provInput); err != nil {
 			_, _ = b.events.Publish(ctx, events.PublishInput{Type: "ci.failed", Severity: "warning", Message: "scm provision failed: " + err.Error(), ResourceID: string(pr.ID)})

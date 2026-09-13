@@ -251,6 +251,16 @@ func (b *Backend) CreateCompanionWorkspace(ctx context.Context, req apitypes.Com
 	}
 	return *w, nil
 }
+
+// CreateCompanionProject creates a project (listing + Forgejo repo) on behalf
+// of an enrolled device. It reuses CreateProject so admin and device paths
+// stay identical; kind "" defaults to "code".
+func (b *Backend) CreateCompanionProject(ctx context.Context, req apitypes.CreateProjectRequest) (domain.Project, error) {
+	if strings.TrimSpace(req.Name) == "" && strings.TrimSpace(req.Slug) == "" {
+		return domain.Project{}, translateError(fmt.Errorf("%w: name or slug is required", store.ErrValidation))
+	}
+	return b.CreateProject(ctx, req)
+}
 // Users (glue)
 
 func (b *Backend) IssueWorkspaceCapability(ctx context.Context, workspaceID string) (apitypes.WorkspaceCapabilityResponse, error) {

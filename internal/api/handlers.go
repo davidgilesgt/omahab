@@ -1269,6 +1269,23 @@ func (s *Server) handleCompanionProjects(w http.ResponseWriter, r *http.Request)
 	writeList(w, items)
 }
 
+func (s *Server) handleCompanionCreateProject(w http.ResponseWriter, r *http.Request) {
+	var req CreateProjectRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.Name) == "" && strings.TrimSpace(req.Slug) == "" {
+		writeError(w, r, errBadRequest("name or slug is required"))
+		return
+	}
+	proj, err := s.backend.CreateCompanionProject(r.Context(), req)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, proj)
+}
+
 // --- tool-environment (admin, server authoritative singleton agent-tools) ---
 
 func (s *Server) handleListToolEnv(w http.ResponseWriter, r *http.Request) {

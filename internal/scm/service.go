@@ -171,6 +171,10 @@ type ProvisionInput struct {
 	WebhookURL         string
 	WebhookSecret      string
 	Mirror             *MirrorConfig
+	// DocsOnly provisions a versioned-only repo: Forgejo repo + README +
+	// docs AGENTS.md + webhook, but no Woodpecker CI, registry token,
+	// pipeline template, or ONCE seed files.
+	DocsOnly bool
 }
 
 // MirrorConfig is the caller-supplied GitHub mirror configuration. Token is
@@ -536,6 +540,46 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) (*ProvisionR
 		markError("mark actions disabled failed")
 		compensate()
 		return nil, fmt.Errorf("mark actions disabled: %w", err)
+	}
+	// Docs-only repos stop here: versioned Forgejo repo with no CI,
+	// no registry token, no pipeline, and no ONCE seed files.
+	if in.DocsOnly {
+		docsAgents := fmt.Sprintf("# AGENTS.md — Omahab docs project %s\n\nThis repository is versioned by Omahab for documents, not code. There is no container, no `/up` health check, and no Woodpecker pipeline.\n\n## Conventions\n- Keep sources (Markdown, PDFs, scans) at the top level or in plain folders\n- Large binaries go through Git LFS\n- No silent commits, merges, or force-pushes\n- Workspaces use branches `ws/<slug>-<id>`\n", repoName)
+		if _, err := s.forgejo.GetFile(ctx, RepoRef{Owner: owner, Name: repoName}, "AGENTS.md", defaultBranch); err != nil {
+			_ = s.forgejo.PutFile(ctx, RepoRef{Owner: owner, Name: repoName}, "AGENTS.md", []byte(docsAgents), "Add AGENTS.md (managed by Omahab)")
+		}
+		if strings.TrimSpace(in.WebhookURL) != "" && strings.TrimSpace(in.WebhookSecret) != "" {
+			if err := s.forgejo.EnsureWebhook(ctx, RepoRef{Owner: owner, Name: repoName}, strings.TrimSpace(in.WebhookURL), strings.TrimSpace(in.WebhookSecret), []string{"pull_request", "push"}); err != nil {
+				markError("ensure webhook failed")
+				compensate()
+				return nil, fmt.Errorf("ensure webhook: %w", err)
+			}
+		}
+		readyAt := time.Now().UTC().Format(time.RFC3339Nano)
+		if _, err := s.db.ExecContext(ctx, `UPDATE scm_repositories SET observed_state='ready', observed_detail='', updated_at=? WHERE id=?`, readyAt, repoID); err != nil {
+			markError("mark ready failed")
+			compensate()
+			return nil, fmt.Errorf("mark repository ready: %w", err)
+		}
+		repoRow.ObservedState = "ready"
+		repoRow.ObservedDetail = ""
+		if refreshed, gerr := s.getRepositoryByID(ctx, domain.ID(repoID)); gerr == nil {
+			repoRow = refreshed
+		}
+		_ = s.sink.Emit(ctx, domain.Event{
+			ID:         domain.ID(newID()),
+			Type:       "scm.repository.provisioned",
+			Severity:   "info",
+			ResourceID: in.ProjectID,
+			Message:    fmt.Sprintf("provisioned %s/%s", owner, repoName),
+			Data: map[string]any{
+				"owner":      owner,
+				"repo":       repoName,
+				"project_id": string(in.ProjectID),
+			},
+			CreatedAt: time.Now().UTC(),
+		})
+		return &ProvisionResult{Repository: repoRow}, nil
 	}
 	repoRow.ActionsDisabled = true
 

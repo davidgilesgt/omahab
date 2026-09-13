@@ -120,7 +120,7 @@ export class ApiClient {
     });
 
   projects = () => this.list<Project>("/projects");
-  createProject = (input: { name: string; slug?: string }) =>
+  createProject = (input: { name: string; slug?: string; kind?: string }) =>
     this.request<Project>("/projects", { method: "POST", body: JSON.stringify(input) });
   releases = (projectId: string) => this.list<Release>(`/projects/${encodeURIComponent(projectId)}/releases`);
   rollbackRelease = (projectId: string, releaseId: string) =>

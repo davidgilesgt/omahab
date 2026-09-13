@@ -1049,11 +1049,11 @@ func newProjectCmd() *cobra.Command {
 		},
 	})
 	// create
-	var createName, createSlug string
+	var createName, createSlug, createKind string
 	createCmd := &cobra.Command{
 		Use:   "create",
 		Short: "Create a project",
-		Long:  "Creates a Forgejo repository, Hermes bot, and ONCE deployment slot.",
+		Long:  "Creates the project listing and autocreates the Forgejo repository (CI + ONCE seed unless --kind docs).",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if strings.TrimSpace(createName) == "" {
 				return errors.New("--name is required")
@@ -1064,7 +1064,7 @@ func newProjectCmd() *cobra.Command {
 			if err != nil {
 			return handleFailure(err)
 		}
-			p, err := c.CreateProject(ctx, apiclient.CreateProjectRequest{Name: createName, Slug: createSlug})
+			p, err := c.CreateProject(ctx, apiclient.CreateProjectRequest{Name: createName, Slug: createSlug, Kind: createKind})
 			if err != nil {
 			return handleFailure(err)
 		}
@@ -1078,6 +1078,7 @@ func newProjectCmd() *cobra.Command {
 	}
 	createCmd.Flags().StringVar(&createName, "name", "", "project display name (required)")
 	createCmd.Flags().StringVar(&createSlug, "slug", "", "slug (derived from name if omitted)")
+	createCmd.Flags().StringVar(&createKind, "kind", "", "code (default, deployable) or docs (versioned only, no CI)")
 	proj.AddCommand(createCmd)
 
 	proj.AddCommand(&cobra.Command{

@@ -431,6 +431,28 @@ func (c *RemoteClient) GetCompanionProjects(ctx context.Context) ([]domain.Proje
 	return []domain.Project{}, nil
 }
 
+// CreateCompanionProject creates a project (listing + Forgejo repo) via device endpoint.
+func (c *RemoteClient) CreateCompanionProject(ctx context.Context, name, slug, kind string) (*domain.Project, error) {
+	auth, err := c.deviceAuthHeader()
+	if err != nil {
+		return nil, err
+	}
+	if auth == "" {
+		return nil, ErrNotAuthenticated
+	}
+	body := map[string]string{
+		"name": name,
+		"slug": slug,
+		"kind": kind,
+	}
+	b, _ := json.Marshal(body)
+	var out domain.Project
+	if err := c.doWithAuth(ctx, http.MethodPost, "/api/v1/companion/projects", auth, strings.NewReader(string(b)), &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // GetCompanionWorkspaces fetches workspaces via device endpoint.
 func (c *RemoteClient) GetCompanionWorkspaces(ctx context.Context) ([]domain.Workspace, error) {
 	auth, err := c.deviceAuthHeader()

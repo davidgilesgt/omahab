@@ -209,6 +209,9 @@ type CreateProjectRequest struct {
 	RepositoryURL string          `json:"repository_url"`
 	Exposure      domain.Exposure `json:"exposure,omitempty"`
 	Hostname      string          `json:"hostname,omitempty"`
+	// Kind is "code" (deployable, default) or "docs" (versioned only:
+	// no Woodpecker CI, no ONCE seed, no deploy contract).
+	Kind string `json:"kind,omitempty"`
 }
 
 type UpdateProjectRequest struct {

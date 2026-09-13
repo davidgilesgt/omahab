@@ -372,18 +372,20 @@ export function ProjectsPage() {
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
+  const [kind, setKind] = useState("code");
   const [formError, setFormError] = useState<string | null>(null);
   const projects = query.data ?? [];
   const domain = (instanceQuery.data?.domain ?? "").trim().toLowerCase();
   const domainReady = domain !== "" && domain !== "example.com" && domain !== "not-configured.invalid";
   const creationBlocked = instanceQuery.isSuccess && !domainReady;
   const create = useMutation({
-    mutationFn: (input: { name: string; slug?: string }) => client.createProject(input),
+    mutationFn: (input: { name: string; slug?: string; kind?: string }) => client.createProject(input),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["projects"] });
       toast.success("Project created");
       setName("");
       setSlug("");
+      setKind("code");
       setFormError(null);
       setShowForm(false);
     },
@@ -414,7 +416,7 @@ export function ProjectsPage() {
       return;
     }
     setFormError(null);
-    create.mutate(trimmedSlug ? { name: trimmedName, slug: trimmedSlug } : { name: trimmedName });
+    create.mutate({ name: trimmedName, ...(trimmedSlug ? { slug: trimmedSlug } : {}), ...(kind === "docs" ? { kind: "docs" } : {}) });
   }
   return (
     <div className="page">
@@ -425,6 +427,7 @@ export function ProjectsPage() {
             <>
               <label>Name<input value={name} onChange={(e) => setName(e.target.value)} required maxLength={100} disabled={create.isPending} /></label>
               <label>Slug (optional)<input value={slug} onChange={(e) => setSlug(e.target.value)} maxLength={63} placeholder="Derived from name" disabled={create.isPending} /></label>
+              <label>Kind<select value={kind} onChange={(e) => setKind(e.target.value)} disabled={create.isPending}><option value="code">Code (deployable)</option><option value="docs">Docs (versioned only, no CI)</option></select></label>
               <div className="row-actions">
                 <button className="button primary" type="submit" disabled={create.isPending}>{create.isPending ? "Creating…" : "Create project"}</button>
                 <button className="button secondary" type="button" disabled={create.isPending} onClick={() => { setShowForm(false); setFormError(null); }}>Cancel</button>

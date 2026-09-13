@@ -370,6 +370,7 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/api/v1/companion/events", s.handleCompanionEvents)
 		r.Get("/api/v1/companion/events/stream", s.handleCompanionStreamEvents)
 		r.Get("/api/v1/companion/projects", s.handleCompanionProjects)
+		r.Post("/api/v1/companion/projects", s.withBodyLimit(defaultBodyLimit, s.handleCompanionCreateProject))
 		r.Get("/api/v1/companion/workspaces", s.handleCompanionListWorkspaces)
 		r.Post("/api/v1/companion/workspaces", s.withBodyLimit(defaultBodyLimit, s.handleCompanionCreateWorkspace))
 		r.Post("/api/v1/companion/workspaces/{id}/stop", s.handleCompanionStopWorkspace)
