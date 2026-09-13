@@ -1193,18 +1193,20 @@ func (b *Backend) renderNativeAppEnv(ctx context.Context, dnsToken, domainName s
 	// only carry existing entries pre-cutover (old YAML still serves) and
 	// prune them once native ownership is established, never reintroducing
 	// broker recovery material into steady-state env.
+	providerKeysPruned := false
 	if ph := b.handoffPhase(ctx); ph == handoffPhaseComplete || ph == handoffPhaseCutover {
 		for k := range existing {
 			if strings.HasPrefix(k, providers.ProviderEnvVarPrefix) {
 				delete(existing, k)
+				providerKeysPruned = true
 			}
 		}
 	}
 	if err := b.writeAppEnv("litellm", existing, "litellm"); err != nil {
 		return fmt.Errorf("litellm: %w", err)
 	}
-	if existing["LITELLM_MASTER_KEY"] != masterBefore || existing["DATABASE_URL"] != dbBefore || existing["LITELLM_SALT_KEY"] != saltBefore {
-		log.Printf("render native appenv: litellm master key, DB URL, or salt changed, redeploying gateway")
+	if existing["LITELLM_MASTER_KEY"] != masterBefore || existing["DATABASE_URL"] != dbBefore || existing["LITELLM_SALT_KEY"] != saltBefore || providerKeysPruned {
+		log.Printf("render native appenv: litellm master key, DB URL, salt, or provider-key retirement changed, redeploying gateway")
 		if err := b.redeployBundle(ctx, "litellm"); err != nil {
 			return fmt.Errorf("litellm: %w", err)
 		}

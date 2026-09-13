@@ -350,13 +350,20 @@ func TestHandoffResumeAfterYAMLReplacement(t *testing.T) {
 	if err := b.runProviderHandoff(ctx); err == nil {
 		t.Fatal("first handoff should fail on injected verify error")
 	}
-	finalPath, _ := b.litellmConfigPaths()
+	finalPath, snapshotPath := b.litellmConfigPaths()
 	raw, err := os.ReadFile(finalPath)
 	if err != nil {
 		t.Fatalf("read yaml after failed cutover: %v", err)
 	}
-	if string(raw) != staticLitellmBootstrap() {
-		t.Fatal("YAML swap must have happened before the injected verify failure")
+	if string(raw) != handoffLegacyYAML {
+		t.Fatal("failed verify must restore the pre-handoff YAML so legacy routing keeps serving")
+	}
+	snap, err := os.ReadFile(snapshotPath)
+	if err != nil {
+		t.Fatalf("read snapshot after failed cutover: %v", err)
+	}
+	if string(snap) != handoffLegacyYAML {
+		t.Fatal("snapshot must still hold the pre-handoff YAML")
 	}
 	if got := b.handoffPhase(ctx); got != handoffPhaseImported {
 		t.Fatalf("phase = %q, want imported after failed verify", got)
@@ -371,6 +378,34 @@ func TestHandoffResumeAfterYAMLReplacement(t *testing.T) {
 		if n := gw.createsFor(name); n != 1 {
 			t.Fatalf("creates for %q = %d, want exactly 1 (resume must not overwrite)", name, n)
 		}
+	}
+}
+
+func TestHandoffQuarantinesUnknownAlias(t *testing.T) {
+	ctx := context.Background()
+	gw := newHandoffFakeGateway()
+	b := newHandoffBackend(t, gw)
+	seedLegacyAliases(t, b)
+	// Legacy custom alias bypassing the current allowlist (raw row, as left
+	// by older builds): must be quarantined, never block the migration.
+	if _, err := b.db.ExecContext(ctx, `INSERT INTO provider_aliases(name, credential_id, model, created_at, updated_at) VALUES('custom', 'cred-openai', 'gpt-4o', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatalf("insert custom alias: %v", err)
+	}
+	writeLegacyYAML(t, b)
+
+	if err := b.runProviderHandoff(ctx); err != nil {
+		t.Fatalf("handoff with quarantined alias: %v", err)
+	}
+	assertHandoffComplete(t, b, gw)
+	if _, ok := gw.getByName("custom"); ok {
+		t.Fatal("quarantined alias must not migrate to the gateway")
+	}
+	if n := gw.createsFor(providers.AliasFast); n != 1 {
+		t.Fatalf("creates for fast = %d, want 1", n)
+	}
+	journal := handoffJournalValues(t, b)
+	if journal["skipped/custom"] != "unsupported alias" {
+		t.Fatalf("skipped/custom = %q, want quarantine reason", journal["skipped/custom"])
 	}
 }
 

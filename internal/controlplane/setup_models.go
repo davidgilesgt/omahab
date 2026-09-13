@@ -6,11 +6,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
 	"os"
-	"os/user"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -61,7 +60,7 @@ func migratedModelID(alias string) string {
 }
 
 func migratedCredentialName(legacyID string) string {
-	return "omahab-migrated-" + strings.TrimSpace(legacyID)
+	return "omahab-migrated-" + sha256Hex(strings.TrimSpace(legacyID))
 }
 
 func seedCredentialName(sourceID string) string {
@@ -177,7 +176,7 @@ func (b *Backend) writeStaticBootstrapYAML() error {
 	finalPath, _ := b.litellmConfigPaths()
 	want := staticLitellmBootstrap()
 	if raw, err := os.ReadFile(finalPath); err == nil && string(raw) == want {
-		shareGatewayConfigCompat(finalPath)
+		providers.ShareGatewayConfig(finalPath)
 		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(finalPath), 0o700); err != nil {
@@ -202,7 +201,45 @@ func (b *Backend) writeStaticBootstrapYAML() error {
 		_ = os.Remove(tmpName)
 		return fmt.Errorf("activate static config: %w", err)
 	}
-	shareGatewayConfigCompat(finalPath)
+	providers.ShareGatewayConfig(finalPath)
+	return nil
+}
+
+// restorePreHandoffYAML puts the pre-handoff gateway config back after a
+// failed cutover verify, so the gateway never serves the empty bootstrap
+// with nothing behind it. No snapshot (fresh installs) is a no-op.
+func (b *Backend) restorePreHandoffYAML() error {
+	finalPath, snapshotPath := b.litellmConfigPaths()
+	raw, err := os.ReadFile(snapshotPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read pre-handoff snapshot: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(finalPath), 0o700); err != nil {
+		return fmt.Errorf("mkdir config dir: %w", err)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(finalPath), "litellm.yaml.*")
+	if err != nil {
+		return fmt.Errorf("stage restored config: %w", err)
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(raw); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("write restored config: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("close restored config: %w", err)
+	}
+	_ = os.Chmod(tmpName, 0o600)
+	if err := os.Rename(tmpName, finalPath); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("activate restored config: %w", err)
+	}
+	providers.ShareGatewayConfig(finalPath)
 	return nil
 }
 
@@ -563,6 +600,44 @@ func (b *Backend) revealLegacySecret(ctx context.Context, c *providers.Credentia
 	return v, nil
 }
 
+// handoffQuarantineReason reports why a legacy alias must not migrate
+// ("" = migratable): unknown names, duplicates, dangling references.
+func handoffQuarantineReason(name string, seen map[string]bool, credByID map[string]*providers.Credential, credID string) string {
+	if !isHandoffAlias(name) {
+		return "unsupported alias"
+	}
+	if seen[name] {
+		return "duplicate alias"
+	}
+	if _, ok := credByID[credID]; !ok {
+		return "missing credential"
+	}
+	return ""
+}
+
+// handoffMigratable filters legacy aliases to the migratable set, journaling
+// quarantine reasons per alias (handoff key "skipped/<name>") instead of
+// failing the whole setup.
+func (b *Backend) handoffMigratable(ctx context.Context, aliases []*providers.Alias, credByID map[string]*providers.Credential) []*providers.Alias {
+	seen := map[string]bool{}
+	out := make([]*providers.Alias, 0, len(aliases))
+	for _, a := range aliases {
+		if a == nil {
+			continue
+		}
+		name := strings.TrimSpace(a.Name)
+		if reason := handoffQuarantineReason(name, seen, credByID, string(a.CredentialID)); reason != "" {
+			_ = b.handoffSet(ctx, "skipped/"+name, reason)
+			log.Printf("provider model handoff: quarantined alias %q (%s)", name, reason)
+			continue
+		}
+		seen[name] = true
+		_ = b.handoffDel(ctx, "skipped/"+name)
+		out = append(out, a)
+	}
+	return out
+}
+
 func (b *Backend) handoffImport(ctx context.Context) error {
 	aliases, err := b.providers.ListAliases(ctx)
 	if err != nil {
@@ -583,30 +658,10 @@ func (b *Backend) handoffImport(ctx context.Context) error {
 		}
 		credByID[string(c.ID)] = c
 	}
-	// Validate alias references before touching the gateway.
-	seenAlias := map[string]bool{}
-	for _, a := range aliases {
-		if a == nil {
-			continue
-		}
-		name := strings.TrimSpace(a.Name)
-		if !isHandoffAlias(name) {
-			msg := "provider model handoff found unsupported alias " + name + "; retry setup"
-			b.handoffSetError(ctx, msg)
-			return fmt.Errorf("handoff unsupported alias %q; retry setup", name)
-		}
-		if seenAlias[name] {
-			msg := "provider model handoff found duplicate alias " + name + "; retry setup"
-			b.handoffSetError(ctx, msg)
-			return fmt.Errorf("handoff duplicate alias %q; retry setup", name)
-		}
-		seenAlias[name] = true
-		if _, ok := credByID[string(a.CredentialID)]; !ok {
-			msg := "provider model handoff found alias " + name + " with missing credential; retry setup"
-			b.handoffSetError(ctx, msg)
-			return fmt.Errorf("handoff alias %q references unknown credential; retry setup", name)
-		}
-	}
+	// Filter to the migratable set, quarantining unknown names, duplicates,
+	// and dangling credential references in the journal instead of failing
+	// the whole setup: one legacy custom alias must never block the rest.
+	aliases = b.handoffMigratable(ctx, aliases, credByID)
 	native, err := b.gateway.ListModels(ctx)
 	if err != nil {
 		msg := "LiteLLM gateway unavailable; retry setup"
@@ -765,8 +820,8 @@ func (b *Backend) handoffImport(ctx context.Context) error {
 				Mode:            mode,
 				LitellmProvider: provider,
 				Extra: map[string]any{
-					"omahab_handoff":       "1",
-					"omahab_source_alias":  name,
+					"omahab_handoff":      "1",
+					"omahab_source_alias": name,
 				},
 			},
 		}
@@ -803,11 +858,23 @@ func (b *Backend) handoffCutover(ctx context.Context) error {
 		b.handoffSetError(ctx, msg)
 		return fmt.Errorf("handoff list aliases: %w; retry setup", err)
 	}
-	wantNames := map[string]string{}
-	for _, a := range aliases {
-		if a == nil {
+	creds, err := b.providers.ListCredentials(ctx)
+	if err != nil {
+		msg := "provider model handoff verify failed; retry setup"
+		b.handoffSetError(ctx, msg)
+		return fmt.Errorf("handoff list credentials: %w; retry setup", err)
+	}
+	credByID := map[string]*providers.Credential{}
+	for _, c := range creds {
+		if c == nil {
 			continue
 		}
+		credByID[string(c.ID)] = c
+	}
+	// Verify only what import migrates; quarantined aliases stay on legacy
+	// rows and must not fail the cutover.
+	wantNames := map[string]string{}
+	for _, a := range b.handoffMigratable(ctx, aliases, credByID) {
 		name := strings.TrimSpace(a.Name)
 		wantNames[name] = migratedModelID(name)
 	}
@@ -823,11 +890,23 @@ func (b *Backend) handoffCutover(ctx context.Context) error {
 		return fmt.Errorf("handoff restart litellm: %w; retry setup", err)
 	}
 	// Re-read inventory and prove DB-backed ownership + name availability.
+	// Any failure after the restart restores the pre-handoff config (and
+	// restarts once more) so the gateway keeps serving legacy routing while
+	// the operator retries; without this the empty bootstrap would go live
+	// with nothing behind it.
+	restoreAndFail := func(msg string, err error) error {
+		b.handoffSetError(ctx, msg)
+		if rerr := b.restorePreHandoffYAML(); rerr != nil {
+			log.Printf("handoff restore pre-handoff config failed: %v", rerr)
+		} else if rerr := b.redeployBundle(ctx, "litellm"); rerr != nil {
+			log.Printf("handoff restart after restore failed: %v", rerr)
+		}
+		return err
+	}
 	native, err := b.gateway.ListModels(ctx)
 	if err != nil {
 		msg := "LiteLLM gateway unavailable; retry setup"
-		b.handoffSetError(ctx, msg)
-		return fmt.Errorf("handoff verify inventory: %w; retry setup", err)
+		return restoreAndFail(msg, fmt.Errorf("handoff verify inventory: %w; retry setup", err))
 	}
 	byID := map[string]providers.GatewayDeployment{}
 	byName := map[string]bool{}
@@ -839,18 +918,15 @@ func (b *Backend) handoffCutover(ctx context.Context) error {
 		d, ok := byID[id]
 		if !ok {
 			msg := "provider model handoff verify failed for alias " + name + "; retry setup"
-			b.handoffSetError(ctx, msg)
-			return fmt.Errorf("handoff missing imported model %q; retry setup", name)
+			return restoreAndFail(msg, fmt.Errorf("handoff missing imported model %q; retry setup", name))
 		}
 		if d.ModelInfo.DBModel == nil || !*d.ModelInfo.DBModel {
 			msg := "provider model handoff verify failed for alias " + name + "; retry setup"
-			b.handoffSetError(ctx, msg)
-			return fmt.Errorf("handoff model %q not database-backed; retry setup", name)
+			return restoreAndFail(msg, fmt.Errorf("handoff model %q not database-backed; retry setup", name))
 		}
 		if !byName[name] {
 			msg := "provider model handoff verify failed for alias " + name + "; retry setup"
-			b.handoffSetError(ctx, msg)
-			return fmt.Errorf("handoff model name %q unavailable; retry setup", name)
+			return restoreAndFail(msg, fmt.Errorf("handoff model name %q unavailable; retry setup", name))
 		}
 	}
 	if err := b.handoffSetPhase(ctx, handoffPhaseCutover); err != nil {
@@ -1028,7 +1104,7 @@ func (b *Backend) SeedModelAliases(ctx context.Context, req apitypes.SeedModelAl
 			}
 			found = true
 			if strings.TrimSpace(gc.CredentialInfo["omahab_seed_source_id"]) != modelID {
-				return apitypes.ModelSetupStatus{}, translateError(fmt.Errorf("%w: credential %q already exists for a different source", apitypes.ErrConflict, credName))
+				return apitypes.ModelSetupStatus{}, translateError(fmt.Errorf("%w: credential %q already exists for a different source model; delete it in LiteLLM or re-seed from the original source", apitypes.ErrConflict, credName))
 			}
 			break
 		}
@@ -1143,21 +1219,6 @@ func isOAuthSource(d providers.GatewayDeployment) bool {
 	return false
 }
 
-func shareGatewayConfigCompat(path string) {
-	// Mirror providers.shareGatewayConfig (unexported): group-readable by the
-	// litellm-cfg group. Missing group is ignored so tests keep working.
-	if grp, err := user.LookupGroup("litellm-cfg"); err == nil {
-		if gid, err := strconv.Atoi(grp.Gid); err == nil {
-			_ = os.Chown(path, 0, gid)
-			_ = os.Chmod(path, 0o640)
-			_ = os.Chown(filepath.Dir(path), 0, gid)
-			_ = os.Chmod(filepath.Dir(path), 0o750)
-			return
-		}
-	}
-	_ = os.Chmod(path, 0o640)
-	_ = os.Chmod(filepath.Dir(path), 0o750)
-}
 // nativeAliasAvailable reports whether a native omahab/* model_name deployment
 // exists. It backs Karakeep gating after the handoff (no SQLite fallback).
 func (b *Backend) nativeAliasAvailable(ctx context.Context, alias string) bool {
@@ -1175,6 +1236,7 @@ func (b *Backend) nativeAliasAvailable(ctx context.Context, alias string) bool {
 	}
 	return false
 }
+
 // nativeProbeModel chooses a live native deployment for OAuth probing,
 // preferring omahab/fast. Empty means no native model is configured.
 func (b *Backend) nativeProbeModel(ctx context.Context, provider string) string {

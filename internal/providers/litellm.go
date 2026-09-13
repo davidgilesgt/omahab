@@ -635,21 +635,21 @@ func NormalizeNativeModel(provider, credType, managedBy, externalRef, model stri
 	}
 }
 
-// shareGatewayConfig makes a freshly rendered config group-readable by the
-// litellm service group. Missing group or chown failure is ignored so tests
-// and foreign hosts keep working; the unit then fails closed on restart.
-func shareGatewayConfig(path string) {
-	grp, err := user.LookupGroup("litellm-cfg")
-	if err != nil {
-		return
+// ShareGatewayConfig makes a freshly rendered config group-readable by the
+// litellm service group. Missing group or chown failure falls back to plain
+// restrictive perms so tests and foreign hosts keep working; the unit then
+// fails closed on restart.
+func ShareGatewayConfig(path string) {
+	if grp, err := user.LookupGroup("litellm-cfg"); err == nil {
+		if gid, err := strconv.Atoi(grp.Gid); err == nil {
+			_ = os.Chown(path, 0, gid)
+			_ = os.Chmod(path, 0o640)
+			_ = os.Chown(filepath.Dir(path), 0, gid)
+			_ = os.Chmod(filepath.Dir(path), 0o750)
+			return
+		}
 	}
-	gid, err := strconv.Atoi(grp.Gid)
-	if err != nil {
-		return
-	}
-	_ = os.Chown(path, 0, gid)
 	_ = os.Chmod(path, 0o640)
-	_ = os.Chown(filepath.Dir(path), 0, gid)
 	_ = os.Chmod(filepath.Dir(path), 0o750)
 }
 
