@@ -369,14 +369,74 @@ function ProjectReleases({ project }: { project: Project }) {
 
 export function ProjectsPage() {
   const { client } = useAuth();
+  const queryClient = useQueryClient();
+  const toast = useToast();
   const query = useQuery({ queryKey: ["projects"], queryFn: client.projects });
+  const instanceQuery = useQuery({ queryKey: ["instance"], queryFn: client.instance });
   const [review, setReview] = useState<Project | null>(null);
+  const [showForm, setShowForm] = useState(false);
+  const [name, setName] = useState("");
+  const [slug, setSlug] = useState("");
+  const [formError, setFormError] = useState<string | null>(null);
   const projects = query.data ?? [];
-  const createCommand = "omahab project create --name my-app --repo https://forge.example.com/owner/repo";
+  const domain = (instanceQuery.data?.domain ?? "").trim();
+  const domainReady = domain !== "" && domain !== "example.com" && domain !== "not-configured.invalid";
+  const creationBlocked = instanceQuery.isSuccess && !domainReady;
+  const create = useMutation({
+    mutationFn: (input: { name: string; slug?: string }) => client.createProject(input),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["projects"] });
+      toast.success("Project created");
+      setName("");
+      setSlug("");
+      setFormError(null);
+      setShowForm(false);
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Could not create project"),
+  });
+  function openForm() {
+    setFormError(null);
+    setShowForm(true);
+  }
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const trimmedName = name.trim();
+    const trimmedSlug = slug.trim();
+    if (!trimmedName) {
+      setFormError("Name is required.");
+      return;
+    }
+    if (trimmedName.length > 100) {
+      setFormError("Name must be 100 characters or fewer.");
+      return;
+    }
+    if (trimmedSlug.length > 63) {
+      setFormError("Slug must be 63 characters or fewer.");
+      return;
+    }
+    setFormError(null);
+    create.mutate(trimmedSlug ? { name: trimmedName, slug: trimmedSlug } : { name: trimmedName });
+  }
   return (
     <div className="page">
-      <PageHeader eyebrow="Build & deploy" title="Projects and releases" description="Inspect immutable releases and deliberately select what is active." />
-      {query.isLoading ? <LoadingState label="Loading projects" /> : query.isError ? <ErrorState error={query.error} retry={() => void query.refetch()} /> : !projects.length ? <EmptyState title="No projects" description="Create a project with the CLI to connect a Forgejo repository and deployment pipeline." action={<div className="form-stack"><code className="mono">{createCommand}</code><CopyButton text={createCommand} label="Copy command" /></div>} /> : (
+      <PageHeader eyebrow="Build & deploy" title="Projects and releases" description="Inspect immutable releases and deliberately select what is active." actions={<button className="button primary" type="button" disabled={creationBlocked || create.isPending} onClick={openForm}>New project</button>} />
+      {showForm && (
+        <form className="form-stack" aria-label="New project" onSubmit={submit}>
+          {instanceQuery.isLoading ? <LoadingState label="Checking setup" /> : instanceQuery.isError ? <ErrorState error={instanceQuery.error} retry={() => void instanceQuery.refetch()} /> : !domainReady ? <p className="muted">Set up a domain before creating projects. <Link to="/setup">Continue setup</Link></p> : (
+            <>
+              <label>Name<input value={name} onChange={(e) => setName(e.target.value)} required maxLength={100} disabled={create.isPending} /></label>
+              <label>Slug (optional)<input value={slug} onChange={(e) => setSlug(e.target.value)} maxLength={63} placeholder="Derived from name" disabled={create.isPending} /></label>
+              <div className="row-actions">
+                <button className="button primary" type="submit" disabled={create.isPending}>{create.isPending ? "Creating…" : "Create project"}</button>
+                <button className="button secondary" type="button" disabled={create.isPending} onClick={() => { setShowForm(false); setFormError(null); }}>Cancel</button>
+              </div>
+            </>
+          )}
+          {formError ? <p className="inline-error" role="alert">{formError}</p> : null}
+          <MutationNotice error={create.error} />
+        </form>
+      )}
+      {query.isLoading ? <LoadingState label="Loading projects" /> : query.isError ? <ErrorState error={query.error} retry={() => void query.refetch()} /> : !projects.length ? <EmptyState title="No projects" description="Create a project to connect a Forgejo repository and deployment pipeline." action={<div className="form-stack"><button className="button primary" type="button" disabled={creationBlocked || create.isPending} onClick={openForm}>New project</button>{creationBlocked ? <p className="muted">Set up a domain before creating projects. <Link to="/setup">Continue setup</Link></p> : null}</div>} /> : (
         <div className="resource-list">{projects.map((project) => <article className="resource-row project-row" key={project.id}><div className="resource-main"><div className="resource-title"><h2>{project.name}</h2><StatusPill value={project.exposure} /></div><p>{project.repository_url}</p><small className="mono">{project.hostname} <CopyButton text={project.hostname} label="Copy" /></small><details><summary>Releases</summary><ProjectReleases project={project} /></details></div><div className="row-actions"><button className="button secondary" type="button" onClick={() => setReview(project)}>Exposure</button></div></article>)}</div>
       )}
       {review && <ExposureReview resource="projects" item={review} onClose={() => setReview(null)} />}
@@ -431,6 +491,14 @@ export function EventsPage() {
     },
     onError: (err) => toast.error(err instanceof Error ? err.message : "Could not mark read"),
   });
+  const markAll = useMutation({
+    mutationFn: client.markAllEventsRead,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["events"] });
+      toast.success("All events marked read");
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Could not mark all read"),
+  });
   const toggleNtfy = useMutation({
     mutationFn: (enabled: boolean) => client.setNtfyEnabled(enabled),
     onSuccess: () => {
@@ -445,7 +513,7 @@ export function EventsPage() {
   const ntfyUrl = topic ? `http://${typeof window !== "undefined" ? window.location.hostname : "omahab"}:2586/${topic}` : "";
   return (
     <div className="page">
-      <PageHeader eyebrow="Operational inbox" title="Events" description="A live, durable record of health changes and actions across your server." />
+      <PageHeader eyebrow="Operational inbox" title="Events" description="A live, durable record of health changes and actions across your server." actions={<button className="button secondary" type="button" disabled={markAll.isPending} onClick={() => markAll.mutate()}>{markAll.isPending ? "Marking…" : "Mark all read"}</button>} />
       <Section title="Phone notifications" description="Forward warning and error events to ntfy (mako/ntfy) on 127.0.0.1:2586 when enabled. Topic is random 24 chars, stored platform-app/ntfy_topic. Default off (DESIGN §20:919).">
         {ntfyQuery.isLoading ? <LoadingState label="Loading ntfy" /> : ntfyQuery.isError ? <ErrorState error={ntfyQuery.error} retry={() => void ntfyQuery.refetch()} /> : (
           <div style={{ display: "flex", gap: "1rem", alignItems: "flex-start", flexWrap: "wrap" }}>
@@ -478,7 +546,7 @@ export function EventsPage() {
       {query.isLoading ? <LoadingState label="Loading events" /> : query.isError ? <ErrorState error={query.error} retry={() => void query.refetch()} /> : !grouped?.length ? <EmptyState title="Inbox is clear" description="New operational events will appear here as they happen." /> : (
         <ol className="event-list">{grouped.map((event) => <li key={event.id} className={event.read_at ? "read" : "unread"}><span className="event-dot" aria-hidden="true" /><div><div className="resource-title"><StatusPill value={event.severity} /><strong>{event.message}</strong></div><p>{event.type.replaceAll(".", " · ")}</p><small>{formatDate(event.created_at)}</small></div>{!event.read_at && <button className="button ghost" type="button" disabled={read.isPending} onClick={() => read.mutate(event.id)}>Mark read</button>}</li>)}</ol>
       )}
-      <MutationNotice error={read.error} />
+      <MutationNotice error={read.error ?? markAll.error} />
     </div>
   );
 }

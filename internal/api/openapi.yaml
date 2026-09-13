@@ -2390,7 +2390,9 @@ components:
 
     CreateProjectRequest:
       type: object
-      required: [slug, name]
+      anyOf:
+        - required: [name]
+        - required: [slug]
       properties:
         slug: { type: string, pattern: '^[a-z0-9-]+$' }
         name: { type: string }

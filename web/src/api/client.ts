@@ -121,6 +121,8 @@ export class ApiClient {
     });
 
   projects = () => this.list<Project>("/projects");
+  createProject = (input: { name: string; slug?: string }) =>
+    this.request<Project>("/projects", { method: "POST", body: JSON.stringify(input) });
   releases = (projectId: string) => this.list<Release>(`/projects/${encodeURIComponent(projectId)}/releases`);
   rollbackRelease = (projectId: string, releaseId: string) =>
     this.request<Release>(`/projects/${encodeURIComponent(projectId)}/releases/${encodeURIComponent(releaseId)}/rollback`, {
@@ -134,6 +136,7 @@ export class ApiClient {
 
   events = () => this.list<ControlEvent>("/events");
   markEventRead = (id: string) => this.request<ControlEvent>(`/events/${encodeURIComponent(id)}/read`, { method: "POST", body: JSON.stringify({}) });
+  markAllEventsRead = () => this.request<void>("/events/read-all", { method: "POST" });
 
   syncFolders = () => this.list<SyncFolder>("/sync/folders");
   createSyncFolder = (input: { name: string; server_path: string; share_with_ai: boolean }) =>
