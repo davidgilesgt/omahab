@@ -452,6 +452,12 @@ func (c *PocketIDClient) CreateUser(ctx context.Context, email, name string, isA
 		"displayName":  name,
 		"isAdmin":      isAdmin,
 		"userGroupIds": groupIDs,
+		// Homelab trust model: no email infrastructure is hooked up, so
+		// verification mails can never arrive. The operator creates every
+		// account by hand (single user plus family/friends), which is the
+		// verification. Mark verified so OIDC email_verified claims are
+		// true and downstream auto-linking works (live: POST accepts it).
+		"emailVerified": true,
 	}
 	var created pocketUserDto
 	if err := c.doJSON(ctx, http.MethodPost, "/api/users", payload, &created); err != nil {

@@ -394,6 +394,10 @@ func TestCreateUser(t *testing.T) {
 						http.Error(w, `{"error":"bad email"}`, http.StatusBadRequest)
 						return
 					}
+					if body["emailVerified"] != true {
+						http.Error(w, `{"error":"email must be pre-verified"}`, http.StatusBadRequest)
+						return
+					}
 					json.NewEncoder(w).Encode(pocketUserDto{ID: "new-user", Username: "bob", Email: strPtr("bob@example.com"), DisplayName: "Bob"})
 					return
 				}
