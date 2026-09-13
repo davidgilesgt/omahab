@@ -51,7 +51,7 @@ function AdminDashboardRoutes() {
     <ProtectedRoute>
       <AppShell basePath="/admin">
         <Routes>
-          <Route path="/" element={<OverviewPage />} />
+          <Route index element={<OverviewPage />} />
           <Route path="setup" element={<SetupPage />} />
           <Route path="applications" element={<ApplicationsPage />} />
           <Route path="projects" element={<ProjectsPage />} />
@@ -165,6 +165,7 @@ export default function App() {
       <Route path="/login" element={<LoginPage />} />
       <Route path="/bootstrap" element={<Navigate to="/" replace />} />
       <Route path="/welcome/:token" element={<WelcomePage />} />
+      <Route path="/admin" element={<Navigate to="/admin/" replace />} />
       <Route path="/admin/*" element={<AdminDashboardRoutes />} />
       <Route path="/*" element={<DashboardRoutes />} />
     </Routes>
