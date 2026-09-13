@@ -475,6 +475,11 @@ in
           PRISMA_SCHEMA_ENGINE_BINARY = "${lib.getBin pkgs.prisma-engines_6}/bin/schema-engine";
           PRISMA_FMT_BINARY = "${lib.getBin pkgs.prisma-engines_6}/bin/prisma-fmt";
         };
+        # prisma-client-py resolves its query-engine binary at connect
+        # time by execing `openssl version` (binaries/platform); the
+        # default unit PATH lacks it, so connect() raises FileNotFound
+        # and the gateway dies during lifespan startup.
+        path = [ pkgs.openssl.bin ];
         serviceConfig = {
           # DynamicUser allocates an ephemeral UID and refuses a static
           # Group= ("already exists"); a static *supplementary* group is
