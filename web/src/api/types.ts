@@ -21,6 +21,7 @@ export interface Application {
   image: string;
   digest: string;
   hostname: string;
+  launch_url?: string;
   exposure: Exposure;
 
   health: Health;

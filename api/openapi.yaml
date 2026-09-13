@@ -2056,6 +2056,7 @@ components:
         image: { type: string }
         digest: { type: string }
         hostname: { type: string }
+        launch_url: { type: string, format: uri, description: "Computed browser destination (https + hostname + catalog app path). Empty when the bundle has no browser interface or no usable hostname." }
         exposure: { $ref: '#/components/schemas/Exposure' }
         health: { $ref: '#/components/schemas/Health' }
         desired_state: { type: string }

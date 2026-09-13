@@ -1,12 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { Link, useLocation } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../auth";
 import type { Application, Backup, Exposure, Project, Release } from "../api/types";
-import { EmptyState, ErrorState, formatDate, LoadingState, PageHeader, Section, shortDigest, StatusPill } from "../components/ui";
+import { EmptyState, ErrorState, formatDate, humanizeStatus, LoadingState, PageHeader, Section, shortDigest, StatusPill } from "../components/ui";
 import { QRCode } from "../components/qr";
 import { useToast } from "../components/toast";
 import { CopyButton } from "../components/copyButton";
+import { AppIcon } from "../components/appIcon";
 
 function MutationNotice({ error }: { error: unknown }) {
   if (!error) return null;
@@ -68,6 +69,8 @@ function DestructiveConfirm({
 
 export function OverviewPage() {
   const { client } = useAuth();
+  const { pathname } = useLocation();
+  const adminPrefix = pathname.startsWith("/admin") ? "/admin" : "";
   const status = useQuery({ queryKey: ["status"], queryFn: client.status });
   const applications = useQuery({ queryKey: ["applications"], queryFn: client.applications });
   const backups = useQuery({ queryKey: ["backups"], queryFn: client.backups });
@@ -84,66 +87,39 @@ export function OverviewPage() {
     undefined,
   );
   const unread = events.data?.filter((event) => !event.read_at) ?? [];
-  const publicCount = applications.data?.filter((a) => a.exposure === "public").length ?? 0;
-
-  function formatRelativeHours(iso: string): string {
-    const ms = Date.now() - Date.parse(iso);
-    if (!Number.isFinite(ms) || ms < 0) return "just now";
-    const h = Math.floor(ms / 3_600_000);
-    if (h < 1) {
-      const m = Math.floor(ms / 60_000);
-      return m <= 1 ? "just now" : `${m} min ago`;
-    }
-    if (h === 1) return "1 h ago";
-    if (h < 24) return `${h} h ago`;
-    const d = Math.floor(h / 24);
-    if (d === 1) return "1 day ago";
-    return `${d} days ago`;
-  }
-
-  function formatVerifiedDay(iso: string): string {
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return iso;
-    return new Intl.DateTimeFormat(undefined, { weekday: "long" }).format(d);
-  }
-
-  let trustSentence = "";
-  let trustAttention = false;
-  {
-    const totalServices = applications.data?.length ?? 0;
-    const backedUpPart = latestBackup ? `Backed up ${formatRelativeHours(latestBackup.finished_at ?? latestBackup.started_at)}` : "No backups yet";
-    const verifiedPart = latestBackup?.verified_at ? `and verified ${formatVerifiedDay(latestBackup.verified_at)}` : "but not verified";
-    const servicesPart = totalServices === 0 ? "No services" : unhealthy.length === 0 ? `${totalServices} services healthy` : `${unhealthy.length} of ${totalServices} need attention`;
-    const exposurePart = publicCount === 0 ? "Nothing is public." : `${publicCount} public.`;
-    trustSentence = `${backedUpPart} ${verifiedPart}. ${servicesPart}. ${exposurePart}`;
-    trustAttention = !latestBackup || !latestBackup.verified_at || unhealthy.length > 0 || publicCount > 0;
-  }
+  const launchers = (applications.data ?? []).filter((application) => application.launch_url);
 
   return (
     <div className="page">
+      <PageHeader title="Overview" description="Health, recovery readiness, and changes that need attention." />
+      <section className="launcher-strip" aria-label="Installed apps">
+        {applications.isLoading ? <LoadingState label="Loading app launchers" /> : applications.isError ? (
+          <ErrorState error={applications.error} retry={() => void applications.refetch()} />
+        ) : launchers.length === 0 ? (
+          <EmptyState title="No app launchers available" description="Installed apps with a browser interface appear here." action={<Link className="button secondary" to={`${adminPrefix}/applications`}>Applications</Link>} />
+        ) : (
+          <ul>
+            {launchers.map((application) => {
+              const url = application.launch_url ?? "";
+              return (
+                <li key={application.id}>
+                  <a href={url} target="_blank" rel="noreferrer" title={url}>
+                    <AppIcon bundleId={application.bundle_id} />
+                    <span>{application.name}</span>
+                    <small>{humanizeStatus(application.health)}{application.observed_state === "running" ? "" : ` · ${humanizeStatus(application.observed_state)}`}</small>
+                  </a>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </section>
       {setup.data && !setup.data.local_ready && (
-        <div className="banner-card" style={{ background: "var(--warning-bg)", border: "1px solid var(--warning)", padding: 12, borderRadius: 8, marginBottom: 16 }}>
-          <strong>Setup is not finished</strong> — <Link to="/setup">Continue setup</Link>
-        </div>
+        <p className="setup-notice" role="status"><strong>Setup is not finished</strong> — <Link to={`${adminPrefix}/setup`}>Continue setup</Link></p>
       )}
       {setup.data && setup.data.local_ready && setup.data.state !== "complete" && (
-        <div className="banner-card" style={{ background: "var(--positive-bg)", border: "1px solid var(--positive)", padding: 12, borderRadius: 8, marginBottom: 16 }} role="status">
-          <strong>Local control panel ready</strong> — <Link to="/setup">Connect your services</Link>: domain/HTTPS, identity (passkeys), recovery phrase, and backups are explicit next steps. Failures below are genuine.
-        </div>
+        <p className="setup-notice" role="status"><strong>Local control panel ready</strong> — <Link to={`${adminPrefix}/setup`}>Connect your services</Link></p>
       )}
-      <div
-        className={trustAttention ? "banner-card" : "trust-sentence"}
-        style={
-          trustAttention
-            ? { background: "var(--warning-bg)", border: "1px solid var(--warning)", padding: 12, borderRadius: 8, marginBottom: 16 }
-            : { background: "var(--positive-bg)", border: "1px solid var(--positive)", padding: 12, borderRadius: 8, marginBottom: 16 }
-        }
-        role="status"
-        aria-live="polite"
-      >
-        {trustSentence}
-      </div>
-      <PageHeader eyebrow="At a glance" title="Your server" description="Health, recovery readiness, and changes that need attention." />
       <div className="metric-strip">
         <article><span>Control plane</span><strong><StatusPill value={status.data.health} /></strong><small>Version {status.data.version}</small></article>
         <article><span>Applications</span><strong>{applications.data?.length ?? "—"}</strong><small>{unhealthy.length ? `${unhealthy.length} need attention` : "No reported issues"}</small></article>
@@ -174,6 +150,13 @@ export function OverviewPage() {
           ) : <EmptyState title="No backups yet" description="Create the first encrypted backup from the Backups page, then verify it can be restored." />}
         </Section>
       </div>
+      <style>{`
+        .launcher-strip ul { display: flex; flex-wrap: wrap; gap: 8px; list-style: none; margin: 0 0 16px; padding: 0; }
+        .launcher-strip a { display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; border: 1px solid var(--line, #e5e7eb); border-radius: 8px; background: var(--surface, #fff); text-decoration: none; color: inherit; }
+        .launcher-strip a:hover { border-color: var(--ink-muted, #9ca3af); }
+        .launcher-strip small { opacity: 0.7; }
+        .setup-notice { margin: 0 0 16px; }
+      `}</style>
     </div>
   );
 }
@@ -247,6 +230,10 @@ function ExposureReview({ resource, item, onClose }: ExposureReviewProps) {
     </dialog>
   );
 }
+// Bundles without a browser interface (no app_path in deploy/catalog/catalog.json).
+// The backend omits launch_url for these even when a hostname is stored
+// (e.g. Caddy's hostname points at the dashboard, not a Caddy UI).
+const INFRASTRUCTURE_BUNDLES: Record<string, true> = { caddy: true, "embedding-worker": true, "restic-server": true };
 
 export function ApplicationsPage() {
   const { client } = useAuth();
@@ -288,13 +275,14 @@ export function ApplicationsPage() {
               <tbody>
                 {applications.map((application) => {
                   const running = application.observed_state === "running";
-                  const url = application.hostname ? `https://${application.hostname}` : null;
+                  const url = application.launch_url || null;
+                  const infrastructure = INFRASTRUCTURE_BUNDLES[application.bundle_id] === true;
                   return (
                     <tr key={application.id}>
                       <td className="app-name">{url ? <a href={url} target="_blank" rel="noreferrer" title={url}>{application.name}</a> : application.name}</td>
                       <td><StatusPill value={application.health} /></td>
                       <td><StatusPill value={application.exposure} /></td>
-                      <td>{application.hostname || "—"} {application.hostname ? <CopyButton text={application.hostname} label="Copy" /> : null}</td>
+                      <td>{url ? <>{url} <CopyButton text={url} label="Copy launch URL" /></> : infrastructure ? "No web interface" : application.hostname ? <>{application.hostname} <CopyButton text={application.hostname} label="Copy" /></> : "—"}</td>
                       <td title={application.digest}>{shortDigest(application.digest)} <CopyButton text={application.digest} label="Copy digest" /></td>
                       <td>{application.desired_state}→{application.observed_state}</td>
                       <td>{formatDate(application.updated_at)}</td>

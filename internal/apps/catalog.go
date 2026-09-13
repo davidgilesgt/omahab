@@ -104,6 +104,10 @@ type Bundle struct {
 	Resources           ResourceGuidance `json:"resources,omitempty"`
 	Default             bool             `json:"default"`
 	Route               string           `json:"route"`
+	// AppPath is the browser entry point below the bundle's hostname
+	// ("/" or "/ui"). Empty means the bundle has no browser interface
+	// and never produces a launch URL.
+	AppPath             string           `json:"app_path,omitempty"`
 	Dependencies        []string         `json:"dependencies,omitempty"`
 	SecretSources       []string         `json:"secret_sources,omitempty"`
 	PipelineImage       string           `json:"pipeline_image,omitempty"`
@@ -128,6 +132,42 @@ func exposureRank(e domain.Exposure) int {
 
 func validSlug(s string) bool {
 	return len(s) <= 63 && slugRe.MatchString(s)
+}
+
+// validateAppPath enforces the browser-path contract: empty means no browser
+// interface; otherwise an absolute local path starting with exactly one "/",
+// with no URL authority/scheme/query/fragment, backslash, or "."/".." segments.
+// A browser path requires a nonempty route to resolve a hostname from.
+func validateAppPath(appPath, route string) string {
+	if appPath == "" {
+		return ""
+	}
+	if !strings.HasPrefix(appPath, "/") || strings.HasPrefix(appPath, "//") {
+		return fmt.Sprintf("app_path %q must begin with one \"/\"", appPath)
+	}
+	if strings.Contains(appPath, "\\") {
+		return fmt.Sprintf("app_path %q must not contain a backslash", appPath)
+	}
+	if strings.ContainsAny(appPath, "?#:") {
+		return fmt.Sprintf("app_path %q must not contain a URL authority, scheme, query, or fragment", appPath)
+	}
+	if strings.Contains(appPath, "//") {
+		return fmt.Sprintf("app_path %q must not contain \"//\"", appPath)
+	}
+	if appPath != "/" {
+		for _, seg := range strings.Split(strings.TrimPrefix(appPath, "/"), "/") {
+			if seg == "" {
+				return fmt.Sprintf("app_path %q must not contain empty segments", appPath)
+			}
+			if seg == "." || seg == ".." {
+				return fmt.Sprintf("app_path %q must not contain %q segments", appPath, seg)
+			}
+		}
+	}
+	if strings.TrimSpace(route) == "" {
+		return fmt.Sprintf("app_path %q requires a nonempty route", appPath)
+	}
+	return ""
 }
 
 // validate normalizes a bundle and enforces the catalog contract. It returns
@@ -207,6 +247,9 @@ func (b Bundle) validate() (Bundle, error) {
 	}
 	if len(b.Route) > 63 {
 		problems = append(problems, fmt.Sprintf("route %q must be at most 63 chars", b.Route))
+	}
+	if msg := validateAppPath(b.AppPath, b.Route); msg != "" {
+		problems = append(problems, msg)
 	}
 	seenDep := map[string]bool{}
 	for _, dep := range b.Dependencies {

@@ -83,6 +83,7 @@
       },
       "default": true,
       "route": "id",
+      "app_path": "/",
       "dependencies": [
         "caddy"
       ],
@@ -141,6 +142,7 @@
       },
       "default": true,
       "route": "git",
+      "app_path": "/",
       "dependencies": [
         "caddy",
         "pocket-id"
@@ -199,6 +201,7 @@
       },
       "default": true,
       "route": "ci",
+      "app_path": "/",
       "dependencies": [
         "caddy",
         "forgejo"
@@ -269,6 +272,7 @@
       },
       "default": true,
       "route": "photos",
+      "app_path": "/",
       "dependencies": [
         "caddy",
         "pocket-id"
@@ -325,6 +329,7 @@
       },
       "default": true,
       "route": "archive",
+      "app_path": "/",
       "dependencies": [
         "caddy",
         "pocket-id"
@@ -394,6 +399,7 @@
       },
       "default": true,
       "route": "keep",
+      "app_path": "/",
       "dependencies": [
         "caddy",
         "pocket-id"
@@ -446,6 +452,7 @@
       },
       "default": true,
       "route": "sync",
+      "app_path": "/",
       "dependencies": [
         "caddy"
       ],
@@ -505,6 +512,7 @@
       },
       "default": true,
       "route": "models",
+      "app_path": "/ui",
       "dependencies": [
         "caddy"
       ],
@@ -596,6 +604,7 @@
       },
       "default": true,
       "route": "ntfy",
+      "app_path": "/",
       "dependencies": [
         "caddy"
       ],
@@ -637,6 +646,7 @@
       },
       "default": true,
       "route": "ai.{{.Domain}}",
+      "app_path": "/",
       "dependencies": [
         "litellm",
         "pocket-id"

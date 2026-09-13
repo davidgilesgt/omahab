@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -133,6 +134,64 @@ func (b *Backend) GetDoctor(ctx context.Context) (*health.Report, error) {
 	return rep, nil
 }
 
+// applicationLaunchURL computes the browser destination for one application copy.
+// It is pure: no I/O, stored hostname/exposure untouched. Empty means no
+// browser interface (no catalog app path), an unknown bundle, an invalid
+// hostname, or a missing/sentinel domain without an explicit usable hostname.
+// An explicit valid stored hostname wins; otherwise the bundle route resolves
+// against the instance domain. Assembly is always https + hostname + app path;
+// service loopback ports and example.com fallbacks are never used.
+func applicationLaunchURL(app domain.Application, bundle apps.Bundle, domainName string) string {
+	if bundle.AppPath == "" {
+		return ""
+	}
+	hostname := ""
+	if h := strings.ToLower(strings.TrimSpace(app.Hostname)); h != "" {
+		if validateInstanceDomain(h) != nil {
+			return ""
+		}
+		hostname = h
+	} else {
+		h, ok := resolveBundleHostname(bundle.Route, domainName)
+		if !ok {
+			return ""
+		}
+		h = strings.ToLower(strings.TrimSpace(h))
+		if validateInstanceDomain(h) != nil {
+			return ""
+		}
+		hostname = h
+	}
+	return (&url.URL{Scheme: "https", Host: hostname, Path: bundle.AppPath}).String()
+}
+
+// launchContext reads the instance domain and indexes the catalog once per
+// call. Instance-read errors propagate through translateError; callers keep
+// GET handlers read-only (response copies only, no stored-state writes).
+func (b *Backend) launchContext(ctx context.Context) (map[string]apps.Bundle, string, error) {
+	inst, err := b.store.Instance(ctx)
+	if err != nil {
+		return nil, "", translateError(err)
+	}
+	bundles := map[string]apps.Bundle{}
+	if b.apps != nil {
+		for _, bd := range b.apps.CatalogBundles() {
+			bundles[bd.ID] = bd
+		}
+	}
+	return bundles, strings.TrimSpace(inst.Domain), nil
+}
+
+func (b *Backend) decorateApplication(app domain.Application, bundles map[string]apps.Bundle, domainName string) domain.Application {
+	bundle, ok := bundles[app.BundleID]
+	if !ok {
+		app.LaunchURL = ""
+		return app
+	}
+	app.LaunchURL = applicationLaunchURL(app, bundle, domainName)
+	return app
+}
+
 // Applications
 
 func (b *Backend) ListApplications(ctx context.Context, p apitypes.Pagination) ([]domain.Application, error) {
@@ -143,9 +202,13 @@ func (b *Backend) ListApplications(ctx context.Context, p apitypes.Pagination) (
 	if err != nil {
 		return nil, translateError(err)
 	}
+	bundles, domainName, err := b.launchContext(ctx)
+	if err != nil {
+		return nil, err
+	}
 	apps := make([]domain.Application, 0, len(list))
 	for _, s := range list {
-		apps = append(apps, s.Application)
+		apps = append(apps, b.decorateApplication(s.Application, bundles, domainName))
 	}
 	// pagination
 	return paginate(apps, p), nil
@@ -164,7 +227,11 @@ func (b *Backend) InstallApplication(ctx context.Context, req apitypes.InstallAp
 	if err != nil {
 		return domain.Application{}, translateError(err)
 	}
-	return st.Application, nil
+	bundles, domainName, err := b.launchContext(ctx)
+	if err != nil {
+		return domain.Application{}, err
+	}
+	return b.decorateApplication(st.Application, bundles, domainName), nil
 }
 
 func (b *Backend) ListCatalog(ctx context.Context) ([]apitypes.CatalogBundle, error) {
@@ -208,7 +275,11 @@ func (b *Backend) GetApplication(ctx context.Context, id domain.ID) (domain.Appl
 	if err != nil {
 		return domain.Application{}, translateError(err)
 	}
-	return st.Application, nil
+	bundles, domainName, err := b.launchContext(ctx)
+	if err != nil {
+		return domain.Application{}, err
+	}
+	return b.decorateApplication(st.Application, bundles, domainName), nil
 }
 
 func (b *Backend) UpdateApplication(ctx context.Context, id domain.ID, req apitypes.UpdateApplicationRequest) (domain.Application, error) {
@@ -233,13 +304,21 @@ func (b *Backend) UpdateApplication(ctx context.Context, id domain.ID, req apity
 			if err != nil {
 				return domain.Application{}, translateError(err)
 			}
-			return st.Application, nil
+			bundles, domainName, lerr := b.launchContext(ctx)
+			if lerr != nil {
+				return domain.Application{}, lerr
+			}
+			return b.decorateApplication(st.Application, bundles, domainName), nil
 		case "stopped":
 			st, err := b.apps.Stop(ctx, id)
 			if err != nil {
 				return domain.Application{}, translateError(err)
 			}
-			return st.Application, nil
+			bundles, domainName, lerr := b.launchContext(ctx)
+			if lerr != nil {
+				return domain.Application{}, lerr
+			}
+			return b.decorateApplication(st.Application, bundles, domainName), nil
 		default:
 			return domain.Application{}, translateError(fmt.Errorf("%w: invalid desired_state %q", store.ErrValidation, *req.DesiredState))
 		}
@@ -251,19 +330,26 @@ func (b *Backend) DoApplicationAction(ctx context.Context, id domain.ID, action 
 	if b.apps == nil {
 		return domain.Application{}, translateError(fmt.Errorf("%w: apps not configured", ErrNotConfigured))
 	}
+	launch := func(app domain.Application) (domain.Application, error) {
+		bundles, domainName, err := b.launchContext(ctx)
+		if err != nil {
+			return domain.Application{}, err
+		}
+		return b.decorateApplication(app, bundles, domainName), nil
+	}
 	switch strings.ToLower(strings.TrimSpace(action)) {
 	case "start":
 		st, err := b.apps.Start(ctx, id)
 		if err != nil {
 			return domain.Application{}, translateError(err)
 		}
-		return st.Application, nil
+		return launch(st.Application)
 	case "stop":
 		st, err := b.apps.Stop(ctx, id)
 		if err != nil {
 			return domain.Application{}, translateError(err)
 		}
-		return st.Application, nil
+		return launch(st.Application)
 	case "restart":
 		// stop then start
 		if _, err := b.apps.Stop(ctx, id); err != nil {
@@ -273,7 +359,7 @@ func (b *Backend) DoApplicationAction(ctx context.Context, id domain.ID, action 
 		if err != nil {
 			return domain.Application{}, translateError(err)
 		}
-		return st.Application, nil
+		return launch(st.Application)
 	case "update":
 		// requires digest param in action? For generic action we need digest; fail with validation
 		return domain.Application{}, translateError(fmt.Errorf("%w: update requires digest; use PATCH", store.ErrValidation))
@@ -282,7 +368,7 @@ func (b *Backend) DoApplicationAction(ctx context.Context, id domain.ID, action 
 		if err != nil {
 			return domain.Application{}, translateError(err)
 		}
-		return st.Application, nil
+		return launch(st.Application)
 	case "uninstall":
 		if err := b.apps.Uninstall(ctx, id); err != nil {
 			return domain.Application{}, translateError(err)
@@ -293,7 +379,7 @@ func (b *Backend) DoApplicationAction(ctx context.Context, id domain.ID, action 
 		if err != nil {
 			return domain.Application{}, translateError(err)
 		}
-		return st.Application, nil
+		return launch(st.Application)
 	default:
 		return domain.Application{}, translateError(fmt.Errorf("%w: unknown action %q", store.ErrValidation, action))
 	}

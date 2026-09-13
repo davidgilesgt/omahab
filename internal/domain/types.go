@@ -57,6 +57,9 @@ type Application struct {
 	ObservedState string     `json:"observed_state"`
 	InstalledAt   *time.Time `json:"installed_at,omitempty"`
 	UpdatedAt     time.Time  `json:"updated_at"`
+	// LaunchURL is the computed browser destination (https + hostname + catalog
+	// app path). It is not stored and never a loopback or example.com fallback.
+	LaunchURL string `json:"launch_url,omitempty"`
 }
 
 type Project struct {

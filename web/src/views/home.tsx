@@ -1,26 +1,24 @@
 import { useQuery } from "@tanstack/react-query";
-import { Bookmark, FileText, FolderSync, GitBranch, Hammer, Image, Sparkles } from "lucide-react";
-import type { LucideIcon } from "lucide-react";
 import { useAuth } from "../auth";
 import { ErrorState, LoadingState, Section, StatusPill } from "../components/ui";
+import { AppIcon } from "../components/appIcon";
 
 type TileDef = {
   id: string;
   name: string;
   purpose: string;
-  icon: LucideIcon;
   route: string;
   group: "everyday" | "build";
 };
 
 const TILES: TileDef[] = [
-  { id: "immich", name: "Photos", purpose: "Private photo library", icon: Image, route: "photos", group: "everyday" },
-  { id: "paperless-ngx", name: "Archive", purpose: "Document archive", icon: FileText, route: "archive", group: "everyday" },
-  { id: "karakeep", name: "Keep", purpose: "Bookmarks & saves", icon: Bookmark, route: "keep", group: "everyday" },
-  { id: "syncthing", name: "Sync", purpose: "File sync", icon: FolderSync, route: "sync", group: "everyday" },
-  { id: "hermes", name: "AI", purpose: "Your AI assistant", icon: Sparkles, route: "ai", group: "everyday" },
-  { id: "forgejo", name: "Git", purpose: "Code hosting", icon: GitBranch, route: "git", group: "build" },
-  { id: "woodpecker", name: "CI", purpose: "Builds & deploys", icon: Hammer, route: "ci", group: "build" },
+  { id: "immich", name: "Photos", purpose: "Private photo library", route: "photos", group: "everyday" },
+  { id: "paperless-ngx", name: "Archive", purpose: "Document archive", route: "archive", group: "everyday" },
+  { id: "karakeep", name: "Keep", purpose: "Bookmarks & saves", route: "keep", group: "everyday" },
+  { id: "syncthing", name: "Sync", purpose: "File sync", route: "sync", group: "everyday" },
+  { id: "hermes", name: "AI", purpose: "Your AI assistant", route: "ai", group: "everyday" },
+  { id: "forgejo", name: "Git", purpose: "Code hosting", route: "git", group: "build" },
+  { id: "woodpecker", name: "CI", purpose: "Builds & deploys", route: "ci", group: "build" },
 ];
 
 function getDomain(): string {
@@ -106,12 +104,11 @@ export function HomePage() {
         <div className="tile-grid">
           {everyday.map((tile) => {
             const h = healthById.get(tile.id) ?? "unknown";
-            const Icon = tile.icon;
             return (
               <a key={tile.id} className="tile" href={tileHref(tile)} target="_blank" rel="noreferrer">
                 <div className="tile-head">
                   <span className="tile-icon" aria-hidden="true">
-                    <Icon size={20} strokeWidth={1.75} />
+                    <AppIcon bundleId={tile.id} size={20} />
                   </span>
                   <HealthDot health={h} />
                 </div>
@@ -130,12 +127,11 @@ export function HomePage() {
         <div className="tile-grid">
           {build.map((tile) => {
             const h = healthById.get(tile.id) ?? "unknown";
-            const Icon = tile.icon;
             return (
               <a key={tile.id} className="tile" href={tileHref(tile)} target="_blank" rel="noreferrer">
                 <div className="tile-head">
                   <span className="tile-icon" aria-hidden="true">
-                    <Icon size={20} strokeWidth={1.75} />
+                    <AppIcon bundleId={tile.id} size={20} />
                   </span>
                   <HealthDot health={h} />
                 </div>
