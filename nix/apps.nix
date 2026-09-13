@@ -520,8 +520,9 @@ in
         # Runtime subprocess deps: `openssl` for prisma's engine-platform
         # detection (without it connect() raises FileNotFound and the
         # gateway dies during lifespan startup), `node` so the `prisma`
-        # CLI can run `db push` without bootstrapping nodeenv.
-        path = [ pkgs.openssl.bin pkgs.nodejs ];
+        # CLI can run `db push` without bootstrapping nodeenv, and `bash`
+        # to provide `sh` for npm lifecycle scripts.
+        path = [ pkgs.openssl.bin pkgs.nodejs pkgs.bash ];
         serviceConfig = {
           # DynamicUser allocates an ephemeral UID and refuses a static
           # Group= ("already exists"); a static *supplementary* group is
