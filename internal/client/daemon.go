@@ -476,7 +476,7 @@ func (d *Daemon) dispatchSocket(req SocketRequest) SocketResponse {
 			if home == "" {
 				home = os.Getenv("HOME")
 			}
-			dir = filepath.Join(home, "Projects", slug)
+			dir = filepath.Join(home, "projects", slug)
 		}
 		if d.remote == nil {
 			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: "not connected to server"}}
@@ -541,7 +541,7 @@ func (d *Daemon) dispatchSocket(req SocketRequest) SocketResponse {
 			if home == "" {
 				home = os.Getenv("HOME")
 			}
-			dir = filepath.Join(home, "Projects", slug)
+			dir = filepath.Join(home, "projects", slug)
 		}
 		if err := d.launcher.OpenTerminal(dir); err != nil {
 			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: err.Error()}}

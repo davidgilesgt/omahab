@@ -41,6 +41,16 @@ Remaining delight item; trust items verified and removed.
 
 - [ ] **Feed all views from one SSE stream.** Daemon SSE is production-ready (`internal/api/sse.go`: Last-Event-ID replay, heartbeats); `web/src/components/shell.tsx` still uses `useQuery` polling and `web/src/views/operations.tsx` invalidates `queryClient` on mutation rather than driving TanStack Query cache from a single shell `EventSource`. Consolidate into one `EventSource` in the shell and update the cache by event type so app health and backups feel live.
 
+## Direction (agreed 2026-09-13)
+
+- [ ] D1 One-shot setup: keep bang-out order (SSH keys → Tailscale → domain/Cloudflare → passkeys → providers → storage → recovery → Hetzner backup+verify); persist progress server-side; `omahab setup` parity for Tailscale+Cloudflare.
+- [ ] D2 AI-forward files-over-MCP: shrink Hermes MCP to read-only search/get (`docs_search/doc_get` + `immich_search`/`karakeep_search` as needed); ingestion via filesystem drop folders, not upload tools; no server-management mutation tools.
+- [ ] D3 Drops inbox + smart router: server `drops` Syncthing folder (`/srv/omahab/sync/drops`, `share_with_ai=false`) + dumb MIME/extension router (pdf → Paperless consume, photo/video → Immich import, media → Jellyfin library); Omarchy plugin shows `~/drops/inbox`.
+- [ ] D4 Projects Git-only + lowercase: canonical `~/projects/<slug>`; new `project.create` socket method (create listing + autocreate Forgejo repo via `scm.Provision`, `git clone`, open terminal); `kind: code|docs` (`docs` skips ONCE seed + Woodpecker); Syncthing never for project trees.
+- [ ] D5 Obsidian vault: auto-provision `obsidian` sync folder (`share_with_ai=true`, knowledge `notes` source) + auto-enroll devices; RW-mount vault into Hermes with Obsidian CLI (content only, never `.obsidian/`); Restic = disaster recovery, not version history (Git if history needed).
+- [ ] D6 Apps: Jellyfin + AdGuard in scope (AdGuard default-off, LAN-only, must not break `DESIGN §7.2` DNS); Ollama stays out (mini-PC target; Proxmox VM if needed).
+
+
 ---
 
 ## Deferred (explicitly out of scope for now)

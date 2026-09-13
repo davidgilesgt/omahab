@@ -164,6 +164,8 @@ in
       "d ${stateDir}/caddy 0750 root omahab-caddy - -"
       # Syncthing data dir under /srv/omahab (module chowns it).
       "d ${dataDir}/sync 0755 syncthing syncthing - -"
+      "d ${dataDir}/sync/obsidian 0750 syncthing syncthing - -"
+      "d ${dataDir}/sync/drops 0750 syncthing syncthing - -"
       "d ${stateDir}/hermes 0700 10000 10000 - -"
       # Immich uses a non-default mediaLocation the module never creates
       # (its `e` rule only repairs existing dirs): pre-create config +
@@ -563,7 +565,7 @@ in
       };
       cmd = [ "gateway" "run" ];
       environmentFiles = [ "${appEnv}/hermes.env" ];
-      volumes = [ "/var/lib/omahab/hermes:/opt/data" ];
+      volumes = [ "/var/lib/omahab/hermes:/opt/data" "${dataDir}/sync/obsidian:/vault:rw" ];
       # Host networking: the gateway must fetch OIDC discovery from the
       # public issuer (https://id.<domain>, a Tailscale IP) exactly like
       # native services do — from the default bridge that fetch times out

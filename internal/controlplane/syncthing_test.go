@@ -56,3 +56,33 @@ func TestImportSyncthingAPIKey(t *testing.T) {
 		t.Fatalf("rotated key = %q err=%v", got, err)
 	}
 }
+
+func TestEnsureDefaultSyncFolders(t *testing.T) {
+	ctx := context.Background()
+	b := newTestBackend(t, nil)
+	if b.syncer == nil {
+		t.Fatal("syncer not wired")
+	}
+
+	b.ensureDefaultSyncFolders(ctx)
+	b.ensureDefaultSyncFolders(ctx)
+
+	ob, err := b.syncer.GetByName(ctx, "obsidian")
+	if err != nil {
+		t.Fatalf("obsidian folder: %v", err)
+	}
+	if !ob.ShareWithAI {
+		t.Fatal("obsidian must share with AI (notes source)")
+	}
+	if got := filepath.Join(b.cfg.DataDir, "sync", "obsidian"); ob.ServerPath != got {
+		t.Fatalf("obsidian path = %q, want %q", ob.ServerPath, got)
+	}
+
+	dr, err := b.syncer.GetByName(ctx, "drops")
+	if err != nil {
+		t.Fatalf("drops folder: %v", err)
+	}
+	if dr.ShareWithAI {
+		t.Fatal("drops must not share with AI (router output is indexed once by its target app)")
+	}
+}

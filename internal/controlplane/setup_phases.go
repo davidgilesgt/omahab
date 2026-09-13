@@ -1136,7 +1136,35 @@ func (b *Backend) setupPhaseCoreApps(ctx context.Context) error {
 	// service has started so the syncer client can authenticate.
 	// Best-effort: never fails setup.
 	b.importSyncthingAPIKey(ctx)
+	// Default sync folders: obsidian vault (AI-shared notes source) and
+	// drops inbox (unshared; the smart router fans out to Paperless/Immich).
+	// Best-effort: never fails setup.
+	b.ensureDefaultSyncFolders(ctx)
 	return nil
+}
+
+// ensureDefaultSyncFolders provisions the omakase sync folders idempotently.
+// obsidian shares with AI (knowledge "notes" source via the syncer registrar);
+// drops stays unshared so the router output is indexed once by its target app.
+func (b *Backend) ensureDefaultSyncFolders(ctx context.Context) {
+	if b.syncer == nil || strings.TrimSpace(b.cfg.DataDir) == "" {
+		return
+	}
+	defaults := []struct {
+		name        string
+		shareWithAI bool
+	}{
+		{name: "obsidian", shareWithAI: true},
+		{name: "drops", shareWithAI: false},
+	}
+	for _, d := range defaults {
+		if _, err := b.syncer.GetByName(ctx, d.name); err == nil {
+			continue
+		}
+		serverPath := filepath.Join(b.cfg.DataDir, "sync", d.name)
+		_ = os.MkdirAll(serverPath, 0o750)
+		_, _ = b.syncer.Create(ctx, syncer.CreateInput{Name: d.name, ServerPath: serverPath, ShareWithAI: d.shareWithAI})
+	}
 }
 
 // renderNativeAppEnv writes the env files that gate the nix-defined
