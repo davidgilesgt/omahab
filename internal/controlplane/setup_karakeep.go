@@ -75,12 +75,9 @@ func (b *Backend) ensureKarakeepLiteLLMKey(ctx context.Context) error {
 		log.Printf("setup dependent_apps: providers/secrets not configured; skipping karakeep key")
 		return nil
 	}
-	if _, err := b.providers.GetAlias(ctx, providers.AliasKarakeep); err != nil {
-		if errors.Is(err, providers.ErrNotFound) {
-			log.Printf("setup dependent_apps: omahab/karakeep alias not mapped; karakeep AI stays off")
-			return nil
-		}
-		return fmt.Errorf("karakeep alias lookup: %w", err)
+	if !b.nativeAliasAvailable(ctx, providers.AliasKarakeep) {
+		log.Printf("setup dependent_apps: omahab/karakeep alias not mapped; karakeep AI stays off")
+		return nil
 	}
 	existing, err := b.readAppEnv("karakeep")
 	if err != nil {

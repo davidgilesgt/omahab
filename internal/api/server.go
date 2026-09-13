@@ -329,15 +329,10 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/api/v1/users/{id}/app-access", s.handleListApplicationAccess)
 		r.Get("/api/v1/users/{id}/groups", s.handleGetUserGroups)
 		r.Put("/api/v1/users/{id}/groups", s.withBodyLimit(defaultBodyLimit, s.handleSetUserGroups))
-		// Provider credentials
-		r.Get("/api/v1/provider-credentials", s.handleListProviderCredentials)
-		r.Post("/api/v1/provider-credentials", s.withBodyLimit(defaultBodyLimit, s.handleCreateProviderCredential))
-		r.Get("/api/v1/provider-credentials/{id}", s.handleGetProviderCredential)
-		r.Delete("/api/v1/provider-credentials/{id}", s.handleDeleteProviderCredential)
-
-		// Model gateway (LiteLLM) — admin
-		r.Get("/api/v1/model-aliases", s.handleListModelAliases)
-		r.Put("/api/v1/model-aliases/{name}", s.withBodyLimit(defaultBodyLimit, s.handleSetModelAlias))
+		// Model gateway (LiteLLM virtual keys) + native setup-models onboarding.
+		// No endpoint accepts provider credentials from the browser.
+		r.Get("/api/v1/setup/models", s.handleGetModelSetup)
+		r.Post("/api/v1/setup/models/seed", s.withBodyLimit(defaultBodyLimit, s.handleSeedModelAliases))
 		r.Get("/api/v1/model-keys", s.handleListModelKeys)
 		r.Post("/api/v1/model-keys", s.withBodyLimit(defaultBodyLimit, s.handleCreateModelKey))
 		r.Delete("/api/v1/model-keys/{id}", s.handleDeleteModelKey)

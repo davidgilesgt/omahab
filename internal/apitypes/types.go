@@ -33,37 +33,36 @@ type ExposureState struct {
 	UpdatedAt    time.Time       `json:"updated_at"`
 }
 
-// ProviderCredential represents a model provider credential (metadata only).
-// Value and secret_id are never returned; managed_by distinguishes API-key vs subscription.
-type ProviderCredential struct {
-	ID          domain.ID  `json:"id"`
-	Provider    string     `json:"provider"`
-	Name        string     `json:"name"`
-	Kind        string     `json:"kind"`
-	Status      string     `json:"status"`
-	Configured  bool       `json:"configured"`
-	ManagedBy   string     `json:"managed_by"`
-	ExternalRef *string    `json:"external_ref,omitempty"`
-	Entitlement *string    `json:"entitlement,omitempty"`
-	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+
+// ModelSetupDeployment is one selectable native LiteLLM deployment: only
+// global database deployments with a known provider and chat/responses mode.
+type ModelSetupDeployment struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Model    string `json:"model"`
+	Provider string `json:"provider"`
+	Mode     string `json:"mode"`
 }
 
-// ModelAlias is a stable omahab/* alias routed via LiteLLM.
-type ModelAlias struct {
-	Name          string    `json:"name"`
-	CredentialID  domain.ID `json:"credential_id"`
-	Model         string    `json:"model"`
-	FallbackOrder []string  `json:"fallback_order,omitempty"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+// ModelSetupAlias summarizes one supported omahab/* alias from native metadata.
+type ModelSetupAlias struct {
+	Name       string   `json:"name"`
+	Configured bool     `json:"configured"`
+	Providers  []string `json:"providers"`
 }
 
-// SetModelAliasRequest is the body for PUT /api/v1/model-aliases/{name}.
-type SetModelAliasRequest struct {
-	CredentialID  string   `json:"credential_id"`
-	Model         string   `json:"model"`
-	FallbackOrder []string `json:"fallback_order,omitempty"`
+// ModelSetupStatus is the safe setup-models response. It carries no secrets.
+type ModelSetupStatus struct {
+	ManagementURL     string                 `json:"management_url,omitempty"`
+	MigrationComplete bool                   `json:"migration_complete"`
+	MigrationError    string                 `json:"migration_error,omitempty"`
+	Deployments       []ModelSetupDeployment `json:"deployments"`
+	Aliases           []ModelSetupAlias      `json:"aliases"`
+}
+
+// SeedModelAliasesRequest seeds missing chat-role aliases from one deployment.
+type SeedModelAliasesRequest struct {
+	ModelID string `json:"model_id"`
 }
 
 // ModelKey is metadata for a scoped LiteLLM virtual key (plaintext never returned except once on create).
@@ -388,12 +387,6 @@ type UpdateUserRequest struct {
 	Disabled *bool     `json:"disabled,omitempty"`
 }
 
-type CreateProviderCredentialRequest struct {
-	Provider string `json:"provider"`
-	Name     string `json:"name"`
-	Kind     string `json:"kind"`
-	Value    string `json:"value"`
-}
 
 type EmailIngestRequest struct {
 	From      string `json:"from"`

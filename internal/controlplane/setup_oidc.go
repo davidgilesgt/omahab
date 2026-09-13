@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -519,9 +520,26 @@ func (b *Backend) ensureLitellmOIDC(ctx context.Context, domainName string) erro
 		// stays for service/API use).
 		"AUTO_REDIRECT_UI_LOGIN_TO_SSO": "true",
 	}
+	// Preserve the catalog's admins-only application access for the models UI.
+	if err := b.pocketClient.EnsureOIDCClientGroupAccess(ctx, clientID, []string{"admins"}); err != nil {
+		return fmt.Errorf("ensure litellm group access: %w", err)
+	}
 	existing, err := b.readAppEnv("litellm")
 	if err != nil {
 		return fmt.Errorf("read litellm appenv: %w", err)
+	}
+	// PROXY_ADMIN_ID bootstrap: keep an explicit value byte-for-byte; when
+	// absent, use the earliest-created active local administrator with a
+	// nonempty PocketUserID (groups admins/admin, stable ID tie-break),
+	// matching the OIDC subject. Do not promote every SSO user. No eligible
+	// administrator leaves the key unset with a prerequisite notice, never a
+	// master-key fallback.
+	if v := strings.TrimSpace(existing["PROXY_ADMIN_ID"]); v != "" {
+		want["PROXY_ADMIN_ID"] = v
+	} else if adminID, aerr := b.litellmProxyAdminID(ctx); aerr == nil && strings.TrimSpace(adminID) != "" {
+		want["PROXY_ADMIN_ID"] = strings.TrimSpace(adminID)
+	} else {
+		log.Printf("setup oidc: litellm admin bootstrap deferred: no eligible Pocket ID administrator yet")
 	}
 	converged := true
 	for k, v := range want {
@@ -540,6 +558,48 @@ func (b *Backend) ensureLitellmOIDC(ctx context.Context, domainName string) erro
 	}
 	log.Printf("setup oidc: litellm client ensured")
 	return nil
+}
+
+// litellmProxyAdminID returns the OIDC subject for PROXY_ADMIN_ID: the
+// earliest-created active local administrator with a nonempty PocketUserID in
+// groups admins/admin (stable ID tie-break). Empty means the prerequisite is
+// not yet met; callers must surface that, never a master key.
+func (b *Backend) litellmProxyAdminID(ctx context.Context) (string, error) {
+	if b.db == nil {
+		return "", fmt.Errorf("db not configured")
+	}
+	rows, err := b.db.QueryContext(ctx, `SELECT id, pocket_user_id, groups_json FROM controlplane_users WHERE disabled = 0 ORDER BY created_at ASC, id ASC`)
+	if err != nil {
+		if strings.Contains(err.Error(), "no such column") {
+			return "", fmt.Errorf("pocket_user_id not available")
+		}
+		return "", err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, groupsJSON string
+		var pocketID sql.NullString
+		if err := rows.Scan(&id, &pocketID, &groupsJSON); err != nil {
+			continue
+		}
+		if !pocketID.Valid || strings.TrimSpace(pocketID.String) == "" {
+			continue
+		}
+		var groups []string
+		_ = json.Unmarshal([]byte(groupsJSON), &groups)
+		admin := false
+		for _, g := range groups {
+			if g == "admins" || g == "admin" {
+				admin = true
+				break
+			}
+		}
+		if !admin {
+			continue
+		}
+		return strings.TrimSpace(pocketID.String), nil
+	}
+	return "", sql.ErrNoRows
 }
 
 // ensureLitellmPostgresAuth syncs the litellm role password with the

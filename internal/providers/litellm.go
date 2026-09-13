@@ -32,13 +32,107 @@ func ValidateCallbackPath(p string) error { return validateCallbackPath(p) }
 // GatewayAdmin is the single control-plane boundary for the LiteLLM gateway.
 type GatewayAdmin interface {
 	Health(ctx context.Context) error
-	ReconcileModels(ctx context.Context, aliases []Alias, creds []Credential) error
+	ListModels(ctx context.Context) ([]GatewayDeployment, error)
+	GetModel(ctx context.Context, id string) (GatewayDeployment, error)
+	CreateModel(ctx context.Context, deployment GatewayDeployment) error
+	ListGatewayCredentials(ctx context.Context) ([]GatewayCredentialSummary, error)
+	CreateGatewayCredential(ctx context.Context, input GatewayCredentialInput) error
 	IssueVirtualKey(ctx context.Context, vk VirtualKey) (string, error)
 	RevokeVirtualKey(ctx context.Context, gatewayKeyID, keyAlias string) error
 	StartOAuth(ctx context.Context, provider, flow string) (OAuthSession, error)
 	PollOAuth(ctx context.Context, sessionID string) (OAuthSession, error)
 	ForwardOAuthCallback(ctx context.Context, sessionID, callbackPath string) error
 	ProbeModel(ctx context.Context, model, virtualKey string) error
+}
+
+// GatewayModelInfo carries native deployment metadata. Extra preserves
+// unknown fields (team membership, blocked state, handoff/seed tags) so
+// callers can detect conflicts without losing data. It is metadata only;
+// LiteLLM never returns secrets here (no return_keys option).
+type GatewayModelInfo struct {
+	ID              string `json:"id"`
+	DBModel         *bool  `json:"db_model,omitempty"`
+	Mode            string `json:"mode,omitempty"`
+	LitellmProvider string `json:"litellm_provider,omitempty"`
+	TeamID          *string `json:"team_id,omitempty"`
+	Blocked         *bool   `json:"blocked,omitempty"`
+	Extra           map[string]any `json:"-"`
+}
+
+// GatewayDeployment is one native LiteLLM router deployment.
+type GatewayDeployment struct {
+	ModelName     string         `json:"model_name"`
+	LitellmParams map[string]any `json:"litellm_params"`
+	ModelInfo     GatewayModelInfo `json:"model_info"`
+}
+
+// GatewayCredentialSummary is a safe named-credential record (masked values only).
+type GatewayCredentialSummary struct {
+	CredentialName string            `json:"credential_name"`
+	CredentialInfo map[string]string `json:"credential_info,omitempty"`
+}
+
+// GatewayCredentialInput creates one named credential. CredentialValues and
+// ModelID are mutually exclusive (values XOR model_id); the latter lets
+// LiteLLM extract/encrypt credentials server-side from an existing deployment.
+type GatewayCredentialInput struct {
+	CredentialName   string            `json:"credential_name"`
+	CredentialInfo   map[string]string `json:"credential_info,omitempty"`
+	CredentialValues map[string]string `json:"credential_values,omitempty"`
+	ModelID          string            `json:"model_id,omitempty"`
+}
+func (m GatewayModelInfo) MarshalJSON() ([]byte, error) {
+	type plain GatewayModelInfo
+	raw, err := json.Marshal(plain(m))
+	if err != nil {
+		return nil, err
+	}
+	if len(m.Extra) == 0 {
+		return raw, nil
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil, err
+	}
+	for k, v := range m.Extra {
+		if _, ok := obj[k]; !ok {
+			obj[k] = v
+		}
+	}
+	return json.Marshal(obj)
+}
+
+func (m *GatewayModelInfo) UnmarshalJSON(data []byte) error {
+	type plain GatewayModelInfo
+	var p plain
+	if err := json.Unmarshal(data, &p); err != nil {
+		return err
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return err
+	}
+	for _, k := range []string{"id", "db_model", "mode", "litellm_provider", "team_id", "blocked"} {
+		delete(obj, k)
+	}
+	*m = GatewayModelInfo(p)
+	if len(obj) > 0 {
+		m.Extra = obj
+	}
+	return nil
+}
+
+// ExtraString returns a string tag from Extra (handoff/seed markers).
+func (m GatewayModelInfo) ExtraString(key string) string {
+	if m.Extra == nil {
+		return ""
+	}
+	if v, ok := m.Extra[key]; ok {
+		if s, ok := v.(string); ok {
+			return strings.TrimSpace(s)
+		}
+	}
+	return ""
 }
 
 // OAuthSession is the safe session exposed to clients; never contains device codes, tokens or master key.
@@ -206,244 +300,339 @@ func (g *litellmGateway) verifyPin(ctx context.Context) error {
 	return nil
 }
 
-// ReconcileModels renders staged LiteLLM config with required privacy settings and atomically replaces the live config.
-// It ensures general_settings.store_prompts_in_spend_logs false, litellm_settings.turn_off_message_logging true,
-// no external callbacks, router_settings.num_retries 0 and fallbacks [] (no silent metered fallback),
-// and per-provider model mappings (xai/<model> + use_xai_oauth, chatgpt/<model> with model_info.mode responses).
-func (g *litellmGateway) ReconcileModels(ctx context.Context, aliases []Alias, creds []Credential) error {
-	// Validate aliases
-	seen := make(map[string]bool, len(aliases))
-	for _, a := range aliases {
-		name := strings.TrimSpace(a.Name)
-		if !allowedAliases[name] {
-			return fmt.Errorf("%w: unsupported alias %q", ErrValidation, name)
-		}
-		if seen[name] {
-			return fmt.Errorf("%w: duplicate alias %q", ErrValidation, name)
-		}
-		seen[name] = true
-		if strings.TrimSpace(string(a.CredentialID)) == "" {
-			return fmt.Errorf("%w: alias %q missing credential_id", ErrValidation, name)
-		}
-		if strings.TrimSpace(a.Model) == "" {
-			return fmt.Errorf("%w: alias %q missing model", ErrValidation, name)
-		}
-		if strings.Contains(a.Model, "\x00") || strings.Contains(name, "\x00") {
-			return fmt.Errorf("%w: NUL byte not allowed", ErrValidation)
-		}
-	}
-	// Index credentials
-	credByID := make(map[string]Credential, len(creds))
-	for _, c := range creds {
-		provider := strings.ToLower(strings.TrimSpace(c.Provider))
-		credType := strings.ToLower(strings.TrimSpace(c.CredentialType))
-		if !allowedProviders[provider] {
-			return fmt.Errorf("%w: unsupported provider %q", ErrValidation, provider)
-		}
-		if err := validateCredentialType(credType); err != nil {
-			return err
-		}
-		if m, ok := allowedProviderCredentialType[provider]; !ok || !m[credType] {
-			return fmt.Errorf("%w: credential type %q not allowed for provider %q", ErrValidation, credType, provider)
-		}
-		// Validate managed_by / external_ref consistency per migration 004
-		mb := strings.TrimSpace(c.ManagedBy)
-		if mb == "" {
-			mb = ManagedByOmahab
-		}
-		if !allowedManagedBy[mb] {
-			return fmt.Errorf("%w: invalid managed_by %q", ErrValidation, mb)
-		}
-		if c.ExternalRef != nil {
-			er := strings.TrimSpace(*c.ExternalRef)
-			if er != "" && !allowedExternalRef[er] {
-				return fmt.Errorf("%w: invalid external_ref %q", ErrValidation, er)
-			}
-		}
-		// Enforce CHECK constraint semantics: omahab => secret_id required, external_ref null; litellm => secret_id empty, external_ref required
-		if mb == ManagedByOmahab {
-			if strings.TrimSpace(string(c.SecretID)) == "" {
-				return fmt.Errorf("%w: secret_id required for managed_by=omahab", ErrValidation)
-			}
-			if c.ExternalRef != nil && strings.TrimSpace(*c.ExternalRef) != "" {
-				return fmt.Errorf("%w: external_ref must be null for managed_by=omahab", ErrValidation)
-			}
-		} else {
-			if strings.TrimSpace(string(c.SecretID)) != "" {
-				return fmt.Errorf("%w: secret_id must be empty for managed_by=litellm", ErrValidation)
-			}
-			if c.ExternalRef == nil || strings.TrimSpace(*c.ExternalRef) == "" {
-				return fmt.Errorf("%w: external_ref required for managed_by=litellm", ErrValidation)
-			}
-		}
-		credByID[string(c.ID)] = c
-	}
+// gatewayAuth attaches LiteLLM master-key authentication to a gateway request.
+func (g *litellmGateway) gatewayAuth(req *http.Request) {
+	req.Header.Set("x-litellm-key", g.masterKey)
+	req.Header.Set("Authorization", "Bearer "+g.masterKey)
+}
 
-	// Ensure config dir exists with 0700 for privacy
-	if err := os.MkdirAll(g.configDir, 0o700); err != nil {
-		return fmt.Errorf("gateway mkdir: %w", err)
+func (g *litellmGateway) gatewayGet(ctx context.Context, path string, query map[string]string) ([]byte, int, error) {
+	if strings.TrimSpace(g.masterKey) == "" {
+		return nil, 0, fmt.Errorf("%w: gateway not configured", ErrValidation)
 	}
-	tmpPath := filepath.Join(g.configDir, "litellm.yaml.tmp")
-	finalPath := filepath.Join(g.configDir, "litellm.yaml")
-	bakPath := finalPath + ".bak"
+	ctx2, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	u := g.baseURL + path
+	if len(query) > 0 {
+		v := url.Values{}
+		for k, val := range query {
+			v.Set(k, val)
+		}
+		u += "?" + v.Encode()
+	}
+	req, err := http.NewRequestWithContext(ctx2, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf("gateway request: %w", err)
+	}
+	g.gatewayAuth(req)
+	resp, err := g.httpClient.Do(req)
+	if err != nil {
+		return nil, 0, fmt.Errorf("gateway request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return body, resp.StatusCode, nil
+}
 
-	// Build YAML content manually to avoid leaking secrets and to ensure exact required keys.
-	var sb strings.Builder
-	sb.WriteString("# Generated by omahab — do not edit. Rebuildable from provider/alias state.\n")
-	sb.WriteString("# store_prompts_in_spend_logs false and turn_off_message_logging true; no external callbacks.\n")
-	sb.WriteString("model_list:\n")
-	if len(aliases) == 0 {
-		sb.WriteString("  []\n")
+func (g *litellmGateway) gatewayPost(ctx context.Context, path string, payload any) ([]byte, int, error) {
+	if strings.TrimSpace(g.masterKey) == "" {
+		return nil, 0, fmt.Errorf("%w: gateway not configured", ErrValidation)
+	}
+	ctx2, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, 0, fmt.Errorf("marshal gateway payload: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx2, http.MethodPost, g.baseURL+path, bytes.NewReader(body))
+	if err != nil {
+		return nil, 0, fmt.Errorf("gateway request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	g.gatewayAuth(req)
+	resp, err := g.httpClient.Do(req)
+	if err != nil {
+		return nil, 0, fmt.Errorf("gateway request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return respBody, resp.StatusCode, nil
+}
+
+// ListModels returns native inventory via GET /v2/model/info with pagination
+// and ID dedup. An empty data array on a fresh gateway is a valid empty
+// inventory, never proof of database connectivity.
+func (g *litellmGateway) ListModels(ctx context.Context) ([]GatewayDeployment, error) {
+	seen := map[string]bool{}
+	var out []GatewayDeployment
+	page := 1
+	for {
+		body, status, err := g.gatewayGet(ctx, "/v2/model/info", map[string]string{"page": strconv.Itoa(page), "size": "100"})
+		if err != nil {
+			return nil, err
+		}
+		if status != http.StatusOK {
+			if classified := ClassifyHTTPStatus(status); classified != nil {
+				return nil, classified
+			}
+			return nil, fmt.Errorf("model info unexpected status %d", status)
+		}
+		var parsed struct {
+			Data        []GatewayDeployment `json:"data"`
+			TotalCount  int                 `json:"total_count"`
+			CurrentPage int                 `json:"current_page"`
+			TotalPages  int                 `json:"total_pages"`
+			Size        int                 `json:"size"`
+		}
+		if err := json.Unmarshal(body, &parsed); err != nil {
+			return nil, fmt.Errorf("parse model info: %w", err)
+		}
+		for _, d := range parsed.Data {
+			id := strings.TrimSpace(d.ModelInfo.ID)
+			if id == "" {
+				id = strings.TrimSpace(d.ModelName)
+			}
+			if id == "" || seen[id] {
+				continue
+			}
+			seen[id] = true
+			out = append(out, d)
+		}
+		totalPages := parsed.TotalPages
+		if totalPages <= 0 {
+			break
+		}
+		if page >= totalPages {
+			break
+		}
+		page++
+		if page > 100 {
+			break
+		}
+	}
+	if out == nil {
+		out = []GatewayDeployment{}
+	}
+	return out, nil
+}
+
+// GetModel fetches one deployment via GET /v1/model/info?litellm_model_id=<id>.
+func (g *litellmGateway) GetModel(ctx context.Context, id string) (GatewayDeployment, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return GatewayDeployment{}, fmt.Errorf("%w: model id is required", ErrValidation)
+	}
+	body, status, err := g.gatewayGet(ctx, "/v1/model/info", map[string]string{"litellm_model_id": id})
+	if err != nil {
+		return GatewayDeployment{}, err
+	}
+	if status == http.StatusNotFound {
+		return GatewayDeployment{}, ErrNotFound
+	}
+	if status != http.StatusOK {
+		if classified := ClassifyHTTPStatus(status); classified != nil {
+			return GatewayDeployment{}, classified
+		}
+		return GatewayDeployment{}, fmt.Errorf("model info unexpected status %d", status)
+	}
+	var parsed struct {
+		Data []GatewayDeployment `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return GatewayDeployment{}, fmt.Errorf("parse model info: %w", err)
+	}
+	if len(parsed.Data) == 0 {
+		return GatewayDeployment{}, ErrNotFound
+	}
+	return parsed.Data[0], nil
+}
+
+// CreateModel creates one DB deployment via POST /model/new, honoring the
+// caller-supplied model_info.id as the stable ID. Callers must supply a
+// distinct stable ID per deployment and never reuse a source model ID.
+func (g *litellmGateway) CreateModel(ctx context.Context, deployment GatewayDeployment) error {
+	if strings.TrimSpace(deployment.ModelName) == "" {
+		return fmt.Errorf("%w: model_name is required", ErrValidation)
+	}
+	if strings.TrimSpace(deployment.ModelInfo.ID) == "" {
+		return fmt.Errorf("%w: model_info.id is required", ErrValidation)
+	}
+	if deployment.LitellmParams == nil {
+		return fmt.Errorf("%w: litellm_params is required", ErrValidation)
+	}
+	payload := map[string]any{
+		"model_name":     strings.TrimSpace(deployment.ModelName),
+		"litellm_params": deployment.LitellmParams,
+		"model_info":     deployment.ModelInfo,
+	}
+	respBody, status, err := g.gatewayPost(ctx, "/model/new", payload)
+	if err != nil {
+		return err
+	}
+	if status == http.StatusOK || status == http.StatusCreated {
+		return nil
+	}
+	_ = respBody
+	if classified := ClassifyHTTPStatus(status); classified != nil {
+		return classified
+	}
+	return fmt.Errorf("model create unexpected status %d", status)
+}
+
+// ListGatewayCredentials returns named-credential inventory (masked values only).
+func (g *litellmGateway) ListGatewayCredentials(ctx context.Context) ([]GatewayCredentialSummary, error) {
+	body, status, err := g.gatewayGet(ctx, "/credentials", nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		if classified := ClassifyHTTPStatus(status); classified != nil {
+			return nil, classified
+		}
+		return nil, fmt.Errorf("credentials unexpected status %d", status)
+	}
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return []GatewayCredentialSummary{}, nil
+	}
+	if trimmed[0] == '[' {
+		var arr []GatewayCredentialSummary
+		if err := json.Unmarshal(trimmed, &arr); err != nil {
+			return nil, fmt.Errorf("parse credentials: %w", err)
+		}
+		if arr == nil {
+			arr = []GatewayCredentialSummary{}
+		}
+		return arr, nil
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &obj); err != nil {
+		return nil, fmt.Errorf("parse credentials: %w", err)
+	}
+	for _, key := range []string{"credentials", "data", "items"} {
+		if raw, ok := obj[key]; ok {
+			var arr []GatewayCredentialSummary
+			if err := json.Unmarshal(raw, &arr); err != nil {
+				return nil, fmt.Errorf("parse credentials: %w", err)
+			}
+			if arr == nil {
+				arr = []GatewayCredentialSummary{}
+			}
+			return arr, nil
+		}
+	}
+	return []GatewayCredentialSummary{}, nil
+}
+
+// CreateGatewayCredential creates one named credential. CredentialValues and
+// ModelID are mutually exclusive; ModelID lets LiteLLM extract/encrypt
+// credentials server-side without secrets transiting the browser or Omahab.
+func (g *litellmGateway) CreateGatewayCredential(ctx context.Context, input GatewayCredentialInput) error {
+	name := strings.TrimSpace(input.CredentialName)
+	if name == "" {
+		return fmt.Errorf("%w: credential_name is required", ErrValidation)
+	}
+	hasValues := len(input.CredentialValues) > 0
+	hasModel := strings.TrimSpace(input.ModelID) != ""
+	if hasValues == hasModel {
+		return fmt.Errorf("%w: exactly one of credential_values or model_id is required", ErrValidation)
+	}
+	payload := map[string]any{"credential_name": name}
+	if input.CredentialInfo != nil {
+		payload["credential_info"] = input.CredentialInfo
 	} else {
-		for _, a := range aliases {
-			cred, ok := credByID[string(a.CredentialID)]
-			if !ok {
-				// alias references missing credential — fail closed rather than render dangling routing
-				return fmt.Errorf("%w: alias %q references unknown credential %q", ErrValidation, a.Name, string(a.CredentialID))
-			}
-			mdl := strings.TrimSpace(a.Model)
-			// Determine rendering per credential
-			mb := strings.TrimSpace(cred.ManagedBy)
-			if mb == "" {
-				mb = ManagedByOmahab
-			}
-			provider := strings.ToLower(strings.TrimSpace(cred.Provider))
-			credType := strings.ToLower(strings.TrimSpace(cred.CredentialType))
-			externalRef := ""
-			if cred.ExternalRef != nil {
-				externalRef = strings.TrimSpace(*cred.ExternalRef)
-			}
-			sb.WriteString(fmt.Sprintf("  - model_name: %s\n", yamlEscape(a.Name)))
-			sb.WriteString("    litellm_params:\n")
-			switch {
-			case provider == ProviderXAI && credType == CredentialTypeOAuth && mb == ManagedByLiteLLM && externalRef == ExternalRefXAI:
-				// xAI subscription: model: xai/<model> plus use_xai_oauth: true
-				model := mdl
-				if !strings.HasPrefix(strings.ToLower(model), "xai/") {
-					model = "xai/" + strings.TrimPrefix(model, "/")
-				}
-				sb.WriteString(fmt.Sprintf("      model: %s\n", yamlEscape(model)))
-				sb.WriteString("      use_xai_oauth: true\n")
-			case provider == ProviderChatGPT && credType == CredentialTypeOAuth && mb == ManagedByLiteLLM && externalRef == ExternalRefChatGPT:
-				model := mdl
-				if !strings.HasPrefix(strings.ToLower(model), "chatgpt/") {
-					model = "chatgpt/" + strings.TrimPrefix(model, "/")
-				}
-				sb.WriteString(fmt.Sprintf("      model: %s\n", yamlEscape(model)))
-				sb.WriteString("    model_info:\n")
-				sb.WriteString("      mode: responses\n")
-				// need to adjust indentation: we already wrote litellm_params, now close and add model_info sibling
-				// The above already handles; ensure proper structure: model_info at same level as litellm_params
-				// We wrote litellm_params then model_info correctly.
-				continue // skip generic suffix handling
-			case credType == CredentialTypeAPIKey && mb == ManagedByOmahab:
-				model := mdl
-				lower := strings.ToLower(model)
-				switch provider {
-				case ProviderOpenAI:
-					if !strings.HasPrefix(lower, "openai/") {
-						model = "openai/" + strings.TrimPrefix(model, "/")
-					}
-				case ProviderAnthropic:
-					if !strings.HasPrefix(lower, "anthropic/") {
-						model = "anthropic/" + strings.TrimPrefix(model, "/")
-					}
-				case ProviderOpenRouter:
-					if !strings.HasPrefix(lower, "openrouter/") {
-						model = "openrouter/" + strings.TrimPrefix(model, "/")
-					}
-				default:
-					if !strings.HasPrefix(lower, provider+"/") {
-						model = provider + "/" + strings.TrimPrefix(model, "/")
-					}
-				}
-				sb.WriteString(fmt.Sprintf("      model: %s\n", yamlEscape(model)))
-				// api_key material is delivered via the litellm systemd unit's
-				// EnvironmentFile (appenv/litellm.env); LiteLLM resolves the
-				// os.environ/<NAME> ref at request time.
-				sb.WriteString(fmt.Sprintf("      api_key: %s\n", yamlEscape("os.environ/"+ProviderEnvVar(string(cred.ID)))))
-			default:
-				// Fallback: treat any litellm-managed oauth as subscription
-				if credType == CredentialTypeOAuth && mb == ManagedByLiteLLM {
-					if provider == ProviderXAI {
-						model := mdl
-						if !strings.HasPrefix(strings.ToLower(model), "xai/") {
-							model = "xai/" + strings.TrimPrefix(model, "/")
-						}
-						sb.WriteString(fmt.Sprintf("      model: %s\n", yamlEscape(model)))
-						sb.WriteString("      use_xai_oauth: true\n")
-					} else if provider == ProviderChatGPT {
-						model := mdl
-						if !strings.HasPrefix(strings.ToLower(model), "chatgpt/") {
-							model = "chatgpt/" + strings.TrimPrefix(model, "/")
-						}
-						sb.WriteString(fmt.Sprintf("      model: %s\n", yamlEscape(model)))
-						sb.WriteString("    model_info:\n")
-						sb.WriteString("      mode: responses\n")
-						continue
-					} else {
-						return fmt.Errorf("%w: oauth credential for provider %q not supported", ErrValidation, provider)
-					}
-				} else {
-					return fmt.Errorf("%w: unsupported credential rendering for %s/%s managed_by=%q external_ref=%q", ErrValidation, provider, credType, mb, externalRef)
-				}
-			}
-			// For non-ChatGPT, we already handled model_info case via continue; for others, no model_info
+		payload["credential_info"] = map[string]string{}
+	}
+	if hasValues {
+		payload["credential_values"] = input.CredentialValues
+	} else {
+		payload["model_id"] = strings.TrimSpace(input.ModelID)
+	}
+	respBody, status, err := g.gatewayPost(ctx, "/credentials", payload)
+	if err != nil {
+		return err
+	}
+	if status == http.StatusOK || status == http.StatusCreated {
+		return nil
+	}
+	_ = respBody
+	if classified := ClassifyHTTPStatus(status); classified != nil {
+		return classified
+	}
+	return fmt.Errorf("credential create unexpected status %d", status)
+}
+
+// NormalizeNativeModel maps a legacy alias model to its native LiteLLM model
+// string, preserving OpenAI/Anthropic/OpenRouter prefixes, xAI use_xai_oauth,
+// and ChatGPT responses mode. It is the extracted rendering contract formerly
+// inside the retired YAML reconciler, reused by the one-time handoff.
+func NormalizeNativeModel(provider, credType, managedBy, externalRef, model string) (litellmModel string, useXaiOAuth bool, responsesMode bool, err error) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	credType = strings.ToLower(strings.TrimSpace(credType))
+	managedBy = strings.TrimSpace(managedBy)
+	if managedBy == "" {
+		managedBy = ManagedByOmahab
+	}
+	externalRef = strings.TrimSpace(externalRef)
+	mdl := strings.TrimSpace(model)
+	if mdl == "" {
+		return "", false, false, fmt.Errorf("%w: model is required", ErrValidation)
+	}
+	if strings.Contains(mdl, "\x00") {
+		return "", false, false, fmt.Errorf("%w: NUL byte not allowed", ErrValidation)
+	}
+	switch {
+	case provider == ProviderXAI && credType == CredentialTypeOAuth && managedBy == ManagedByLiteLLM && externalRef == ExternalRefXAI:
+		if !strings.HasPrefix(strings.ToLower(mdl), "xai/") {
+			mdl = "xai/" + strings.TrimPrefix(mdl, "/")
 		}
-	}
-	// Required global settings
-	sb.WriteString("general_settings:\n")
-	sb.WriteString("  store_prompts_in_spend_logs: false\n")
-	sb.WriteString("litellm_settings:\n")
-	sb.WriteString("  turn_off_message_logging: true\n")
-	sb.WriteString("router_settings:\n")
-	sb.WriteString("  num_retries: 0\n")
-	sb.WriteString("  fallbacks: []\n")
-	// Ensure no database_url or master key raw values are embedded; rely on wrapper env.
-	// Ensure no callbacks key.
-	content := sb.String()
-	// Safety: never leak master key (only check for non-trivial keys to avoid false positives on short test keys)
-	if len(g.masterKey) >= 8 && strings.Contains(content, g.masterKey) {
-		return fmt.Errorf("config rendering would leak master key")
-	}
-	// Validate required privacy settings present
-	if !strings.Contains(content, "store_prompts_in_spend_logs: false") {
-		return fmt.Errorf("config missing store_prompts_in_spend_logs false")
-	}
-	if !strings.Contains(content, "turn_off_message_logging: true") {
-		return fmt.Errorf("config missing turn_off_message_logging true")
-	}
-	if !strings.Contains(content, "num_retries: 0") {
-		return fmt.Errorf("config missing router_settings.num_retries 0")
-	}
-	if strings.Contains(content, "callbacks:") {
-		return fmt.Errorf("config must not contain callbacks")
-	}
-	// Stage tmp file with 0600
-	if err := os.WriteFile(tmpPath, []byte(content), 0o600); err != nil {
-		return fmt.Errorf("gateway write tmp: %w", err)
-	}
-	// Backup existing if present
-	if _, err := os.Stat(finalPath); err == nil {
-		_ = os.Rename(finalPath, bakPath)
-	}
-	if err := os.Rename(tmpPath, finalPath); err != nil {
-		if _, err2 := os.Stat(bakPath); err2 == nil {
-			_ = os.Rename(bakPath, finalPath)
+		return mdl, true, false, nil
+	case provider == ProviderChatGPT && credType == CredentialTypeOAuth && managedBy == ManagedByLiteLLM && externalRef == ExternalRefChatGPT:
+		if !strings.HasPrefix(strings.ToLower(mdl), "chatgpt/") {
+			mdl = "chatgpt/" + strings.TrimPrefix(mdl, "/")
 		}
-		return fmt.Errorf("gateway rename: %w", err)
+		return mdl, false, true, nil
+	case credType == CredentialTypeAPIKey && managedBy == ManagedByOmahab:
+		lower := strings.ToLower(mdl)
+		switch provider {
+		case ProviderOpenAI:
+			if !strings.HasPrefix(lower, "openai/") {
+				mdl = "openai/" + strings.TrimPrefix(mdl, "/")
+			}
+		case ProviderAnthropic:
+			if !strings.HasPrefix(lower, "anthropic/") {
+				mdl = "anthropic/" + strings.TrimPrefix(mdl, "/")
+			}
+		case ProviderOpenRouter:
+			if !strings.HasPrefix(lower, "openrouter/") {
+				mdl = "openrouter/" + strings.TrimPrefix(mdl, "/")
+			}
+		default:
+			if !allowedProviders[provider] {
+				return "", false, false, fmt.Errorf("%w: unsupported provider %q", ErrValidation, provider)
+			}
+			if !strings.HasPrefix(lower, provider+"/") {
+				mdl = provider + "/" + strings.TrimPrefix(mdl, "/")
+			}
+		}
+		return mdl, false, false, nil
+	default:
+		if credType == CredentialTypeOAuth && managedBy == ManagedByLiteLLM {
+			if provider == ProviderXAI {
+				if !strings.HasPrefix(strings.ToLower(mdl), "xai/") {
+					mdl = "xai/" + strings.TrimPrefix(mdl, "/")
+				}
+				return mdl, true, false, nil
+			}
+			if provider == ProviderChatGPT {
+				if !strings.HasPrefix(strings.ToLower(mdl), "chatgpt/") {
+					mdl = "chatgpt/" + strings.TrimPrefix(mdl, "/")
+				}
+				return mdl, false, true, nil
+			}
+		}
+		return "", false, false, fmt.Errorf("%w: unsupported credential rendering for %s/%s", ErrValidation, provider, credType)
 	}
-	_ = os.Remove(bakPath)
-	// The systemd unit runs DynamicUser (ephemeral UID) with static group
-	// `litellm-cfg` and reads this file via group permission (see nix/apps.nix).
-	// The group must differ from the unit name: DynamicUser implicitly takes
-	// user `litellm`, so a same-named static group fails 217/USER.
-	// Best-effort: unit tests and non-NixOS hosts lack the group, in which
-	// case the file stays root-only and the unit fails loudly on restart.
-	shareGatewayConfig(finalPath)
-	// Note: restart/health-check is handled by backend apps runner after ReconcileModels;
-	// gateway does not directly restart here to keep single responsibility.
-	return nil
 }
 
 // shareGatewayConfig makes a freshly rendered config group-readable by the
@@ -965,8 +1154,20 @@ var _ GatewayAdmin = (*litellmGateway)(nil)
 type NoopGateway struct{}
 
 func (NoopGateway) Health(ctx context.Context) error { return nil }
-func (NoopGateway) ReconcileModels(ctx context.Context, aliases []Alias, creds []Credential) error {
-	return nil
+func (NoopGateway) ListModels(ctx context.Context) ([]GatewayDeployment, error) {
+	return nil, fmt.Errorf("%w: gateway not configured", ErrValidation)
+}
+func (NoopGateway) GetModel(ctx context.Context, id string) (GatewayDeployment, error) {
+	return GatewayDeployment{}, fmt.Errorf("%w: gateway not configured", ErrValidation)
+}
+func (NoopGateway) CreateModel(ctx context.Context, deployment GatewayDeployment) error {
+	return fmt.Errorf("%w: gateway not configured", ErrValidation)
+}
+func (NoopGateway) ListGatewayCredentials(ctx context.Context) ([]GatewayCredentialSummary, error) {
+	return nil, fmt.Errorf("%w: gateway not configured", ErrValidation)
+}
+func (NoopGateway) CreateGatewayCredential(ctx context.Context, input GatewayCredentialInput) error {
+	return fmt.Errorf("%w: gateway not configured", ErrValidation)
 }
 func (NoopGateway) IssueVirtualKey(ctx context.Context, vk VirtualKey) (string, error) {
 	var b [16]byte

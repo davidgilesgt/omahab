@@ -1164,10 +1164,13 @@ func (b *Backend) renderNativeAppEnv(ctx context.Context, dnsToken, domainName s
 	if err := b.writeAppEnv("pocket-id", pocketEnv, "pocket-id"); err != nil {
 		return fmt.Errorf("pocket-id: %w", err)
 	}
-	// LiteLLM env converges through the single-writer merge shared with the
-	// runtime projection: fresh platform vars overlay the existing file, live
-	// provider vars merge in, stale provider vars prune. Nil providers
-	// (tests) skip the provider merge, preserving existing entries.
+	// LiteLLM env converges read-modify-write: fresh platform vars overlay the
+	// existing file, everything else (OIDC, virtual-key-agnostic settings)
+	// survives. Native DB ownership uses STORE_MODEL_IN_DB=True with a static
+	// empty-model bootstrap (see nix/apps.nix + writeStaticBootstrapYAML);
+	// models/credentials live in LiteLLM's database, never in YAML or
+	// OMAHAB_PROVIDER_* projections. Legacy provider rows are recovery
+	// material only and are never reprojected here.
 	existing, err := b.readAppEnv("litellm")
 	if err != nil {
 		return fmt.Errorf("litellm: %w", err)
@@ -1175,72 +1178,35 @@ func (b *Backend) renderNativeAppEnv(ctx context.Context, dnsToken, domainName s
 	// The gateway only reads its EnvironmentFile at unit start: a changed
 	// master key or DB URL needs a restart, otherwise it keeps running with
 	// prisma_client=None (every DB endpoint, including SSO login, 403s).
-	masterBefore, dbBefore := existing["LITELLM_MASTER_KEY"], existing["DATABASE_URL"]
+	masterBefore, dbBefore, saltBefore := existing["LITELLM_MASTER_KEY"], existing["DATABASE_URL"], existing["LITELLM_SALT_KEY"]
 	if k := reveal("litellm_master_key"); k != "" {
 		existing["LITELLM_MASTER_KEY"] = k
 	}
 	if u := reveal("litellm_db_url"); u != "" {
 		existing["DATABASE_URL"] = u
 	}
-	live := make(map[string]string)
-	for k, v := range existing {
-		if strings.HasPrefix(k, providers.ProviderEnvVarPrefix) {
-			live[k] = v
-		}
+	existing["STORE_MODEL_IN_DB"] = "True"
+	if salt := b.ensureLitellmSalt(ctx, existing); salt != "" {
+		existing["LITELLM_SALT_KEY"] = salt
 	}
-	if b.providers != nil {
-		if creds, err := b.providers.ListCredentials(ctx); err == nil {
-			want := make(map[string]bool, len(creds))
-			for _, c := range creds {
-				if c == nil {
-					continue
-				}
-				if strings.ToLower(strings.TrimSpace(c.CredentialType)) != providers.CredentialTypeAPIKey {
-					continue
-				}
-				mb := strings.TrimSpace(c.ManagedBy)
-				if mb == "" {
-					mb = providers.ManagedByOmahab
-				}
-				if mb != providers.ManagedByOmahab {
-					continue
-				}
-				id := strings.TrimSpace(string(c.ID))
-				if id == "" {
-					continue
-				}
-				env := providers.ProviderEnvVar(id)
-				want[env] = true
-				var material string
-				var rerr error
-				if strings.TrimSpace(string(c.SecretID)) != "" {
-					material, rerr = b.secrets.Reveal(ctx, c.SecretID)
-				} else {
-					material, rerr = b.secrets.RevealByName(ctx, "provider", "credential."+id)
-				}
-				if rerr == nil {
-					live[env] = material
-				}
-				// Reveal failure keeps the carried value (transient); a
-				// deleted credential drops out of want and prunes below.
-			}
-			for k := range live {
-				if !want[k] {
-					delete(live, k)
-				}
+	// One-time retirement owns OMAHAB_PROVIDER_* removal at cutover. Here we
+	// only carry existing entries pre-cutover (old YAML still serves) and
+	// prune them once native ownership is established, never reintroducing
+	// broker recovery material into steady-state env.
+	if ph := b.handoffPhase(ctx); ph == handoffPhaseComplete || ph == handoffPhaseCutover {
+		for k := range existing {
+			if strings.HasPrefix(k, providers.ProviderEnvVarPrefix) {
+				delete(existing, k)
 			}
 		}
-		// List failure: live stays as carried values — pure preserve, no prune.
 	}
-	if merged := mergeLiteLLMProviderEnv(existing, live); len(merged) > 0 {
-		if err := b.writeAppEnv("litellm", merged, "litellm"); err != nil {
+	if err := b.writeAppEnv("litellm", existing, "litellm"); err != nil {
+		return fmt.Errorf("litellm: %w", err)
+	}
+	if existing["LITELLM_MASTER_KEY"] != masterBefore || existing["DATABASE_URL"] != dbBefore || existing["LITELLM_SALT_KEY"] != saltBefore {
+		log.Printf("render native appenv: litellm master key, DB URL, or salt changed, redeploying gateway")
+		if err := b.redeployBundle(ctx, "litellm"); err != nil {
 			return fmt.Errorf("litellm: %w", err)
-		}
-		if merged["LITELLM_MASTER_KEY"] != masterBefore || merged["DATABASE_URL"] != dbBefore {
-			log.Printf("render native appenv: litellm master key or DB URL changed, redeploying gateway")
-			if err := b.redeployBundle(ctx, "litellm"); err != nil {
-				return fmt.Errorf("litellm: %w", err)
-			}
 		}
 	}
 	if err := b.writeAppEnv("ntfy", map[string]string{
@@ -1276,6 +1242,12 @@ func (b *Backend) renderNativeAppEnv(ctx context.Context, dnsToken, domainName s
 func (b *Backend) setupPhaseDependentApps(ctx context.Context) error {
 	if b.apps == nil {
 		return fmt.Errorf("apps not configured")
+	}
+	// One-time LiteLLM ownership handoff after DB/env readiness (core_apps +
+	// OIDC) and before dependent model-key configuration (Hermes/Karakeep).
+	// Resume-safe; retries re-enter here via the setup retry path.
+	if err := b.runProviderHandoff(ctx); err != nil {
+		return err
 	}
 	// Retry a deferred scm bind: Forgejo/Woodpecker credentials land as
 	// those apps come up. Single guarded transition (nil → set), so no

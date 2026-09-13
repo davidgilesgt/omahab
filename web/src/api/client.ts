@@ -17,14 +17,13 @@ import type {
   Instance,
   KnowledgeConsent,
   ListEnvelope,
-  ModelAlias,
   ModelAliasName,
   ModelInfo,
   ModelKey,
+  ModelSetupStatus,
   NtfyConfig,
   OAuthSession,
   Project,
-  ProviderCredential,
   PublicStatusResponse,
   RecoverySession,
   Release,
@@ -172,16 +171,10 @@ export class ApiClient {
   setupWoodpecker = (input: { username: string; token: string }) =>
     this.request<{ status: string }>("/setup/woodpecker", { method: "PUT", body: JSON.stringify(input) });
 
-  providerCredentials = () => this.list<ProviderCredential>("/provider-credentials");
-  createProviderCredential = (input: { provider: string; kind: string; value: string; name?: string }) =>
-    this.request<ProviderCredential>("/provider-credentials", { method: "POST", body: JSON.stringify(input) });
-  revokeProvider = (id: string) =>
-    this.request<void>(`/provider-credentials/${encodeURIComponent(id)}`, { method: "DELETE", body: JSON.stringify({}) });
-
-  // Model gateway (LiteLLM) — aliases
-  modelAliases = () => this.list<ModelAlias>("/model-aliases");
-  setModelAlias = (name: ModelAliasName, input: { credential_id: string; model: string; fallback_order?: string[] }) =>
-    this.request<ModelAlias>(`/model-aliases/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify(input) });
+  // Native model setup (LiteLLM) — read-only inventory plus explicit seed; no credential intake.
+  modelSetup = () => this.request<ModelSetupStatus>("/setup/models");
+  seedModelAliases = (input: { model_id: string }) =>
+    this.request<ModelSetupStatus>("/setup/models/seed", { method: "POST", body: JSON.stringify(input) });
 
   // Model keys (virtual keys) — metadata, plaintext returned once on create
   modelKeys = () => this.list<ModelKey>("/model-keys");

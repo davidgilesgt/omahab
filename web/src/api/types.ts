@@ -131,29 +131,28 @@ export interface User {
   pocket_user_id?: string | null;
 }
 
-export interface ProviderCredential {
-  id: ID;
-  provider: "openai" | "anthropic" | "openrouter" | "chatgpt" | "xai" | string;
+export type ModelAliasName = "omahab/fast" | "omahab/balanced" | "omahab/reasoning" | "omahab/summarization" | "omahab/embedding" | "omahab/karakeep";
+
+export interface ModelSetupDeployment {
+  id: string;
   name: string;
-  kind: "api_key" | "oauth" | string;
-  status: string;
-  configured: boolean;
-  managed_by: "omahab" | "litellm" | string;
-  external_ref?: string | null;
-  entitlement?: string | null;
-  expires_at?: string | null;
-  updated_at: string;
+  model: string;
+  provider: string;
+  mode: string;
 }
 
-export type ModelAliasName = "omahab/fast" | "omahab/balanced" | "omahab/reasoning" | "omahab/embedding" | "omahab/karakeep";
+export interface ModelSetupAlias {
+  name: string;
+  configured: boolean;
+  providers: string[];
+}
 
-export interface ModelAlias {
-  name: ModelAliasName;
-  credential_id: ID;
-  model: string;
-  fallback_order?: string[] | null;
-  created_at: string;
-  updated_at: string;
+export interface ModelSetupStatus {
+  management_url?: string;
+  migration_complete: boolean;
+  migration_error?: string;
+  deployments: ModelSetupDeployment[];
+  aliases: ModelSetupAlias[];
 }
 
 export interface ModelKey {

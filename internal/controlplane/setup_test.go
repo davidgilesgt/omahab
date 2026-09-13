@@ -1684,6 +1684,16 @@ func TestEnsureKarakeepLiteLLMKeyIssuesAndRenders(t *testing.T) {
 	b.cfg.DataDir = filepath.Join(stateRoot, "data")
 	gw := &recordingGateway{token: "sk-karakeep-test-1"}
 	karakeepTestProviders(t, b, gw)
+	// Post-handoff gating reads the native deployment, not the legacy SQLite
+	// alias below (kept as inert recovery material).
+	nativeGw := newHandoffFakeGateway()
+	karakeepDB := true
+	nativeGw.setModel(providers.GatewayDeployment{
+		ModelName:     providers.AliasKarakeep,
+		LitellmParams: map[string]any{"model": "openai/gpt-4o-mini", "custom_llm_provider": "openai"},
+		ModelInfo:     providers.GatewayModelInfo{ID: "native-karakeep-1", DBModel: &karakeepDB, Mode: "chat", LitellmProvider: "openai"},
+	})
+	b.gateway = nativeGw
 	karakeepTestCatalog(t, b, runner, digest)
 	if _, err := b.providers.CreateCredential(ctx, providers.CreateCredentialInput{
 		ID:             "cred-karakeep",

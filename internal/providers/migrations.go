@@ -105,5 +105,14 @@ CREATE INDEX IF NOT EXISTS idx_provider_virtual_keys_gateway_key_id ON provider_
 CREATE INDEX IF NOT EXISTS idx_provider_virtual_keys_owner ON provider_virtual_keys(owner_kind, owner_id);
 `,
 		},
+		{
+			Name: "providers-006-model-handoff",
+			SQL: `
+CREATE TABLE IF NOT EXISTS provider_model_handoff (
+	key TEXT PRIMARY KEY,
+	value TEXT NOT NULL
+);
+`,
+		},
 	}
 }

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 
@@ -923,97 +922,33 @@ func (s *Server) handleIdentityRecover(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, rec)
 }
 
-// --- provider credentials ---
+// --- model gateway (LiteLLM virtual keys) + setup models (native onboarding) ---
 
-func (s *Server) handleListProviderCredentials(w http.ResponseWriter, r *http.Request) {
-	p := parsePagination(r)
-	items, err := s.backend.ListProviderCredentials(r.Context(), p)
+func (s *Server) handleGetModelSetup(w http.ResponseWriter, r *http.Request) {
+	st, err := s.backend.GetModelSetup(r.Context())
 	if err != nil {
 		writeError(w, r, err)
 		return
 	}
-	writeList(w, items)
+	writeJSON(w, http.StatusOK, st)
 }
 
-func (s *Server) handleGetProviderCredential(w http.ResponseWriter, r *http.Request) {
-	id := domain.ID(chi.URLParam(r, "id"))
-	cred, err := s.backend.GetProviderCredential(r.Context(), id)
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, cred)
-}
-
-func (s *Server) handleCreateProviderCredential(w http.ResponseWriter, r *http.Request) {
-	var req CreateProviderCredentialRequest
+func (s *Server) handleSeedModelAliases(w http.ResponseWriter, r *http.Request) {
+	var req SeedModelAliasesRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if strings.TrimSpace(req.Provider) == "" || strings.TrimSpace(req.Kind) == "" {
-		writeError(w, r, errBadRequest("provider and kind are required"))
+	if strings.TrimSpace(req.ModelID) == "" {
+		writeError(w, r, errBadRequest("model_id is required"))
 		return
 	}
-	if req.Value == "" {
-		writeError(w, r, errBadRequest("value is required"))
-		return
-	}
-	cred, err := s.backend.CreateProviderCredential(r.Context(), req)
+	st, err := s.backend.SeedModelAliases(r.Context(), req)
 	if err != nil {
 		writeError(w, r, err)
 		return
 	}
-	// Never echo value.
-	writeJSON(w, http.StatusCreated, cred)
+	writeJSON(w, http.StatusOK, st)
 }
-
-func (s *Server) handleDeleteProviderCredential(w http.ResponseWriter, r *http.Request) {
-	id := domain.ID(chi.URLParam(r, "id"))
-	if err := s.backend.DeleteProviderCredential(r.Context(), id); err != nil {
-		writeError(w, r, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// --- model gateway (LiteLLM) ---
-
-func (s *Server) handleListModelAliases(w http.ResponseWriter, r *http.Request) {
-	items, err := s.backend.ListModelAliases(r.Context())
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
-	writeList(w, items)
-}
-
-func (s *Server) handleSetModelAlias(w http.ResponseWriter, r *http.Request) {
-	raw := chi.URLParam(r, "name")
-	// chi keeps %2F encoded; decode to handle omahab/* aliases.
-	name := raw
-	if decoded, err := url.PathUnescape(raw); err == nil {
-		name = decoded
-	}
-	if name != "omahab/fast" && name != "omahab/balanced" && name != "omahab/reasoning" && name != "omahab/embedding" && name != "omahab/karakeep" {
-		writeError(w, r, errBadRequest("invalid alias name"))
-		return
-	}
-	var req SetModelAliasRequest
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-	if strings.TrimSpace(req.CredentialID) == "" || strings.TrimSpace(req.Model) == "" {
-		writeError(w, r, errBadRequest("credential_id and model are required"))
-		return
-	}
-	alias, err := s.backend.SetModelAlias(r.Context(), name, req)
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, alias)
-}
-
 func (s *Server) handleListModelKeys(w http.ResponseWriter, r *http.Request) {
 	p := parsePagination(r)
 	items, err := s.backend.ListModelKeys(r.Context(), p)

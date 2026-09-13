@@ -59,6 +59,9 @@ const (
 	// through the gateway. Admins map it to a vision-capable model; Karakeep
 	// uses it for both INFERENCE_TEXT_MODEL and INFERENCE_IMAGE_MODEL.
 	AliasKarakeep = "omahab/karakeep"
+	// AliasSummarization is the dedicated remote-summarization alias with
+	// independent provider consent (never borrows omahab/balanced).
+	AliasSummarization = "omahab/summarization"
 )
 
 // ManagedBy values for provider_credentials.managed_by.
@@ -106,11 +109,12 @@ var allowedProviderCredentialType = map[string]map[string]bool{
 }
 
 var allowedAliases = map[string]bool{
-	AliasFast:      true,
-	AliasBalanced:  true,
-	AliasReasoning: true,
-	AliasEmbedding: true,
-	AliasKarakeep:  true,
+	AliasFast:          true,
+	AliasBalanced:      true,
+	AliasReasoning:     true,
+	AliasEmbedding:     true,
+	AliasKarakeep:      true,
+	AliasSummarization: true,
 }
 
 // Rejected substrings for cookie/session exfiltration.
@@ -149,7 +153,7 @@ func SupportedProviders() []string {
 
 // SupportedAliases returns the routed alias list.
 func SupportedAliases() []string {
-	return []string{AliasFast, AliasBalanced, AliasReasoning, AliasEmbedding, AliasKarakeep}
+	return []string{AliasFast, AliasBalanced, AliasReasoning, AliasEmbedding, AliasKarakeep, AliasSummarization}
 }
 
 // IsEntitlementError reports whether err is an entitlement (403) failure distinct from token corruption.
@@ -334,10 +338,11 @@ type IssueVirtualKeyInput struct {
 }
 
 // virtualKeyGateway is the narrow gateway contract needed by Service.IssueVirtualKey
-// to store the LiteLLM-side key ID. The full GatewayAdmin (Health, ReconcileModels,
-// IssueVirtualKey, RevokeVirtualKey, StartOAuth, PollOAuth, ForwardOAuthCallback,
-// ProbeModel) is defined in litellm.go; litellmGateway implements this narrow
-// interface as well so Service can call it without a package-level duplicate.
+// to store the LiteLLM-side key ID. The full GatewayAdmin (Health, native
+// model/credential management, IssueVirtualKey, RevokeVirtualKey, StartOAuth,
+// PollOAuth, ForwardOAuthCallback, ProbeModel) is defined in litellm.go;
+// litellmGateway implements this narrow interface as well so Service can call
+// it without a package-level duplicate.
 type virtualKeyGateway interface {
 	IssueVirtualKey(ctx context.Context, vk VirtualKey) (string, error)
 	RevokeVirtualKey(ctx context.Context, gatewayKeyID, keyAlias string) error

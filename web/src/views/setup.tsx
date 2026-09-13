@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../auth";
-import type { Secret, SetupStatus } from "../api/types";
+import type { ModelSetupStatus, Secret, SetupStatus } from "../api/types";
 import { ErrorState, LoadingState } from "../components/ui";
 import { useToast } from "../components/toast";
 import { CopyButton } from "../components/copyButton";
@@ -117,9 +117,90 @@ function tailnetErrorMessage(err: unknown): string {
   return "Tailnet path check failed";
 }
 
-type BoxId = "ssh" | "tailscale" | "domain" | "cloudflare" | "lan" | "admin" | "knowledge" | "recovery" | "backups" | "storage" | "woodpecker";
+type BoxId = "ssh" | "tailscale" | "domain" | "cloudflare" | "lan" | "admin" | "providers" | "knowledge" | "recovery" | "backups" | "storage" | "woodpecker";
 
 const BLOCKING: BoxId[] = ["ssh", "tailscale", "domain", "cloudflare", "lan", "admin", "knowledge", "recovery", "backups"];
+
+const REQUIRED_CHAT_ALIASES = ["omahab/fast", "omahab/balanced", "omahab/reasoning"];
+const VISIBLE_SETUP_ALIASES = ["omahab/fast", "omahab/balanced", "omahab/reasoning", "omahab/summarization", "omahab/embedding", "omahab/karakeep"];
+
+function ProvidersSetupBox({ status, isLoading, isError, error, onRetry }: { status: ModelSetupStatus | undefined; isLoading: boolean; isError: boolean; error: unknown; onRetry: () => void }) {
+  const { client } = useAuth();
+  const toast = useToast();
+  const queryClient = useQueryClient();
+  const [selectedId, setSelectedId] = useState("");
+  const seed = useMutation({
+    mutationFn: (model_id: string) => client.seedModelAliases({ model_id }),
+    onSuccess: (data) => {
+      queryClient.setQueryData(["setup", "models"], data);
+      toast.success("Default aliases created");
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Could not create default aliases"),
+  });
+  const deployments = status?.deployments ?? [];
+  const aliases = status?.aliases ?? [];
+  const selected = deployments.some((d) => d.id === selectedId) ? selectedId : "";
+  const seedDisabled = !selected || seed.isPending || status?.migration_complete === false;
+  return (
+    <div className="form-stack">
+      <p>Add a provider and model in LiteLLM, then refresh. Defaults share a credential; edit models and credentials in LiteLLM.</p>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        {status?.management_url ? (
+          <a className="button secondary" href={status.management_url} target="_blank" rel="noreferrer">Open LiteLLM</a>
+        ) : (
+          <span className="muted">LiteLLM URL unavailable — install LiteLLM first.</span>
+        )}
+        <button className="button secondary" type="button" onClick={() => void queryClient.invalidateQueries({ queryKey: ["setup", "models"] })}>
+          Refresh models
+        </button>
+      </div>
+      {status?.migration_error ? (
+        <p className="inline-error" role="alert">{status.migration_error}</p>
+      ) : null}
+      {status && !status.migration_complete ? (
+        <p className="muted">Migration is not complete — retry automatic setup, then seed.</p>
+      ) : null}
+      {isLoading ? (
+        <p>Loading models…</p>
+      ) : isError ? (
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <span className="inline-error" role="alert">{error instanceof Error ? error.message : "Could not load models"}</span>
+          <button className="button ghost" type="button" onClick={onRetry}>Retry</button>
+        </div>
+      ) : !deployments.length ? (
+        <p className="muted">No chat models found. Add a provider and model in LiteLLM, then refresh.</p>
+      ) : (
+        <label className="field">
+          <span>Initial chat model</span>
+          <select value={selected} onChange={(e) => setSelectedId(e.target.value)} disabled={seed.isPending}>
+            <option value="">Choose a model…</option>
+            {deployments.map((d) => (
+              <option key={d.id} value={d.id}>{d.name} · {d.model} ({d.provider})</option>
+            ))}
+          </select>
+        </label>
+      )}
+      <button className="button primary" type="button" disabled={seedDisabled} onClick={() => { if (selected) void seed.mutate(selected); }}>
+        {seed.isPending ? "Creating…" : "Create default aliases"}
+      </button>
+      {seed.isError ? (
+        <p className="inline-error" role="alert">{seed.error instanceof Error ? seed.error.message : "Could not create default aliases"}</p>
+      ) : null}
+      <ul style={{ listStyle: "none", padding: 0, display: "grid", gap: 4 }}>
+        {VISIBLE_SETUP_ALIASES.map((name) => {
+          const alias = aliases.find((a) => a.name === name);
+          const configured = alias?.configured === true;
+          return (
+            <li key={name} style={{ display: "flex", gap: 8, alignItems: "baseline", fontSize: "0.9em" }}>
+              <code className="mono">{name}</code>
+              <span className="muted">{configured ? `configured${alias && alias.providers.length ? ` (${alias.providers.join(", ")})` : ""}` : "missing"}</span>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
 
 function Box({
   title,
@@ -185,6 +266,14 @@ export function SetupPage() {
   });
   // SSH keys first: the installer seeds keys, add more here.
   const sshQuery = useQuery({ queryKey: ["system-ssh-keys"], queryFn: client.systemSSHKeys, retry: false });
+  // Optional provider onboarding reads native LiteLLM inventory. No polling:
+  // explicit refresh plus a window-focus refetch for returning from LiteLLM.
+  const modelsQuery = useQuery({ queryKey: ["setup", "models"], queryFn: client.modelSetup, staleTime: 30_000, retry: false });
+  useEffect(() => {
+    const onFocus = () => { void queryClient.invalidateQueries({ queryKey: ["setup", "models"] }); };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [queryClient]);
   const [sshGithubUser, setSshGithubUser] = useState("");
   const [sshPaste, setSshPaste] = useState("");
 
@@ -636,6 +725,8 @@ export function SetupPage() {
   const tailscaleRunning = tailscaleQuery.data?.running === true;
   const tailscaleIp = tailscaleQuery.data?.ip ?? "";
   const lanClosed = networkQuery.data?.lan_closed === true;
+  const modelAliases = modelsQuery.data?.aliases ?? [];
+  const providersDone = REQUIRED_CHAT_ALIASES.every((name) => modelAliases.some((a) => a.name === name && a.configured));
   const doneMap: Record<BoxId, boolean> = {
     ssh: isOk("ssh_keys"),
     tailscale: tailscaleRunning || isOk("tailscale"),
@@ -643,6 +734,7 @@ export function SetupPage() {
     cloudflare: isOk("cloudflare_dns"),
     lan: lanClosed,
     admin: isOk("admin_passkeys"),
+    providers: providersDone,
     knowledge: isOk("knowledge_index_setup"),
     recovery: isOk("recovery_key"),
     backups: isOk("backups_configured"),
@@ -935,6 +1027,9 @@ export function SetupPage() {
               Refresh
             </button>
           </div>
+        </Box>
+        <Box title="AI providers (optional)" done={doneMap.providers} open={openId === "providers"} onToggle={() => toggle("providers")}>
+          <ProvidersSetupBox status={modelsQuery.data} isLoading={modelsQuery.isLoading} isError={modelsQuery.isError} error={modelsQuery.error} onRetry={() => void modelsQuery.refetch()} />
         </Box>
         <Box title="Document search" done={doneMap.knowledge} open={openId === "knowledge"} onToggle={() => toggle("knowledge")}>
           <IndexSetupControl />

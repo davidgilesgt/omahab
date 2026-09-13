@@ -3,7 +3,7 @@ import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { LoginPage, ProtectedRoute } from "./auth";
 import { AppShell } from "./components/shell";
 import { ApplicationsPage, BackupsPage, EventsPage, OverviewPage, ProjectsPage } from "./views/operations";
-import { PeoplePage, ProvidersPage, SyncFoldersPage, WorkspacesPage } from "./views/administration";
+import { PeoplePage, SyncFoldersPage, WorkspacesPage } from "./views/administration";
 import { ToolEnvironmentPage } from "./views/tool-environment";
 import { DevicesPage } from "./views/devices";
 import { AssistantKnowledgePanel } from "./views/knowledge";
@@ -35,7 +35,6 @@ function DashboardRoutes() {
           <Route path="/sync" element={<SyncFoldersPage />} />
           <Route path="/workspaces" element={<WorkspacesPage />} />
           <Route path="/people" element={<PeoplePage />} />
-          <Route path="/providers" element={<ProvidersPage />} />
           <Route path="/tool-environment" element={<ToolEnvironmentPage />} />
           <Route path="/devices" element={<DevicesPage />} />
           <Route path="/ai" element={<AssistantKnowledgePanel />} />
@@ -61,7 +60,6 @@ function AdminDashboardRoutes() {
           <Route path="/admin/sync" element={<SyncFoldersPage />} />
           <Route path="/admin/workspaces" element={<WorkspacesPage />} />
           <Route path="/admin/people" element={<PeoplePage />} />
-          <Route path="/admin/providers" element={<ProvidersPage />} />
           <Route path="/admin/tool-environment" element={<ToolEnvironmentPage />} />
           <Route path="/admin/devices" element={<DevicesPage />} />
           <Route path="/admin/ai" element={<AssistantKnowledgePanel />} />
@@ -85,7 +83,6 @@ function HomeHostRedirects() {
     "/sync",
     "/workspaces",
     "/people",
-    "/providers",
     "/tool-environment",
     "/devices",
     "/ai",

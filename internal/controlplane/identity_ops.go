@@ -311,478 +311,7 @@ func (b *Backend) CreateUserRecoverySession(ctx context.Context, userID domain.I
 	return b.CreateRecoverySession(ctx, u.Email)
 }
 
-// Provider credentials
-
-func (b *Backend) ListProviderCredentials(ctx context.Context, p apitypes.Pagination) ([]apitypes.ProviderCredential, error) {
-	if b.providers == nil {
-		return nil, translateError(fmt.Errorf("%w: providers not configured", ErrNotConfigured))
-	}
-	list, err := b.providers.ListCredentials(ctx)
-	if err != nil {
-		return nil, translateError(err)
-	}
-	out := make([]apitypes.ProviderCredential, 0, len(list))
-	for _, c := range list {
-		ent := c.Entitlement
-		out = append(out, apitypes.ProviderCredential{
-			ID:          c.ID,
-			Provider:    c.Provider,
-			Name:        c.DisplayName,
-			Kind:        c.CredentialType,
-			Status:      string(c.Health),
-			Configured:  true,
-			ManagedBy:   c.ManagedBy,
-			ExternalRef: c.ExternalRef,
-			Entitlement: &ent,
-			ExpiresAt:   c.ExpiresAt,
-			UpdatedAt:   c.UpdatedAt,
-		})
-	}
-	return paginate(out, p), nil
-}
-
-func (b *Backend) GetProviderCredential(ctx context.Context, id domain.ID) (apitypes.ProviderCredential, error) {
-	if b.providers == nil {
-		return apitypes.ProviderCredential{}, translateError(fmt.Errorf("%w: providers not configured", ErrNotConfigured))
-	}
-	c, err := b.providers.GetCredential(ctx, id)
-	if err != nil {
-		return apitypes.ProviderCredential{}, translateError(err)
-	}
-	ent := c.Entitlement
-	return apitypes.ProviderCredential{
-		ID:          c.ID,
-		Provider:    c.Provider,
-		Name:        c.DisplayName,
-		Kind:        c.CredentialType,
-		Status:      string(c.Health),
-		Configured:  true,
-		ManagedBy:   c.ManagedBy,
-		ExternalRef: c.ExternalRef,
-		Entitlement: &ent,
-		ExpiresAt:   c.ExpiresAt,
-		UpdatedAt:   c.UpdatedAt,
-	}, nil
-}
-
-func (b *Backend) CreateProviderCredential(ctx context.Context, req apitypes.CreateProviderCredentialRequest) (apitypes.ProviderCredential, error) {
-	if b.providers == nil || b.secrets == nil {
-		return apitypes.ProviderCredential{}, translateError(fmt.Errorf("%w: providers or secrets not configured", ErrNotConfigured))
-	}
-	provider := strings.TrimSpace(strings.ToLower(req.Provider))
-	kind := strings.TrimSpace(strings.ToLower(req.Kind))
-	displayName := strings.TrimSpace(req.Name)
-	value := req.Value
-
-	// Strict provider/kind validation. Reject mismatched pairs before touching secrets.
-	if provider == "" {
-		return apitypes.ProviderCredential{}, translateError(fmt.Errorf("%w: provider is required", store.ErrValidation))
-	}
-	if kind == "" {
-		return apitypes.ProviderCredential{}, translateError(fmt.Errorf("%w: kind is required", store.ErrValidation))
-	}
-	// Use providers constants for allowed checks; fallback to service validation if needed.
-	allowed := map[string]map[string]bool{
-		providers.ProviderOpenAI:     {providers.CredentialTypeAPIKey: true},
-		providers.ProviderAnthropic:  {providers.CredentialTypeAPIKey: true},
-		providers.ProviderOpenRouter: {providers.CredentialTypeAPIKey: true},
-		providers.ProviderChatGPT:    {providers.CredentialTypeOAuth: true},
-		providers.ProviderXAI:        {providers.CredentialTypeOAuth: true},
-	}
-	if m, ok := allowed[provider]; !ok || !m[kind] {
-		return apitypes.ProviderCredential{}, translateError(fmt.Errorf("%w: credential type %q not allowed for provider %q", store.ErrValidation, kind, provider))
-	}
-	if kind == providers.CredentialTypeAPIKey {
-		// API-key path: managed_by omahab, secret via broker.
-		if strings.TrimSpace(value) == "" {
-			return apitypes.ProviderCredential{}, translateError(fmt.Errorf("%w: value is required for api_key credentials", store.ErrValidation))
-		}
-		if strings.Contains(value, "\x00") || strings.Contains(displayName, "\x00") {
-			return apitypes.ProviderCredential{}, translateError(fmt.Errorf("%w: value contains NUL", store.ErrValidation))
-		}
-		// Reject cookie/session/browser exfiltration substrings (case-insensitive) in value.
-		low := strings.ToLower(value)
-		for _, sub := range []string{"cookie", "session", "browser"} {
-			if strings.Contains(low, sub) {
-				return apitypes.ProviderCredential{}, translateError(fmt.Errorf("%w: credential value contains rejected substring %q", store.ErrValidation, sub))
-			}
-		}
-	}
-	if kind == providers.CredentialTypeOAuth {
-		if strings.TrimSpace(value) != "" {
-			// OAuth credentials must not carry a raw value; they are managed by LiteLLM.
-			return apitypes.ProviderCredential{}, translateError(fmt.Errorf("%w: value must be empty for oauth credentials", store.ErrValidation))
-		}
-	}
-
-	// Generate credential ID for secret naming; this will be the provider_credentials.id as well.
-	credentialID := domain.ID(store.NewID())
-	var secretID domain.ID
-	var managedBy string
-	var externalRef *string
-	var secretName string
-
-	switch kind {
-	case providers.CredentialTypeAPIKey:
-		managedBy = providers.ManagedByOmahab
-		secretName = "credential." + string(credentialID)
-		sec, err := b.secrets.Put(ctx, "provider", secretName, value)
-		if err != nil {
-			return apitypes.ProviderCredential{}, translateError(err)
-		}
-		secretID = sec.ID
-		externalRef = nil
-	case providers.CredentialTypeOAuth:
-		managedBy = providers.ManagedByLiteLLM
-		// Do not create secret; set external_ref per provider.
-		switch provider {
-		case providers.ProviderChatGPT:
-			ref := providers.ExternalRefChatGPT
-			externalRef = &ref
-		case providers.ProviderXAI:
-			ref := providers.ExternalRefXAI
-			externalRef = &ref
-		default:
-			return apitypes.ProviderCredential{}, translateError(fmt.Errorf("%w: oauth not supported for provider %q", store.ErrValidation, provider))
-		}
-		secretID = ""
-		secretName = ""
-	default:
-		return apitypes.ProviderCredential{}, translateError(fmt.Errorf("%w: unsupported kind %q", store.ErrValidation, kind))
-	}
-
-	// Persist metadata. Use generated credentialID as primary key so secret name matches.
-	in := providers.CreateCredentialInput{
-		ID:             credentialID,
-		Provider:       provider,
-		CredentialType: kind,
-		DisplayName:    displayName,
-		SecretID:       secretID,
-		ManagedBy:      managedBy,
-		ExternalRef:    externalRef,
-	}
-	cred, err := b.providers.CreateCredential(ctx, in)
-	if err != nil {
-		// Roll back secret if it was created.
-		if managedBy == providers.ManagedByOmahab && secretID != "" {
-			_ = b.secrets.Delete(ctx, secretID)
-			if secretName != "" {
-				_ = b.secrets.DeleteByName(ctx, "provider", secretName)
-			}
-		}
-		return apitypes.ProviderCredential{}, translateError(err)
-	}
-
-	// After metadata persisted, reconcile LiteLLM. Capture lists for rollback.
-	if b.gateway != nil {
-		aliases, _ := b.providers.ListAliases(ctx)
-		creds, _ := b.providers.ListCredentials(ctx)
-		// Convert to value slices for gateway.
-		var aliasVals []providers.Alias
-		for _, a := range aliases {
-			if a != nil {
-				aliasVals = append(aliasVals, *a)
-			}
-		}
-		var credVals []providers.Credential
-		for _, c := range creds {
-			if c != nil {
-				credVals = append(credVals, *c)
-			}
-		}
-		// Sync provider key material into the litellm env before rendering so
-		// os.environ refs resolve at request time.
-		// Fail closed: roll back metadata + secret like a reconcile failure.
-		if err := b.syncLiteLLMProviderEnv(ctx, credVals); err != nil {
-			_ = b.providers.DeleteCredential(ctx, cred.ID)
-			if managedBy == providers.ManagedByOmahab && secretID != "" {
-				_ = b.secrets.Delete(ctx, secretID)
-				if secretName != "" {
-					_ = b.secrets.DeleteByName(ctx, "provider", secretName)
-				}
-			}
-			return apitypes.ProviderCredential{}, translateError(err)
-		}
-		if err := b.gateway.ReconcileModels(ctx, aliasVals, credVals); err != nil {
-			_ = b.providers.DeleteCredential(ctx, cred.ID)
-			if managedBy == providers.ManagedByOmahab && secretID != "" {
-				_ = b.secrets.Delete(ctx, secretID)
-				if secretName != "" {
-					_ = b.secrets.DeleteByName(ctx, "provider", secretName)
-				}
-			}
-			// Attempt to re-reconcile without the new credential to restore prior gateway state.
-			prevAliases, _ := b.providers.ListAliases(ctx)
-			prevCreds, _ := b.providers.ListCredentials(ctx)
-			var prevVals []providers.Alias
-			for _, a := range prevAliases {
-				if a != nil {
-					prevVals = append(prevVals, *a)
-				}
-			}
-			var prevCredVals []providers.Credential
-			for _, c := range prevCreds {
-				if c != nil {
-					prevCredVals = append(prevCredVals, *c)
-				}
-			}
-			// Best-effort: keep the litellm env convergent with the restored state.
-			_ = b.syncLiteLLMProviderEnv(ctx, prevCredVals)
-			if rerr := b.gateway.ReconcileModels(ctx, prevVals, prevCredVals); rerr == nil {
-				_ = b.reloadLiteLLMGateway(ctx)
-			}
-			return apitypes.ProviderCredential{}, translateError(fmt.Errorf("gateway reconcile failed: %w", err))
-		}
-		if err := b.reloadLiteLLMGateway(ctx); err != nil {
-			_ = b.providers.DeleteCredential(ctx, cred.ID)
-			if managedBy == providers.ManagedByOmahab && secretID != "" {
-				_ = b.secrets.Delete(ctx, secretID)
-				if secretName != "" {
-					_ = b.secrets.DeleteByName(ctx, "provider", secretName)
-				}
-			}
-			prevAliases, _ := b.providers.ListAliases(ctx)
-			prevCreds, _ := b.providers.ListCredentials(ctx)
-			var prevVals3 []providers.Alias
-			for _, a := range prevAliases {
-				if a != nil {
-					prevVals3 = append(prevVals3, *a)
-				}
-			}
-			var prevCredVals3 []providers.Credential
-			for _, c := range prevCreds {
-				if c != nil {
-					prevCredVals3 = append(prevCredVals3, *c)
-				}
-			}
-			_ = b.syncLiteLLMProviderEnv(ctx, prevCredVals3)
-			if rerr := b.gateway.ReconcileModels(ctx, prevVals3, prevCredVals3); rerr == nil {
-				_ = b.reloadLiteLLMGateway(ctx)
-			}
-			return apitypes.ProviderCredential{}, translateError(err)
-		}
-		if err := b.gateway.Health(ctx); err != nil {
-			_ = b.providers.DeleteCredential(ctx, cred.ID)
-			if managedBy == providers.ManagedByOmahab && secretID != "" {
-				_ = b.secrets.Delete(ctx, secretID)
-				if secretName != "" {
-					_ = b.secrets.DeleteByName(ctx, "provider", secretName)
-				}
-			}
-			prevAliases, _ := b.providers.ListAliases(ctx)
-			prevCreds, _ := b.providers.ListCredentials(ctx)
-			var prevVals2 []providers.Alias
-			for _, a := range prevAliases {
-				if a != nil {
-					prevVals2 = append(prevVals2, *a)
-				}
-			}
-			var prevCredVals2 []providers.Credential
-			for _, c := range prevCreds {
-				if c != nil {
-					prevCredVals2 = append(prevCredVals2, *c)
-				}
-			}
-			_ = b.syncLiteLLMProviderEnv(ctx, prevCredVals2)
-			if rerr := b.gateway.ReconcileModels(ctx, prevVals2, prevCredVals2); rerr == nil {
-				_ = b.reloadLiteLLMGateway(ctx)
-			}
-			return apitypes.ProviderCredential{}, translateError(err)
-		}
-	}
-
-	ent := cred.Entitlement
-	return apitypes.ProviderCredential{
-		ID:          cred.ID,
-		Provider:    cred.Provider,
-		Name:        cred.DisplayName,
-		Kind:        cred.CredentialType,
-		Status:      string(cred.Health),
-		Configured:  true,
-		ManagedBy:   cred.ManagedBy,
-		ExternalRef: cred.ExternalRef,
-		Entitlement: &ent,
-		ExpiresAt:   cred.ExpiresAt,
-		UpdatedAt:   cred.UpdatedAt,
-	}, nil
-}
-
-func (b *Backend) DeleteProviderCredential(ctx context.Context, id domain.ID) error {
-	if b.providers == nil {
-		return translateError(fmt.Errorf("%w: providers not configured", ErrNotConfigured))
-	}
-	if strings.TrimSpace(string(id)) == "" {
-		return translateError(fmt.Errorf("%w: id is required", store.ErrValidation))
-	}
-	// Fetch existing to know managed_by/secret_id for cleanup and to surface not-found.
-	cred, err := b.providers.GetCredential(ctx, id)
-	if err != nil {
-		return translateError(err)
-	}
-	// First, reject if any alias still references this credential (FK RESTRICT).
-	aliases, err := b.providers.ListAliases(ctx)
-	if err != nil {
-		return translateError(err)
-	}
-	for _, a := range aliases {
-		if a != nil && a.CredentialID == id {
-			return translateError(fmt.Errorf("%w: credential is referenced by alias %q", store.ErrValidation, a.Name))
-		}
-	}
-	// Remove LiteLLM deployment before deleting metadata.
-	if b.gateway != nil {
-		// Build lists without the credential being deleted.
-		allCreds, _ := b.providers.ListCredentials(ctx)
-		var remainingCredVals []providers.Credential
-		for _, c := range allCreds {
-			if c != nil && c.ID != id {
-				remainingCredVals = append(remainingCredVals, *c)
-			}
-		}
-		var aliasVals []providers.Alias
-		for _, a := range aliases {
-			if a != nil {
-				aliasVals = append(aliasVals, *a)
-			}
-		}
-		// Sync the deleted credential out of the litellm env before rendering.
-		if err := b.syncLiteLLMProviderEnv(ctx, remainingCredVals); err != nil {
-			return translateError(err)
-		}
-		if err := b.gateway.ReconcileModels(ctx, aliasVals, remainingCredVals); err != nil {
-			return translateError(fmt.Errorf("gateway reconcile failed: %w", err))
-		}
-		if err := b.reloadLiteLLMGateway(ctx); err != nil {
-			return translateError(err)
-		}
-	}
-	// Delete metadata.
-	if err := b.providers.DeleteCredential(ctx, id); err != nil {
-		return translateError(err)
-	}
-	// Finally, delete encrypted secret if omahab-managed.
-	if cred.ManagedBy == providers.ManagedByOmahab {
-		// Secret was stored as provider/credential.<id>
-		secretName := "credential." + string(id)
-		if cred.SecretID != "" {
-			_ = b.secrets.Delete(ctx, cred.SecretID)
-		}
-		_ = b.secrets.DeleteByName(ctx, "provider", secretName)
-		// Explicitly drop the legacy projected file (covers paths where no reconcile ran).
-		b.removeProviderSecretFile(string(id))
-	}
-	return nil
-}
-
-// reloadLiteLLMGateway restarts the litellm app so a freshly reconciled config
-// file goes live (the gateway never reloads its static config on its own).
-// It is a no-op when the apps service is unavailable (unit tests) or litellm is
-// not installed. A restart failure is a real failure: the config is not live.
-func (b *Backend) reloadLiteLLMGateway(ctx context.Context) error {
-	if b.apps == nil {
-		return nil
-	}
-	list, err := b.apps.List(ctx)
-	if err != nil {
-		return translateError(err)
-	}
-	var id domain.ID
-	found := false
-	for _, st := range list {
-		if st.BundleID == "litellm" {
-			id = st.ID
-			found = true
-			break
-		}
-	}
-	if !found {
-		return nil
-	}
-	if _, err := b.apps.Stop(ctx, id); err != nil {
-		return translateError(err)
-	}
-	if _, err := b.apps.Start(ctx, id); err != nil {
-		return translateError(err)
-	}
-	return nil
-}
-
-// Model gateway — alias and virtual-key management via providers.Service and GatewayAdmin.
-
-func (b *Backend) ListModelAliases(ctx context.Context) ([]apitypes.ModelAlias, error) {
-	if b.providers == nil {
-		return nil, translateError(fmt.Errorf("%w: providers not configured", ErrNotConfigured))
-	}
-	list, err := b.providers.ListAliases(ctx)
-	if err != nil {
-		return nil, translateError(err)
-	}
-	out := make([]apitypes.ModelAlias, 0, len(list))
-	for _, a := range list {
-		out = append(out, apitypes.ModelAlias{
-			Name:         a.Name,
-			CredentialID: a.CredentialID,
-			Model:        a.Model,
-			CreatedAt:    a.CreatedAt,
-			UpdatedAt:    a.UpdatedAt,
-		})
-	}
-	return out, nil
-}
-
-func (b *Backend) SetModelAlias(ctx context.Context, name string, req apitypes.SetModelAliasRequest) (apitypes.ModelAlias, error) {
-	if b.providers == nil {
-		return apitypes.ModelAlias{}, translateError(fmt.Errorf("%w: providers not configured", ErrNotConfigured))
-	}
-	in := providers.SetAliasInput{
-		Name:         name,
-		CredentialID: domain.ID(req.CredentialID),
-		Model:        req.Model,
-	}
-	a, err := b.providers.SetAlias(ctx, in)
-	if err != nil {
-		return apitypes.ModelAlias{}, translateError(err)
-	}
-	// Reconcile gateway after alias change, with rollback on failure.
-	if b.gateway != nil {
-		aliases, _ := b.providers.ListAliases(ctx)
-		creds, _ := b.providers.ListCredentials(ctx)
-		var aliasVals []providers.Alias
-		for _, al := range aliases {
-			if al != nil {
-				aliasVals = append(aliasVals, *al)
-			}
-		}
-		var credVals []providers.Credential
-		for _, c := range creds {
-			if c != nil {
-				credVals = append(credVals, *c)
-			}
-		}
-		// Sync provider key material into the litellm env before rendering so
-		// os.environ refs resolve at request time.
-		if err := b.syncLiteLLMProviderEnv(ctx, credVals); err != nil {
-			return apitypes.ModelAlias{}, translateError(err)
-		}
-		if err := b.gateway.ReconcileModels(ctx, aliasVals, credVals); err != nil {
-			return apitypes.ModelAlias{}, translateError(fmt.Errorf("gateway reconcile failed: %w", err))
-		}
-		if err := b.reloadLiteLLMGateway(ctx); err != nil {
-			return apitypes.ModelAlias{}, translateError(err)
-		}
-		if err := b.gateway.Health(ctx); err != nil {
-			return apitypes.ModelAlias{}, translateError(err)
-		}
-	}
-	return apitypes.ModelAlias{
-		Name:          a.Name,
-		CredentialID:  a.CredentialID,
-		Model:         a.Model,
-		FallbackOrder: req.FallbackOrder,
-		CreatedAt:     a.CreatedAt,
-		UpdatedAt:     a.UpdatedAt,
-	}, nil
-}
+// Model gateway — virtual-key management via providers.Service and GatewayAdmin.
 
 func (b *Backend) ListModelKeys(ctx context.Context, p apitypes.Pagination) ([]apitypes.ModelKey, error) {
 	if b.providers == nil {
@@ -895,6 +424,44 @@ func (b *Backend) DeleteModelKey(ctx context.Context, id domain.ID) error {
 	return nil
 }
 
+func (b *Backend) ensureOAuthMetadata(ctx context.Context, provider string) {
+	if b.providers == nil {
+		return
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	expectedRef := ""
+	switch provider {
+	case providers.ProviderChatGPT:
+		expectedRef = providers.ExternalRefChatGPT
+	case providers.ProviderXAI:
+		expectedRef = providers.ExternalRefXAI
+	default:
+		return
+	}
+	creds, err := b.providers.ListCredentials(ctx)
+	if err != nil {
+		return
+	}
+	for _, c := range creds {
+		if c == nil {
+			continue
+		}
+		if strings.EqualFold(c.Provider, provider) && c.ManagedBy == providers.ManagedByLiteLLM {
+			if c.ExternalRef != nil && strings.EqualFold(strings.TrimSpace(*c.ExternalRef), expectedRef) {
+				return
+			}
+		}
+	}
+	ref := expectedRef
+	_, _ = b.providers.CreateCredential(ctx, providers.CreateCredentialInput{
+		Provider:       provider,
+		CredentialType: providers.CredentialTypeOAuth,
+		DisplayName:    provider + " subscription",
+		ManagedBy:      providers.ManagedByLiteLLM,
+		ExternalRef:    &ref,
+	})
+}
+
 func (b *Backend) StartProviderOAuth(ctx context.Context, provider string, req apitypes.StartProviderOAuthRequest) (apitypes.OAuthSession, error) {
 	if b.gateway == nil {
 		return apitypes.OAuthSession{}, translateError(fmt.Errorf("%w: gateway not configured", ErrNotConfigured))
@@ -908,6 +475,10 @@ func (b *Backend) StartProviderOAuth(ctx context.Context, provider string, req a
 			flow = providers.FlowLoopback
 		}
 	}
+	// No browser-created placeholder credential is required: ensure the
+	// OAuth-only metadata record (authentication tracking, not native
+	// model/credential configuration) before starting the flow.
+	b.ensureOAuthMetadata(ctx, provider)
 	sess, err := b.gateway.StartOAuth(ctx, provider, flow)
 	if err != nil {
 		return apitypes.OAuthSession{}, translateError(err)
@@ -1048,6 +619,7 @@ func (b *Backend) probeAndMarkHealthy(ctx context.Context, provider string) erro
 	}
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	// Find a litellm-managed credential for this provider (external_ref chatgpt|xai_oauth), managed_by litellm, no secret_id.
+	// These records track authentication, not native model/credential configuration.
 	creds, err := b.providers.ListCredentials(ctx)
 	if err != nil {
 		return err
@@ -1079,25 +651,14 @@ func (b *Backend) probeAndMarkHealthy(ctx context.Context, provider string) erro
 	if target == nil {
 		return nil
 	}
-	// Choose concrete model to probe: prefer alias that uses this credential, else omahab/fast via LiteLLM.
-	aliases, err := b.providers.ListAliases(ctx)
-	if err != nil || len(aliases) == 0 {
-		return nil
-	}
-	modelToProbe := ""
-	for _, a := range aliases {
-		if a != nil && a.CredentialID == target.ID {
-			if a.Name == providers.AliasFast {
-				modelToProbe = a.Name
-				break
-			}
-			if modelToProbe == "" {
-				modelToProbe = a.Name
-			}
-		}
-	}
+	// Choose a live native deployment for the connected provider (prefer
+	// omahab/fast), not legacy SQLite aliases. If no native model is
+	// configured, return connected authentication without claiming a
+	// successful model probe; LiteLLM remains the model-configuration
+	// destination. 403 stays distinct from invalid tokens.
+	modelToProbe := b.nativeProbeModel(ctx, provider)
 	if modelToProbe == "" {
-		modelToProbe = providers.AliasFast
+		return nil
 	}
 	// Issue a short-lived probe virtual key scoped to modelToProbe; LiteLLM is authoritative for auth, not local ValidateVirtualKey.
 	ownerKind := "harness"

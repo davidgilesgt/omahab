@@ -1029,74 +1029,32 @@ paths:
         '201': { description: Recovery session, content: { application/json: { schema: { $ref: '#/components/schemas/RecoverySession' } } } }
         '400': { $ref: '#/components/responses/BadRequest' }
 
-  /api/v1/provider-credentials:
+  /api/v1/setup/models:
     get:
-      summary: List provider credentials (metadata)
-      operationId: listProviderCredentials
-      parameters:
-        - $ref: '#/components/parameters/Limit'
-        - $ref: '#/components/parameters/Offset'
-        - $ref: '#/components/parameters/Page'
-        - $ref: '#/components/parameters/PerPage'
+      summary: Get native model setup status
+      description: Admin only. Read-only native LiteLLM inventory for optional provider onboarding. No endpoint accepts provider credentials from the browser. Supplies management_url from the installed LiteLLM launch URL (never example.com). Handoff failures expose only safe migration_error text; seed is unavailable until migration_complete.
+      operationId: modelSetup
       responses:
-        '200': { description: Credentials, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/ProviderCredential' } } } } } } }
-    post:
-      summary: Create provider credential
-      operationId: createProviderCredential
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CreateProviderCredentialRequest' } } } }
-      responses:
-        '201': { description: Created metadata, content: { application/json: { schema: { $ref: '#/components/schemas/ProviderCredential' } } } }
-        '400': { $ref: '#/components/responses/BadRequest' }
-
-  /api/v1/provider-credentials/{id}:
-    parameters: [{ $ref: '#/components/parameters/IdPath' }]
-    get:
-      summary: Get provider credential metadata
-      operationId: getProviderCredential
-      responses:
-        '200': { description: Credential, content: { application/json: { schema: { $ref: '#/components/schemas/ProviderCredential' } } } }
-        '404': { $ref: '#/components/responses/NotFound' }
-    delete:
-      summary: Delete provider credential
-      operationId: deleteProviderCredential
-      responses:
-        '204': { description: Deleted }
-        '404': { $ref: '#/components/responses/NotFound' }
-  /api/v1/model-aliases:
-    get:
-      summary: List model aliases
-      operationId: listModelAliases
-      responses:
-        '200':
-          description: Aliases
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [items]
-                properties:
-                  items: { type: array, items: { $ref: '#/components/schemas/ModelAlias' } }
+        '200': { description: Model setup status, content: { application/json: { schema: { $ref: '#/components/schemas/ModelSetupStatus' } } } }
         '401': { $ref: '#/components/responses/Unauthorized' }
-  /api/v1/model-aliases/{name}:
-    put:
-      summary: Upsert model alias
-      operationId: setModelAlias
-      parameters:
-        - name: name
-          in: path
-          required: true
-          schema: { type: string, enum: [omahab/fast, omahab/balanced, omahab/reasoning, omahab/embedding, omahab/karakeep] }
-          description: Alias name. Contains a slash — clients MUST percent-encode it as %2F (e.g. omahab%2Ffast) when building the request path.
+        '503': { $ref: '#/components/responses/Error' }
+  /api/v1/setup/models/seed:
+    post:
+      summary: Seed default chat aliases from one model
+      description: Admin only. Seeds missing omahab/fast, omahab/balanced, omahab/reasoning and omahab/summarization from the chosen global chat deployment via a shared native credential. Missing-only creation; repeat is a no-op. Never rotates keys, restarts, probes, or creates fallbacks. Defaults share a credential; edit models and credentials in LiteLLM.
+      operationId: seedModelAliases
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/SetModelAliasRequest' }
+            schema: { $ref: '#/components/schemas/SeedModelAliasesRequest' }
       responses:
-        '200': { description: Alias, content: { application/json: { schema: { $ref: '#/components/schemas/ModelAlias' } } } }
+        '200': { description: Fresh model setup status, content: { application/json: { schema: { $ref: '#/components/schemas/ModelSetupStatus' } } } }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /api/v1/model-keys:
     get:
       summary: List model keys (metadata)
@@ -2185,22 +2143,40 @@ components:
         comment: { type: string }
         source: { type: string }
         fingerprint: { type: string }
-    ProviderCredential:
+    ModelSetupDeployment:
       type: object
-      description: Metadata only; value and secret_id never returned. managed_by=omahab for API keys via secrets broker, litellm for subscription (chatgpt/xai_oauth) with external_ref.
-      required: [id, provider, name, kind, status, configured, managed_by, updated_at]
+      description: "One selectable native LiteLLM deployment: global database deployment with known provider and chat/responses mode."
+      required: [id, name, model, provider, mode]
       properties:
         id: { type: string }
-        provider: { type: string, enum: [openai, anthropic, openrouter, chatgpt, xai] }
         name: { type: string }
-        kind: { type: string, enum: [api_key, oauth] }
-        status: { type: string }
+        model: { type: string }
+        provider: { type: string }
+        mode: { type: string, enum: [chat, responses] }
+    ModelSetupAlias:
+      type: object
+      description: Supported omahab alias summary from native metadata, even when missing.
+      required: [name, configured, providers]
+      properties:
+        name: { type: string, enum: [omahab/fast, omahab/balanced, omahab/reasoning, omahab/summarization, omahab/embedding, omahab/karakeep] }
         configured: { type: boolean }
-        managed_by: { type: string, enum: [omahab, litellm], description: "omahab=API key via secrets broker (secret_id non-null), litellm=subscription via LiteLLM (external_ref chatgpt|xai_oauth)" }
-        external_ref: { type: string, nullable: true, description: "External reference for subscription credentials: chatgpt or xai_oauth; null for API keys" }
-        entitlement: { type: string, nullable: true }
-        expires_at: { type: string, format: date-time, nullable: true }
-        updated_at: { type: string, format: date-time }
+        providers: { type: array, items: { type: string } }
+    ModelSetupStatus:
+      type: object
+      description: Safe setup-models response; carries no secrets.
+      required: [migration_complete, deployments, aliases]
+      properties:
+        management_url: { type: string }
+        migration_complete: { type: boolean }
+        migration_error: { type: string }
+        deployments: { type: array, items: { $ref: '#/components/schemas/ModelSetupDeployment' } }
+        aliases: { type: array, items: { $ref: '#/components/schemas/ModelSetupAlias' } }
+    SeedModelAliasesRequest:
+      type: object
+      required: [model_id]
+      properties:
+        model_id: { type: string }
+      additionalProperties: false
 
     RecoverySession:
       type: object
@@ -2519,16 +2495,6 @@ components:
         disabled: { type: boolean }
       additionalProperties: false
 
-    CreateProviderCredentialRequest:
-      type: object
-      required: [provider, kind, value]
-      properties:
-        provider: { type: string }
-        name: { type: string }
-        kind: { type: string }
-        value: { type: string, description: Secret value, never returned } 
-      additionalProperties: false
-
     EmailIngestRequest:
       type: object
       required: [from, to, timestamp, nonce, raw, rawSize]
@@ -2539,25 +2505,6 @@ components:
         nonce: { type: string }
         raw: { type: string, contentEncoding: base64, description: Base64-encoded raw RFC 5322 message }
         rawSize: { type: integer, minimum: 1, description: Decoded raw byte length }
-      additionalProperties: false
-    ModelAlias:
-      type: object
-      description: Stable omahab alias routed via LiteLLM.
-      required: [name, credential_id, model, updated_at]
-      properties:
-        name: { type: string, enum: [omahab/fast, omahab/balanced, omahab/reasoning, omahab/embedding, omahab/karakeep] }
-        credential_id: { type: string }
-        model: { type: string, description: Upstream model, e.g. gpt-4o, anthropic/claude-3-5-sonnet, xai/grok-4, chatgpt/gpt-4o }
-        fallback_order: { type: array, items: { type: string }, nullable: true, description: Ordered fallback credential IDs or model names; empty means no fallback } 
-        created_at: { type: string, format: date-time }
-        updated_at: { type: string, format: date-time }
-    SetModelAliasRequest:
-      type: object
-      required: [credential_id, model]
-      properties:
-        credential_id: { type: string }
-        model: { type: string }
-        fallback_order: { type: array, items: { type: string } }
       additionalProperties: false
     ModelKey:
       type: object
@@ -2583,7 +2530,7 @@ components:
         name: { type: string, minLength: 1, maxLength: 128 }
         owner_kind: { type: string, enum: [hermes, device, harness] }
         owner_id: { type: string, minLength: 1 }
-        scopes: { type: array, items: { type: string, enum: [omahab/fast, omahab/balanced, omahab/reasoning, omahab/embedding, omahab/karakeep] } }
+        scopes: { type: array, items: { type: string, enum: [omahab/fast, omahab/balanced, omahab/reasoning, omahab/summarization, omahab/embedding, omahab/karakeep] } }
         rpm: { type: integer, minimum: 1 }
         tpm: { type: integer, minimum: 1 }
         concurrency: { type: integer, minimum: 1 }
