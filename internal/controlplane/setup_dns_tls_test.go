@@ -169,6 +169,7 @@ func TestSetupStatusMetadataAndTailscaleAction(t *testing.T) {
 		"tailscale":                {"Connect Tailscale", "operator"},
 		"admin_passkeys":           {"Create the admin account and passkeys", "operator"},
 		"recovery_key":             {"Save a recovery phrase", "operator"},
+		"knowledge_index_setup":    {"Document search", "operator"},
 		"recovery_tested":          {"Verify a restore", "operator"},
 		"storage_configured":       {"Storage placement", "operator"},
 		"backups_configured":       {"Configure backups", "operator"},

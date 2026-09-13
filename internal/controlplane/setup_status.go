@@ -19,7 +19,7 @@ import (
 // secrets, exposure observations, apps, identity, and backups.
 // It persists nothing new — all derivable — per plan step 6.
 func (b *Backend) GetSetupStatus(ctx context.Context) (apitypes.SetupStatus, error) {
-	checks := make([]apitypes.SetupCheck, 0, 13)
+	checks := make([]apitypes.SetupCheck, 0, 16)
 	// --- ssh_keys check (first: installer seeds keys, add more here) ---
 	sshCheck := apitypes.SetupCheck{ID: "ssh_keys"}
 	if keys, err := b.ListSSHKeys(ctx); err != nil {
@@ -333,6 +333,32 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (apitypes.SetupStatus, err
 	}
 	checks = append(checks, passCheck)
 
+	// --- knowledge_index_setup check (explicit local document-search mode) ---
+	idxCheck := apitypes.SetupCheck{ID: "knowledge_index_setup"}
+	if b.knowledge == nil {
+		idxCheck.Status = "failed"
+		idxCheck.Detail = "knowledge not configured"
+	} else if choice, err := b.knowledge.GetIndexSetupChoice(ctx); err != nil {
+		idxCheck.Status = "failed"
+		idxCheck.Detail = "query failed: " + err.Error()
+	} else {
+		switch normalized := strings.TrimSpace(strings.ToLower(choice)); normalized {
+		case "":
+			idxCheck.Status = "pending"
+			idxCheck.Detail = "no document search mode chosen"
+		case "english", "worldwide", "full_text", "fulltext":
+			idxCheck.Status = "ok"
+			idxCheck.Detail = normalized
+			if idxCheck.Detail == "fulltext" {
+				idxCheck.Detail = "full_text"
+			}
+		default:
+			idxCheck.Status = "failed"
+			idxCheck.Detail = "invalid document search mode: " + choice
+		}
+	}
+	checks = append(checks, idxCheck)
+
 	// --- recovery_tested check ---
 	recovCheck := apitypes.SetupCheck{ID: "recovery_tested"}
 	var recovCount int
@@ -603,6 +629,10 @@ func applySetupCheckMeta(c apitypes.SetupCheck) apitypes.SetupCheck {
 		c.Label = "Create the admin account and passkeys"
 		c.Owner = "operator"
 		c.Action = "Create the admin below and register two passkeys."
+	case "knowledge_index_setup":
+		c.Label = "Document search"
+		c.Owner = "operator"
+		c.Action = "Choose a document search mode."
 	case "recovery_key":
 		c.Label = "Save a recovery phrase"
 		c.Owner = "operator"
@@ -642,7 +672,7 @@ func applySetupCheckMeta(c apitypes.SetupCheck) apitypes.SetupCheck {
 	return c
 }
 func orderSetupChecks(checks []apitypes.SetupCheck) []apitypes.SetupCheck {
-	order := []string{"ssh_keys", "domain", "cloudflare_dns", "tailscale", "recovery_key", "admin_passkeys", "backups_configured", "storage_configured", "tunnel", "dashboard_dns", "core_apps", "woodpecker_connection", "automatic_reconciliation", "recovery_tested"}
+	order := []string{"ssh_keys", "domain", "cloudflare_dns", "tailscale", "recovery_key", "admin_passkeys", "knowledge_index_setup", "backups_configured", "storage_configured", "tunnel", "dashboard_dns", "core_apps", "woodpecker_connection", "automatic_reconciliation", "recovery_tested"}
 	byID := make(map[string]apitypes.SetupCheck, len(checks))
 	for _, c := range checks {
 		byID[c.ID] = c

@@ -5,6 +5,7 @@ import type { Secret, SetupStatus } from "../api/types";
 import { ErrorState, LoadingState } from "../components/ui";
 import { useToast } from "../components/toast";
 import { CopyButton } from "../components/copyButton";
+import { IndexSetupControl } from "../components/indexSetup";
 
 function authHeaders(): Record<string, string> {
   const t = sessionStorage.getItem("omahab.session") ?? "";
@@ -116,9 +117,9 @@ function tailnetErrorMessage(err: unknown): string {
   return "Tailnet path check failed";
 }
 
-type BoxId = "ssh" | "tailscale" | "domain" | "cloudflare" | "lan" | "admin" | "recovery" | "backups" | "storage" | "woodpecker";
+type BoxId = "ssh" | "tailscale" | "domain" | "cloudflare" | "lan" | "admin" | "knowledge" | "recovery" | "backups" | "storage" | "woodpecker";
 
-const BLOCKING: BoxId[] = ["ssh", "tailscale", "domain", "cloudflare", "lan", "admin", "recovery", "backups"];
+const BLOCKING: BoxId[] = ["ssh", "tailscale", "domain", "cloudflare", "lan", "admin", "knowledge", "recovery", "backups"];
 
 function Box({
   title,
@@ -642,6 +643,7 @@ export function SetupPage() {
     cloudflare: isOk("cloudflare_dns"),
     lan: lanClosed,
     admin: isOk("admin_passkeys"),
+    knowledge: isOk("knowledge_index_setup"),
     recovery: isOk("recovery_key"),
     backups: isOk("backups_configured"),
     storage: isOk("storage_configured"),
@@ -933,6 +935,9 @@ export function SetupPage() {
               Refresh
             </button>
           </div>
+        </Box>
+        <Box title="Document search" done={doneMap.knowledge} open={openId === "knowledge"} onToggle={() => toggle("knowledge")}>
+          <IndexSetupControl />
         </Box>
         {otherApps.map((a) => (
           <Box key={`core-${a.bundle_id}`} title={a.bundle_id} done={a.status === "running"} open={coreOpen === a.bundle_id} onToggle={() => setCoreOpen(coreOpen === a.bundle_id ? null : a.bundle_id)}>
