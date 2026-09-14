@@ -679,6 +679,8 @@ in
       config.services.woodpecker-agents.agents.docker.package
       config.services.forgejo.package
       config.services.syncthing.package
+      pkgs.rclone
+      pkgs.devpod
     ];
 
     # ----------------------------------------------------------------
