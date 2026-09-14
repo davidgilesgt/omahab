@@ -1787,10 +1787,12 @@ install_stage() {
   # addressed, sandbox-verified by Hydra. Skipping the per-build chroot
   # bind-mount storm matters on 2 vCPU. Outputs are identical; the
   # installed system's own daemon keeps sandboxing enabled.
-  # --max-jobs 2 --cores 2: trivial builds are single-threaded (2 at a
-  # time); the few heavy ones (initrd compress) use both cores.
-  # --option http-connections 50: guest downloads average ~1.4 MB/s per
-  # flow (slirp per-flow overhead dominates), so more flows raise aggregate.
+  # --max-jobs 4 --cores 2: the guest builds ~360 trivial text-assembly
+  # derivations (units, etc, checks — all machine-specific, never cached)
+  # whose per-build overhead dominates at jobs=2 (traced: builds span
+  # +76s..+234s while copies finish by +169s). Trivial builds are
+  # fork+exec+write (~tens of MB), so 4-wide is safe down to small
+  # machines; the few heavy ones (initrd compress) still use both cores.
   # Optional extra binary cache (e.g. a host serving its store so the
   # installer substitutes custom closures instead of rebuilding them):
   # OMAHAB_EXTRA_SUBSTITUTERS=http://host:8485
@@ -1803,14 +1805,11 @@ install_stage() {
     extra_subst+=(--option extra-trusted-public-keys "${OMAHAB_EXTRA_TRUSTED_KEYS}")
   fi
   # --no-channel-copy: the appliance upgrades via flakes (releaseRef), never
-  # legacy channels (installer tools are absent from the installed system).
-  # Skips copying the ~200 MiB nixpkgs source into a target channel profile.
-  # Trace nixos-install stderr with stage-relative timestamps, live to the
-  # console (>&2 inside the loop inherits the outer stderr) and appended to
-  # the log: reveals eval vs fetch/build vs activation split for tuning.
-  # A stderr redirect (not a pipe), so the exit status stays nixos-install's.
+  # legacy channels. Stderr carries stage-relative timestamps (live to the
+  # console and appended to the log); a redirect, not a pipe, so the exit
+  # status stays nixos-install's.
   INSTALL_T0=$SECONDS
-  if ! nixos-install --root "$MNT" --flake "$TARGET_FLAKE#$FLAKE_ATTR" --no-root-passwd --no-channel-copy --option sandbox false --max-jobs 2 --cores 2 --option http-connections 50 "${extra_subst[@]}" 2> >(while IFS= read -r line; do printf '[install+%ss] %s\n' "$((SECONDS - INSTALL_T0))" "$line" | tee -a "$LOG_FILE" >&2; done); then
+  if ! nixos-install --root "$MNT" --flake "$TARGET_FLAKE#$FLAKE_ATTR" --no-root-passwd --no-channel-copy --option sandbox false --max-jobs 4 --cores 2 --option http-connections 50 "${extra_subst[@]}" 2> >(while IFS= read -r line; do printf '[install+%ss] %s\n' "$((SECONDS - INSTALL_T0))" "$line" | tee -a "$LOG_FILE" >&2; done); then
     progress "install" "failed" "nixos-install failed — see $LOG_FILE"
     die "nixos-install failed"
   fi
