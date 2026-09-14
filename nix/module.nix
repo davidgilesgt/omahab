@@ -415,7 +415,10 @@ in
         Type = "simple";
         User = "omahab-builder";
         Group = "omahab-builder";
-        ExecStart = "${pkgs.podman}/bin/podman system service --time=0";
+        # Install-time closure: use the podman module's wrapped package
+        # (config.virtualisation.podman.package), not raw pkgs.podman, so
+        # the closure carries exactly one podman build.
+        ExecStart = "${config.virtualisation.podman.package}/bin/podman system service --time=0";
         Restart = "on-failure";
         RestartSec = 3;
         WorkingDirectory = "/var/lib/omahab-builder";
@@ -458,7 +461,7 @@ in
       environment = {
         HOME = "/var/lib/omahab-builder";
         # Rootless podman execs newuidmap/newgidmap from shadow's bin.
-        PATH = lib.mkForce "/run/wrappers/bin:${lib.makeBinPath [ pkgs.podman pkgs.shadow ]}";
+        PATH = lib.mkForce "/run/wrappers/bin:${lib.makeBinPath [ config.virtualisation.podman.package pkgs.shadow ]}";
 
         # No session bus in a system unit: force cgroupfs manager
         # (podman checks SD_NOTIFY + dbus; empty value falls back).
@@ -483,7 +486,7 @@ in
         Type = "oneshot";
         User = "omahab-builder";
         Group = "omahab-builder";
-        ExecStart = "${pkgs.podman}/bin/podman image prune --all --force --filter until=168h";
+        ExecStart = "${config.virtualisation.podman.package}/bin/podman image prune --all --force --filter until=168h";
         ProtectHome = false;
         ReadWritePaths = [
           "/var/lib/omahab-builder"
@@ -499,7 +502,7 @@ in
       };
       environment = {
         HOME = "/var/lib/omahab-builder";
-        PATH = lib.mkForce "/run/wrappers/bin:${lib.makeBinPath [ pkgs.podman pkgs.shadow ]}";
+        PATH = lib.mkForce "/run/wrappers/bin:${lib.makeBinPath [ config.virtualisation.podman.package pkgs.shadow ]}";
       };
     };
 
