@@ -91,10 +91,11 @@ in
       description = ''
         Extra closures baked into the installer ISO (isoImage.storeContents)
         so nixos-install copies them from the live medium instead of
-        downloading or building them in the guest. For custom (non-cache)
-        outputs this is the difference between a copy and a guest build.
-        Every entry costs ISO bytes: keep the list tight and prefer small,
-        expensive-to-build closures. Set in nix/apps.nix.
+        downloading or building them in the guest. Primarily custom
+        (non-cache) outputs, for which this is the difference between a
+        copy and a guest build; the largest stock downloads qualify too.
+        Every entry costs ISO bytes: keep the list tight. Set in
+        nix/apps.nix; the ISO cap is 3 GiB.
       '';
     };
 

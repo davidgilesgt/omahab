@@ -653,19 +653,21 @@ in
 
     # ----------------------------------------------------------------
     # ISO pre-cache (services.omahab.precachePackages, consumed by
-    # nix/installer.nix isoImage.storeContents): custom closures the guest
-    # would otherwise BUILD at install time (absent from cache.nixos.org).
-    # litellmPrismaEngines (patchelf build) and notesmd-cli (Go build) are
-    # small; the wrapped podman (Go build) saves a compiler run in the
-    # guest; karakeep 0.33.2 (pnpm build, minutes + GiBs of tmpfs) is the
-    # largest entry — affordable since the ISO cap is 3 GiB. Each entry
-    # costs ISO bytes: keep the list tight.
+    # nix/installer.nix isoImage.storeContents): closures the guest would
+    # otherwise BUILD (custom, absent from cache.nixos.org) or DOWNLOAD
+    # over slirp at install time. litellmPrismaEngines (patchelf) and
+    # notesmd-cli (Go) are small; the wrapped podman (Go) saves a compiler
+    # run; karakeep 0.33.2 (pnpm, minutes + GiBs of tmpfs) is the largest
+    # entry; stock tesseract5 carries the 1 GiB all-languages traineddata
+    # (shared by paperless ocrmypdf and tika). Affordable since the ISO cap
+    # is 3 GiB — but every entry costs ISO bytes, keep the list tight.
     # ----------------------------------------------------------------
     services.omahab.precachePackages = [
       litellmPrismaEngines
       notesmdCli
       config.virtualisation.podman.package
       config.services.karakeep.package
+      pkgs.tesseract5
     ];
 
     # ----------------------------------------------------------------
