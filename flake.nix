@@ -3,11 +3,26 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
-    flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" ] (system:
+  # Systems we build for. (Inlined instead of flake-utils' eachSystem so
+  # installs fetch one fewer flake input from GitHub in the guest.
+  # Semantics match eachSystem exactly: per-system results are merged
+  # transposed, so self.packages.x86_64-linux etc. keep working.)
+  outputs = { self, nixpkgs }:
+    let
+      systems = [ "x86_64-linux" "aarch64-linux" ];
+      eachSystem = nixpkgs.lib.foldl' (
+          attrs: system:
+            let
+              ret = perSystem system;
+              ans = attrs // { ${system} = ret; };
+            in
+            nixpkgs.lib.foldl' (
+              a: key: a // { ${key} = (a.${key} or { }) // { ${system} = ret.${key}; }; }
+            ) ans (builtins.attrNames ret)
+        ) { } systems;
+      perSystem = system:
       let
         pkgs = import nixpkgs { inherit system; };
         lib = pkgs.lib;
@@ -216,8 +231,9 @@ EOF
           # nixosConfigurations are x86_64-linux only, hence the guard.
           installed-closure = self.nixosConfigurations.omahab-installed.config.system.build.toplevel;
         };
-      }
-    ) // {
+      };
+    in
+    eachSystem // {
       nixosModules = {
         omahab = import ./nix/module.nix;
         default = self.nixosModules.omahab;

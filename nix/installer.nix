@@ -123,7 +123,6 @@ in
   # cap (note: above GitHub's 2GB release-asset limit — releases need
   # split or external hosting).
   # omahab-web (2.5 MiB) and omahab-catalog (KiBs) cost ~nothing on the
-  # ISO but save a full npm build plus its sandbox tmpfs in the guest.
   isoImage.storeContents = lib.optionals (pkgs.system == "x86_64-linux") (
     let installed = self.nixosConfigurations.omahab-installed.config;
     in [
@@ -138,6 +137,15 @@ in
       # sandbox tmpfs during install (OOM on small machines). Prebuilt here,
       # reused by identical store path in the guest.
       self.packages.${pkgs.system}.omahab-dl
+      # The locked nixpkgs source nar (self.inputs.nixpkgs.outPath).
+      # nixos-install evaluates the flake in the guest;
+      # with this valid in the live store it skips the ~40 MiB GitHub
+      # tarball download (slow-link installs feel it most). Note this is
+      # NOT pkgs.path (the import-materialized tree, unneeded in-guest).
+      # (Deliberately not includeSystemBuildDependencies: that ships every
+      # build source for live-system nix-build, GBs with no install gain —
+      # the guest copy path needs no builds.)
+      self.inputs.nixpkgs.outPath
       # Custom closures the guest would otherwise build (no cache hit):
       # curated in nix/apps.nix via services.omahab.precachePackages.
     ] ++ installed.services.omahab.precachePackages
