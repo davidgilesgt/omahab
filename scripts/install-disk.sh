@@ -1805,7 +1805,12 @@ install_stage() {
   # --no-channel-copy: the appliance upgrades via flakes (releaseRef), never
   # legacy channels (installer tools are absent from the installed system).
   # Skips copying the ~200 MiB nixpkgs source into a target channel profile.
-  if ! nixos-install --root "$MNT" --flake "$TARGET_FLAKE#$FLAKE_ATTR" --no-root-passwd --no-channel-copy --option sandbox false --max-jobs 2 --cores 2 --option http-connections 50 "${extra_subst[@]}" 2>>"$LOG_FILE"; then
+  # Trace nixos-install stderr with stage-relative timestamps, live to the
+  # console (>&2 inside the loop inherits the outer stderr) and appended to
+  # the log: reveals eval vs fetch/build vs activation split for tuning.
+  # A stderr redirect (not a pipe), so the exit status stays nixos-install's.
+  INSTALL_T0=$SECONDS
+  if ! nixos-install --root "$MNT" --flake "$TARGET_FLAKE#$FLAKE_ATTR" --no-root-passwd --no-channel-copy --option sandbox false --max-jobs 2 --cores 2 --option http-connections 50 "${extra_subst[@]}" 2> >(while IFS= read -r line; do printf '[install+%ss] %s\n' "$((SECONDS - INSTALL_T0))" "$line" | tee -a "$LOG_FILE" >&2; done); then
     progress "install" "failed" "nixos-install failed — see $LOG_FILE"
     die "nixos-install failed"
   fi
