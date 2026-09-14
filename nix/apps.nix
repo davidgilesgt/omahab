@@ -349,11 +349,6 @@ in
       configureTika = true;
       dataDir = "${dataDir}/apps/paperless";
       environmentFile = "${appEnv}/paperless-ngx.env";
-      # Install-time closure: "eng" is paperless' default OCR language, but
-      # spelling it out lets the nixpkgs module restrict tesseract to
-      # equ+osd+eng instead of every traineddata (~1 GiB download at
-      # nixos-install). Multi-language OCR can re-add codes with "+".
-      settings.PAPERLESS_OCR_LANGUAGE = "eng";
     };
     systemd.services."paperless-secret-key" = gate "paperless-ngx";
     systemd.services.paperless-web = gate "paperless-ngx";
@@ -661,11 +656,13 @@ in
     # nix/installer.nix isoImage.storeContents): custom closures the guest
     # would otherwise BUILD at install time (absent from cache.nixos.org).
     # litellmPrismaEngines (patchelf build) and notesmd-cli (Go build) are
-    # small; each saves a guest build for a few MiB of ISO.
+    # small; the wrapped podman (Go build) saves a compiler run in the
+    # guest. Each entry costs ISO bytes: keep the list tight.
     # ----------------------------------------------------------------
     services.omahab.precachePackages = [
       litellmPrismaEngines
       notesmdCli
+      config.virtualisation.podman.package
     ];
 
     # ----------------------------------------------------------------
