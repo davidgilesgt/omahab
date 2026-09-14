@@ -657,6 +657,18 @@ in
     };
 
     # ----------------------------------------------------------------
+    # ISO pre-cache (services.omahab.precachePackages, consumed by
+    # nix/installer.nix isoImage.storeContents): custom closures the guest
+    # would otherwise BUILD at install time (absent from cache.nixos.org).
+    # litellmPrismaEngines (patchelf build) and notesmd-cli (Go build) are
+    # small; each saves a guest build for a few MiB of ISO.
+    # ----------------------------------------------------------------
+    services.omahab.precachePackages = [
+      litellmPrismaEngines
+      notesmdCli
+    ];
+
+    # ----------------------------------------------------------------
     # Storage placement: mounts volumes recorded in storage.json before
     # app units start. No-op when the file is absent (root disk holds
     # everything; the wizard step is skippable).

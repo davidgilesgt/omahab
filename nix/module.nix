@@ -85,6 +85,19 @@ in
       description = "Embedding worker Python package.";
     };
 
+    precachePackages = mkOption {
+      type = types.listOf types.package;
+      default = [ ];
+      description = ''
+        Extra closures baked into the installer ISO (isoImage.storeContents)
+        so nixos-install copies them from the live medium instead of
+        downloading or building them in the guest. For custom (non-cache)
+        outputs this is the difference between a copy and a guest build.
+        Every entry costs ISO bytes: keep the list tight and prefer small,
+        expensive-to-build closures. Set in nix/apps.nix.
+      '';
+    };
+
     listen = mkOption {
       type = types.str;
       default = "0.0.0.0:8484";

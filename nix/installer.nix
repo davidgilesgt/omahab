@@ -137,7 +137,9 @@ in
       # sandbox tmpfs during install (OOM on small machines). Prebuilt here,
       # reused by identical store path in the guest.
       self.packages.${pkgs.system}.omahab-dl
-    ]
+      # Custom closures the guest would otherwise build (no cache hit):
+      # curated in nix/apps.nix via services.omahab.precachePackages.
+    ] ++ installed.services.omahab.precachePackages
   );
 
   # Live ISO must not run the installed appliance.  We do NOT import
