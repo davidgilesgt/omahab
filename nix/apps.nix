@@ -656,11 +656,14 @@ in
     # nix/installer.nix isoImage.storeContents): closures the guest would
     # otherwise BUILD (custom, absent from cache.nixos.org) or DOWNLOAD
     # over slirp at install time. litellmPrismaEngines (patchelf) and
-    # notesmd-cli (Go) are small; the wrapped podman (Go) saves a compiler
-    # run; karakeep 0.33.2 (pnpm, minutes + GiBs of tmpfs) is the largest
-    # entry; stock tesseract5 carries the 1 GiB all-languages traineddata
-    # (shared by paperless ocrmypdf and tika). Affordable since the ISO cap
-    # is 3 GiB — but every entry costs ISO bytes, keep the list tight.
+    # notesmd-cli (Go build) are small; the wrapped podman (Go) saves a
+    # compiler run; karakeep 0.33.2 (pnpm, minutes + GiBs of tmpfs) is the
+    # largest entry; stock tesseract5 carries the 1 GiB all-languages
+    # traineddata (shared by paperless ocrmypdf and tika); the trailing
+    # service packages are self-contained statics whose deps are already
+    # on the ISO (each ~1s of slirp download, ~250 MiB of ISO together).
+    # Affordable since the ISO cap is 3 GiB — but every entry costs ISO
+    # bytes, keep the list tight.
     # ----------------------------------------------------------------
     services.omahab.precachePackages = [
       litellmPrismaEngines
@@ -668,6 +671,14 @@ in
       config.virtualisation.podman.package
       config.services.karakeep.package
       pkgs.tesseract5
+      config.services.tailscale.package
+      config.services.ntfy-sh.package
+      config.services.pocket-id.package
+      config.services.meilisearch.package
+      config.services.woodpecker-server.package
+      config.services.woodpecker-agents.agents.docker.package
+      config.services.forgejo.package
+      config.services.syncthing.package
     ];
 
     # ----------------------------------------------------------------
