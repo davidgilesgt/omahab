@@ -349,6 +349,11 @@ in
       configureTika = true;
       dataDir = "${dataDir}/apps/paperless";
       environmentFile = "${appEnv}/paperless-ngx.env";
+      # Install-time closure: "eng" is paperless' default OCR language, but
+      # spelling it out lets the nixpkgs module restrict tesseract to
+      # equ+osd+eng instead of every traineddata (~1 GiB download at
+      # nixos-install). Multi-language OCR can re-add codes with "+".
+      settings.PAPERLESS_OCR_LANGUAGE = "eng";
     };
     systemd.services."paperless-secret-key" = gate "paperless-ngx";
     systemd.services.paperless-web = gate "paperless-ngx";
@@ -565,23 +570,18 @@ in
 
     # ----------------------------------------------------------------
     # Hermes — upstream nousresearch/hermes-agent. Loopback-only.
-    # Image is part of the closure via imageFile (no --pull=never).
-    # Tag 0.21.0 requested by spec; upstream currently only publishes
-    # :latest / dated v2026.* tags. Pinned by digest of latest at time of
-    # implementation (sha256:a7e2ed27163b31f30f0e9858018df36eed22dd14b4db4a9d574646f1dd3a9a21).
-    # Resolved via `docker pull nousresearch/hermes-agent:latest` on
-    # 2026-09-02; refreshed via `nix-prefetch-docker` on 2026-09-03
-    # (prefetch output hash used directly as the SRI hash).
+    # Install-time closure: the image used to ship via imageFile (a 2.8 GiB
+    # tarball nixos-install downloads or rebuilds). It now pulls at first
+    # start instead — the unit is gated on enrollment (gate "hermes"), so
+    # the pull happens on the booted system over the host network, in
+    # parallel with setup, instead of inside nixos-install over slirp.
+    # Pinned by digest (immutable): :0.21.0 does not exist upstream (only
+    # :latest / dated v2026.* tags), so a tag ref would fail to pull.
+    # Digest resolved via `docker pull nousresearch/hermes-agent:latest` on
+    # 2026-09-02; refreshed via `nix-prefetch-docker` on 2026-09-03.
     virtualisation.oci-containers.backend = "docker";
     virtualisation.oci-containers.containers.hermes = {
-      image = "nousresearch/hermes-agent:0.21.0";
-      imageFile = pkgs.dockerTools.pullImage {
-        imageName = "nousresearch/hermes-agent";
-        imageDigest = "sha256:a7e2ed27163b31f30f0e9858018df36eed22dd14b4db4a9d574646f1dd3a9a21";
-        sha256 = "sha256-/mgAE2YWuo1jN2hfEz0MgcCcYLoAbKr7/B4Pp81Fic0=";
-        finalImageName = "nousresearch/hermes-agent";
-        finalImageTag = "0.21.0";
-      };
+      image = "nousresearch/hermes-agent@sha256:a7e2ed27163b31f30f0e9858018df36eed22dd14b4db4a9d574646f1dd3a9a21";
       cmd = [ "gateway" "run" ];
       environmentFiles = [ "${appEnv}/hermes.env" ];
       volumes = [ "/var/lib/omahab/hermes:/opt/data" "${dataDir}/sync/obsidian:/vault:rw" "${notesmdCli}/bin:/opt/notesmd:ro" ];
