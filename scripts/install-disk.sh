@@ -1802,7 +1802,10 @@ install_stage() {
   if [[ -n "${OMAHAB_EXTRA_TRUSTED_KEYS:-}" ]]; then
     extra_subst+=(--option extra-trusted-public-keys "${OMAHAB_EXTRA_TRUSTED_KEYS}")
   fi
-  if ! nixos-install --root "$MNT" --flake "$TARGET_FLAKE#$FLAKE_ATTR" --no-root-passwd --option sandbox false --max-jobs 2 --cores 2 --option http-connections 50 "${extra_subst[@]}" 2>>"$LOG_FILE"; then
+  # --no-channel-copy: the appliance upgrades via flakes (releaseRef), never
+  # legacy channels (installer tools are absent from the installed system).
+  # Skips copying the ~200 MiB nixpkgs source into a target channel profile.
+  if ! nixos-install --root "$MNT" --flake "$TARGET_FLAKE#$FLAKE_ATTR" --no-root-passwd --no-channel-copy --option sandbox false --max-jobs 2 --cores 2 --option http-connections 50 "${extra_subst[@]}" 2>>"$LOG_FILE"; then
     progress "install" "failed" "nixos-install failed — see $LOG_FILE"
     die "nixos-install failed"
   fi
