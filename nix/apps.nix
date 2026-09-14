@@ -657,12 +657,15 @@ in
     # would otherwise BUILD at install time (absent from cache.nixos.org).
     # litellmPrismaEngines (patchelf build) and notesmd-cli (Go build) are
     # small; the wrapped podman (Go build) saves a compiler run in the
-    # guest. Each entry costs ISO bytes: keep the list tight.
+    # guest; karakeep 0.33.2 (pnpm build, minutes + GiBs of tmpfs) is the
+    # largest entry — affordable since the ISO cap is 3 GiB. Each entry
+    # costs ISO bytes: keep the list tight.
     # ----------------------------------------------------------------
     services.omahab.precachePackages = [
       litellmPrismaEngines
       notesmdCli
       config.virtualisation.podman.package
+      config.services.karakeep.package
     ];
 
     # ----------------------------------------------------------------

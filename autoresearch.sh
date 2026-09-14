@@ -106,8 +106,10 @@ echo "METRIC iso_outputs=$ISO_OUTPUTS"
 echo "METRIC guest_missing_drvs=$MISSING_DRVS"
 echo "METRIC harness_seconds=$((END_S - START_S))"
 
-# Gate: a fresh over-cap ISO is a hard failure. Cap is 2048 MiB = 2147483648 B.
-if [[ "$ISO_FRESH" -eq 1 && "$ISO_FILE_BYTES" -gt 2147483648 ]]; then
-  echo "HARNESS FAIL: fresh ISO $ISO_FILE_BYTES B exceeds 2048 MiB cap" >&2
+# Gate: a fresh over-cap ISO is a hard failure. Cap is 3 GiB = 3221225472 B.
+# (Raised from 2048 MiB: pre-caching the built karakeep package costs ISO
+# bytes but kills the guest pnpm build.)
+if [[ "$ISO_FRESH" -eq 1 && "$ISO_FILE_BYTES" -gt 3221225472 ]]; then
+  echo "HARNESS FAIL: fresh ISO $ISO_FILE_BYTES B exceeds 3 GiB cap" >&2
   exit 1
 fi
