@@ -119,8 +119,9 @@ in
   # nixos-install reuses identical store paths from the live medium, so
   # install becomes copy plus the remaining cache downloads — no local
   # builds. Stock deps still substitute from cache.nixos.org (install
-  # already requires network); embedding the full toplevel would push
-  # the ISO past GitHub's 2GB release-asset cap, hence the subset.
+  # already requires network); the subset keeps the ISO under the 3 GiB
+  # cap (note: above GitHub's 2GB release-asset limit — releases need
+  # split or external hosting).
   # omahab-web (2.5 MiB) and omahab-catalog (KiBs) cost ~nothing on the
   # ISO but save a full npm build plus its sandbox tmpfs in the guest.
   isoImage.storeContents = lib.optionals (pkgs.system == "x86_64-linux") (
