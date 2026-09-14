@@ -687,6 +687,12 @@ in
       pkgs.restic
       pkgs.restic-rest-server
       pkgs.cloudflared
+      # Micro-bundle: exact-match media/data helpers (exiftool, pdfcpu,
+      # curl-impersonate, poppler-data). Each ~0.5s of slirp for a few MiB.
+      pkgs.perlPackages.ImageExifTool
+      pkgs.pdfcpu
+      pkgs.curl-impersonate
+      pkgs.poppler_data
     ];
 
     # ----------------------------------------------------------------
