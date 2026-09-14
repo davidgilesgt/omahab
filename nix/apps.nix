@@ -681,6 +681,12 @@ in
       config.services.syncthing.package
       pkgs.rclone
       pkgs.devpod
+      # Backup / data path: postgres+plugins wrapper (exact service value),
+      # restic CLI + rest server, cloudflared tunnel. Small statics.
+      config.services.postgresql.finalPackage
+      pkgs.restic
+      pkgs.restic-rest-server
+      pkgs.cloudflared
     ];
 
     # ----------------------------------------------------------------
