@@ -1787,12 +1787,27 @@ install_stage() {
   # addressed, sandbox-verified by Hydra. Skipping the per-build chroot
   # bind-mount storm matters on 2 vCPU. Outputs are identical; the
   # installed system's own daemon keeps sandboxing enabled.
-  # --max-jobs 4 --cores 2: the guest builds ~360 trivial text-assembly
+  # --max-jobs is adaptive: the guest builds ~360 trivial text-assembly
   # derivations (units, etc, checks — all machine-specific, never cached)
-  # whose per-build overhead dominates at jobs=2 (traced: builds span
-  # +76s..+234s while copies finish by +169s). Trivial builds are
-  # fork+exec+write (~tens of MB), so 4-wide is safe down to small
-  # machines; the few heavy ones (initrd compress) still use both cores.
+  # whose per-build overhead dominates at low parallelism (traced: builds
+  # span +76s..+234s at jobs=2 while copies finish by +169s). Trivial
+  # builds are fork+exec+write (~tens of MB), so jobs scale with RAM
+  # (~2 GiB per job, clamped 2..8 and by vCPU count): small boxes keep
+  # jobs=2 exactly as before, capable hardware builds wider. The few heavy
+  # ones (initrd compress) still use both cores via --cores 2.
+  # OMAHAB_MAX_JOBS overrides the detection (debugging).
+  local jobs="2"
+  if [[ -n "${OMAHAB_MAX_JOBS:-}" ]]; then
+    jobs="$OMAHAB_MAX_JOBS"
+  elif read -r _ mem_kb _ < /proc/meminfo 2>/dev/null; then
+    jobs=$((mem_kb / 1024 / 1024 / 2))
+    if ((jobs < 2)); then jobs=2; fi
+    if ((jobs > 8)); then jobs=8; fi
+    ncpu=$(nproc 2>/dev/null || echo 2)
+    if ((ncpu < jobs)); then jobs=$ncpu; fi
+    if ((jobs < 2)); then jobs=2; fi
+  fi
+  log "nixos-install parallelism: --max-jobs $jobs --cores 2"
   # Optional extra binary cache (e.g. a host serving its store so the
   # installer substitutes custom closures instead of rebuilding them):
   # OMAHAB_EXTRA_SUBSTITUTERS=http://host:8485
@@ -1807,9 +1822,8 @@ install_stage() {
   # --no-channel-copy: the appliance upgrades via flakes (releaseRef), never
   # legacy channels. Stderr carries stage-relative timestamps (live to the
   # console and appended to the log); a redirect, not a pipe, so the exit
-  # status stays nixos-install's.
   INSTALL_T0=$SECONDS
-  if ! nixos-install --root "$MNT" --flake "$TARGET_FLAKE#$FLAKE_ATTR" --no-root-passwd --no-channel-copy --option sandbox false --max-jobs 4 --cores 2 --option http-connections 50 "${extra_subst[@]}" 2> >(while IFS= read -r line; do printf '[install+%ss] %s\n' "$((SECONDS - INSTALL_T0))" "$line" | tee -a "$LOG_FILE" >&2; done); then
+  if ! nixos-install --root "$MNT" --flake "$TARGET_FLAKE#$FLAKE_ATTR" --no-root-passwd --no-channel-copy --option sandbox false --max-jobs "$jobs" --cores 2 --option http-connections 50 "${extra_subst[@]}" 2> >(while IFS= read -r line; do printf '[install+%ss] %s\n' "$((SECONDS - INSTALL_T0))" "$line" | tee -a "$LOG_FILE" >&2; done); then
     progress "install" "failed" "nixos-install failed — see $LOG_FILE"
     die "nixos-install failed"
   fi
