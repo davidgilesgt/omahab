@@ -1123,6 +1123,15 @@ func (b *Backend) setupPhaseCoreApps(ctx context.Context) error {
 	ordered = append(ordered, login...)
 	ordered = append(ordered, rest...)
 	for _, bd := range ordered {
+		if bd.ID == "litellm" {
+			// TCP md5 auth: the NixOS module creates the role with no password,
+			// and the gateway connects over 127.0.0.1:5432. Sync before the
+			// first install, otherwise the healthy-wait fails here and the
+			// OIDC-phase resync is never reached. Mirrors woodpecker.
+			if err := b.ensureLitellmPostgresAuth(ctx); err != nil {
+				return fmt.Errorf("litellm postgres auth: %w", err)
+			}
+		}
 		if err := b.ensureDefaultApp(ctx, bd, domainName); err != nil {
 			return fmt.Errorf("%s: %w", bd.ID, err)
 		}
