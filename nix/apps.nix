@@ -368,11 +368,13 @@ in
     # nixos-install/-enter/-generate-config/-rebuild and their perl envs
     # from the installed closure (faster install, smaller disk).
     system.disableInstallerTools = true;
-    # Threaded initrd compression: zstd -10 single-threaded is the
-    # default; the 2-vCPU target compresses ~2x faster with -T2.
-    # Decompression at boot is identical. The initrd is per-install
-    # (hardware modules) either way, so no cache is lost.
-    boot.initrd.compressorArgs = [ "-10" "-T2" ];
+    # Initrd compression: the initrd is built in the guest at install
+    # (per-hardware modules, never cached), then copied to local disk, so
+    # build speed dominates — zstd -5 compresses ~2-3x faster than the
+    # default -10 for a few percent larger output, and -T0 scales with
+    # whatever cores the target has (2-vCPU floor through 4-vCPU test VM).
+    # Decompression at boot is level-independent. Saves ~10s of guest CPU.
+    boot.initrd.compressorArgs = [ "-5" "-T0" ];
     # ----------------------------------------------------------------
     # Karakeep — bookmarks. Domain-gated (NextAuth + OIDC).
     # ----------------------------------------------------------------
