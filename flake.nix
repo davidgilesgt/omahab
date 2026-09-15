@@ -203,6 +203,7 @@ EOF
             nodejs
             sqlc
             jq
+            shellcheck
           ];
         };
         checks = {

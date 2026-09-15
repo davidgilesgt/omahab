@@ -220,6 +220,15 @@ Item {
     reconnectTimer.restart()
   }
 
+  function responseItems(result, legacyKey) {
+    if (result instanceof Array) return result
+    if (result && typeof result === "object") {
+      if (result.items instanceof Array) return result.items
+      if (result[legacyKey] instanceof Array) return result[legacyKey]
+    }
+    return null
+  }
+
   function handleSubscribeLine(line) {
     var text = String(line || "").trim()
     if (text === "") return
@@ -229,12 +238,11 @@ Item {
     } catch (e) {
       return
     }
+    if (!msg || typeof msg !== "object" || Array.isArray(msg)) return
     if (msg.event === "status" && msg.data) {
       connecting = false
       clientdReachable = true
       applyStatus(msg.data)
-      // Also refresh workspaces/projects on status push if needed (non-blocking)
-      // Workspaces are not in status; trigger a lightweight refresh occasionally? Keep minimal.
     } else if (msg.result && msg.id) {
       // subscribe ack
       connecting = false
@@ -252,6 +260,10 @@ Item {
     try {
       response = JSON.parse(text)
     } catch (error) {
+      failCurrent("invalid_clientd_response")
+      return
+    }
+    if (!response || typeof response !== "object" || Array.isArray(response)) {
       failCurrent("invalid_clientd_response")
       return
     }
@@ -279,21 +291,17 @@ Item {
       if (response.error) {
         workspaces = []
       } else {
-        var r = response.result
-        if (r && r.items instanceof Array) workspaces = r.items
-        else if (r instanceof Array) workspaces = r
-        else if (r && r.workspaces instanceof Array) workspaces = r.workspaces
-        else workspaces = []
+        var items = responseItems(response.result, "workspaces")
+        if (items === null) failCurrent("invalid_clientd_response")
+        else workspaces = items
       }
     } else if (completed.kind === "project_list") {
       if (response.error) {
         projects = []
       } else {
-        var r2 = response.result
-        if (r2 && r2.items instanceof Array) projects = r2.items
-        else if (r2 instanceof Array) projects = r2
-        else if (r2 && r2.projects instanceof Array) projects = r2.projects
-        else projects = []
+        var projects2 = responseItems(response.result, "projects")
+        if (projects2 === null) failCurrent("invalid_clientd_response")
+        else projects = projects2
       }
     } else if (completed.kind === "backup_status") {
       if (response.error) {

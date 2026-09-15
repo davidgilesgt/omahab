@@ -79,6 +79,23 @@ track_mount() {
   CREATED_MOUNTS+=("$mp")
 }
 
+assert_flake_readable() {
+  # Asserts a flake source has a readable flake.nix and a readable
+  # flake.lock when present. $1 = source dir, $2 = optional error prefix.
+  local src="$1" ctx="${2:-}"
+  [[ -r "$src/flake.nix" ]] || die "${ctx}flake not readable: $src/flake.nix"
+  if [[ -e "$src/flake.lock" && ! -r "$src/flake.lock" ]]; then die "${ctx}flake.lock not readable: $src/flake.lock"; fi
+}
+
+add_protected() {
+  # Records one canonical protected-device path with deduplication.
+  local disk="$1" c d
+  c=$(resolve "$disk" 2>/dev/null || echo "$disk")
+  [[ -n "$c" && -b "$c" ]] || return 0
+  for d in "${PROTECTED_DISKS[@]}"; do [[ "$d" == "$c" ]] && return 0; done
+  PROTECTED_DISKS+=("$c")
+}
+
 need() {
   local missing=()
   for c in "$@"; do command -v "$c" >/dev/null 2>&1 || missing+=("$c"); done
@@ -89,11 +106,12 @@ need() {
 
 progress() {
   local stage="$1" status="$2" message="$3"
-  if [[ -n "$PROGRESS_FD" ]]; then
-    local esc_msg
-    esc_msg=$(printf '%s' "$message" | jq -Rs . 2>/dev/null || printf '"%s"' "$message")
-    # esc_msg already quoted; construct JSON manually to avoid double quoting.
-    printf '{"stage":"%s","status":"%s","message":%s}\n' "$stage" "$status" "$esc_msg" 1>&"$PROGRESS_FD" 2>/dev/null || true
+  if [[ -z "$PROGRESS_FD" ]]; then CURRENT_STAGE="$stage"; return 0; fi
+  local payload
+  payload=$(jq -cn --arg stage "$stage" --arg status "$status" --arg message "$message" '{stage:$stage,status:$status,message:$message}') || die "progress serialization failed"
+  if ! printf '%s\n' "$payload" 1>&"$PROGRESS_FD" 2>/dev/null; then
+    echo "install-disk: warn: progress consumer gone; disabling progress writes" >&2
+    PROGRESS_FD=""
   fi
   CURRENT_STAGE="$stage"
 }
@@ -187,8 +205,8 @@ collect_protected_disks() {
       src=$(findmnt -no SOURCE "$mp" 2>/dev/null || true)
       if [[ -n "$src" && "$src" != "overlay" ]]; then
         disk=$(disk_of_source "$src")
-        if [[ -n "$disk" && -b "$disk" ]]; then
-          PROTECTED_DISKS+=("$(resolve "$disk")")
+        if [[ -n "$disk" ]]; then
+          add_protected "$disk"
         fi
       fi
     fi
@@ -198,14 +216,8 @@ collect_protected_disks() {
   src=$(findmnt -no SOURCE /iso 2>/dev/null || true)
   if [[ -n "$src" && "$src" != "overlay" && "$src" == /dev/* ]]; then
     disk=$(disk_of_source "$src")
-    if [[ -n "$disk" && -b "$disk" ]]; then
-      local c
-      c=$(resolve "$disk" 2>/dev/null || true)
-      if [[ -n "$c" ]]; then
-        local found=0
-        for d in "${PROTECTED_DISKS[@]}"; do [[ "$d" == "$c" ]] && found=1; done
-        [[ $found -eq 0 ]] && PROTECTED_DISKS+=("$c")
-      fi
+    if [[ -n "$disk" ]]; then
+      add_protected "$disk"
     fi
   fi
 
@@ -217,12 +229,8 @@ collect_protected_disks() {
       local resolved_src
       resolved_src=$(resolve "$src" 2>/dev/null || echo "$src")
       disk=$(disk_of_source "$resolved_src")
-      if [[ -n "$disk" && -b "$disk" ]]; then
-        local c
-        c=$(resolve "$disk" 2>/dev/null || echo "$disk")
-        local found=0
-        for d in "${PROTECTED_DISKS[@]}"; do [[ "$d" == "$c" ]] && found=1; done
-        [[ $found -eq 0 ]] && PROTECTED_DISKS+=("$c")
+      if [[ -n "$disk" ]]; then
+        add_protected "$disk"
       fi
     fi
   else
@@ -240,12 +248,8 @@ collect_protected_disks() {
           src=$(findmnt -no SOURCE --target "$dir" 2>/dev/null || findmnt -no SOURCE --target "$backing" 2>/dev/null || true)
           if [[ -n "$src" && "$src" != "overlay" && "$src" == /dev/* ]]; then
             disk=$(disk_of_source "$src")
-            if [[ -n "$disk" && -b "$disk" ]]; then
-              local c
-              c=$(resolve "$disk" 2>/dev/null || echo "$disk")
-              local found=0
-              for d in "${PROTECTED_DISKS[@]}"; do [[ "$d" == "$c" ]] && found=1; done
-              [[ $found -eq 0 ]] && PROTECTED_DISKS+=("$c")
+            if [[ -n "$disk" ]]; then
+              add_protected "$disk"
             fi
           fi
         fi
@@ -264,30 +268,13 @@ collect_protected_disks() {
         src=$(findmnt -no SOURCE --target "$dir" 2>/dev/null || true)
         if [[ -n "$src" && "$src" == /dev/* ]]; then
           disk=$(disk_of_source "$src")
-          if [[ -n "$disk" && -b "$disk" ]]; then
-            local c
-            c=$(resolve "$disk" 2>/dev/null || echo "$disk")
-            local found=0
-            for d in "${PROTECTED_DISKS[@]}"; do [[ "$d" == "$c" ]] && found=1; done
-            [[ $found -eq 0 ]] && PROTECTED_DISKS+=("$c")
+          if [[ -n "$disk" ]]; then
+            add_protected "$disk"
           fi
         fi
       fi
     fi
   done < <(findmnt -rno SOURCE -t squashfs 2>/dev/null || true)
-
-  # Deduplicate
-  if [[ ${#PROTECTED_DISKS[@]} -gt 0 ]]; then
-    local uniq=()
-    local seen=""
-    for d in "${PROTECTED_DISKS[@]}"; do
-      if [[ " $seen " != *" $d "* ]]; then
-        uniq+=("$d")
-        seen="$seen $d"
-      fi
-    done
-    PROTECTED_DISKS=("${uniq[@]}")
-  fi
   # Fail closed if installer backing disk cannot be identified
   local iso_src
   iso_src=$(findmnt -no SOURCE /iso 2>/dev/null || true)
@@ -623,8 +610,9 @@ if [[ "$RESUME_INSTALL" -eq 1 ]]; then
   fi
   # Validate flake still readable
   manifest_flake=$(jq -r '.flake_src // ""' "$MANIFEST_FILE" 2>/dev/null || echo "")
-  if [[ -n "$manifest_flake" && ! -f "${MNT}/etc/omahab/flake/flake.nix" ]]; then
-    die "--resume-install: target flake not found at ${MNT}/etc/omahab/flake — cannot resume"
+  if [[ -n "$manifest_flake" ]]; then
+    [[ -f "${MNT}/etc/omahab/flake/flake.nix" ]] || die "--resume-install: target flake not found at ${MNT}/etc/omahab/flake — cannot resume"
+    assert_flake_readable "${MNT}/etc/omahab/flake" "--resume-install: "
   fi
   # Validate selection identity still matches live disks
   # We have manifest disks identities; re-evaluate current disks
@@ -736,8 +724,7 @@ if [[ "$RESUME_MODE" -eq 0 ]]; then
   if ! [[ "$HOSTNAME" =~ ^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$ ]]; then die "bad hostname: $HOSTNAME"; fi
   if [[ "$PLACEMENT" != "lan" && "$PLACEMENT" != "vps" ]]; then die "bad placement: $PLACEMENT (want lan|vps)"; fi
   [[ -d "$FLAKE_SRC" ]] || die "flake source not found: $FLAKE_SRC (boot the installer ISO?)"
-  [[ -f "$FLAKE_SRC/flake.nix" ]] || die "not a flake: $FLAKE_SRC"
-  if [[ -f "$FLAKE_SRC/flake.lock" && ! -r "$FLAKE_SRC/flake.lock" ]]; then die "flake.lock not readable: $FLAKE_SRC/flake.lock"; fi
+  assert_flake_readable "$FLAKE_SRC"
 
   if [[ "$NO_INSTALL" -eq 0 ]]; then
     if [[ -z "$USERNAME" ]]; then die "--username required for install (omit --no-install for storage-only test)"; fi
@@ -820,22 +807,19 @@ fi
 # Firmware detection
 if [[ -d /sys/firmware/efi ]]; then FIRMWARE=uefi; else FIRMWARE=bios; fi
 
-# Secure Boot check
+# Secure Boot check — single implementation in check-secureboot.sh,
+# packaged as omahab-check-secureboot on the ISO.
 if [[ "$FIRMWARE" == "uefi" && "$RESUME_MODE" -eq 0 ]]; then
-  secure_boot_enabled=0
-  for f in /sys/firmware/efi/efivars/SecureBoot-*; do
-    [[ -e "$f" ]] || continue
-    # efivar has 4-byte header then 1 byte value
-    if od -An -t u1 "$f" 2>/dev/null | tr -s ' ' '\n' | tail -1 | grep -qx 1; then
-      secure_boot_enabled=1
-    fi
-    break
-  done
-  # Also try bootctl
-  if [[ $secure_boot_enabled -eq 0 ]] && command -v bootctl >/dev/null 2>&1; then
-    if bootctl status 2>/dev/null | grep -qi "Secure Boot:.*enabled"; then secure_boot_enabled=1; fi
+  secure_boot_checker=""
+  if command -v omahab-check-secureboot >/dev/null 2>&1; then
+    secure_boot_checker="omahab-check-secureboot"
+  elif [[ -x "$(dirname "$0")/check-secureboot.sh" ]]; then
+    secure_boot_checker="$(dirname "$0")/check-secureboot.sh"
   fi
-  if [[ $secure_boot_enabled -eq 1 ]]; then
+  if [[ -z "$secure_boot_checker" ]]; then
+    die "Secure Boot checker not found (omahab-check-secureboot or adjacent check-secureboot.sh) — fail closed before destructive operations"
+  fi
+  if ! "$secure_boot_checker"; then
     die "Secure Boot is enabled — this unsigned ISO/install requires Secure Boot disabled in firmware setup before proceeding"
   fi
 fi
@@ -848,9 +832,7 @@ need parted wipefs mkfs.vfat mkfs.ext4 mount umount findmnt lsblk blkid mountpoi
 preflight_checks() {
   progress "preflight" "running" "running preflight checks"
 
-  # Flake readability already checked; also check lock
-  if [[ ! -r "$FLAKE_SRC/flake.nix" ]]; then die "flake not readable: $FLAKE_SRC/flake.nix"; fi
-  if [[ -e "$FLAKE_SRC/flake.lock" && ! -r "$FLAKE_SRC/flake.lock" ]]; then die "flake.lock not readable"; fi
+  assert_flake_readable "$FLAKE_SRC"
 
   # Firmware tool check
   if [[ "$FIRMWARE" == "uefi" ]]; then

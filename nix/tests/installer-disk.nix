@@ -27,6 +27,7 @@ in
       environment.etc."omahab-test-flake".source = testFlake;
       environment.systemPackages = with pkgs; [
         (pkgs.writeShellScriptBin "omahab-install-disk" (builtins.readFile "${testFlake}/scripts/install-disk.sh"))
+        (pkgs.writeShellScriptBin "omahab-check-secureboot" (builtins.readFile "${testFlake}/scripts/check-secureboot.sh"))
         parted
         dosfstools
         e2fsprogs
@@ -51,6 +52,7 @@ in
       environment.etc."omahab-test-flake".source = testFlake;
       environment.systemPackages = with pkgs; [
         (pkgs.writeShellScriptBin "omahab-install-disk" (builtins.readFile "${testFlake}/scripts/install-disk.sh"))
+        (pkgs.writeShellScriptBin "omahab-check-secureboot" (builtins.readFile "${testFlake}/scripts/check-secureboot.sh"))
         parted
         dosfstools
         e2fsprogs

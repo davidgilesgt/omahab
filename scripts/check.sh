@@ -9,33 +9,32 @@ fail=0
 pass() { echo "PASS: $*"; }
 fail_check() { echo "FAIL: $*" >&2; fail=1; }
 
-bash -n scripts/build.sh scripts/check.sh scripts/install-disk.sh scripts/e2e-iso-install.sh && pass "bash syntax" || fail_check "bash syntax"
-# Runtime `set -u` safety net that bash -n cannot see: every variable used in
-# a script must be assigned (or guarded). Caught two clobbered assignments.
-unbound=0
-for s in scripts/build.sh scripts/check.sh scripts/install-disk.sh scripts/e2e-iso-install.sh; do
-  while IFS= read -r v; do
-    case "$v" in _|E2E_*) continue ;; esac
-    if ! grep -qE "(^|[^A-Za-z0-9_])${v}=" "$s" && ! grep -qE "\\$\\{${v}:[-=?+#]" "$s"; then
-      echo "FAIL: $s uses \$$v without assignment" >&2
-      unbound=1
-    fi
-  done < <(grep -oE '\$[A-Z_][A-Z_0-9]*' "$s" | tr -d '$' | sort -u)
-done
-[[ $unbound -eq 0 ]] && pass "no unbound vars" || fail_check "unbound vars"
+bash -n scripts/build.sh scripts/check.sh scripts/install-disk.sh scripts/e2e-iso-install.sh scripts/check-secureboot.sh && pass "bash syntax" || fail_check "bash syntax"
+# Shell entrypoints are linted with ShellCheck instead of a homegrown
+# variable detector: real shell diagnostics over source-text heuristics.
+if command -v shellcheck >/dev/null 2>&1; then
+  shellcheck -S warning scripts/build.sh scripts/check.sh scripts/install-disk.sh scripts/e2e-iso-install.sh scripts/check-secureboot.sh && pass "shellcheck" || fail_check "shellcheck"
+else
+  fail_check "shellcheck not found (nix develop provides it)"
+fi
 
-# Config defaults: loopback standalone, wildcard via the NixOS module.
-grep -q 'DefaultListen.*127\.0\.0\.1' internal/config/config.go && pass "loopback API default" || fail_check "loopback API default"
-grep -q 'OMAHAB_LISTEN' nix/module.nix && pass "module sets listen env" || fail_check "module listen env"
+# Config defaults: loopback standalone (Go behavior test below), wildcard
+# via the NixOS module with nftables as the admission boundary (evaluated).
 ! grep -rn 'OMAHAB_ETC_DIR' internal/ cmd/ --include='*.go' | grep -qv _test && pass "no /etc config writes" || fail_check "/etc config writes"
 
-# Firewall: nftables table in the module, 8484 gated to tailscale + LAN RFC1918 + ULA/link-local, no 8485.
-grep -q 'iifname "tailscale0" tcp dport 8484' nix/module.nix && pass "nftables tailscale gate for 8484" || fail_check "nftables tailscale gate for 8484"
-grep -q 'iifname "lo" accept' nix/module.nix && pass "nftables loopback accept" || fail_check "nftables loopback accept"
-grep -q 'tcp dport 8484 ip saddr { 10\.0\.0\.0/8' nix/module.nix && pass "nftables LAN RFC1918 gate for 8484" || fail_check "nftables LAN RFC1918 gate for 8484"
-grep -q 'ip6 saddr fc00::/7 tcp dport 8484' nix/module.nix && pass "nftables ULA gate for 8484" || fail_check "nftables ULA gate for 8484"
-grep -q 'ip6 saddr fe80::/10 tcp dport 8484' nix/module.nix && pass "nftables link-local gate for 8484" || fail_check "nftables link-local gate for 8484"
-! grep -q 'tcp dport 8485' nix/module.nix && pass "no 8485 listener" || fail_check "8485 still present (should be removed)"
+# Firewall: the installed closure's evaluated nftables table is authoritative.
+# Loopback, tailscale, and LAN gates on 8484; no 8485 listener.
+if command -v nix >/dev/null 2>&1; then
+  ruleset="$(nix eval --raw .#nixosConfigurations.omahab-installed.config.networking.nftables.tables.omahab.content 2>/dev/null)" || ruleset=""
+  listen="$(nix eval --raw .#nixosConfigurations.omahab-installed.config.systemd.services.omahabd.environment.OMAHAB_LISTEN 2>/dev/null)" || listen=""
+  [[ "$listen" == "0.0.0.0:8484" ]] && pass "module sets wildcard listen env" || fail_check "module listen env ($listen)"
+  for rule in 'iifname "lo" accept' 'iifname "tailscale0" tcp dport 8484' 'tcp dport 8484 ip saddr { 10.0.0.0/8' 'ip6 saddr fc00::/7 tcp dport 8484' 'ip6 saddr fe80::/10 tcp dport 8484'; do
+    grep -qF "$rule" <<<"$ruleset" && pass "nftables rule: $rule" || fail_check "nftables rule missing: $rule"
+  done
+  ! grep -q 'tcp dport 8485' <<<"$ruleset" && pass "no 8485 listener" || fail_check "8485 still present (should be removed)"
+else
+  fail_check "nix not found (evaluated firewall checks require nix)"
+fi
 
 # No Debian path remnants.
 ! grep -rn "internal/installer" --include="*.go" cmd/ internal/ && pass "installer package deleted" || fail_check "installer package still referenced"
@@ -90,17 +89,43 @@ fi
 if command -v go >/dev/null 2>&1; then
   go build ./... && pass "go build" || fail_check "go build"
   go vet ./... && pass "go vet" || fail_check "go vet"
+  go test ./internal/config/ -run 'TestDefaultListenIsLoopback|TestLoadWithoutListenEnvUsesLoopbackDefault|TestLoadAcceptsPackagedWildcardWhenExplicitlySet' -count=1 >/dev/null 2>&1 && pass "loopback API default" || fail_check "loopback API default"
   go run ./cmd/omahab catalog validate deploy/catalog/catalog.json && pass "catalog validate" || fail_check "catalog validate"
 else
   fail_check "go toolchain not found"
 fi
 
-# Web typecheck when node is present.
-if command -v npm >/dev/null 2>&1 && [[ -d web ]]; then
-  if [[ ! -d web/node_modules ]]; then
-    (cd web && npm ci --no-audit --no-fund >/dev/null 2>&1) || fail_check "web npm ci"
+# Frontend and email-worker typechecks are required gates, not best-effort:
+# missing toolchains fail loudly and diagnostics are shown, not suppressed.
+if ! command -v npm >/dev/null 2>&1; then
+  fail_check "npm not found (frontend/email toolchains required)"
+else
+  if [[ ! -d web ]]; then
+    fail_check "web directory missing"
+  else
+    if [[ ! -d web/node_modules ]]; then
+      (cd web && npm ci --no-audit --no-fund) || fail_check "web npm ci"
+    fi
+    if out=$(cd web && npm run typecheck 2>&1); then
+      pass "web typecheck"
+    else
+      echo "$out" >&2
+      fail_check "web typecheck"
+    fi
   fi
-  (cd web && npm run typecheck >/dev/null 2>&1) && pass "web typecheck" || fail_check "web typecheck"
+  if [[ ! -d workers/email ]]; then
+    fail_check "workers/email directory missing"
+  else
+    if [[ ! -d workers/email/node_modules ]]; then
+      (cd workers/email && npm ci --no-audit --no-fund) || fail_check "email npm ci"
+    fi
+    if out=$(cd workers/email && npm run typecheck 2>&1); then
+      pass "email typecheck"
+    else
+      echo "$out" >&2
+      fail_check "email typecheck"
+    fi
+  fi
 fi
 
 (( fail == 0 )) || exit 1
