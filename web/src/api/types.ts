@@ -14,6 +14,13 @@ export interface Status {
   now: string;
 }
 
+export interface Maintenance {
+  bundle_id: string;
+  reason: "import" | "restore" | "storage";
+  operation_id?: string;
+  created_at: string;
+}
+
 export interface Application {
   id: ID;
   name: string;
@@ -29,6 +36,7 @@ export interface Application {
   observed_state: string;
   installed_at?: string;
   updated_at: string;
+  maintenance?: Maintenance;
 }
 
 export interface CatalogBundle {

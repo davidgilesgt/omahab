@@ -149,9 +149,25 @@ let
       fallbacks: []
   '';
 
-  # Gate a service on omahabd having rendered its env file.
+  # Gate a service on omahabd having rendered its env file, and on the
+  # absence of maintenance markers. Markers are the boot-time authority;
+  # the control-plane database holds the UI view. Both the per-app marker
+  # and the global server marker gate every app unit, including services
+  # that start without appenv (via maintenanceGate below).
   gate = bundle: {
-    unitConfig.ConditionPathExists = "${appEnv}/${bundle}.env";
+    unitConfig.ConditionPathExists = [
+      "${appEnv}/${bundle}.env"
+      "!${stateDir}/maintenance/apps/${bundle}"
+      "!${stateDir}/maintenance/server"
+    ];
+  };
+  # Maintenance-only gate for units that start without an appenv file
+  # (e.g. syncthing): never gated on enrollment, always gated on pause.
+  maintenanceGate = bundle: {
+    unitConfig.ConditionPathExists = [
+      "!${stateDir}/maintenance/apps/${bundle}"
+      "!${stateDir}/maintenance/server"
+    ];
   };
 in
 {
@@ -234,7 +250,7 @@ in
       serviceConfig = {
         EnvironmentFile = [ "-${appEnv}/caddy.env" ];
       };
-    };
+    } // (maintenanceGate "caddy");
 
     # ----------------------------------------------------------------
     # Pocket ID — passkey-first OIDC IdP. Domain-gated.
@@ -427,6 +443,7 @@ in
       dataDir = "${dataDir}/sync";
       guiAddress = "127.0.0.1:8384";
     };
+    systemd.services.syncthing = maintenanceGate "syncthing";
 
     # ----------------------------------------------------------------
     # ntfy — push notifications. base-url is runtime state.

@@ -234,6 +234,24 @@ type ApplicationActionRequest struct {
 	Action string `json:"action"`
 }
 
+// MaintenanceRequest pauses an app for guided manual work (import).
+type MaintenanceRequest struct {
+	Reason string `json:"reason"`
+}
+
+// MaintenanceResumeRequest resumes an app after validation.
+type MaintenanceResumeRequest struct {
+	Confirm bool `json:"confirm"`
+}
+
+// MaintenanceResponse is the durable pause record with operation link.
+type MaintenanceResponse struct {
+	BundleID    string `json:"bundle_id"`
+	Reason      string `json:"reason"`
+	OperationID string `json:"operation_id,omitempty"`
+	CreatedAt   string `json:"created_at"`
+}
+
 // InstallApplicationRequest installs a curated bundle. The name defaults to
 // the bundle id; non-private exposure requires a hostname.
 type InstallApplicationRequest struct {

@@ -50,8 +50,11 @@ test ! -f "$ROOT/$a" && test ! -f "$ROOT/$b" && test ! -f "$ROOT/$c" && pass "no
 test ! -f "$ROOT/Dockerfile" && pass "Dockerfile deleted" || fail_check "Dockerfile present"
 test ! -f "$ROOT/.dockerignore" && pass ".dockerignore deleted" || fail_check ".dockerignore present"
 
-# Gated native units: every appenv consumer has a condition.
-grep -q 'ConditionPathExists = "${appEnv}/${bundle}.env"' nix/apps.nix && pass "appenv gating present" || fail_check "appenv gating missing"
+# Gated native units: every appenv consumer has a condition, and every app
+# unit is gated on maintenance markers (boot-time pause authority).
+grep -q '"${appEnv}/${bundle}.env"' nix/apps.nix && pass "appenv gating present" || fail_check "appenv gating missing"
+grep -q '"!${stateDir}/maintenance/apps/${bundle}"' nix/apps.nix && pass "maintenance app marker gating present" || fail_check "maintenance app marker gating missing"
+grep -q '"!${stateDir}/maintenance/server"' nix/apps.nix && pass "maintenance server marker gating present" || fail_check "maintenance server marker gating missing"
 
 # No runtime writes to /etc from the daemon (internal/ + cmd/omahabd).
 # CLI-only /etc paths are out of scope: `omahab install` looks up the live

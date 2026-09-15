@@ -142,6 +142,43 @@ func (s *Server) handleApplicationAction(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, app)
 }
 
+func (s *Server) handlePauseApplicationMaintenance(w http.ResponseWriter, r *http.Request) {
+	id := domain.ID(chi.URLParam(r, "id"))
+	var req apitypes.MaintenanceRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.Reason != "" && req.Reason != "import" {
+		writeError(w, r, errBadRequest("reason must be \"import\""))
+		return
+	}
+	if req.Reason == "" {
+		req.Reason = "import"
+	}
+	m, err := s.backend.PauseApplicationMaintenance(r.Context(), id, req)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, m)
+}
+
+func (s *Server) handleResumeApplicationMaintenance(w http.ResponseWriter, r *http.Request) {
+	id := domain.ID(chi.URLParam(r, "id"))
+	var req apitypes.MaintenanceResumeRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if !req.Confirm {
+		writeError(w, r, errBadRequest("confirm:true is required"))
+		return
+	}
+	if err := s.backend.ResumeApplicationMaintenance(r.Context(), id, req); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"resumed": true})
+}
 func (s *Server) handleInstallApplication(w http.ResponseWriter, r *http.Request) {
 	var req apitypes.InstallApplicationRequest
 	if !decodeJSON(w, r, &req) {

@@ -1022,6 +1022,55 @@ func newAppCmd() *cobra.Command {
 			return nil
 		},
 	})
+	app.AddCommand(&cobra.Command{
+		Use:   "pause <id>",
+		Short: "Pause an application for guided import (stops writers, records maintenance)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := needForceGuard(false); err != nil {
+				return handleFailure(err)
+			}
+			ctx, cancel := newContext()
+			defer cancel()
+			c, err := resolveClient()
+			if err != nil {
+				return handleFailure(err)
+			}
+			m, err := c.PauseApplicationMaintenance(ctx, args[0])
+			if err != nil {
+				return handleFailure(err)
+			}
+			if flagJSON {
+				return printJSON(m)
+			}
+			fmt.Printf("paused %s for %s (operation %s)\n", m.BundleID, m.Reason, m.OperationID)
+			return nil
+		},
+	})
+	app.AddCommand(&cobra.Command{
+		Use:   "resume <id>",
+		Short: "Validate and resume an application from import pause",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := needForceGuard(false); err != nil {
+				return handleFailure(err)
+			}
+			ctx, cancel := newContext()
+			defer cancel()
+			c, err := resolveClient()
+			if err != nil {
+				return handleFailure(err)
+			}
+			if err := c.ResumeApplicationMaintenance(ctx, args[0]); err != nil {
+				return handleFailure(err)
+			}
+			if flagJSON {
+				return printJSON(map[string]bool{"resumed": true})
+			}
+			fmt.Printf("resumed %s\n", args[0])
+			return nil
+		},
+	})
 	return app
 }
 

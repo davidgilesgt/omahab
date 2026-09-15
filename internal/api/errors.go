@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/omahab/omahab/internal/apitypes"
+	"github.com/omahab/omahab/internal/apps"
 	"github.com/omahab/omahab/internal/backups"
 	"github.com/omahab/omahab/internal/store"
 )
@@ -30,7 +31,7 @@ func httpStatus(err error) int {
 	if errors.Is(err, apitypes.ErrNotFound) || errors.Is(err, store.ErrNotFound) || errors.Is(err, backups.ErrNotFound) {
 		return http.StatusNotFound
 	}
-	if errors.Is(err, apitypes.ErrAlreadyExists) || errors.Is(err, apitypes.ErrConflict) || errors.Is(err, store.ErrConflict) || errors.Is(err, backups.ErrConflict) || errors.Is(err, backups.ErrOperationInProgress) {
+	if errors.Is(err, apitypes.ErrAlreadyExists) || errors.Is(err, apitypes.ErrConflict) || errors.Is(err, store.ErrConflict) || errors.Is(err, backups.ErrConflict) || errors.Is(err, backups.ErrOperationInProgress) || errors.Is(err, apps.ErrMaintained) || errors.Is(err, apps.ErrConflict) {
 		return http.StatusConflict
 	}
 	if errors.Is(err, apitypes.ErrValidation) || errors.Is(err, store.ErrValidation) || errors.Is(err, backups.ErrInvalid) {
@@ -57,7 +58,7 @@ func errorCode(err error) string {
 	if errors.Is(err, apitypes.ErrNotFound) || errors.Is(err, store.ErrNotFound) || errors.Is(err, backups.ErrNotFound) {
 		return apitypes.CodeNotFound
 	}
-	if errors.Is(err, apitypes.ErrAlreadyExists) || errors.Is(err, apitypes.ErrConflict) || errors.Is(err, store.ErrConflict) || errors.Is(err, backups.ErrConflict) || errors.Is(err, backups.ErrOperationInProgress) {
+	if errors.Is(err, apitypes.ErrAlreadyExists) || errors.Is(err, apitypes.ErrConflict) || errors.Is(err, store.ErrConflict) || errors.Is(err, backups.ErrConflict) || errors.Is(err, backups.ErrOperationInProgress) || errors.Is(err, apps.ErrMaintained) || errors.Is(err, apps.ErrConflict) {
 		return apitypes.CodeConflict
 	}
 	if errors.Is(err, apitypes.ErrValidation) || errors.Is(err, store.ErrValidation) || errors.Is(err, backups.ErrInvalid) {

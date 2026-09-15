@@ -9,6 +9,9 @@ func Migrations() []store.Migration {
 	return []store.Migration{{
 		Name: "0001_apps_and_app_releases",
 		SQL:  appsSchema,
+	}, {
+		Name: "0002_app_maintenance",
+		SQL:  maintenanceSchema,
 	}}
 }
 
@@ -40,4 +43,13 @@ CREATE TABLE IF NOT EXISTS app_releases (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_app_releases_app ON app_releases (app_id, created_at);
+`
+
+const maintenanceSchema = `
+CREATE TABLE IF NOT EXISTS app_maintenance (
+    bundle_id    TEXT PRIMARY KEY,
+    reason       TEXT NOT NULL CHECK (reason IN ('import','restore','storage')),
+    operation_id TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL
+);
 `

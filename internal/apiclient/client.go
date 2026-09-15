@@ -146,6 +146,14 @@ func (c *Client) del(ctx context.Context, path string, out any) error {
 	return c.do(req, out)
 }
 
+func (c *Client) deleteWithBody(ctx context.Context, path string, body any, out any) error {
+	req, err := c.newRequest(ctx, http.MethodDelete, path, body)
+	if err != nil {
+		return err
+	}
+	return c.do(req, out)
+}
+
 // --- status / up / doctor ---
 
 func (c *Client) Up(ctx context.Context) (map[string]any, error) {
@@ -229,6 +237,20 @@ func (c *Client) RestartApplication(ctx context.Context, id string) (*AppActionR
 		return nil, err
 	}
 	return &out, nil
+}
+
+// --- application maintenance (import pause/resume) ---
+
+func (c *Client) PauseApplicationMaintenance(ctx context.Context, id string) (*apitypes.MaintenanceResponse, error) {
+	var out apitypes.MaintenanceResponse
+	if err := c.post(ctx, "/applications/"+url.PathEscape(id)+"/maintenance", map[string]string{"reason": "import"}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) ResumeApplicationMaintenance(ctx context.Context, id string) error {
+	return c.deleteWithBody(ctx, "/applications/"+url.PathEscape(id)+"/maintenance", map[string]bool{"confirm": true}, nil)
 }
 
 // --- exposure ---

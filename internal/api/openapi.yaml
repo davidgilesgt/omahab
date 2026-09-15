@@ -536,6 +536,43 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
         '500': { $ref: '#/components/responses/Error' }
+  /api/v1/applications/{id}/maintenance:
+    post:
+      summary: Pause application for import
+      description: Admin only. Stops writers (dependents first, desired state preserved) and records an import pause with markers. Never device/Hermes privileges.
+      operationId: pauseApplicationMaintenance
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MaintenanceRequest' }
+      responses:
+        '201': { description: Paused, content: { application/json: { schema: { $ref: '#/components/schemas/MaintenanceResponse' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/Error' }
+    delete:
+      summary: Resume application from import pause
+      description: Admin only. Validates mounts/ownership/health, then resumes to prior desired state. Restore/storage-owned pauses cannot be cleared here.
+      operationId: resumeApplicationMaintenance
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MaintenanceResumeRequest' }
+      responses:
+        '200': { description: Resumed }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/Error' }
 
   /api/v1/applications/{id}/exposure:
     get:
@@ -2421,6 +2458,29 @@ components:
       required: [action]
       properties:
         action: { type: string, enum: [start, stop, restart, update, rollback] }
+      additionalProperties: false
+    MaintenanceRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason: { type: string, enum: [import] }
+      additionalProperties: false
+
+    MaintenanceResumeRequest:
+      type: object
+      required: [confirm]
+      properties:
+        confirm: { type: boolean }
+      additionalProperties: false
+
+    MaintenanceResponse:
+      type: object
+      required: [bundle_id, reason, created_at]
+      properties:
+        bundle_id: { type: string }
+        reason: { type: string, enum: [import, restore, storage] }
+        operation_id: { type: string }
+        created_at: { type: string }
       additionalProperties: false
 
     InstallApplicationRequest:

@@ -17,6 +17,7 @@ import type {
   Instance,
   KnowledgeConsent,
   ListEnvelope,
+  Maintenance,
   ModelAliasName,
   ModelInfo,
   ModelKey,
@@ -136,6 +137,16 @@ export class ApiClient {
     this.request<Application>(`/applications/${encodeURIComponent(id)}/actions`, {
       method: "POST",
       body: JSON.stringify({ action }),
+    });
+  pauseApplicationMaintenance = (id: string) =>
+    this.request<Maintenance>(`/applications/${encodeURIComponent(id)}/maintenance`, {
+      method: "POST",
+      body: JSON.stringify({ reason: "import" }),
+    });
+  resumeApplicationMaintenance = (id: string) =>
+    this.request<{ resumed: boolean }>(`/applications/${encodeURIComponent(id)}/maintenance`, {
+      method: "DELETE",
+      body: JSON.stringify({ confirm: true }),
     });
   setExposure = (resource: "applications" | "projects", id: string, exposure: Exposure, confirmation?: string) =>
     this.request<ExposureState>(`/${resource}/${encodeURIComponent(id)}/exposure`, {

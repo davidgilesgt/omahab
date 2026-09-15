@@ -532,6 +532,11 @@ func (b *Backend) initServices(ctx context.Context) error {
 		Events:     newMCPEventsAdapter(b),
 		Backups:    newMCPBackupsAdapter(b),
 	})
+	// Maintenance markers are the boot-time authority: converge
+	// marker/database mismatches toward paused before serving.
+	if err := b.ReconcileMaintenance(ctx); err != nil {
+		log.Printf("maintenance reconcile: %v", err)
+	}
 
 	return nil
 }
@@ -920,6 +925,9 @@ func translateError(err error) error {
 	}
 	if errors.Is(err, apps.ErrInvalid) {
 		return fmt.Errorf("%w: %v", apitypes.ErrValidation, err)
+	}
+	if errors.Is(err, apps.ErrMaintained) || errors.Is(err, apps.ErrConflict) {
+		return fmt.Errorf("%w: %v", apitypes.ErrConflict, err)
 	}
 	if errors.Is(err, backups.ErrNotFound) {
 		return fmt.Errorf("%w: %v", apitypes.ErrNotFound, err)

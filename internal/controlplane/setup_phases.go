@@ -1687,6 +1687,12 @@ func isNativeBundle(bundle apps.Bundle) bool {
 	return true
 }
 func (b *Backend) ensureDefaultApp(ctx context.Context, bundle apps.Bundle, domainName string) error {
+	// Maintained apps stay paused: setup provisioning must reject them with
+	// a structured conflict, never auto-initialize over a pending restore.
+	if m, err := apps.GetMaintenance(ctx, b.db, bundle.ID); err == nil {
+		log.Printf("setup: bundle %q paused for %s (operation %s); skipping provisioning", bundle.ID, m.Reason, m.OperationID)
+		return nil
+	}
 	list, err := b.apps.List(ctx)
 	if err != nil {
 		return fmt.Errorf("list apps: %w", err)

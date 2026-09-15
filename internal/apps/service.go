@@ -108,10 +108,11 @@ func NewService(db *sql.DB, opt Options) (*Service, error) {
 // source and the runner.
 type Status struct {
 	domain.Application
-	BundleID          string `json:"bundle_id"`
-	PreviousDigest    string `json:"previous_digest,omitempty"`
-	RollbackAvailable bool   `json:"rollback_available"`
-	Error             string `json:"error,omitempty"`
+	BundleID          string       `json:"bundle_id"`
+	PreviousDigest    string       `json:"previous_digest,omitempty"`
+	RollbackAvailable bool         `json:"rollback_available"`
+	Error             string       `json:"error,omitempty"`
+	Maintenance       *Maintenance `json:"maintenance,omitempty"`
 }
 
 // InstallRequest installs a curated bundle. Name defaults to the bundle ID;
@@ -140,6 +141,9 @@ func (s *Service) Install(ctx context.Context, req InstallRequest) (Status, erro
 	s.catMu.RUnlock()
 	if !ok {
 		return Status{}, invalid("unknown bundle %q", req.BundleID)
+	}
+	if err := s.requireNotMaintained(ctx, bundle.ID); err != nil {
+		return Status{}, err
 	}
 
 	name := req.Name
@@ -233,6 +237,9 @@ func (s *Service) Start(ctx context.Context, id domain.ID) (Status, error) {
 	if rec.ObservedState == ObservedProvisioning {
 		return Status{}, fmt.Errorf("%w: app %s is provisioning", ErrConflict, id)
 	}
+	if err := s.requireNotMaintained(ctx, rec.BundleID); err != nil {
+		return Status{}, err
+	}
 	if rec.DesiredState == DesiredRunning && rec.ObservedState == ObservedRunning {
 		return s.Status(ctx, id)
 	}
@@ -305,6 +312,42 @@ func (s *Service) Stop(ctx context.Context, id domain.ID) (Status, error) {
 	return s.Status(ctx, id)
 }
 
+// Quiesce stops a running stack without overwriting prior desired state, so a
+// maintenance pause can resume to the previous desired state. Desired state
+// is preserved; observed moves to stopped. Already-stopped or absent apps
+// are no-ops; provisioning apps conflict.
+func (s *Service) Quiesce(ctx context.Context, id domain.ID) (Status, error) {
+	rec, unlock, err := s.lockedApp(ctx, id)
+	if err != nil {
+		return Status{}, err
+	}
+	defer unlock()
+	switch rec.ObservedState {
+	case ObservedProvisioning:
+		return Status{}, fmt.Errorf("%w: app %s is provisioning", ErrConflict, id)
+	case ObservedStopped, ObservedAbsent:
+		return s.Status(ctx, id)
+	}
+	spec, err := s.specFor(ctx, rec)
+	if err != nil {
+		return Status{}, err
+	}
+	if err := s.runner.Stop(ctx, rec.application(), spec); err != nil {
+		msg := redact(err.Error(), spec.Env)
+		if setErr := setObserved(ctx, s.db, id, rec.ObservedState, rec.Health, msg, s.now()); setErr != nil {
+			return Status{}, setErr
+		}
+		s.emit(ctx, EventStopFailed, SeverityError, id, rec.Name+" failed to quiesce",
+			map[string]any{"digest": rec.Digest, "error": msg})
+		return Status{}, fmt.Errorf("%w: %s", ErrRunner, msg)
+	}
+	if err := setObserved(ctx, s.db, id, ObservedStopped, domain.HealthUnknown, "", s.now()); err != nil {
+		return Status{}, err
+	}
+	s.emit(ctx, EventStopped, SeverityInfo, id, rec.Name+" quiesced for maintenance", map[string]any{"digest": rec.Digest})
+	return s.Status(ctx, id)
+}
+
 // Update is retained for API compatibility but native bundles are updated
 // via the system image (nixpkgs pin), not per-bundle digests.
 func (s *Service) Update(ctx context.Context, id domain.ID, digest string) (Status, error) {
@@ -315,6 +358,9 @@ func (s *Service) Update(ctx context.Context, id domain.ID, digest string) (Stat
 	defer unlock()
 	if rec.ObservedState == ObservedProvisioning {
 		return Status{}, fmt.Errorf("%w: app %s is provisioning", ErrConflict, id)
+	}
+	if err := s.requireNotMaintained(ctx, rec.BundleID); err != nil {
+		return Status{}, err
 	}
 	s.catMu.RLock()
 	bundle, ok := s.catalog.Get(rec.BundleID)
@@ -336,6 +382,9 @@ func (s *Service) Rollback(ctx context.Context, id domain.ID) (Status, error) {
 	defer unlock()
 	if rec.ObservedState == ObservedProvisioning {
 		return Status{}, fmt.Errorf("%w: app %s is provisioning", ErrConflict, id)
+	}
+	if err := s.requireNotMaintained(ctx, rec.BundleID); err != nil {
+		return Status{}, err
 	}
 	if rec.PreviousReleaseID == "" {
 		return Status{}, fmt.Errorf("%w: app %s has no previous release to roll back to", ErrConflict, id)
@@ -487,9 +536,12 @@ func (s *Service) List(ctx context.Context) ([]Status, error) {
 	}
 	return out, nil
 }
-
 func (s *Service) view(ctx context.Context, rec appRecord) (Status, error) {
 	st := Status{Application: rec.application(), BundleID: rec.BundleID, Error: rec.LastError}
+	if m, err := GetMaintenance(ctx, s.db, rec.BundleID); err == nil {
+		cp := m
+		st.Maintenance = &cp
+	}
 	if rec.PreviousReleaseID != "" {
 		prev, err := getRelease(ctx, s.db, domain.ID(rec.PreviousReleaseID))
 		if err != nil {

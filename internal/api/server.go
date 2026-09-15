@@ -209,6 +209,8 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/api/v1/applications/{id}", s.handleGetApplication)
 		r.Patch("/api/v1/applications/{id}", s.withBodyLimit(defaultBodyLimit, s.handleUpdateApplication))
 		r.Post("/api/v1/applications/{id}/actions", s.withBodyLimit(defaultBodyLimit, s.handleApplicationAction))
+		r.Post("/api/v1/applications/{id}/maintenance", s.withBodyLimit(defaultBodyLimit, s.handlePauseApplicationMaintenance))
+		r.Delete("/api/v1/applications/{id}/maintenance", s.withBodyLimit(defaultBodyLimit, s.handleResumeApplicationMaintenance))
 		// Exposure
 		r.Get("/api/v1/exposure", s.handleListExposure)
 		r.Get("/api/v1/exposure/{kind}/{id}", s.handleGetExposure)
