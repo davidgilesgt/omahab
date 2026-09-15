@@ -102,6 +102,8 @@ type Backup struct {
 	StartedAt  time.Time  `json:"started_at"`
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
 	Error      string     `json:"error,omitempty"`
+	// OperationID links a restore/staging record to its progress journal.
+	OperationID string `json:"operation_id,omitempty"`
 }
 
 type Event struct {

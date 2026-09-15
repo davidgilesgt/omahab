@@ -32,6 +32,8 @@ type Runner interface {
 	Restore(ctx context.Context, repo Repository, creds Credentials, snapshotID, targetDir string) error
 	// Snapshots lists snapshots in repo as JSON (latest N).
 	Snapshots(ctx context.Context, repo Repository, creds Credentials, latest int) ([]SnapshotListEntry, error)
+	// Check runs restic integrity checking on the repository.
+	Check(ctx context.Context, repo Repository, creds Credentials) error
 }
 
 // SnapshotListEntry is the minimal snapshot info returned by restic snapshots --json.
@@ -249,6 +251,12 @@ func (c *CommandRunner) Snapshots(ctx context.Context, repo Repository, creds Cr
 		return nil, fmt.Errorf("parse snapshots json: %w", err)
 	}
 	return entries, nil
+}
+
+func (c *CommandRunner) Check(ctx context.Context, repo Repository, creds Credentials) error {
+	args := withSFTP(repo, []string{"check"})
+	_, err := c.exec(ctx, args, c.env(repo, creds), creds)
+	return err
 }
 
 // exec runs the restic binary and returns stdout. On failure it returns an

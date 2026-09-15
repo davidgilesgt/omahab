@@ -120,5 +120,24 @@ func Migrations() []store.Migration {
 			Name: "backups_0012_repositories_attached",
 			SQL:  `ALTER TABLE backup_repositories ADD COLUMN attached INTEGER NOT NULL DEFAULT 0`,
 		},
+		{
+			// Isolated verification depth: manifest presence, SQLite
+			// integrity results and disposable-database PostgreSQL restore
+			// results per verification. data_verified (extraction plus
+			// database proof) stays distinct from restore_tested (full app
+			// startup proof, recorded by live restores).
+			Name: "backups_0013_verification_depth",
+			SQL: `CREATE TABLE IF NOT EXISTS verification_depth (
+	verification_id TEXT PRIMARY KEY REFERENCES backup_verifications (id) ON DELETE CASCADE,
+	manifest_found INTEGER NOT NULL DEFAULT 0,
+	legacy INTEGER NOT NULL DEFAULT 0,
+	sqlite_checked INTEGER NOT NULL DEFAULT 0,
+	sqlite_ok INTEGER NOT NULL DEFAULT 0,
+	pg_checked INTEGER NOT NULL DEFAULT 0,
+	pg_ok INTEGER NOT NULL DEFAULT 0,
+	pg_skipped TEXT NOT NULL DEFAULT '',
+	checked_at TEXT NOT NULL
+)`,
+		},
 	}
 }

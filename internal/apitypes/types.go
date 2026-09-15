@@ -298,6 +298,8 @@ type Operation struct {
 	CanRollback bool     `json:"can_rollback"`
 	CreatedAt   string   `json:"created_at"`
 	UpdatedAt   string   `json:"updated_at"`
+	// Preview describes affected apps/dependents and downtime before confirm.
+	Preview string `json:"preview,omitempty"`
 }
 
 // OperationActionRequest drives resume|rollback|dismiss from journal stage.
@@ -377,6 +379,16 @@ type CreateBackupRequest struct {
 	Repository string `json:"repository,omitempty"`
 	// Scopes selects snapshot content; empty means all configured scopes.
 	Scopes []string `json:"scopes,omitempty"`
+}
+
+// RestoreBackupRequest stages or applies a snapshot. Scopes select manifest
+// scopes (empty means the snapshot's recorded scopes); mode staging (default)
+// extracts and validates without touching live apps, live requires confirm
+// and a pre-restore safety snapshot when data exists.
+type RestoreBackupRequest struct {
+	Scopes  []string `json:"scopes,omitempty"`
+	Mode    string   `json:"mode,omitempty"`
+	Confirm bool     `json:"confirm,omitempty"`
 }
 
 type UpdateExposureRequest struct {

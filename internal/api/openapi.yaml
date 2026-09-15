@@ -367,7 +367,8 @@ paths:
         Two forms are accepted:
         - Hetzner Storage Box (recommended, ~€4/mo): `{kind:"hetzner_storagebox", label, username, host, sub_account_password}` — generates an ed25519 key at `/var/lib/omahab/backup_ssh/id_ed25519`, uploads the pubkey to `.ssh/authorized_keys` via SFTP:23, derives the restic password from the recovery phrase (`HKDF-SHA256(seed, salt "omahab-recovery-v1", info "restic-password")`), location `sftp://<user>@<host>:23/./omahab/<instanceID>`.
         - Generic/Advanced: `{label, location, password}` — restic URL and password.
-      operationId: createBackupRepository
+        `mode:attach` adopts an existing repository: it runs `restic snapshots` (never `init`) against the exact source URL and preserves its instance suffix. Each repository gets its own secret record.
+        Hetzner setup authenticates the recovery phrase before generating keys; without a phrase it returns `recovery_phrase_required`, never random material.
       requestBody:
         required: true
         content:
@@ -382,9 +383,8 @@ paths:
                 host: { type: string, example: "u123456.your-storagebox.de" }
                 sub_account_password: { type: string, format: password, description: "Hetzner sub-account password (used once to upload SSH key, never stored)" }
                 location: { type: string, example: "sftp:user@host:restic-repo", description: "Generic restic URL (Advanced)" }
-                password: { type: string, format: password, description: "Generic restic password (Advanced)" }
                 phrase: { type: string, description: "Optional 24-word phrase to derive restic password for Hetzner when seed not in memory" }
-      responses:
+                mode: { type: string, enum: [create, attach], description: "create initializes; attach verifies an existing repo with snapshots (never init)" }
         '201':
           description: Repository configured
           content:
@@ -407,6 +407,26 @@ paths:
       responses:
         '204': { description: Deleted }
         '409': { $ref: '#/components/responses/Error' }
+  /api/v1/backup-repositories/{id}/snapshots/import:
+    post:
+      summary: Import snapshot metadata for a repository
+      description: Discovers snapshot metadata without the old control database (restic snapshots, never init) and populates the snapshot listing.
+      operationId: importRepoSnapshots
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Imported
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  imported: { type: integer }
+        '404': { $ref: '#/components/responses/NotFound' }
 
   /up:
     get:
@@ -868,12 +888,28 @@ paths:
 
   /api/v1/backups/{id}/restore:
     post:
-      summary: Restore backup
+      summary: Stage or live-restore a backup snapshot
+      description: >-
+        Scopes select manifest scopes (empty means the snapshot scopes).
+        Staging (default) extracts to a fresh operation directory and validates
+        in isolation without touching live apps. Live requires confirm and a
+        pre-restore safety snapshot; server-config restores refuse live mode
+        and require the offline recovery executor. Returns HTTP 202 plus an
+        operation-backed backup record carrying the operation_id.
       operationId: restoreBackup
       parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RestoreBackupRequest' }
       responses:
-        '200': { description: Restoring, content: { application/json: { schema: { $ref: '#/components/schemas/Backup' } } } }
+        '202': { description: Operation accepted, content: { application/json: { schema: { $ref: '#/components/schemas/Backup' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/Error' }
 
   /api/v1/backups/{id}/verify:
     post:
@@ -2175,6 +2211,7 @@ components:
         started_at: { type: string, format: date-time }
         finished_at: { type: string, format: date-time, nullable: true }
         error: { type: string }
+        operation_id: { type: string, description: 'Progress journal for a staged/live restore' }
 
     Event:
       type: object
@@ -2597,6 +2634,16 @@ components:
         scope: { type: string }
         name: { type: string }
         value: { type: string, description: Never returned in reads }
+      additionalProperties: false
+    RestoreBackupRequest:
+      type: object
+      properties:
+        scopes:
+          type: array
+          items: { type: string }
+          description: 'Manifest scopes to restore; empty means the snapshot scopes'
+        mode: { type: string, enum: [staging, live], description: 'Staging validates only; live promotes with confirmation' }
+        confirm: { type: boolean }
       additionalProperties: false
 
     UpdateSecretRequest:

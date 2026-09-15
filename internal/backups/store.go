@@ -581,15 +581,13 @@ func (s *Service) lastCompletedBackupAt(ctx context.Context) (*time.Time, error)
 	return &t, nil
 }
 
-// lastVerifiedRestoreAt returns the most recent proof of restorability: the
-// finish time of the newest passed verification or completed restore run.
+// lastVerifiedRestoreAt returns the most recent isolated data proof: the
+// finish time of the newest passed verification (extraction plus manifest,
+// SQLite and disposable-PostgreSQL checks). It never counts live restores.
 func (s *Service) lastVerifiedRestoreAt(ctx context.Context) (*time.Time, error) {
 	var latest sql.NullString
-	err := s.st.DB().QueryRowContext(ctx, `SELECT MAX(f) FROM (
-	SELECT finished_at AS f FROM backup_verifications WHERE status = 'passed' AND finished_at IS NOT NULL
-	UNION ALL
-	SELECT finished_at AS f FROM backup_runs WHERE kind = 'restore' AND status = 'completed' AND finished_at IS NOT NULL
-)`).Scan(&latest)
+	err := s.st.DB().QueryRowContext(ctx,
+		"SELECT MAX(finished_at) FROM backup_verifications WHERE status = 'passed' AND finished_at IS NOT NULL").Scan(&latest)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -606,8 +604,67 @@ func (s *Service) lastVerifiedRestoreAt(ctx context.Context) (*time.Time, error)
 	return &t, nil
 }
 
+// lastRestoreTestedAt returns the last full application restore proof: the
+// finish time of the newest completed live restore run. It is never inferred
+// from extraction alone.
+func (s *Service) lastRestoreTestedAt(ctx context.Context) (*time.Time, error) {
+	var latest sql.NullString
+	err := s.st.DB().QueryRowContext(ctx,
+		"SELECT MAX(finished_at) FROM backup_runs WHERE kind = 'restore' AND status = 'completed' AND finished_at IS NOT NULL").Scan(&latest)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !latest.Valid {
+		return nil, nil
+	}
+	t, err := parseTime(latest.String)
+	if err != nil {
+		return nil, fmt.Errorf("parse last restore test time: %w", err)
+	}
+	return &t, nil
+}
+
 func (s *Service) countRunsForRepository(ctx context.Context, repositoryID string) (int, error) {
 	var n int
 	err := s.st.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM backup_runs WHERE repository_id = ?", repositoryID).Scan(&n)
 	return n, err
+}
+
+func boolToInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
+
+func (s *Service) saveVerificationDepth(ctx context.Context, d VerificationDepth) error {
+	_, err := s.st.DB().ExecContext(ctx,
+		`INSERT INTO verification_depth (verification_id, manifest_found, legacy, sqlite_checked, sqlite_ok, pg_checked, pg_ok, pg_skipped, checked_at)
+		 VALUES (?,?,?,?,?,?,?,?,?)`,
+		d.VerificationID, boolToInt(d.ManifestFound), boolToInt(d.Legacy),
+		d.SQLiteChecked, d.SQLiteOK, d.PGChecked, d.PGOK, d.PGSkipped, fmtTime(d.CheckedAt))
+	return err
+}
+
+func (s *Service) getVerificationDepth(ctx context.Context, verificationID string) (VerificationDepth, error) {
+	var d VerificationDepth
+	var manifestFound, legacy int
+	var checked string
+	err := s.st.DB().QueryRowContext(ctx,
+		`SELECT verification_id, manifest_found, legacy, sqlite_checked, sqlite_ok, pg_checked, pg_ok, pg_skipped, checked_at
+		 FROM verification_depth WHERE verification_id = ?`, verificationID).
+		Scan(&d.VerificationID, &manifestFound, &legacy, &d.SQLiteChecked, &d.SQLiteOK,
+			&d.PGChecked, &d.PGOK, &d.PGSkipped, &checked)
+	if err != nil {
+		return VerificationDepth{}, err
+	}
+	d.ManifestFound = manifestFound != 0
+	d.Legacy = legacy != 0
+	if t, err := parseTime(checked); err == nil {
+		d.CheckedAt = t
+	}
+	return d, nil
 }

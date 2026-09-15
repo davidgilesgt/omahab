@@ -314,7 +314,7 @@ func (s *Server) buildRouter() chi.Router {
 		r.Post("/api/v1/operations/{id}/actions", s.withBodyLimit(defaultBodyLimit, s.handleOperationAction))
 		r.Get("/api/v1/system/ssh-keys", s.handleListSystemSSHKeys)
 		r.Post("/api/v1/system/ssh-keys", s.withBodyLimit(64<<10, s.handleAddSystemSSHKeys))
-		r.Delete("/api/v1/system/ssh-keys", s.withBodyLimit(64<<10, s.handleDeleteSystemSSHKeys))
+		r.Post("/api/v1/backup-repositories/{id}/snapshots/import", s.handleImportRepoSnapshots)
 		r.Get("/api/v1/backup-repositories", s.handleListBackupRepositories)
 		r.Post("/api/v1/backup-repositories", s.withBodyLimit(defaultBodyLimit, s.handleCreateBackupRepository))
 		r.Delete("/api/v1/backup-repositories/{id}", s.handleDeleteBackupRepository)

@@ -58,6 +58,10 @@ func (f *fakeRunner) Snapshots(_ context.Context, repo Repository, creds Credent
 	return []SnapshotListEntry{{ID: "snap1", Time: "2026-09-01T00:00:00Z", Hostname: "omahab-host"}}, nil
 }
 
+func (f *fakeRunner) Check(_ context.Context, _ Repository, _ Credentials) error {
+	return nil
+}
+
 func (f *fakeRunner) Backup(_ context.Context, repo Repository, creds Credentials, req BackupRequest) (Snapshot, error) {
 	f.mu.Lock()
 	f.backupCalls = append(f.backupCalls, req)

@@ -488,7 +488,12 @@ func (panicRunner) Backup(_ context.Context, _ backups.Repository, _ backups.Cre
 func (panicRunner) Restore(_ context.Context, _ backups.Repository, _ backups.Credentials, _, _ string) error {
 	panic("unreachable")
 }
+
 func (panicRunner) Snapshots(_ context.Context, _ backups.Repository, _ backups.Credentials, _ int) ([]backups.SnapshotListEntry, error) {
+	panic("unreachable")
+}
+
+func (panicRunner) Check(_ context.Context, _ backups.Repository, _ backups.Credentials) error {
 	panic("unreachable")
 }
 

@@ -566,12 +566,27 @@ func (s *Server) handleCreateBackup(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRestoreBackup(w http.ResponseWriter, r *http.Request) {
 	id := domain.ID(chi.URLParam(r, "id"))
-	bk, err := s.backend.RestoreBackup(r.Context(), id)
+	var req apitypes.RestoreBackupRequest
+	if r.ContentLength != 0 {
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+	}
+	bk, err := s.backend.RestoreBackup(r.Context(), id, req)
 	if err != nil {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, bk)
+	writeJSON(w, http.StatusAccepted, bk)
+}
+
+func (s *Server) handleImportRepoSnapshots(w http.ResponseWriter, r *http.Request) {
+	n, err := s.backend.ImportRepoSnapshots(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"imported": n})
 }
 
 func (s *Server) handleVerifyBackup(w http.ResponseWriter, r *http.Request) {

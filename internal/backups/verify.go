@@ -2,7 +2,6 @@ package backups
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -106,14 +105,25 @@ func (s *Service) Verify(ctx context.Context, req VerifyRequest) (Run, Verificat
 		return failVer(StageVerify, err)
 	}
 
-	files, bytes, err := walkStats(target)
+	// Isolated depth through the shared staging validator: restic integrity
+	// was proven by Check, then manifest/SQLite/disposable-PostgreSQL proof.
+	// None of this touches live apps or their hooks.
+	if err := s.runner.Check(ctx, s.scopedRepository(ctx, repo), creds); err != nil {
+		return failVer(StageVerify, fmt.Errorf("restic check: %w", err))
+	}
+	rep, err := ValidateStaging(ctx, target)
 	if err != nil {
 		return failVer(StageVerify, err)
 	}
-	if files == 0 {
-		return failVer(StageVerify, errors.New("verified restore produced zero files"))
+	depth := VerificationDepth{VerificationID: ver.ID, CheckedAt: s.nowUTC(),
+		ManifestFound: rep.ManifestFound, Legacy: rep.Legacy,
+		SQLiteChecked: rep.SQLiteChecked, SQLiteOK: rep.SQLiteOK,
+		PGChecked: rep.PGChecked, PGOK: rep.PGOK}
+	if err := s.saveVerificationDepth(ctx, depth); err != nil {
+		return failVer(StageVerify, err)
 	}
-
+	ver.Depth = &depth
+	files, bytes := rep.Files, rep.Bytes
 	now := s.nowUTC()
 	ver.Status = VerificationPassed
 	ver.FilesRestored = files

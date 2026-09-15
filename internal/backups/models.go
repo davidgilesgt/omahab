@@ -169,6 +169,25 @@ type Verification struct {
 	CleanedAt     *time.Time         `json:"cleaned_at,omitempty"`
 	Error         string             `json:"error,omitempty"`
 	CleanupError  string             `json:"cleanup_error,omitempty"`
+	// Depth carries isolated database proof when loaded with it; nil for
+	// legacy rows and for in-flight verifications.
+	Depth *VerificationDepth `json:"depth,omitempty"`
+}
+
+// VerificationDepth records how deep isolated verification went.
+// data_verified means extraction plus manifest/SQLite/disposable-PostgreSQL
+// proof; restore_tested (full app startup) is recorded separately by live
+// restores and never inferred from extraction alone.
+type VerificationDepth struct {
+	VerificationID string    `json:"verification_id"`
+	ManifestFound  bool      `json:"manifest_found"`
+	Legacy         bool      `json:"legacy"`
+	SQLiteChecked  int       `json:"sqlite_checked"`
+	SQLiteOK       int       `json:"sqlite_ok"`
+	PGChecked      int       `json:"pg_checked"`
+	PGOK           int       `json:"pg_ok"`
+	PGSkipped      string    `json:"pg_skipped,omitempty"`
+	CheckedAt      time.Time `json:"checked_at"`
 }
 
 // ConfigureRequest creates or updates a backup repository. A non-empty ID
@@ -242,6 +261,10 @@ type StatusReport struct {
 	Reason              string        `json:"reason,omitempty"`
 	LastBackupAt        *time.Time    `json:"last_backup_at,omitempty"`
 	LastVerifiedAt      *time.Time    `json:"last_verified_at,omitempty"`
+	// LastRestoreTestedAt is the last full application restore proof
+	// (disposable-ISO live restore), or nil when never tested. It is never
+	// inferred from extraction alone.
+	LastRestoreTestedAt *time.Time    `json:"last_restore_tested_at,omitempty"`
 	RPOLimit            time.Duration `json:"rpo_limit"`
 	RPOExceeded         bool          `json:"rpo_exceeded"`
 	RTOLimit            time.Duration `json:"rto_limit"`

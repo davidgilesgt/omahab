@@ -78,6 +78,8 @@ func (f *rtoFakeRunner) Snapshots(_ context.Context, _ Repository, _ Credentials
 	return nil, nil
 }
 
+func (f *rtoFakeRunner) Check(_ context.Context, _ Repository, _ Credentials) error { return nil }
+
 type rtoFakeSecretSource struct{}
 
 func (f *rtoFakeSecretSource) Resolve(_ context.Context, _ SecretRef) (Credentials, error) {

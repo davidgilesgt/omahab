@@ -151,9 +151,15 @@ func (b *Backend) DoOperationAction(ctx context.Context, id string, action strin
 	case "dismiss":
 		return b.dismissOperation(id)
 	case "rollback":
-		return b.rollbackStorageOperation(ctx, id)
+		if _, err := loadStorageJournal(b.cfg.StateDir, id); err == nil {
+			return b.rollbackStorageOperation(ctx, id)
+		}
+		return b.rollbackRestoreOperation(ctx, id)
 	case "resume":
-		return b.resumeStorageOperation(ctx, id)
+		if _, err := loadStorageJournal(b.cfg.StateDir, id); err == nil {
+			return b.resumeStorageOperation(ctx, id)
+		}
+		return b.resumeRestoreOperation(ctx, id)
 	default:
 		return Operation{}, fmt.Errorf("%w: action must be resume|rollback|dismiss", apitypes.ErrValidation)
 	}
@@ -169,6 +175,13 @@ func (b *Backend) dismissOperation(id string) (Operation, error) {
 	}
 	// Dismiss removes only this operation's validated staging tree and its
 	// journal; live state is untouched.
+	if op.Kind == "restore" {
+		if j, err := loadRestoreJournal(b.cfg.StateDir, id); err == nil {
+			if j.StagingDir != "" {
+				_ = os.RemoveAll(j.StagingDir)
+			}
+		}
+	}
 	_ = os.RemoveAll(filepath.Join(operationsDir(b.cfg.StateDir, op.Kind), id))
 	op.Status = OpCompleted
 	return op, nil

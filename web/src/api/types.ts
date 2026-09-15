@@ -91,6 +91,7 @@ export interface Backup {
   started_at: string;
   finished_at?: string;
   error?: string;
+  operation_id?: string;
 }
 
 export interface Disk {

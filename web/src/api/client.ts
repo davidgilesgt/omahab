@@ -180,6 +180,10 @@ export class ApiClient {
   createBackup = (input?: { repository?: string; scopes?: string[] }) =>
     this.request<Backup>("/backups", { method: "POST", body: JSON.stringify(input ?? {}) });
   verifyBackup = (id: string) => this.request<Backup>(`/backups/${encodeURIComponent(id)}/verify`, { method: "POST", body: JSON.stringify({}) });
+  restoreBackup = (id: string, input?: { scopes?: string[]; mode?: string; confirm?: boolean }) =>
+    this.request<Backup>(`/backups/${encodeURIComponent(id)}/restore`, { method: "POST", body: JSON.stringify(input ?? {}) });
+  importRepoSnapshots = (repositoryId: string) =>
+    this.request<{ imported: number }>(`/backup-repositories/${encodeURIComponent(repositoryId)}/snapshots/import`, { method: "POST", body: JSON.stringify({}) });
 
   events = () => this.list<ControlEvent>("/events");
   markEventRead = (id: string) => this.request<ControlEvent>(`/events/${encodeURIComponent(id)}/read`, { method: "POST", body: JSON.stringify({}) });

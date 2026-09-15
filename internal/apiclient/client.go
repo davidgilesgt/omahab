@@ -493,12 +493,22 @@ func (c *Client) CreateBackup(ctx context.Context, req apitypes.CreateBackupRequ
 	return &out, nil
 }
 
-func (c *Client) RestoreBackup(ctx context.Context, id string) (*domain.Backup, error) {
+func (c *Client) RestoreBackup(ctx context.Context, id string, req apitypes.RestoreBackupRequest) (*domain.Backup, error) {
 	var out domain.Backup
-	if err := c.post(ctx, "/backups/"+url.PathEscape(id)+"/restore", map[string]any{}, &out); err != nil {
+	if err := c.post(ctx, "/backups/"+url.PathEscape(id)+"/restore", req, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
+}
+
+func (c *Client) ImportRepoSnapshots(ctx context.Context, repositoryID string) (int, error) {
+	var out struct {
+		Imported int `json:"imported"`
+	}
+	if err := c.post(ctx, "/backup-repositories/"+url.PathEscape(repositoryID)+"/snapshots/import", map[string]any{}, &out); err != nil {
+		return 0, err
+	}
+	return out.Imported, nil
 }
 
 func (c *Client) VerifyBackup(ctx context.Context, id string) (*domain.Backup, error) {

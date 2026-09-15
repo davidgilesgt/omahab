@@ -358,7 +358,10 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (apitypes.SetupStatus, err
 	}
 	checks = append(checks, idxCheck)
 
-	// --- recovery_tested check ---
+	// --- recovery_tested check ("Verify backup data") ---
+	// Gated on isolated data/database verification, not a destructive live
+	// restore. Full application restore proof is the separate restore_tested
+	// check below.
 	recovCheck := apitypes.SetupCheck{ID: "recovery_tested"}
 	var recovCount int
 	err = b.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM backup_verifications WHERE status='passed'`).Scan(&recovCount)
@@ -374,13 +377,36 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (apitypes.SetupStatus, err
 	} else {
 		if recovCount > 0 {
 			recovCheck.Status = "ok"
-			recovCheck.Detail = "restore verified"
+			recovCheck.Detail = "backup data verified in isolation"
 		} else {
 			recovCheck.Status = "pending"
-			recovCheck.Detail = "verify a restore"
+			recovCheck.Detail = "verify backup data"
 		}
 	}
 	checks = append(checks, recovCheck)
+
+	// --- restore_tested check ("Last application restore test") ---
+	// Release evidence only: the installer/E2E result, never inferred from
+	// extraction. Timestamp or "Not yet tested".
+	restoreCheck := apitypes.SetupCheck{ID: "restore_tested"}
+	var restoreAt sql.NullString
+	rerr := b.db.QueryRowContext(ctx, `SELECT MAX(finished_at) FROM backup_runs WHERE kind='restore' AND status='completed' AND finished_at IS NOT NULL`).Scan(&restoreAt)
+	if rerr != nil {
+		if strings.Contains(rerr.Error(), "no such table") {
+			restoreCheck.Status = "pending"
+			restoreCheck.Detail = "Not yet tested"
+		} else {
+			restoreCheck.Status = "failed"
+			restoreCheck.Detail = "query failed: " + rerr.Error()
+		}
+	} else if !restoreAt.Valid || strings.TrimSpace(restoreAt.String) == "" {
+		restoreCheck.Status = "pending"
+		restoreCheck.Detail = "Not yet tested"
+	} else {
+		restoreCheck.Status = "ok"
+		restoreCheck.Detail = "last application restore test: " + strings.TrimSpace(restoreAt.String)
+	}
+	checks = append(checks, restoreCheck)
 
 	// --- recovery_key check (kit exported + fingerprint stored) ---
 	recovKeyCheck := apitypes.SetupCheck{ID: "recovery_key"}
@@ -657,9 +683,13 @@ func applySetupCheckMeta(c apitypes.SetupCheck) apitypes.SetupCheck {
 		c.Owner = "operator"
 		c.Action = "Optional: dedicate a disk to media or data."
 	case "recovery_tested":
-		c.Label = "Verify a restore"
+		c.Label = "Verify backup data"
 		c.Owner = "operator"
-		c.Action = "Run a backup and verify a restore."
+		c.Action = "Run a backup and verify its data in isolation."
+	case "restore_tested":
+		c.Label = "Last application restore test"
+		c.Owner = "operator"
+		c.Action = "Full application restore proof from release testing; extraction alone never counts."
 	case "backups_configured":
 		c.Label = "Configure backups"
 		c.Owner = "operator"
@@ -686,8 +716,9 @@ func applySetupCheckMeta(c apitypes.SetupCheck) apitypes.SetupCheck {
 	}
 	return c
 }
+
 func orderSetupChecks(checks []apitypes.SetupCheck) []apitypes.SetupCheck {
-	order := []string{"ssh_keys", "domain", "cloudflare_dns", "tailscale", "recovery_key", "admin_passkeys", "knowledge_index_setup", "backups_configured", "storage_configured", "tunnel", "dashboard_dns", "core_apps", "woodpecker_connection", "automatic_reconciliation", "recovery_tested"}
+	order := []string{"ssh_keys", "domain", "cloudflare_dns", "tailscale", "recovery_key", "admin_passkeys", "knowledge_index_setup", "backups_configured", "storage_configured", "tunnel", "dashboard_dns", "core_apps", "woodpecker_connection", "automatic_reconciliation", "recovery_tested", "restore_tested"}
 	byID := make(map[string]apitypes.SetupCheck, len(checks))
 	for _, c := range checks {
 		byID[c.ID] = c

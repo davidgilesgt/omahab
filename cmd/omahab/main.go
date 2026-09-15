@@ -1767,22 +1767,30 @@ func newBackupCmd() *cobra.Command {
 	// restore
 	restoreCmd := &cobra.Command{
 		Use:   "restore [<id>]",
-		Short: "Restore from a backup snapshot",
+		Short: "Stage a backup snapshot for restore (repeat --scope; --live --confirm applies it)",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return handleFailure(fmt.Errorf("snapshot id is required"))
 			}
+			scopes, _ := cmd.Flags().GetStringArray("scope")
+			live, _ := cmd.Flags().GetBool("live")
+			confirm, _ := cmd.Flags().GetBool("confirm")
 			force, _ := cmd.Flags().GetBool("force")
+			mode := "staging"
+			if live {
+				mode = "live"
+			}
 			if isNonInteractive() && !force && !flagForce {
 				err := errors.New("restore is destructive; requires --force in --non-interactive mode")
 				return handleFailure(err)
 			}
-			if !force && !flagForce && !flagJSON {
-				if !confirmPrompt(fmt.Sprintf("restore backup %s? This overwrites current data", args[0])) {
+			if live && !force && !flagForce && !flagJSON && !confirm {
+				if !confirmPrompt(fmt.Sprintf("live-restore backup %s? This overwrites current data", args[0])) {
 					fmt.Println("aborted")
 					return nil
 				}
+				confirm = true
 			}
 			ctx, cancel := newContext()
 			defer cancel()
@@ -1790,20 +1798,22 @@ func newBackupCmd() *cobra.Command {
 			if err != nil {
 				return handleFailure(err)
 			}
-			b, err := c.RestoreBackup(ctx, args[0])
+			b, err := c.RestoreBackup(ctx, args[0], apitypes.RestoreBackupRequest{Scopes: scopes, Mode: mode, Confirm: confirm || force || flagForce})
 			if err != nil {
 				return handleFailure(err)
 			}
 			if flagJSON {
 				return printJSON(b)
 			}
-			fmt.Printf("restore %s: %s\n", b.ID, b.Status)
+			fmt.Printf("restore %s: %s (operation %s)\n", b.ID, b.Status, b.OperationID)
 			return nil
 		},
 	}
 	restoreCmd.Flags().Bool("force", false, "force without confirmation")
+	restoreCmd.Flags().StringArray("scope", nil, "manifest scope to restore (repeatable; empty means snapshot scopes)")
+	restoreCmd.Flags().Bool("live", false, "apply live instead of staging only")
+	restoreCmd.Flags().Bool("confirm", false, "confirm a live restore")
 	bk.AddCommand(restoreCmd)
-
 
 	bk.AddCommand(&cobra.Command{
 		Use:   "verify [<id>]",

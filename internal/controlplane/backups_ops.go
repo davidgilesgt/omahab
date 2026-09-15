@@ -156,11 +156,6 @@ func (b *Backend) CreateBackup(ctx context.Context, req apitypes.CreateBackupReq
 	return b.CreateBackupScoped(ctx, strings.TrimSpace(req.Repository), req.Scopes)
 }
 
-func (b *Backend) RestoreBackup(ctx context.Context, id domain.ID) (domain.Backup, error) {
-	// Mark not configured if restic runner not available? For now return not-configured explicitly
-	return domain.Backup{}, translateError(fmt.Errorf("%w: restore requires restic runner and is not configured in this environment", ErrNotConfigured))
-}
-
 func (b *Backend) VerifyBackup(ctx context.Context, id domain.ID) (domain.Backup, error) {
 	if b.backups == nil {
 		return domain.Backup{}, translateError(fmt.Errorf("%w: backups not configured", ErrNotConfigured))
