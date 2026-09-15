@@ -118,6 +118,7 @@ EOF
           '';
         omahab-once = pkgs.buildGoModule {
           pname = "omahab-once";
+          inherit version;
           src = ./third_party/once;
           subPackages = [ "cmd/once" ];
           vendorHash = "sha256-g05AhTYiD+kP9j0hFeojneJ7G95B2KfKGqM+VfJOO7I=";
