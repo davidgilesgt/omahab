@@ -2610,6 +2610,10 @@ components:
       type: object
       properties:
         repository: { type: string }
+        scopes:
+          type: array
+          items: { type: string }
+          description: 'Scoped snapshot content (server-config, app:<bundle-id>, server-sync, server-projects, machine-backups). Empty means all configured scopes.'
       additionalProperties: false
 
     CreateSyncFolderRequest:

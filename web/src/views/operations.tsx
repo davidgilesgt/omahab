@@ -396,7 +396,7 @@ export function BackupsPage() {
   const toast = useToast();
   const query = useQuery({ queryKey: ["backups"], queryFn: client.backups });
   const create = useMutation({
-    mutationFn: client.createBackup,
+    mutationFn: () => client.createBackup(),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["backups"] });
       toast.success("Backup started");

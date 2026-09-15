@@ -150,17 +150,10 @@ func (b *Backend) GetBackup(ctx context.Context, id domain.ID) (domain.Backup, e
 }
 
 func (b *Backend) CreateBackup(ctx context.Context, req apitypes.CreateBackupRequest) (domain.Backup, error) {
-	if b.backups == nil {
-		return domain.Backup{}, translateError(fmt.Errorf("%w: backups not configured", ErrNotConfigured))
-	}
-	run, err := b.backups.RunBackup(ctx, backups.RunRequest{
-		RepositoryID: strings.TrimSpace(req.Repository),
-		Trigger:      backups.TriggerManual,
-	})
-	if err != nil {
-		return domain.Backup{}, translateError(err)
-	}
-	return b.GetBackup(ctx, domain.ID(run.ID))
+	// Scoped snapshots default to all configured scopes: consistent dumps
+	// plus a structured manifest, taken while selected writers are
+	// stopped and resumed afterwards even on failure.
+	return b.CreateBackupScoped(ctx, strings.TrimSpace(req.Repository), req.Scopes)
 }
 
 func (b *Backend) RestoreBackup(ctx context.Context, id domain.ID) (domain.Backup, error) {

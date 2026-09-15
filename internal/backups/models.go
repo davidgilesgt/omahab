@@ -187,6 +187,17 @@ type RunRequest struct {
 	RepositoryID string `json:"repository_id,omitempty"`
 	// Trigger is manual or scheduled; empty means manual.
 	Trigger string `json:"trigger,omitempty"`
+	// Scopes selects snapshot content (server-config, app:<bundle-id>,
+	// server-sync, server-projects, machine-backups). Empty means all
+	// configured scopes.
+	Scopes []string `json:"scopes,omitempty"`
+	// Paths overrides the configured source paths when non-empty. The
+	// control plane sets explicit scoped paths; direct service use falls
+	// back to Config.Paths.
+	Paths []string `json:"paths,omitempty"`
+	// Excludes are restic --exclude patterns for caches, staging trees,
+	// live databases and transient runtime files.
+	Excludes []string `json:"excludes,omitempty"`
 }
 
 // VerifyRequest triggers a restore verification. With no snapshot id the

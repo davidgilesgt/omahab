@@ -47,10 +47,15 @@ func (s *Service) RunBackup(ctx context.Context, req RunRequest) (Run, error) {
 	if err := s.advanceRun(ctx, run, StageSnapshot, creds); err != nil {
 		return *run, fmt.Errorf("backups: backup run %s failed: %w", run.ID, err)
 	}
+	paths := req.Paths
+	if len(paths) == 0 {
+		paths = s.cfg.Paths
+	}
 	snap, err := s.runner.Backup(ctx, s.scopedRepository(ctx, repo), creds, BackupRequest{
-		Paths: s.cfg.Paths,
-		Host:  s.cfg.Host,
-		Tags:  backupTags,
+		Paths:    paths,
+		Host:     s.cfg.Host,
+		Tags:     backupTags,
+		Excludes: req.Excludes,
 	})
 	if err != nil {
 		s.failRun(ctx, run, StageSnapshot, err, creds.Password, creds.AccessKey)

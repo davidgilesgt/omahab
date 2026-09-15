@@ -375,6 +375,8 @@ type UpdateSecretRequest struct {
 
 type CreateBackupRequest struct {
 	Repository string `json:"repository,omitempty"`
+	// Scopes selects snapshot content; empty means all configured scopes.
+	Scopes []string `json:"scopes,omitempty"`
 }
 
 type UpdateExposureRequest struct {

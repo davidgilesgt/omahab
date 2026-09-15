@@ -167,10 +167,6 @@ export class ApiClient {
       body: JSON.stringify({}),
     });
 
-  backups = () => this.list<Backup>("/backups");
-  createBackup = () => this.request<Backup>("/backups", { method: "POST", body: JSON.stringify({}) });
-  verifyBackup = (id: string) => this.request<Backup>(`/backups/${encodeURIComponent(id)}/verify`, { method: "POST", body: JSON.stringify({}) });
-
   disks = () => this.list<Disk>("/system/disks");
   configureStorage = (input: { placements: StoragePlacement[]; migrate?: boolean; confirm?: boolean }) =>
     this.request<Operation>("/system/storage", { method: "PUT", body: JSON.stringify(input) });
@@ -180,6 +176,10 @@ export class ApiClient {
       method: "POST",
       body: JSON.stringify({ action, confirm: true }),
     });
+  backups = () => this.list<Backup>("/backups");
+  createBackup = (input?: { repository?: string; scopes?: string[] }) =>
+    this.request<Backup>("/backups", { method: "POST", body: JSON.stringify(input ?? {}) });
+  verifyBackup = (id: string) => this.request<Backup>(`/backups/${encodeURIComponent(id)}/verify`, { method: "POST", body: JSON.stringify({}) });
 
   events = () => this.list<ControlEvent>("/events");
   markEventRead = (id: string) => this.request<ControlEvent>(`/events/${encodeURIComponent(id)}/read`, { method: "POST", body: JSON.stringify({}) });

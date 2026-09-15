@@ -45,9 +45,10 @@ type SnapshotListEntry struct {
 
 // BackupRequest describes one restic backup invocation.
 type BackupRequest struct {
-	Paths []string
-	Host  string
-	Tags  []string
+	Paths    []string
+	Host     string
+	Tags     []string
+	Excludes []string
 }
 
 // backupTags are applied to every snapshot Omahab creates.
@@ -185,6 +186,11 @@ func (c *CommandRunner) backupPlan(repo Repository, creds Credentials, req Backu
 	}
 	for _, tag := range req.Tags {
 		args = append(args, "--tag", tag)
+	}
+	for _, ex := range req.Excludes {
+		if strings.TrimSpace(ex) != "" {
+			args = append(args, "--exclude", ex)
+		}
 	}
 	args = append(args, req.Paths...)
 	args = withSFTP(repo, args)
