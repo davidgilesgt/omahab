@@ -59,21 +59,6 @@ export function buildCanonicalBytes(
 }
 
 /**
- * Convenience helper that returns the canonical bytes as a UTF-8 string
- * for debug display when raw is known to be ASCII. For binary raw,
- * use buildCanonicalBytes directly. This is not used for HMAC.
- */
-export function buildCanonicalString(
-  metadata: CanonicalMetadata,
-  rawText: string,
-): string {
-  const raw = new TextEncoder().encode(rawText);
-  const canonical = buildCanonicalBytes(metadata, raw);
-  // Header is ASCII; rawText assumed ASCII here.
-  return new TextDecoder().decode(canonical);
-}
-
-/**
  * Constant-time helpers for validation/formatting.
  */
 

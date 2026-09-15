@@ -54,12 +54,29 @@ export interface Env {
   HMAC_KEY_ID?: string;
 }
 
+const MIN_HMAC_SECRET_LENGTH = 16;
+const DEFAULT_MAX_RAW_BYTES = 26_214_400;
+// Retry budget: initial attempt plus three retries (four total attempts).
+const MAX_RETRIES = 3;
+
+function normalizeEmail(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function isValidEmail(value: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
 interface ValidatedEnv {
   hmacSecret: string;
   ingestUrl: string;
   allowedRecipient: string;
   /** Additional alias; null when not configured */
   recipientAlias: string | null;
+  allowedRecipients: Set<string>;
+  maxRawBytes: number;
+  hmacKeyId: string | null;
+}
 export function validateEnv(env: Env): ValidatedEnv {
   if (!env || typeof env !== "object") {
     throw new Error("invalid environment: missing env");
@@ -153,6 +170,7 @@ export function validateEnv(env: Env): ValidatedEnv {
     maxRawBytes,
     hmacKeyId: keyId,
   };
+}
 
 // ---------------------------------------------------------------------------
 // Crypto
@@ -204,10 +222,8 @@ interface ForwardPayload {
   nonce: string;
   raw: string; // base64-encoded raw message
   rawSize: number;
-  // Optional key id for rotation; if present it is covered by HMAC via canonical metadata
-  // (canonical does not currently include keyId to avoid ambiguous downgrade; caller may
-  // extend canonical with keyId in a versioned way. For now keyId travels as header
-  // and is not part of HMAC; future v2 will include it.)
+  // Optional key id for rotation; transported in x-omahab-key-id and not
+  // included in HMAC v1.
 }
 
 function sleepMs(ms: number): Promise<void> {
@@ -223,7 +239,8 @@ async function postWithRetry(
 ): Promise<Response> {
   const body = JSON.stringify(payload);
   let lastError: unknown = null;
-  let lastResponse: Response | null = null;
+  let lastStatus: number | null = null;
+  let lastDiagnostic = "";
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     if (attempt > 0) {
@@ -251,7 +268,7 @@ async function postWithRetry(
     } catch (err) {
       // Network failure — transient, retry.
       lastError = err;
-      lastResponse = null;
+      lastStatus = null;
       continue;
     }
 
@@ -261,13 +278,11 @@ async function postWithRetry(
 
     if (response.status === 408 || response.status === 429 || response.status >= 500) {
       lastError = new Error(`transient upstream error: ${response.status}`);
-      lastResponse = response;
-      // Drain body to avoid leaks before retry.
-      try {
-        await response.text();
-      } catch {
-        // ignore
-      }
+      lastStatus = response.status;
+      // Read the bounded diagnostic string now: the body cannot be re-read
+      // after retry, and a diagnostic read failure must not hide the
+      // primary HTTP failure.
+      lastDiagnostic = (await response.text().catch(() => "")).slice(0, 512);
       continue;
     }
 
@@ -280,10 +295,9 @@ async function postWithRetry(
   }
 
   // Exhausted retries — fail closed (temp failure for SMTP retry).
-  if (lastResponse) {
-    const text = await lastResponse.text().catch(() => "");
+  if (lastStatus !== null) {
     throw new Error(
-      `ingest transient failure after ${MAX_RETRIES + 1} attempts: ${lastResponse.status} ${text.slice(0, 256)}`,
+      `ingest transient failure after ${MAX_RETRIES + 1} attempts: ${lastStatus} ${lastDiagnostic.slice(0, 256)}`,
     );
   }
   throw new Error(
@@ -295,29 +309,26 @@ async function postWithRetry(
 // Helpers to read Cloudflare email message
 // ---------------------------------------------------------------------------
 
-async function readRawBytes(message: ForwardableEmailMessage): Promise<Uint8Array> {
+async function readRawBytes(message: EmailInput): Promise<Uint8Array> {
   // message.raw is a ReadableStream<Uint8Array>. Consume via Response helper.
   const ab = await new Response(message.raw).arrayBuffer();
   return new Uint8Array(ab);
 }
 
-// Minimal typing for Cloudflare EmailMessage; we avoid importing
-// "cloudflare:email" at runtime to keep unit-testability.
-interface ForwardableEmailMessage {
-  readonly from: string;
-  readonly to: string;
-  readonly raw: ReadableStream<Uint8Array>;
-  readonly rawSize: number;
-  readonly headers: Headers;
-  setReject(reason: string): void;
-}
+// Narrow view of the ambient Cloudflare ForwardableEmailMessage (from pinned
+// @cloudflare/workers-types): only the fields this entrypoint consumes, so unit
+// tests can supply fixtures without the forward/reply methods.
+type EmailInput = Pick<
+  ForwardableEmailMessage,
+  "from" | "to" | "raw" | "rawSize" | "headers" | "setReject"
+>;
 
 // ---------------------------------------------------------------------------
 // Main handler
 // ---------------------------------------------------------------------------
 
 export async function handleEmail(
-  message: ForwardableEmailMessage,
+  message: EmailInput,
   env: Env,
 ): Promise<void> {
   // Fail closed on any malformed environment.

@@ -17,6 +17,21 @@ jobs:
       - run: nix build .#checks.x86_64-linux.installed-closure --print-build-logs
       - run: nix build .#checks.x86_64-linux.go-test --print-build-logs
       - run: nix build .#packages.x86_64-linux.omahab-web --print-build-logs
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: workers/email/package-lock.json
+      - run: npm ci
+        working-directory: workers/email
+      - run: npm run typecheck
+        working-directory: workers/email
+      - run: npm test
+        working-directory: workers/email
+      - run: npm run knip
+        working-directory: workers/email
+      - run: npm run knip -- --production
+        working-directory: workers/email
       - run: bash scripts/check.sh
   integration:
     runs-on: ubuntu-latest
