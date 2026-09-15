@@ -58,15 +58,21 @@ func (s *Service) Configure(ctx context.Context, req ConfigureRequest) (Reposito
 	}
 	// Initialize the restic repository (idempotent; if already exists restic
 	// init will fail with "already initialized" which we treat as success).
+	// Any other outcome leaves the repository configured but initialization
+	// pending: report through the event sink so the observable status never
+	// claims a verified backup merely because configuration was saved.
 	if s.runner != nil && s.secrets != nil {
-		if creds, err := s.secrets.Resolve(ctx, repo.SecretRef); err == nil {
-			if err := s.runner.Init(ctx, repo, creds); err != nil {
-				// If repo already initialized, ignore. Detect by error string.
-				if !strings.Contains(strings.ToLower(err.Error()), "already initialized") && !strings.Contains(err.Error(), "already exists") {
-					// Log but don't fail creation: repository is configured and
-					// will be retried on next backup. Emit event for visibility.
-					_ = s.secrets // avoid unused
-				}
+		creds, err := s.secrets.Resolve(ctx, repo.SecretRef)
+		if err != nil {
+			s.emit(ctx, EventBackupInitPending, severityWarning, repo.ID,
+				fmt.Sprintf("backup %q configured but initialization is pending: credential resolution failed", repo.Label),
+				map[string]any{"repository_id": repo.ID})
+		} else if err := s.runner.Init(ctx, repo, creds); err != nil {
+			// If repo already initialized, ignore. Detect by error string.
+			if !strings.Contains(strings.ToLower(err.Error()), "already initialized") && !strings.Contains(err.Error(), "already exists") {
+				s.emit(ctx, EventBackupInitPending, severityWarning, repo.ID,
+					fmt.Sprintf("backup %q configured but initialization is pending: %v", repo.Label, err),
+					map[string]any{"repository_id": repo.ID})
 			}
 		}
 	}

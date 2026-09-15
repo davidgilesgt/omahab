@@ -14,6 +14,7 @@ const (
 	EventBackupVerificationFailed = "backup.verification_failed"
 	EventBackupRestored           = "backup.restored"
 	EventBackupHealthChanged      = "backup.health_changed"
+	EventBackupInitPending        = "backup.init_pending"
 )
 
 // Event severities.

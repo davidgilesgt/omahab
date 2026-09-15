@@ -355,13 +355,17 @@ func (b *Backend) CreateBackupRepository(ctx context.Context, req apitypes.Creat
 			return backups.Repository{}, fmt.Errorf("%w: sub_account_password is required for Hetzner", store.ErrValidation)
 		}
 		// 1. Ensure ed25519 key pair
-		privPath, pubLine, err := ensureBackupSSHKey(b.cfg.StateDir)
+		_, pubLine, err := ensureBackupSSHKey(b.cfg.StateDir)
 		if err != nil {
 			return backups.Repository{}, fmt.Errorf("generate backup ssh key: %w", err)
 		}
-		_ = privPath
-		// 2. Upload pubkey via SFTP (best-effort, stub on failure)
-		_ = uploadHetznerKey(ctx, b.cfg.StateDir, host, username, subPass, pubLine)
+		// 2. Upload pubkey via SFTP. Failure aborts setup before any
+		// repository is configured or persisted; the password is never
+		// stored and never appears in the error.
+		if err := uploadHetznerKey(ctx, b.cfg.StateDir, host, username, subPass, pubLine); err != nil {
+			subPass = ""
+			return backups.Repository{}, fmt.Errorf("upload backup ssh key: %w", err)
+		}
 		// Discard password (never stored)
 		subPass = ""
 		// 3. Instance ID for location suffix
