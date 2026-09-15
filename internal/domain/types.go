@@ -123,6 +123,9 @@ type SyncFolder struct {
 	ServerPath  string    `json:"server_path"`
 	ShareWithAI bool      `json:"share_with_ai"`
 	Health      Health    `json:"health"`
+	// SyncthingID is the folder ID on the Syncthing wire, shared with
+	// companions. Internal record IDs and foreign keys never change.
+	SyncthingID string    `json:"syncthing_id"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }

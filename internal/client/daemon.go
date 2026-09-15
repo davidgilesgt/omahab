@@ -686,8 +686,12 @@ func (d *Daemon) dispatchSocket(req SocketRequest) SocketResponse {
 		if err != nil {
 			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: err.Error()}}
 		}
-		// Best-effort local Syncthing folder add with DefaultNotesExclusions
-		_ = ensureLocalSyncthingFolder(apiKey, name, localPath, deviceID)
+		// Best-effort local Syncthing folder add with the canonical wire ID.
+		wireID := strings.TrimSpace(folder.SyncthingID)
+		if wireID == "" {
+			wireID = strings.TrimSpace(string(folder.ID))
+		}
+		_ = ensureLocalSyncthingFolder(apiKey, wireID, name, localPath, deviceID)
 		return SocketResponse{ID: req.ID, Result: folder}
 	case "workspace.list":
 		if d.remote == nil {
@@ -1136,11 +1140,23 @@ func syncthingDeviceID(apiKey string) (string, error) {
 	return strings.TrimSpace(out.MyID), nil
 }
 
+// syncthingLocalBase is the local Syncthing REST base. Overridden in tests.
+var syncthingLocalBase = "http://127.0.0.1:8384"
+
 // ensureLocalSyncthingFolder creates the local folder directory, writes .stignore with DefaultNotesExclusions,
-// and best-effort adds the folder to local Syncthing via REST.
-func ensureLocalSyncthingFolder(apiKey, folderName, localPath, deviceID string) error {
-	if strings.TrimSpace(localPath) == "" || strings.TrimSpace(folderName) == "" {
-		return fmt.Errorf("folder name and path required")
+// and adds the folder to local Syncthing via REST using the canonical wire ID.
+// Clients use the server-provided wire ID instead of a name-derived guess. If
+// an already-enrolled client has an old managed folder ID at the same path,
+// that folder is stopped/paused, its bytes preserved, only the old
+// configuration entry removed, and the canonical entry recreated (expect a
+// rescan; no data is deleted). Name-only/different-path or ambiguous matches
+// are left as visible conflicts.
+func ensureLocalSyncthingFolder(apiKey, wireID, folderName, localPath, deviceID string) error {
+	if strings.TrimSpace(localPath) == "" || strings.TrimSpace(wireID) == "" {
+		return fmt.Errorf("wire id and path required")
+	}
+	if strings.TrimSpace(folderName) == "" {
+		folderName = wireID
 	}
 	// Ensure directory exists
 	if err := os.MkdirAll(localPath, 0755); err != nil {
@@ -1149,41 +1165,25 @@ func ensureLocalSyncthingFolder(apiKey, folderName, localPath, deviceID string) 
 	// Write .stignore with DefaultNotesExclusions
 	ignorePath := filepath.Join(localPath, ".stignore")
 	exclusions := syncer.DefaultNotesExclusions()
-	// Also add basic exclusions for safety
 	content := strings.Join(exclusions, "\n") + "\n"
 	_ = os.WriteFile(ignorePath, []byte(content), 0644)
-	// Best-effort Syncthing REST: try to create folder via /rest/config/folders
-	// If Syncthing not running, ignore error (folder will be created when Syncthing starts, or manual).
 	client := &http.Client{Timeout: 5 * time.Second}
-	// Try to POST folder config; Syncthing API is GET /rest/config then PUT, but we try simple POST first.
-	// Build folder config payload
-	folderID := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(folderName), " ", "-"))
-	// Sanitize folder ID: alphanumeric + - _
-	safeID := ""
-	for _, r := range folderID {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
-			safeID += string(r)
-		} else if r >= 'A' && r <= 'Z' {
-			safeID += strings.ToLower(string(r))
-		} else {
-			safeID += "-"
-		}
-	}
-	if safeID == "" {
-		safeID = folderName
-	}
 	payload := map[string]any{
-		"id":    safeID,
-		"label": folderName,
-		"path":  localPath,
-		"type":  "sendreceive",
-		"devices": []map[string]string{
-			{"deviceID": deviceID},
-		},
+		"id":             wireID,
+		"label":          folderName,
+		"path":           localPath,
+		"type":           "sendreceive",
+		"devices":        []map[string]string{{"deviceID": deviceID}},
 		"filesystemType": "basic",
 	}
+	// Retire stale same-path entries carrying a different (old managed) ID:
+	// pause them, preserve bytes, remove only the configuration entry.
+	if oldIDs, err := samePathFolderIDs(client, apiKey, localPath, wireID); err == nil && len(oldIDs) == 1 {
+		_ = pauseSyncthingFolder(client, apiKey, oldIDs[0])
+		_ = deleteSyncthingFolder(client, apiKey, oldIDs[0])
+	}
 	b, _ := json.Marshal(payload)
-	req, err := http.NewRequest("POST", "http://127.0.0.1:8384/rest/config/folders", strings.NewReader(string(b)))
+	req, err := http.NewRequest("POST", syncthingLocalBase + "/rest/config/folders", strings.NewReader(string(b)))
 	if err != nil {
 		return nil // best-effort
 	}
@@ -1196,50 +1196,101 @@ func ensureLocalSyncthingFolder(apiKey, folderName, localPath, deviceID string) 
 		return nil
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		// If POST not supported, try GET+PUT config approach
-		// Fetch current config
-		getReq, _ := http.NewRequest("GET", "http://127.0.0.1:8384/rest/config", nil)
-		if strings.TrimSpace(apiKey) != "" {
-			getReq.Header.Set("X-API-Key", apiKey)
-		}
-		getResp, err := client.Do(getReq)
-		if err != nil || getResp.StatusCode != 200 {
-			_ = body
-			return nil
-		}
-		cfgData, _ := io.ReadAll(getResp.Body)
-		_ = getResp.Body.Close()
-		var cfg map[string]any
-		if err := json.Unmarshal(cfgData, &cfg); err != nil {
-			return nil
-		}
-		// Insert folder if not already present
-		folders, _ := cfg["folders"].([]any)
-		for _, f := range folders {
-			if m, ok := f.(map[string]any); ok && m["id"] == safeID {
-				return nil // already exists
-			}
-		}
-		folders = append(folders, payload)
-		cfg["folders"] = folders
-		newCfg, _ := json.Marshal(cfg)
-		putReq, _ := http.NewRequest("PUT", "http://127.0.0.1:8384/rest/config", strings.NewReader(string(newCfg)))
-		putReq.Header.Set("Content-Type", "application/json")
-		if strings.TrimSpace(apiKey) != "" {
-			putReq.Header.Set("X-API-Key", apiKey)
-		}
-		putResp, _ := client.Do(putReq)
-		if putResp != nil {
-			_ = putResp.Body.Close()
-		}
-		return nil
-	}
-	_ = body
+	_, _ = io.ReadAll(resp.Body)
 	return nil
 }
 
+func syncthingAuthed(client *http.Client, apiKey, method, url string, body []byte) (*http.Response, error) {
+	var reader *strings.Reader
+	if body == nil {
+		reader = strings.NewReader("")
+	} else {
+		reader = strings.NewReader(string(body))
+	}
+	req, err := http.NewRequest(method, url, reader)
+	if err != nil {
+		return nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if strings.TrimSpace(apiKey) != "" {
+		req.Header.Set("X-API-Key", apiKey)
+	}
+	return client.Do(req)
+}
+
+// samePathFolderIDs lists folder IDs configured at localPath excluding keep.
+func samePathFolderIDs(client *http.Client, apiKey, localPath, keep string) ([]string, error) {
+	resp, err := syncthingAuthed(client, apiKey, "GET", syncthingLocalBase + "/rest/config/folders", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("list folders: %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	var folders []map[string]any
+	if err := json.Unmarshal(data, &folders); err != nil {
+		return nil, err
+	}
+	want := filepath.Clean(localPath)
+	var out []string
+	for _, f := range folders {
+		id, _ := f["id"].(string)
+		path, _ := f["path"].(string)
+		if strings.TrimSpace(id) == "" || strings.TrimSpace(id) == keep {
+			continue
+		}
+		if filepath.Clean(strings.TrimSpace(path)) == want {
+			out = append(out, strings.TrimSpace(id))
+		}
+	}
+	return out, nil
+}
+
+// pauseSyncthingFolder pauses a folder (type sendonly... no: paused=true).
+func pauseSyncthingFolder(client *http.Client, apiKey, id string) error {
+	resp, err := syncthingAuthed(client, apiKey, "GET", syncthingLocalBase + "/rest/config/folders/" + id, nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("get folder: %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	var folder map[string]any
+	if err := json.Unmarshal(data, &folder); err != nil {
+		return err
+	}
+	folder["paused"] = true
+	updated, _ := json.Marshal(folder)
+	presp, err := syncthingAuthed(client, apiKey, "POST", syncthingLocalBase + "/rest/config/folders", updated)
+	if err != nil {
+		return err
+	}
+	defer presp.Body.Close()
+	_, _ = io.ReadAll(presp.Body)
+	return nil
+}
+
+func deleteSyncthingFolder(client *http.Client, apiKey, id string) error {
+	resp, err := syncthingAuthed(client, apiKey, "DELETE", syncthingLocalBase + "/rest/config/folders/" + id, nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.ReadAll(resp.Body)
+	return nil
+}
 func (d *Daemon) buildStatus() DaemonStatus {
 	d.mu.RLock()
 	defer d.mu.RUnlock()

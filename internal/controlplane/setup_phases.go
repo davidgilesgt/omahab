@@ -1186,6 +1186,12 @@ func (b *Backend) ensureDefaultSyncFolders(ctx context.Context) {
 		_ = os.MkdirAll(serverPath, 0o750)
 		_, _ = b.syncer.Create(ctx, syncer.CreateInput{Name: d.name, ServerPath: serverPath, ShareWithAI: d.shareWithAI})
 	}
+	// Converge Syncthing configuration toward the records (adopting
+	// same-path wire IDs for managed drops/obsidian); retries converge.
+	// Best-effort: never fails setup.
+	if _, err := b.ReconcileSyncFolders(ctx); err != nil {
+		log.Printf("setup sync folders reconcile: %v", err)
+	}
 }
 
 // renderNativeAppEnv writes the env files that gate the nix-defined

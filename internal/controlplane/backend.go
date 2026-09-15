@@ -313,7 +313,11 @@ func (b *Backend) initServices(ctx context.Context) error {
 		b.syncer.SetSyncthingClient(syncer.NewHTTPClient(syncBaseURL, syncAPIKey))
 	}
 	b.syncer.SetEventSink(newSyncerSink(b.events))
-
+	// Converge Syncthing configuration toward database records on startup;
+	// retries converge idempotently, failures surface on Sync/Doctor.
+	if _, err := b.ReconcileSyncFolders(ctx); err != nil {
+		log.Printf("syncthing reconcile at startup: %v", err)
+	}
 	// projects runner - wire self as ReleaseTokenVerifier post-creation
 	onceRunner := NewCommandOnceRunner("omahab-once", "127.0.0.1:8080")
 	projSvc, err := projects.NewService(projects.Deps{

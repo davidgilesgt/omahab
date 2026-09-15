@@ -3,6 +3,7 @@ package syncer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -66,12 +67,18 @@ func (f *fakeRegistrar) countUnregister() int {
 }
 
 type fakeClient struct {
-	mu           sync.Mutex
-	folderErrors map[string]string
-	folderErr    error
-	conns        map[string]ConnectionInfo
-	connErr      error
-	calls        []string
+	mu              sync.Mutex
+	folderErrors    map[string]string
+	folderErr       error
+	conns           map[string]ConnectionInfo
+	connErr         error
+	calls           []string
+	ensureFolders   []FolderSpec
+	ensureFolderErr error
+	ensureDevices   []DeviceSpec
+	removedDevices  []string
+	removedFolders  []string
+	listedFolders   []FolderInfo
 }
 
 func (f *fakeClient) FolderErrors(_ context.Context, folder string) (string, error) {
@@ -97,6 +104,50 @@ func (f *fakeClient) Connections(_ context.Context) (map[string]ConnectionInfo, 
 		out[k] = v
 	}
 	return out, nil
+}
+
+func (f *fakeClient) GetFolder(_ context.Context, id string) (FolderInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, fi := range f.listedFolders {
+		if strings.TrimSpace(fi.ID) == strings.TrimSpace(id) {
+			return fi, nil
+		}
+	}
+	return FolderInfo{}, errors.New("folder not found")
+}
+
+func (f *fakeClient) EnsureFolder(_ context.Context, spec FolderSpec) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.ensureFolderErr != nil {
+		return f.ensureFolderErr
+	}
+	f.ensureFolders = append(f.ensureFolders, spec)
+	return nil
+}
+func (f *fakeClient) EnsureDevice(_ context.Context, spec DeviceSpec) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ensureDevices = append(f.ensureDevices, spec)
+	return nil
+}
+func (f *fakeClient) RemoveDevice(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.removedDevices = append(f.removedDevices, id)
+	return nil
+}
+func (f *fakeClient) ListFolders(_ context.Context) ([]FolderInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]FolderInfo{}, f.listedFolders...), nil
+}
+func (f *fakeClient) RemoveFolderConfig(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.removedFolders = append(f.removedFolders, id)
+	return nil
 }
 
 type fakeSink struct {

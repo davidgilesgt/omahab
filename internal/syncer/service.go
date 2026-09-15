@@ -91,22 +91,37 @@ type ConnectionInfo struct {
 	LastSeen  time.Time
 }
 
-// SyncthingClient is the narrow interface the syncer uses to query Syncthing.
-// SDK types must not leak past this boundary; implementations convert at the edge.
+// SyncthingClient is the narrow interface the syncer uses to query and
+// reconcile Syncthing. SDK types must not leak past this boundary;
 type SyncthingClient interface {
 	FolderErrors(ctx context.Context, folder string) (string, error)
 	Connections(ctx context.Context) (map[string]ConnectionInfo, error)
+	GetFolder(ctx context.Context, id string) (FolderInfo, error)
+	EnsureFolder(ctx context.Context, spec FolderSpec) error
+	EnsureDevice(ctx context.Context, spec DeviceSpec) error
+	RemoveDevice(ctx context.Context, id string) error
+	ListFolders(ctx context.Context) ([]FolderInfo, error)
+	RemoveFolderConfig(ctx context.Context, id string) error
 }
-
 // NoopSyncthingClient is a no-op client for testing or when Syncthing is disabled.
 type NoopSyncthingClient struct{}
 
 func (NoopSyncthingClient) FolderErrors(_ context.Context, _ string) (string, error) {
 	return "", nil
 }
+func (NoopSyncthingClient) GetFolder(_ context.Context, _ string) (FolderInfo, error) {
+	return FolderInfo{}, ErrNotFound
+}
 func (NoopSyncthingClient) Connections(_ context.Context) (map[string]ConnectionInfo, error) {
 	return map[string]ConnectionInfo{}, nil
 }
+func (NoopSyncthingClient) EnsureFolder(_ context.Context, _ FolderSpec) error { return nil }
+func (NoopSyncthingClient) EnsureDevice(_ context.Context, _ DeviceSpec) error { return nil }
+func (NoopSyncthingClient) RemoveDevice(_ context.Context, _ string) error     { return nil }
+func (NoopSyncthingClient) ListFolders(_ context.Context) ([]FolderInfo, error) {
+	return nil, nil
+}
+func (NoopSyncthingClient) RemoveFolderConfig(_ context.Context, _ string) error { return nil }
 
 // Service owns Syncthing folder and device metadata.
 type Service struct {
@@ -222,9 +237,9 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*domain.SyncFolde
 	now := time.Now().UTC()
 
 	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO sync_folders (id, name, server_path, share_with_ai, health, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		id, name, serverPath, boolToInt(in.ShareWithAI), string(domain.HealthUnknown), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
+		`INSERT INTO sync_folders (id, name, server_path, share_with_ai, health, syncthing_id, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, name, serverPath, boolToInt(in.ShareWithAI), string(domain.HealthUnknown), id, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
 	)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -239,6 +254,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*domain.SyncFolde
 		ServerPath:  serverPath,
 		ShareWithAI: in.ShareWithAI,
 		Health:      domain.HealthUnknown,
+		SyncthingID: id,
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
@@ -255,21 +271,21 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*domain.SyncFolde
 // Get returns a folder by ID.
 func (s *Service) Get(ctx context.Context, id string) (*domain.SyncFolder, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, name, server_path, share_with_ai, health, created_at, updated_at FROM sync_folders WHERE id = ?`, id)
+		`SELECT id, name, server_path, share_with_ai, health, syncthing_id, created_at, updated_at FROM sync_folders WHERE id = ?`, id)
 	return scanFolder(row)
 }
 
 // GetByName returns a folder by name.
 func (s *Service) GetByName(ctx context.Context, name string) (*domain.SyncFolder, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, name, server_path, share_with_ai, health, created_at, updated_at FROM sync_folders WHERE name = ?`, strings.TrimSpace(name))
+		`SELECT id, name, server_path, share_with_ai, health, syncthing_id, created_at, updated_at FROM sync_folders WHERE name = ?`, strings.TrimSpace(name))
 	return scanFolder(row)
 }
 
 // List returns all sync folders ordered by name.
 func (s *Service) List(ctx context.Context) ([]*domain.SyncFolder, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, name, server_path, share_with_ai, health, created_at, updated_at FROM sync_folders ORDER BY name ASC`)
+		`SELECT id, name, server_path, share_with_ai, health, syncthing_id, created_at, updated_at FROM sync_folders ORDER BY name ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("list sync folders: %w", err)
 	}
@@ -450,12 +466,16 @@ func (s *Service) CheckConflicts(ctx context.Context) error {
 		}
 		var folderErr string
 		if s.client != nil {
-			if e, err := s.client.FolderErrors(ctx, string(f.ID)); err == nil && strings.TrimSpace(e) != "" {
+			wireID := strings.TrimSpace(f.SyncthingID)
+			if wireID == "" {
+				wireID = string(f.ID)
+			}
+			if e, err := s.client.FolderErrors(ctx, wireID); err == nil && strings.TrimSpace(e) != "" {
 				folderErr = strings.TrimSpace(e)
 				details = append(details, "folder error: "+folderErr)
 			}
 			// Also try by folder name as fallback for HTTP client that keys by name.
-			if folderErr == "" && string(f.ID) != f.Name {
+			if folderErr == "" && wireID != f.Name {
 				if e, err := s.client.FolderErrors(ctx, f.Name); err == nil && strings.TrimSpace(e) != "" {
 					folderErr = strings.TrimSpace(e)
 					details = append(details, "folder error: "+folderErr)
@@ -650,11 +670,11 @@ type folderScanner interface {
 
 func scanFolder(row folderScanner) (*domain.SyncFolder, error) {
 	var (
-		id, name, serverPath, health string
-		shareWithAI                  int
-		createdAt, updatedAt         string
+		id, name, serverPath, health, syncthingID string
+		shareWithAI                               int
+		createdAt, updatedAt                      string
 	)
-	if err := row.Scan(&id, &name, &serverPath, &shareWithAI, &health, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&id, &name, &serverPath, &shareWithAI, &health, &syncthingID, &createdAt, &updatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -662,12 +682,16 @@ func scanFolder(row folderScanner) (*domain.SyncFolder, error) {
 	}
 	ca, _ := time.Parse(time.RFC3339Nano, createdAt)
 	ua, _ := time.Parse(time.RFC3339Nano, updatedAt)
+	if strings.TrimSpace(syncthingID) == "" {
+		syncthingID = id
+	}
 	return &domain.SyncFolder{
 		ID:          domain.ID(id),
 		Name:        name,
 		ServerPath:  serverPath,
 		ShareWithAI: shareWithAI != 0,
 		Health:      domain.Health(health),
+		SyncthingID: strings.TrimSpace(syncthingID),
 		CreatedAt:   ca,
 		UpdatedAt:   ua,
 	}, nil

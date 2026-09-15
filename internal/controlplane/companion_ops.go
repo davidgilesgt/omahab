@@ -217,6 +217,13 @@ func (b *Backend) RevokeCompanionDevice(ctx context.Context, id domain.ID) error
 			}
 		}
 	}
+	// Remove only this device from managed folder sharing, leaving other
+	// devices and GUI folders untouched.
+	if b.syncer != nil {
+		if affected, err := b.syncer.RemoveCompanionDevice(ctx, trimmed); err == nil && len(affected) > 0 {
+			_, _ = b.ReconcileSyncFolders(ctx)
+		}
+	}
 	if b.events != nil {
 		_, _ = b.events.Publish(ctx, events.PublishInput{
 			Type:     "companion.revoked",

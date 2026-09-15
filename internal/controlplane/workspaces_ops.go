@@ -4,11 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"path/filepath"
 	"strings"
 	"time"
-
 	"github.com/omahab/omahab/internal/apitypes"
+	"github.com/omahab/omahab/internal/companion"
 	"github.com/omahab/omahab/internal/domain"
 	"github.com/omahab/omahab/internal/events"
 	"github.com/omahab/omahab/internal/store"
@@ -109,6 +110,10 @@ func (b *Backend) CreateCompanionSyncFolder(ctx context.Context, req apitypes.Cr
 					Message:  fmt.Sprintf("enroll device %s to folder %s failed: %v", deviceID, name, eerr),
 				})
 			}
+			_ = b.syncer.LinkCompanionDevice(ctx, string(existing.ID), deviceID, companion.DeviceIDFromContext(ctx))
+			if _, err := b.ReconcileSyncFolders(ctx); err != nil {
+				log.Printf("companion sync folders reconcile: %v", err)
+			}
 			return *existing, nil
 		}
 		return domain.SyncFolder{}, translateError(err)
@@ -125,12 +130,12 @@ func (b *Backend) CreateCompanionSyncFolder(ctx context.Context, req apitypes.Cr
 			})
 		}
 	}
-	// Best-effort: try to configure server Syncthing REST to add device/folder.
-	// The syncer service's SyncthingClient currently only supports FolderErrors/Connections checks.
-	// Full config manipulation (GET /rest/config, PUT) would require extending the client; for now
-	// we rely on DB enrollment and the regular Syncthing poll to surface conflicts. The device will be
-	// added to Syncthing's config via the next restart or via external automation.
-	// Emitting an event for local folder addition on the device is handled client-side via local REST.
+	// Link the companion owner for revocation, then converge Syncthing
+	// configuration (folder + enrolled device sharing) immediately.
+	_ = b.syncer.LinkCompanionDevice(ctx, string(f.ID), deviceID, companion.DeviceIDFromContext(ctx))
+	if _, err := b.ReconcileSyncFolders(ctx); err != nil {
+		log.Printf("companion sync folders reconcile: %v", err)
+	}
 	return *f, nil
 }
 
@@ -313,6 +318,11 @@ func (b *Backend) StartIdleExpirer(ctx context.Context, every time.Duration) {
 func (b *Backend) PollSyncthing(ctx context.Context) error {
 	if b.syncer == nil {
 		return translateError(fmt.Errorf("%w: syncer not configured", ErrNotConfigured))
+	}
+	// Reconcile repeats converge idempotently and produce no duplicates; a
+	// GUI-created folder survives (only managed wire IDs are merged).
+	if _, err := b.ReconcileSyncFolders(ctx); err != nil {
+		log.Printf("syncthing poll reconcile: %v", err)
 	}
 	if err := b.syncer.PollSyncthing(ctx); err != nil {
 		return translateError(err)

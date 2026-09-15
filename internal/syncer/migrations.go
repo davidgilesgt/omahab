@@ -33,5 +33,24 @@ CREATE TABLE IF NOT EXISTS sync_devices (
 CREATE INDEX IF NOT EXISTS idx_sync_devices_folder_id ON sync_devices(folder_id);
 `,
 		},
+		{
+			// Wire ID for Syncthing configuration: server record IDs stay
+			// stable (foreign keys unchanged); syncthing_id is the folder
+			// ID on the wire shared with companions. Backfilled to the
+			// server record ID for existing folders.
+			Name: "syncer-003-folders-syncthing-id",
+			SQL:  `ALTER TABLE sync_folders ADD COLUMN syncthing_id TEXT NOT NULL DEFAULT ''`,
+		},
+		{
+			Name: "syncer-004-folders-syncthing-id-backfill",
+			SQL:  `UPDATE sync_folders SET syncthing_id = id WHERE syncthing_id = ''`,
+		},
+		{
+			// Companion linkage for revocation: the enrolled Syncthing
+			// device ID maps back to the companion device that owns it, so
+			// revocation removes only that device's managed sharing.
+			Name: "syncer-005-devices-companion-id",
+			SQL:  `ALTER TABLE sync_devices ADD COLUMN companion_id TEXT NOT NULL DEFAULT ''`,
+		},
 	}
 }
