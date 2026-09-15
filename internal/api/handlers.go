@@ -2102,6 +2102,56 @@ func (s *Server) handleEnsureEmailRoute(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// --- email senders (DESIGN §18 enrollment) ---
+
+func toAPISender(s emailing.Sender) apitypes.EmailSender {
+	return apitypes.EmailSender{ID: s.ID, Email: s.Email, Status: s.Status, CreatedAt: s.CreatedAt, VerifiedAt: s.VerifiedAt}
+}
+
+// handleEnrollEmailSender registers the allowed personal sender address.
+// Admin only. The sender stays pending until a DKIM-passing ingest verifies it.
+func (s *Server) handleEnrollEmailSender(w http.ResponseWriter, r *http.Request) {
+	var req apitypes.EnrollEmailSenderRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	sender, err := s.backend.EnrollEmailSender(r.Context(), req.Email)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, toAPISender(sender))
+}
+
+// handleListEmailSenders returns enrolled senders with verification state.
+func (s *Server) handleListEmailSenders(w http.ResponseWriter, r *http.Request) {
+	senders, err := s.backend.ListEmailSenders(r.Context())
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	out := make([]apitypes.EmailSender, 0, len(senders))
+	for _, sender := range senders {
+		out = append(out, toAPISender(sender))
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleRemoveEmailSender deletes an enrolled sender. The address travels as
+// a query parameter (?email=) because "@" in path segments is URL-hostile.
+func (s *Server) handleRemoveEmailSender(w http.ResponseWriter, r *http.Request) {
+	email := strings.TrimSpace(r.URL.Query().Get("email"))
+	if email == "" {
+		writeError(w, r, errBadRequest("email query parameter is required"))
+		return
+	}
+	if err := s.backend.RemoveEmailSender(r.Context(), email); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"removed": true})
+}
+
 // handleVerifyCloudflareToken runs the live token check server-side.
 func (s *Server) handleVerifyCloudflareToken(w http.ResponseWriter, r *http.Request) {
 	var req struct {

@@ -855,15 +855,23 @@ export function SetupPage() {
         </Box>
 
         <Box title="Cloudflare DNS" done={doneMap.cloudflare} open={openId === "cloudflare"} onToggle={() => toggle("cloudflare")}>
+          <p className="muted">
+            Cloudflare gives this box a public name: automatic TLS certificates (DNS challenge),
+            remote access without opening router ports (tunnel), single sign-on for apps (Access),
+            and the ai@ receiving address (Email Routing). Without it the box stays reachable
+            over LAN and Tailscale only. Never use a global API key — each token below is
+            scoped to one job, so a leaked token cannot manage the rest of the account.
+          </p>
           <div className="form-stack">
             <label className="field">
               <span>DNS token</span>
-              <small className="muted">Cloudflare API token with Zone:Read + DNS:Edit</small>
+              <small className="muted">Cloudflare API token with Zone:Read + DNS:Edit — proves domain control for TLS certificates, nothing else</small>
               <input type="password" value={dnsToken} onChange={(e) => setDnsToken(e.target.value)} placeholder="dns token" />
               {existingSecrets["cloudflare_dns"] && <small className="muted">Already set — leave blank to keep, or enter new value to overwrite.</small>}
             </label>
             <label className="field">
               <span>Tunnel token (optional)</span>
+              <small className="muted">From the Cloudflare tunnel you create for this box — lets you reach it away from home with no router ports opened</small>
               <input type="password" value={tunnelToken} onChange={(e) => setTunnelToken(e.target.value)} placeholder="tunnel token (optional)" />
               {existingSecrets["cloudflare_tunnel"] && <small className="muted">Already set — leave blank to keep, or enter new value to overwrite.</small>}
             </label>

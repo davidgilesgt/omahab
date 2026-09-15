@@ -365,6 +365,9 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/api/v1/email/messages", s.handleListEmailMessages)
 		r.Get("/api/v1/email/messages/{id}", s.handleGetEmailMessage)
 		r.Post("/api/v1/email/routes", s.withBodyLimit(defaultBodyLimit, s.handleEnsureEmailRoute))
+		r.Post("/api/v1/email/senders", s.withBodyLimit(defaultBodyLimit, s.handleEnrollEmailSender))
+		r.Get("/api/v1/email/senders", s.handleListEmailSenders)
+		r.Delete("/api/v1/email/senders", s.handleRemoveEmailSender)
 	})
 
 	// Device-authenticated group — companion + callback relay.

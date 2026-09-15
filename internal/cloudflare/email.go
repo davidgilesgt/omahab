@@ -83,13 +83,13 @@ func ruleMatchesRecipient(rule emailRuleWire, recipient string) bool {
 }
 
 func ruleHasDestination(rule emailRuleWire, destination string) bool {
-	destination = normalizeEmail(destination)
+	wantType, wantValues := actionFor(destination)
 	for _, a := range rule.Actions {
-		if a.Type != "forward" {
+		if a.Type != wantType {
 			continue
 		}
 		for _, v := range a.Value {
-			if normalizeEmail(v) == destination {
+			if actionValueEqual(wantType, v, wantValues[0]) {
 				return true
 			}
 		}
@@ -97,27 +97,60 @@ func ruleHasDestination(rule emailRuleWire, destination string) bool {
 	return false
 }
 
-// EnsureEmailRoute ensures a routing rule forwarding recipient (e.g.
-// "ai@example.com" or an alias) to destination (the ingestion worker address
-// or forwarding target). It is idempotent: if a rule for the recipient already
+// actionFor maps a destination to its Email Routing action. A destination
+// without "@" is a Worker name: the rule sends matching mail to the Worker
+// (the deployed omahab-email-worker path) instead of forwarding to an email
+// address. Email destinations keep the forward action.
+func actionFor(destination string) (string, []string) {
+	if !strings.Contains(destination, "@") {
+		return "worker", []string{strings.TrimSpace(destination)}
+	}
+	return "forward", []string{normalizeEmail(destination)}
+}
+
+// actionValueEqual compares a stored action value with the wanted one.
+// Worker names are case-sensitive; email addresses are not.
+func actionValueEqual(actionType, got, want string) bool {
+	if actionType == "worker" {
+		return strings.TrimSpace(got) == want
+	}
+	return normalizeEmail(got) == want
+}
+
+// validWorkerName reports whether name is a plausible Cloudflare Worker name
+// ([a-z0-9-_]+).
+func validWorkerName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+// EnsureEmailRoute ensures a routing rule delivering recipient (e.g.
+// "ai@example.com" or an alias) to destination. A destination without "@"
+// is a Worker name: the rule sends matching mail to that Worker (the
+// deployed omahab-email-worker path). An email destination keeps the
+// forward action. It is idempotent: if a rule for the recipient already
 // exists with the same destination, it does nothing. If a rule exists with a
 // different destination, it updates it. Otherwise it creates a new rule.
 // The rule is enabled and named "omahab-ai".
 func (c *EmailClient) EnsureEmailRoute(ctx context.Context, recipient, destination string) error {
 	recipient = normalizeEmail(recipient)
-	destination = normalizeEmail(destination)
 	if recipient == "" || !strings.Contains(recipient, "@") {
 		return fmt.Errorf("%w: recipient %q is not a valid email", store.ErrValidation, recipient)
 	}
-	if destination == "" || !strings.Contains(destination, "@") {
-		// Destination may be a worker name (no @) in some deployments – allow
-		// non-email worker identifiers when they contain no spaces.
-		if strings.Contains(destination, " ") || strings.Contains(destination, "\n") {
+	actionType, actionValues := actionFor(destination)
+	if actionType == "forward" {
+		if destination == "" || !strings.Contains(destination, "@") {
 			return fmt.Errorf("%w: destination %q is not valid", store.ErrValidation, destination)
 		}
-		if destination == "" {
-			return fmt.Errorf("%w: destination is required", store.ErrValidation)
-		}
+	} else if !validWorkerName(destination) {
+		return fmt.Errorf("%w: destination %q is not a valid worker name", store.ErrValidation, destination)
 	}
 	rules, err := c.listRules(ctx)
 	if err != nil {
@@ -131,7 +164,7 @@ func (c *EmailClient) EnsureEmailRoute(ctx context.Context, recipient, destinati
 			// Update existing rule to correct destination.
 			body := map[string]any{
 				"actions": []map[string]any{
-					{"type": "forward", "value": []string{destination}},
+					{"type": actionType, "value": actionValues},
 				},
 				"matchers": []map[string]any{
 					{"field": "to", "type": "literal", "value": recipient},
@@ -152,7 +185,7 @@ func (c *EmailClient) EnsureEmailRoute(ctx context.Context, recipient, destinati
 	}
 	body := map[string]any{
 		"actions": []map[string]any{
-			{"type": "forward", "value": []string{destination}},
+			{"type": actionType, "value": actionValues},
 		},
 		"matchers": []map[string]any{
 			{"field": "to", "type": "literal", "value": recipient},

@@ -248,7 +248,6 @@ func (b *Backend) IngestEmail(ctx context.Context, req apitypes.EmailIngestReque
 	if err != nil {
 		return domain.EmailMessage{}, translateError(err)
 	}
-	auth := "unknown"
 	reason := res.Status
 	if res.Quarantine != nil {
 		reason = res.Quarantine.Reason
@@ -256,13 +255,16 @@ func (b *Backend) IngestEmail(ctx context.Context, req apitypes.EmailIngestReque
 	if reason == "" {
 		reason = "received"
 	}
-	_ = auth
+	subject := ""
+	if res.Parsed != nil {
+		subject = res.Parsed.Subject
+	}
 	return domain.EmailMessage{
 		ID:             domain.ID(res.MessageID),
 		EnvelopeFrom:   ingestReq.From,
 		HeaderFrom:     ingestReq.From,
 		Recipient:      ingestReq.To,
-		Subject:        "",
+		Subject:        subject,
 		Authentication: reason,
 		Status:         res.Status,
 		ReceivedAt:     time.Now().UTC(),
@@ -281,19 +283,7 @@ func (b *Backend) ListEmailMessages(ctx context.Context, p apitypes.Pagination) 
 	if err != nil {
 		return nil, translateError(err)
 	}
-	out := make([]domain.EmailMessage, 0, len(list))
-	for _, m := range list {
-		out = append(out, domain.EmailMessage{
-			ID:             domain.ID(m.ID),
-			EnvelopeFrom:   m.EnvelopeFrom,
-			HeaderFrom:     m.HeaderFrom,
-			Recipient:      m.Recipient,
-			Subject:        "", // never return raw subject content? But metadata allowed; we keep empty to avoid leakage
-			Authentication: m.Authentication,
-			Status:         m.Status,
-			ReceivedAt:     m.ReceivedAt,
-		})
-	}
+	out := emailing.DomainMessages(list)
 	// offset pagination
 	if p.Offset > 0 && p.Offset < len(out) {
 		out = out[p.Offset:]
@@ -303,7 +293,6 @@ func (b *Backend) ListEmailMessages(ctx context.Context, p apitypes.Pagination) 
 	}
 	return out, nil
 }
-
 func (b *Backend) GetEmailMessage(ctx context.Context, id domain.ID) (domain.EmailMessage, error) {
 	if b.emailing == nil {
 		return domain.EmailMessage{}, translateError(fmt.Errorf("%w: email not configured", ErrNotConfigured))
@@ -312,35 +301,83 @@ func (b *Backend) GetEmailMessage(ctx context.Context, id domain.ID) (domain.Ema
 	if err != nil {
 		return domain.EmailMessage{}, translateError(err)
 	}
-	return domain.EmailMessage{
-		ID:             domain.ID(m.ID),
-		EnvelopeFrom:   m.EnvelopeFrom,
-		HeaderFrom:     m.HeaderFrom,
-		Recipient:      m.Recipient,
-		Subject:        "",
-		Authentication: m.Authentication,
-		Status:         m.Status,
-		ReceivedAt:     m.ReceivedAt,
-	}, nil
+	return m.ToDomain(), nil
 }
 
-// Release tokens (admin only)
+// EmailWorkerName is the deployed Cloudflare Worker that receives ai@domain
+// mail via the Send-to-Worker routing rule and HMAC-posts it to omahabd.
+// It mirrors workers/email/wrangler.toml; renaming the worker requires
+// updating the routing rules it owns.
+const EmailWorkerName = "omahab-email-worker"
 
+// EnrollEmailSender registers the one allowed personal sender address
+// (DESIGN §18 step 1). The sender stays pending until a DKIM-passing ingest
+// promotes it to verified; the route must not be created before enrollment.
+func (b *Backend) EnrollEmailSender(ctx context.Context, email string) (emailing.Sender, error) {
+	if b.emailing == nil {
+		return emailing.Sender{}, translateError(fmt.Errorf("%w: email not configured", ErrNotConfigured))
+	}
+	id, err := b.emailing.EnrollSender(ctx, email)
+	if err != nil {
+		return emailing.Sender{}, translateError(err)
+	}
+	sender, err := b.emailing.GetSender(ctx, email)
+	if err != nil {
+		return emailing.Sender{}, translateError(err)
+	}
+	if sender.ID != id {
+		return emailing.Sender{}, translateError(fmt.Errorf("enroll sender mismatch"))
+	}
+	return sender, nil
+}
+
+// ListEmailSenders returns enrolled sender addresses with verification state.
+func (b *Backend) ListEmailSenders(ctx context.Context) ([]emailing.Sender, error) {
+	if b.emailing == nil {
+		return []emailing.Sender{}, nil
+	}
+	senders, err := b.emailing.ListSenders(ctx)
+	if err != nil {
+		return nil, translateError(err)
+	}
+	return senders, nil
+}
+
+// RemoveEmailSender deletes an enrolled sender (e.g. to fix a typo before
+// verification). Verified-sender removal does not touch routing rules.
+func (b *Backend) RemoveEmailSender(ctx context.Context, email string) error {
+	if b.emailing == nil {
+		return translateError(fmt.Errorf("%w: email not configured", ErrNotConfigured))
+	}
+	return translateError(b.emailing.RemoveSender(ctx, email))
+}
+
+// EnsureEmailRoute creates the Send-to-Worker routing rule delivering the AI
+// address to the ingestion Worker (DESIGN §18 step 2). Enrollment comes
+// first: the route is not created until at least one sender is enrolled, so
+// a typo'd address can never receive mail. Verification itself completes on
+// the first DKIM-passing ingest, which promotes the sender to verified.
 func (b *Backend) EnsureEmailRoute(ctx context.Context, recipient string) error {
+	if b.emailing == nil {
+		return translateError(fmt.Errorf("%w: email not configured", ErrNotConfigured))
+	}
+	senders, err := b.emailing.ListSenders(ctx)
+	if err != nil {
+		return translateError(err)
+	}
+	if len(senders) == 0 {
+		return translateError(fmt.Errorf("%w: enroll a sender address before creating the route", store.ErrValidation))
+	}
 	if b.emailRouter == nil {
 		return translateError(fmt.Errorf("%w: email routing not configured", ErrNotConfigured))
 	}
-	// require sender verification before activating route
-	// check if recipient matches primary or alias and if sender is verified? For now just ensure route
-	dest := ""
-	// derive worker ingestion address from config? Use primary domain? For now use fixed placeholder
 	if strings.TrimSpace(recipient) == "" {
 		recipient = b.emailPrimary
 		if alias := b.emailAlias; alias != "" && recipient == "" {
 			recipient = alias
 		}
 	}
-	if err := b.emailRouter.EnsureEmailRoute(ctx, recipient, dest); err != nil {
+	if err := b.emailRouter.EnsureEmailRoute(ctx, recipient, EmailWorkerName); err != nil {
 		return translateError(err)
 	}
 	return nil

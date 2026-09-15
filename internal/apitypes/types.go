@@ -268,6 +268,22 @@ type VerifyCloudflareTokenResult struct {
 	Detail string `json:"detail,omitempty"`
 }
 
+// EmailSender is an enrolled AI-email sender address with verification
+// state. Pending senders promote to verified on the first DKIM-passing
+// ingest; only enrolled senders are accepted at the ingestion edge.
+type EmailSender struct {
+	ID string `json:"id"`
+	Email string `json:"email"`
+	Status string `json:"status"`
+	CreatedAt time.Time `json:"created_at"`
+	VerifiedAt *time.Time `json:"verified_at,omitempty"`
+}
+
+// EnrollEmailSenderRequest enrolls the one allowed personal sender address.
+type EnrollEmailSenderRequest struct {
+	Email string `json:"email"`
+}
+
 // StoragePlacement assigns a filesystem to one volume. volume identifies
 // <bundle-id>:<DataVolume.Name>, "postgresql", or "server-data";
 // fs_uuid:null means the system disk.

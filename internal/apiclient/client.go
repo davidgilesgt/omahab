@@ -519,10 +519,37 @@ func (c *Client) ConnectZAI(ctx context.Context, req apitypes.ConnectZAIRequest)
 	return &out, nil
 }
 
+func (c *Client) EnrollEmailSender(ctx context.Context, email string) (*apitypes.EmailSender, error) {
+	var out apitypes.EmailSender
+	if err := c.post(ctx, "/email/senders", apitypes.EnrollEmailSenderRequest{Email: email}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) ListEmailSenders(ctx context.Context) ([]apitypes.EmailSender, error) {
+	var out []apitypes.EmailSender
+	if err := c.get(ctx, "/email/senders", &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *Client) RemoveEmailSender(ctx context.Context, email string) error {
+	var out map[string]any
+	return c.del(ctx, "/email/senders?email="+url.QueryEscape(email), &out)
+}
+
+func (c *Client) EnsureEmailRoute(ctx context.Context, recipient string) error {
+	var out map[string]any
+	return c.post(ctx, "/email/routes", map[string]any{"recipient": recipient}, &out)
+}
+
 func (c *Client) DisconnectProvider(ctx context.Context, provider string) error {
 	var out map[string]any
 	return c.post(ctx, "/providers/"+url.PathEscape(provider)+"/disconnect", map[string]any{}, &out)
 }
+
 func (c *Client) VerifyBackup(ctx context.Context, id string) (*domain.Backup, error) {
 	var out domain.Backup
 	if err := c.post(ctx, "/backups/"+url.PathEscape(id)+"/verify", map[string]any{}, &out); err != nil {

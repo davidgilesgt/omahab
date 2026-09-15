@@ -1705,8 +1705,12 @@ paths:
 
   /api/v1/email/routes:
     post:
-      summary: Ensure email routing rule (gated on sender verification)
-      description: Dashboard-triggered activation of the AI address Cloudflare Email Routing rule. Requires sender verification; routed via scoped Token C.
+      summary: Ensure AI address routing rule (requires enrolled sender)
+      description: |
+        Creates the Send-to-Worker Cloudflare Email Routing rule delivering the AI address
+        (default ai@<domain>) to the omahab-email-worker, which HMAC-posts raw mail to omahabd.
+        Requires at least one enrolled sender (DESIGN §18 step 1 before step 2); sender
+        verification itself completes on the first DKIM-passing ingest. Routed via scoped Token C.
       operationId: ensureEmailRoute
       requestBody:
         required: false
@@ -1718,9 +1722,47 @@ paths:
                 recipient: { type: string, format: email }
       responses:
         '200': { description: Route ensured, content: { application/json: { schema: { type: object, required: [ok], properties: { ok: { type: boolean } } } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /api/v1/email/senders:
+    post:
+      summary: Enroll the allowed sender address
+      description: |
+        Admin only. Registers the one allowed personal sender address (DESIGN §18 step 1).
+        The sender stays pending until a DKIM-passing ingest promotes it to verified.
+        The routing rule cannot be created before enrollment.
+      operationId: enrollEmailSender
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EnrollEmailSenderRequest' }
+      responses:
+        '201': { description: Enrolled sender, content: { application/json: { schema: { $ref: '#/components/schemas/EmailSender' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    get:
+      summary: List enrolled senders
+      description: Admin only. Returns enrolled sender addresses with verification state.
+      operationId: listEmailSenders
+      responses:
+        '200': { description: Senders, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/EmailSender' } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    delete:
+      summary: Remove an enrolled sender
+      description: Admin only. The address travels as ?email= because "@" is URL-hostile in path segments.
+      operationId: removeEmailSender
+      parameters:
+        - name: email
+          in: query
+          required: true
+          schema: { type: string, format: email }
+      responses:
+        '200': { description: Removed, content: { application/json: { schema: { type: object, required: [removed], properties: { removed: { type: boolean } } } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
   /api/v1/projects/{id}/release-token:
     post:
       summary: Issue per-project release token (admin only, never to Forgejo)
@@ -2386,9 +2428,26 @@ components:
         status: { type: string }
         received_at: { type: string, format: date-time }
 
+    EmailSender:
+      type: object
+      description: Enrolled AI-email sender address. Pending promotes to verified on the first DKIM-passing ingest.
+      required: [id, email, status, created_at]
+      properties:
+        id: { type: string }
+        email: { type: string, format: email }
+        status: { type: string, enum: [pending, verified] }
+        created_at: { type: string, format: date-time }
+        verified_at: { type: string, format: date-time, nullable: true }
+
+    EnrollEmailSenderRequest:
+      type: object
+      required: [email]
+      properties:
+        email: { type: string, format: email }
+      additionalProperties: false
+
     ExposureState:
       type: object
-      required: [resource_type, resource_id, hostname, exposure, updated_at]
       properties:
         resource_type: { type: string, enum: [application, project] }
         resource_id: { type: string }
