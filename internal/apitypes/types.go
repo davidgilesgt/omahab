@@ -302,6 +302,19 @@ type Operation struct {
 	Preview string `json:"preview,omitempty"`
 }
 
+// AdGuardSetup is the one-time DNS setup view. The initial admin password is
+// returned exactly once, then deleted. LAN/upstream state shows the privacy
+// choice; household clients must choose the server LAN address as DNS.
+type AdGuardSetup struct {
+	InitialAdminPassword string   `json:"initial_admin_password,omitempty"`
+	PasswordShown        bool     `json:"password_shown"`
+	LANAddresses         []string `json:"lan_addresses"`
+	DNSPort              int      `json:"dns_port"`
+	Upstream             string   `json:"upstream"`
+	DNSReady             bool     `json:"dns_ready"`
+	DNSDetail            string   `json:"dns_detail,omitempty"`
+}
+
 // OperationActionRequest drives resume|rollback|dismiss from journal stage.
 type OperationActionRequest struct {
 	Action  string `json:"action"`

@@ -1146,6 +1146,17 @@ func (b *Backend) setupPhaseCoreApps(ctx context.Context) error {
 	// service has started so the syncer client can authenticate.
 	// Best-effort: never fails setup.
 	b.importSyncthingAPIKey(ctx)
+	// AdGuard Home: refuse port-53 conflicts with an actionable message,
+	// then seed/refresh the mutable YAML (LAN binds, Quad9 default for
+	// fresh installs, DHCP off, bcrypt admin shown once via API).
+	if adguardInstalled(ctx, b) {
+		if err := checkAdGuardPortConflict(); err != nil {
+			return err
+		}
+		if err := b.ensureAdGuardHome(ctx); err != nil {
+			return fmt.Errorf("adguard setup: %w", err)
+		}
+	}
 	// Default sync folders: obsidian vault (AI-shared notes source) and
 	// drops inbox (unshared; the smart router fans out to Paperless/Immich).
 	// Best-effort: never fails setup.

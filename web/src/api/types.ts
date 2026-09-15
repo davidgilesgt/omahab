@@ -120,6 +120,16 @@ export interface Operation {
   can_rollback: boolean;
 }
 
+export interface AdGuardSetup {
+  initial_admin_password?: string;
+  password_shown: boolean;
+  lan_addresses: string[];
+  dns_port: number;
+  upstream: string;
+  dns_ready: boolean;
+  dns_detail?: string;
+}
+
 export interface ControlEvent {
   id: ID;
   type: string;

@@ -172,6 +172,20 @@ function ExposureReview({ resource, item, onClose }: ExposureReviewProps) {
 // (e.g. Caddy's hostname points at the dashboard, not a Caddy UI).
 const INFRASTRUCTURE_BUNDLES: Record<string, true> = { caddy: true, "embedding-worker": true, "restic-server": true };
 
+// First-run guidance shown under matching app rows. Jellyfin keeps admin
+// creation in its private UI (no automatic SSO claim); AdGuard points at
+// household DNS onboarding without touching DHCP or the system resolver.
+const BUNDLE_FIRST_RUN: Record<string, { title: string; body: string }> = {
+  jellyfin: {
+    title: "Finish Jellyfin setup",
+    body: "Create the admin account in Jellyfin, then add a media library at /srv/omahab/apps/jellyfin/library. Routed drop files land there automatically.",
+  },
+  "adguard-home": {
+    title: "Household DNS filtering",
+    body: "Point household clients at this server's LAN address as their DNS (usually through the router). Upstream: Quad9. The system resolver and DHCP are unchanged.",
+  },
+};
+
 export function ApplicationsPage() {
   const { client } = useAuth();
   const queryClient = useQueryClient();
@@ -214,8 +228,10 @@ export function ApplicationsPage() {
                   const running = application.observed_state === "running";
                   const url = application.launch_url || null;
                   const infrastructure = INFRASTRUCTURE_BUNDLES[application.bundle_id] === true;
+                  const hint = BUNDLE_FIRST_RUN[application.bundle_id];
                   return (
-                    <tr key={application.id}>
+                    <Fragment key={application.id}>
+                    <tr>
                       <td className="app-name">{url ? <a href={url} target="_blank" rel="noreferrer" title={url}>{application.name}</a> : application.name}</td>
                       <td><StatusPill value={application.health} /></td>
                       <td><StatusPill value={application.exposure} /></td>
@@ -231,6 +247,12 @@ export function ApplicationsPage() {
                         </div>
                       </td>
                     </tr>
+                    {hint && (
+                      <tr className="app-hint">
+                        <td colSpan={8}><strong>{hint.title}.</strong> {hint.body}</td>
+                      </tr>
+                    )}
+                    </Fragment>
                   );
                 })}
               </tbody>

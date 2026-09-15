@@ -427,6 +427,24 @@ paths:
                 properties:
                   imported: { type: integer }
         '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/adguard/setup:
+    get:
+      summary: AdGuard Home one-time DNS setup
+      description: |
+        Admin only. Returns LAN addresses, DNS port, the configured upstream
+        (Quad9 by default; the privacy choice stays visible), and DNS query
+        readiness. The initial admin password is returned exactly once, then
+        deleted. Household clients must choose the server LAN address as DNS
+        (usually through their router); the system resolver and DHCP are
+        never changed automatically.
+      operationId: getAdGuardSetup
+      responses:
+        '200':
+          description: Setup view
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdGuardSetup' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
 
   /up:
     get:
@@ -2625,6 +2643,16 @@ components:
             hostname being made public (case-insensitive). Requests without a
             matching confirmation are rejected with 400 code confirmation_required.
             Optional and ignored for private/shared targets.
+    AdGuardSetup:
+      type: object
+      properties:
+        initial_admin_password: { type: string, description: 'Returned exactly once, then deleted' }
+        password_shown: { type: boolean }
+        lan_addresses: { type: array, items: { type: string } }
+        dns_port: { type: integer }
+        upstream: { type: string }
+        dns_ready: { type: boolean }
+        dns_detail: { type: string }
       additionalProperties: false
 
     CreateSecretRequest:

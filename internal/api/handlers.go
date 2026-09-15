@@ -589,6 +589,17 @@ func (s *Server) handleImportRepoSnapshots(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, map[string]int{"imported": n})
 }
 
+
+// handleGetAdGuardSetup serves the admin one-time DNS setup view. Admin
+// API/CLI only, never device/Hermes privileges (mounted in the admin group).
+func (s *Server) handleGetAdGuardSetup(w http.ResponseWriter, r *http.Request) {
+	view, err := s.backend.GetAdGuardSetup(r.Context())
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
+}
 func (s *Server) handleVerifyBackup(w http.ResponseWriter, r *http.Request) {
 	id := domain.ID(chi.URLParam(r, "id"))
 	bk, err := s.backend.VerifyBackup(r.Context(), id)

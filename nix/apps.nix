@@ -745,7 +745,8 @@ in
       config.services.woodpecker-agents.agents.docker.package
       config.services.forgejo.package
       config.services.syncthing.package
-      pkgs.rclone
+      config.services.jellyfin.package
+      config.services.adguardhome.package
       pkgs.devpod
       # Backup / data path: postgres+plugins wrapper (exact service value),
       # restic CLI + rest server, cloudflared tunnel. Small statics.

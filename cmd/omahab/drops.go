@@ -14,7 +14,7 @@ func newDropsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "drops",
 		Short: "Route files from the drops inbox to app consume/staging dirs",
-		Long:  "Move files out of the drops inbox by extension: PDFs and office documents to the Paperless consume directory, camera photos and phone video to the photos staging directory, library audio/video to the media staging directory. Unknown files stay put. Run by the omahab-drops-route timer; safe to run by hand.",
+		Long:  "Move files out of the drops inbox by extension: PDFs and office documents to the Paperless consume directory, camera photos and phone video to the photos staging directory, library audio/video to the Jellyfin library. Unknown files stay put. Run by the omahab-drops-route timer; safe to run by hand.",
 	}
 	cmd.AddCommand(newDropsRouteCmd())
 	return cmd
@@ -30,17 +30,24 @@ func newDropsRouteCmd() *cobra.Command {
 			if dataDir == "" {
 				dataDir = "/srv/omahab"
 			}
+			// Drain the retired Syncthing-backed media directory into the
+			// Jellyfin library first (idempotent, collision-preserving).
+			migrated, err := drops.MigrateLegacyMedia(dataDir)
+			if err != nil {
+				return err
+			}
 			res, err := drops.RouteInbox(
 				filepath.Join(dataDir, "sync", "drops", "inbox"),
 				drops.Destinations{
 					Paperless: filepath.Join(dataDir, "apps", "paperless", "consume"),
 					Photos:    filepath.Join(dataDir, "sync", "drops", "photos"),
-					Media:     filepath.Join(dataDir, "sync", "drops", "media"),
+					Media:     filepath.Join(dataDir, "apps", "jellyfin", "library"),
 				},
 			)
 			if err != nil {
 				return err
 			}
+			res = append(migrated, res...)
 			if res == nil {
 				res = []drops.Result{}
 			}

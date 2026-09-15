@@ -1,4 +1,4 @@
-import { Bell, Bookmark, Cpu, FileText, FolderSync, GitBranch, Hammer, Image, KeyRound, Server, Sparkles } from "lucide-react";
+import { Bell, Bookmark, Clapperboard, Cpu, FileText, FolderSync, GitBranch, Hammer, Image, KeyRound, Server, ShieldCheck, Sparkles } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 const ICONS: Record<string, LucideIcon> = {
@@ -12,6 +12,8 @@ const ICONS: Record<string, LucideIcon> = {
   litellm: Cpu,
   ntfy: Bell,
   hermes: Sparkles,
+  jellyfin: Clapperboard,
+  "adguard-home": ShieldCheck,
 };
 
 // Decorative bundle icon; adjacent app names supply the accessible label.

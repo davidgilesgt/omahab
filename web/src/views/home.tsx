@@ -13,6 +13,7 @@ type TileDef = {
 
 const TILES: TileDef[] = [
   { id: "immich", name: "Photos", purpose: "Private photo library", route: "photos", group: "everyday" },
+  { id: "jellyfin", name: "Media", purpose: "Movies, shows & music", route: "media", group: "everyday" },
   { id: "paperless-ngx", name: "Archive", purpose: "Document archive", route: "archive", group: "everyday" },
   { id: "karakeep", name: "Keep", purpose: "Bookmarks & saves", route: "keep", group: "everyday" },
   { id: "syncthing", name: "Sync", purpose: "File sync", route: "sync", group: "everyday" },
