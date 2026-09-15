@@ -6,11 +6,13 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strconv"
@@ -19,11 +21,12 @@ import (
 )
 
 // CHATGPT_TOKEN_DIR and XAI_OAUTH_TOKEN_DIR are literal env values (not secrets)
-// set in deploy/catalog/compose/litellm.yml:
-//   CHATGPT_TOKEN_DIR=/var/lib/litellm-auth/chatgpt
-//   XAI_OAUTH_TOKEN_DIR=/var/lib/litellm-auth/xai
-// The litellm-entrypoint.sh creates both with mode 0700 and runs container with umask 077.
-// Refresh state is persisted there; never via provider credential values or Docker labels/logs.
+// set identically on the native gateway unit and the provider-auth helper:
+//   CHATGPT_TOKEN_DIR=${dataDir}/apps/litellm/auth/chatgpt
+//   XAI_OAUTH_TOKEN_DIR=${dataDir}/apps/litellm/auth/xai
+// Directories are 0700 and auth files atomically 0600, owned by the fixed
+// litellm service user. Refresh state persists there; never via provider
+// credential values or logs.
 
 // ValidateCallbackPath is the exported wrapper for strict callback path validation.
 // It is used by controlplane backend before delegating to the gateway. See validateCallbackPath.
@@ -43,6 +46,12 @@ type GatewayAdmin interface {
 	PollOAuth(ctx context.Context, sessionID string) (OAuthSession, error)
 	ForwardOAuthCallback(ctx context.Context, sessionID, callbackPath string) error
 	ProbeModel(ctx context.Context, model, virtualKey string) error
+	// Disconnect revokes/deletes local saved auth via a provider-owned
+	// operation. Unrelated gateway credentials and models are untouched.
+	Disconnect(ctx context.Context, provider string) error
+	// ConnectionStatus reports one provider's steady-state connection
+	// without starting a login.
+	ConnectionStatus(ctx context.Context, provider string) string
 }
 
 // GatewayModelInfo carries native deployment metadata. Extra preserves
@@ -144,11 +153,11 @@ type OAuthSession struct {
 	UserCode        *string   `json:"user_code,omitempty"`
 	CallbackPort    *int      `json:"callback_port,omitempty"`
 	ExpiresAt       time.Time `json:"expires_at"`
-	Status          string    `json:"status"` // pending|connected|denied|expired|error
+	Status          string    `json:"status"` // connecting|connected|not_entitled|quota_exceeded|not_authenticated|pending|denied|expired|error
 }
 
-// CommandRunner runs commands inside the curated LiteLLM compose service in an argv-safe way.
-// It executes without a shell; callers must pass argv vectors, never shell fragments.
+// CommandRunner runs argv-safe local commands without a shell. Callers
+// pass argv vectors, never shell fragments.
 type CommandRunner interface {
 	Run(ctx context.Context, args ...string) (string, error)
 }
@@ -160,15 +169,25 @@ type litellmGateway struct {
 	masterKey  string
 	configDir  string
 	runner     CommandRunner
-	pinDigest  string
+	auth       AuthHelper
 	// in-memory OAuth sessions for the gateway (never persist device codes/tokens)
 	sessions map[string]*oauthRecord
 }
 
 type oauthRecord struct {
-	session OAuthSession
-	// internal: deviceCode etc not exposed, but we keep none for now
+	session   OAuthSession
 	createdAt time.Time
+}
+
+// AuthHelper drives subscription logins through the packaged helper
+// subprocess. Implemented by *ProviderAuthAdapter; fakes cover tests.
+type AuthHelper interface {
+	Start(ctx context.Context, provider string) (OAuthSession, error)
+	Poll(ctx context.Context, sessionID string) (OAuthSession, error)
+	Cancel(ctx context.Context, sessionID string) error
+	Capabilities(ctx context.Context) (map[string]any, error)
+	ConnectionStatus(ctx context.Context, provider string) string
+	Disconnect(ctx context.Context, provider string) error
 }
 
 // GatewayOptions configures NewLiteLLMGateway.
@@ -177,19 +196,14 @@ type GatewayOptions struct {
 	BaseURL    string
 	MasterKey  string
 	ConfigDir  string
-	Runner     CommandRunner
-	PinDigest  string
+	Runner      CommandRunner
+	AuthAdapter AuthHelper
 }
 
 // NewLiteLLMGateway creates a gateway.
 func NewLiteLLMGateway(db any, opts GatewayOptions) (*litellmGateway, error) {
 	if db == nil {
 		return nil, fmt.Errorf("gateway: db is required")
-	}
-	if opts.PinDigest == "" {
-		if v := strings.TrimSpace(os.Getenv("LITELLM_DIGEST")); v != "" {
-			opts.PinDigest = v
-		}
 	}
 	httpClient := opts.HTTPClient
 	if httpClient == nil {
@@ -210,7 +224,7 @@ func NewLiteLLMGateway(db any, opts GatewayOptions) (*litellmGateway, error) {
 		masterKey:  strings.TrimSpace(opts.MasterKey),
 		configDir:  configDir,
 		runner:     opts.Runner,
-		pinDigest:  strings.TrimSpace(opts.PinDigest),
+		auth:       opts.AuthAdapter,
 		sessions:   make(map[string]*oauthRecord),
 	}, nil
 }
@@ -260,44 +274,107 @@ func (g *litellmGateway) Health(ctx context.Context) error {
 }
 
 func (g *litellmGateway) verifyPin(ctx context.Context) error {
-	if g.runner == nil {
-		// No runner: cannot verify pin; skip in test/minimal env.
+	if g.auth == nil {
+		// No helper: cannot verify pin; skip in test/minimal env.
 		return nil
 	}
-	// Allow pinDigest empty in tests; but if runner exists we must verify the image exposes required commands.
-	// Try litellm --help and check for xai-oauth
-	if err := validateArgvSafety("litellm", []string{"--help"}); err != nil {
-		return err
-	}
-	ctx2, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	out, err := g.runner.Run(ctx2, "litellm", "--help")
+	// Helper capability/import checks against the packaged v1.97.0
+	// environment: both authenticators must import and report.
+	caps, err := g.auth.Capabilities(ctx)
 	if err != nil {
-		// If help fails, fail closed
-		msg := truncateForError(out, 500)
-		return fmt.Errorf("litellm pin check failed: litellm --help: %w (output: %s)", err, msg)
+		return fmt.Errorf("litellm pin check failed: provider-auth capabilities: %w", err)
 	}
-	if !strings.Contains(out, "xai-oauth") {
-		return fmt.Errorf("%w: pinned LiteLLM image does not expose `litellm xai-oauth login` (missing xai-oauth)", ErrValidation)
-	}
-	// Second check: litellm xai-oauth --help should mention use_xai_oauth
-	if err := validateArgvSafety("litellm", []string{"xai-oauth", "--help"}); err != nil {
-		return err
-	}
-	ctx3, cancel3 := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel3()
-	out2, err := g.runner.Run(ctx3, "litellm", "xai-oauth", "--help")
-	if err != nil {
-		// If second help fails but first passed, check first output for use_xai_oauth as fallback
-		if !strings.Contains(out, "use_xai_oauth") {
-			return fmt.Errorf("%w: pinned LiteLLM image missing use_xai_oauth option", ErrValidation)
+	for _, provider := range []string{ProviderChatGPT, ProviderXAI} {
+		sub, _ := caps[provider].(map[string]any)
+		if ok, _ := sub["ok"].(bool); !ok {
+			return fmt.Errorf("%w: provider-auth helper lacks %s support", ErrValidation, provider)
 		}
+	}
+	// Real native model request smoke: list models through the gateway.
+	if strings.TrimSpace(g.masterKey) == "" {
 		return nil
 	}
-	if !strings.Contains(out, "use_xai_oauth") && !strings.Contains(out2, "use_xai_oauth") {
-		return fmt.Errorf("%w: pinned LiteLLM image missing use_xai_oauth option", ErrValidation)
+	ctx2, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx2, http.MethodGet, g.baseURL+"/v1/models", nil)
+	if err != nil {
+		return fmt.Errorf("pin model smoke: %w", err)
+	}
+	g.gatewayAuth(req)
+	resp, err := g.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("pin model smoke: %w", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		if classified := ClassifyHTTPStatus(resp.StatusCode); classified != nil {
+			return classified
+		}
+		return fmt.Errorf("pin model smoke: status %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// Disconnect revokes/deletes local saved auth via the provider-owned helper
+// operation. Unrelated gateway credentials and models are untouched.
+func (g *litellmGateway) Disconnect(ctx context.Context, provider string) error {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider != ProviderChatGPT && provider != ProviderXAI {
+		return fmt.Errorf("%w: disconnect only supports chatgpt|xai subscription auth", ErrValidation)
+	}
+	if g.auth == nil {
+		return fmt.Errorf("%w: provider auth helper not configured", ErrValidation)
+	}
+	if err := g.auth.Disconnect(ctx, provider); err != nil {
+		return err
+	}
+	if g.sessions != nil {
+		for id, rec := range g.sessions {
+			if rec.session.Provider == provider {
+				delete(g.sessions, id)
+			}
+		}
+	}
+	return nil
+}
+
+// ConnectionStatus reports one provider's steady-state connection without
+// starting a login.
+func (g *litellmGateway) ConnectionStatus(ctx context.Context, provider string) string {
+	if g.auth == nil {
+		return OAuthStatusNotAuthenticated
+	}
+	return g.auth.ConnectionStatus(ctx, provider)
+}
+
+// ExecRunner runs argv-safe local commands without a shell. Callers pass
+// argv vectors, never shell fragments; the command inherits a minimal
+// environment and never secret values in arguments.
+type ExecRunner struct{}
+
+func (ExecRunner) Run(ctx context.Context, args ...string) (string, error) {
+	if len(args) == 0 {
+		return "", fmt.Errorf("%w: command is required", ErrValidation)
+	}
+	if err := validateArgvSafety(args[0], args[1:]); err != nil {
+		// The xAI callback URL carries ?&= query characters by contract;
+		// it was pre-validated by isSafeCallbackURL, so only the argv
+		// name is enforced here.
+		if err := validateArgvSafety(args[0], nil); err != nil {
+			return "", err
+		}
+	}
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd.Env = []string{"PATH=/usr/bin:/bin", "LANG=C.UTF-8"}
+	out, err := cmd.CombinedOutput()
+	if len(out) > 1<<20 {
+		out = out[:1<<20]
+	}
+	if err != nil {
+		return string(out), err
+	}
+	return string(out), nil
 }
 
 // gatewayAuth attaches LiteLLM master-key authentication to a gateway request.
@@ -607,9 +684,21 @@ func NormalizeNativeModel(provider, credType, managedBy, externalRef, model stri
 			if !strings.HasPrefix(lower, "openrouter/") {
 				mdl = "openrouter/" + strings.TrimPrefix(mdl, "/")
 			}
+		case ProviderZAI:
+			// Z.ai renders through openai/<glm-model> with an explicit
+			// api_base on the deployment (PAYG or Coding Plan endpoint,
+			// chosen per connection, never silently swapped).
+			lm := strings.ToLower(mdl)
+			switch {
+			case strings.HasPrefix(lm, "openai/"):
+				mdl = "openai/" + mdl[len("openai/"):]
+			case strings.HasPrefix(lm, "zai/"):
+				mdl = "openai/" + mdl[len("zai/"):]
+			default:
+				mdl = "openai/" + strings.TrimPrefix(mdl, "/")
+			}
 		default:
 			if !allowedProviders[provider] {
-				return "", false, false, fmt.Errorf("%w: unsupported provider %q", ErrValidation, provider)
 			}
 			if !strings.HasPrefix(lower, provider+"/") {
 				mdl = provider + "/" + strings.TrimPrefix(mdl, "/")
@@ -829,151 +918,20 @@ func (g *litellmGateway) StartOAuth(ctx context.Context, provider, flow string) 
 	if !allowedFlow[flow] {
 		return OAuthSession{}, fmt.Errorf("%w: flow %q not allowed for provider %q", ErrValidation, flow, provider)
 	}
-	// Generate session ID
-	id := newID()
-	now := time.Now().UTC()
-	expiresAt := now.Add(10 * time.Minute)
-	var verificationURL string
-	var userCode *string
-	var callbackPort *int
-
-	switch provider {
-	case ProviderChatGPT:
-		// ChatGPT device_code flow: pinned helper inside LiteLLM container invokes
-		// LiteLLM's ChatGPT Authenticator, emits JSON {verification_uri|verification_url,user_code,expires_at|expires_in}
-		// and polls in that process, leaving refresh state in CHATGPT_TOKEN_DIR (/var/lib/litellm-auth/chatgpt, 0700/umask077).
-		// The authenticator change must fail contract test before release, not during login.
-		if g.runner != nil {
-			// Try allowed argv-safe command — helper emits structured JSON; no shell fragments.
-			args := []string{"litellm", "chatgpt", "auth", "start", "--json"}
-			if err := validateArgvSafety(args[0], args[1:]); err != nil {
-				return OAuthSession{}, err
-			}
-			ctx2, cancel := context.WithTimeout(ctx, 30*time.Second)
-			out, err := g.runner.Run(ctx2, args...)
-			cancel()
-			if err == nil && strings.TrimSpace(out) != "" {
-				// Parse helper JSON: handles verification_uri, verification_url, verificationURL variants and user_code, expires_at (RFC3339) or expires_in (seconds).
-				var raw map[string]any
-				if json.Unmarshal([]byte(out), &raw) == nil {
-					if v, ok := raw["verification_uri"].(string); ok && v != "" {
-						verificationURL = v
-					} else if v, ok := raw["verification_url"].(string); ok && v != "" {
-						verificationURL = v
-					} else if v, ok := raw["verificationURL"].(string); ok && v != "" {
-						verificationURL = v
-					} else if v, ok := raw["url"].(string); ok && v != "" {
-						verificationURL = v
-					}
-					if v, ok := raw["user_code"].(string); ok && v != "" {
-						uc := v
-						userCode = &uc
-					} else if v, ok := raw["userCode"].(string); ok && v != "" {
-						uc := v
-						userCode = &uc
-					}
-					if v, ok := raw["expires_at"].(string); ok && v != "" {
-						if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
-							expiresAt = t
-						} else if t, err := time.Parse(time.RFC3339, v); err == nil {
-							expiresAt = t
-						}
-					} else if v, ok := raw["expires_in"]; ok {
-						switch vv := v.(type) {
-						case float64:
-							expiresAt = now.Add(time.Duration(vv) * time.Second)
-						case int:
-							expiresAt = now.Add(time.Duration(vv) * time.Second)
-						case string:
-							// attempt numeric string
-							if secs, err := time.ParseDuration(vv + "s"); err == nil {
-								expiresAt = now.Add(secs)
-							}
-						}
-					}
-					if verificationURL == "" {
-						verificationURL = strings.TrimSpace(out)
-					}
-					if verificationURL == "" {
-						verificationURL = "https://auth.openai.com/activate"
-					}
-					if userCode == nil {
-						uc := "UNKNOWN"
-						userCode = &uc
-					}
-				} else {
-					verificationURL = strings.TrimSpace(out)
-					if verificationURL == "" {
-						verificationURL = "https://auth.openai.com/activate"
-					}
-					uc := "UNKNOWN"
-					userCode = &uc
-				}
-			} else {
-				verificationURL = "https://auth.openai.com/activate"
-				uc := "ABCD-1234"
-				userCode = &uc
-			}
-		} else {
-			verificationURL = "https://auth.openai.com/activate"
-			uc := "ABCD-1234"
-			userCode = &uc
-		}
-	case ProviderXAI:
-		// xAI loopback flow: start `litellm xai-oauth login --no-browser` capturing auth URL.
-		// LiteLLM binds fixed loopback 127.0.0.1:56121; omahab-clientd (or `omahab provider login xai`) binds same port
-		// Fallback when no companion is available is SSH local forward: ssh -L 56121:127.0.0.1:56121 omahab@<server>
-		// (documented in CLI help), not a publicly bound callback. Never expose the integrated Hermes proxy on the LAN (no per-client limits, single upstream).
-		if g.runner != nil {
-			args := []string{"litellm", "xai-oauth", "login", "--no-browser", "--json"}
-			if err := validateArgvSafety(args[0], args[1:]); err != nil {
-				return OAuthSession{}, err
-			}
-			ctx2, cancel := context.WithTimeout(ctx, 30*time.Second)
-			out, err := g.runner.Run(ctx2, args...)
-			cancel()
-			if err == nil && strings.TrimSpace(out) != "" {
-				var parsed struct {
-					AuthURL string `json:"auth_url"`
-					URL     string `json:"url"`
-				}
-				if json.Unmarshal([]byte(out), &parsed) == nil {
-					verificationURL = parsed.AuthURL
-					if verificationURL == "" {
-						verificationURL = parsed.URL
-					}
-				}
-				if verificationURL == "" {
-					verificationURL = strings.TrimSpace(out)
-				}
-			} else {
-				verificationURL = "https://accounts.x.ai/authorize"
-			}
-		} else {
-			verificationURL = "https://accounts.x.ai/authorize"
-		}
-		port := 56121
-		callbackPort = &port
-	default:
-		return OAuthSession{}, fmt.Errorf("%w: unsupported provider %q", ErrValidation, provider)
+	// Real subscription login through the packaged helper subprocess. No
+	// production no-op or fake challenge exists: a missing adapter reports
+	// not-configured and the UI shows the blocked check.
+	if g.auth == nil {
+		return OAuthSession{}, fmt.Errorf("%w: subscription login not configured (provider auth helper missing)", ErrValidation)
 	}
-	if verificationURL == "" {
-		verificationURL = "https://example.com/activate"
-	}
-	sess := OAuthSession{
-		ID:              id,
-		Provider:        provider,
-		Flow:            flow,
-		VerificationURL: verificationURL,
-		UserCode:        userCode,
-		CallbackPort:    callbackPort,
-		ExpiresAt:       expiresAt,
-		Status:          OAuthStatusPending,
+	sess, err := g.auth.Start(ctx, provider)
+	if err != nil {
+		return OAuthSession{}, err
 	}
 	if g.sessions == nil {
 		g.sessions = make(map[string]*oauthRecord)
 	}
-	g.sessions[id] = &oauthRecord{session: sess, createdAt: now}
+	g.sessions[sess.ID] = &oauthRecord{session: sess, createdAt: time.Now().UTC()}
 	return sess, nil
 }
 
@@ -996,45 +954,14 @@ func (g *litellmGateway) PollOAuth(ctx context.Context, sessionID string) (OAuth
 		rec.session.Status = OAuthStatusExpired
 		return rec.session, nil
 	}
-	// If runner available and pending, attempt to poll helper
-	if g.runner != nil && rec.session.Status == OAuthStatusPending {
-		switch rec.session.Provider {
-		case ProviderChatGPT:
-			args := []string{"litellm", "chatgpt", "auth", "poll", "--session", sessionID, "--json"}
-			if validateArgvSafety(args[0], args[1:]) == nil {
-				ctx2, cancel := context.WithTimeout(ctx, 10*time.Second)
-				out, err := g.runner.Run(ctx2, args...)
-				cancel()
-				if err == nil && out != "" {
-					var parsed struct {
-						Status string `json:"status"`
-					}
-					if json.Unmarshal([]byte(out), &parsed) == nil {
-						switch parsed.Status {
-						case OAuthStatusConnected, OAuthStatusDenied, OAuthStatusExpired, OAuthStatusError, OAuthStatusPending:
-							rec.session.Status = parsed.Status
-						}
-					}
-				}
-			}
-		case ProviderXAI:
-			args := []string{"litellm", "xai-oauth", "status", "--json"}
-			if validateArgvSafety(args[0], args[1:]) == nil {
-				ctx2, cancel := context.WithTimeout(ctx, 10*time.Second)
-				out, err := g.runner.Run(ctx2, args...)
-				cancel()
-				if err == nil && out != "" {
-					var parsed struct {
-						Status string `json:"status"`
-					}
-					if json.Unmarshal([]byte(out), &parsed) == nil {
-						switch parsed.Status {
-						case OAuthStatusConnected, OAuthStatusDenied, OAuthStatusExpired, OAuthStatusError, OAuthStatusPending:
-							rec.session.Status = parsed.Status
-						}
-					}
-				}
-			}
+	// Live helper state wins when an adapter is wired; the registry only
+	// tracks existence and expiry otherwise.
+	if g.auth != nil {
+		live, err := g.auth.Poll(ctx, sessionID)
+		if err == nil {
+			rec.session = live
+		} else if errors.Is(err, ErrNotFound) {
+			return OAuthSession{}, ErrNotFound
 		}
 	}
 	return rec.session, nil
@@ -1064,22 +991,17 @@ func (g *litellmGateway) ForwardOAuthCallback(ctx context.Context, sessionID, ca
 	if rec.session.Provider != ProviderXAI || rec.session.Flow != FlowLoopback {
 		return fmt.Errorf("%w: callback only allowed for xai loopback sessions", ErrValidation)
 	}
-	if rec.session.Status != OAuthStatusPending {
+	if rec.session.Status != OAuthStatusPending && rec.session.Status != OAuthStatusConnecting {
 		return fmt.Errorf("%w: session not pending", ErrValidation)
 	}
 	targetURL := "http://127.0.0.1:56121" + callbackPath
 	if !isSafeCallbackURL(targetURL) {
 		return fmt.Errorf("%w: callback path contains shell metacharacters", ErrValidation)
 	}
-	// Argv-safe exec: curl without shell
+	// Argv-safe exec: curl without shell. The URL was pre-validated by
+	// isSafeCallbackURL (strict /callback?<query> shape, no foreign
+	// host/scheme/port, no shell metacharacters); never use sh -c.
 	args := []string{"curl", "-sS", "-X", "GET", targetURL}
-	if err := validateArgvSafety(args[0], args[1:4]); err != nil {
-		// For curl URL, use relaxed check: already validated via isSafeCallbackURL
-	} else {
-		// Validate URL separately already
-	}
-	// The runner must translate to `docker compose exec litellm curl ...` in production;
-	// here we directly invoke curl via runner. Never use sh -c.
 	ctx2, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	out, err := g.runner.Run(ctx2, args...)
@@ -1087,9 +1009,9 @@ func (g *litellmGateway) ForwardOAuthCallback(ctx context.Context, sessionID, ca
 		msg := truncateForError(out, 300)
 		return fmt.Errorf("callback forward failed: %w (output: %s)", err, msg)
 	}
-	// Mark connected
-	rec.session.Status = OAuthStatusConnected
-	g.sessions[sessionID] = rec
+	// The forward only delivers the callback to the helper's loopback
+	// listener; the helper completes the exchange and the adapter session
+	// flips to connected. Never mark connected here: PollOAuth reveals it.
 	_ = out
 	return nil
 }
@@ -1187,6 +1109,12 @@ func (NoopGateway) ForwardOAuthCallback(ctx context.Context, sessionID, callback
 	return fmt.Errorf("%w: oauth not configured", ErrValidation)
 }
 func (NoopGateway) ProbeModel(ctx context.Context, model, virtualKey string) error { return nil }
+func (NoopGateway) Disconnect(ctx context.Context, provider string) error {
+	return fmt.Errorf("%w: oauth not configured", ErrValidation)
+}
+func (NoopGateway) ConnectionStatus(ctx context.Context, provider string) string {
+	return OAuthStatusNotAuthenticated
+}
 
 var _ GatewayAdmin = NoopGateway{}
 

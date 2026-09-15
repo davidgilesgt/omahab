@@ -19,6 +19,7 @@ var (
 	ErrNotFound                  = errors.New("provider: not found")
 	ErrAlreadyExists             = errors.New("provider: already exists")
 	ErrValidation                = errors.New("provider: validation failed")
+	ErrConflict                  = errors.New("provider: conflict")
 	ErrUnsupportedCredentialType = errors.New("provider: unsupported credential type")
 	ErrEntitlement               = errors.New("provider: entitlement failure")
 	ErrTokenInvalid              = errors.New("provider: token invalid or corrupted")
@@ -26,7 +27,6 @@ var (
 	ErrVirtualKeyExpired         = errors.New("provider: virtual key expired")
 	ErrVirtualKeyRevoked         = errors.New("provider: virtual key revoked")
 )
-
 // Provider constants — only these are sanctioned.
 const (
 	ProviderOpenAI     = "openai"
@@ -34,6 +34,7 @@ const (
 	ProviderOpenRouter = "openrouter"
 	ProviderChatGPT    = "chatgpt"
 	ProviderXAI        = "xai"
+	ProviderZAI        = "zai"
 )
 
 // Credential types — only sanctioned types are accepted.
@@ -76,6 +77,27 @@ const (
 	ExternalRefXAI     = "xai_oauth"
 )
 
+// Z.ai billing plans and endpoints. Coding Plan use requires an explicit
+// user acknowledgement of authorization (recorded with timestamp); the
+// acknowledgement is not proof Z.ai granted authorization, and entitlement
+// failure stays visible instead of falling back to paid API usage.
+const (
+	ZAIPlanPAYG   = "payg"
+	ZAIPlanCoding = "coding"
+)
+
+const (
+	ZAIPAYGBase   = "https://api.z.ai/api/paas/v4"
+	ZAICodingBase = "https://api.z.ai/api/coding/paas/v4"
+)
+
+const (
+	// ZAITermsURL states the current subscription restrictions.
+	ZAITermsURL = "https://docs.z.ai/legal-agreement/subscription-terms"
+	// ZAIKeyURL is where the user creates the API key.
+	ZAIKeyURL = "https://z.ai/manage-apikey/apikey-list"
+)
+
 // OwnerKind values for provider_virtual_keys.owner_kind.
 const (
 	OwnerKindHermes  = "hermes"
@@ -89,6 +111,7 @@ var allowedProviders = map[string]bool{
 	ProviderOpenRouter: true,
 	ProviderChatGPT:    true,
 	ProviderXAI:        true,
+	ProviderZAI:        true,
 }
 
 var allowedCredentialTypes = map[string]bool{
@@ -103,6 +126,7 @@ var allowedProviderCredentialType = map[string]map[string]bool{
 	ProviderOpenRouter: {CredentialTypeAPIKey: true},
 	ProviderChatGPT:    {CredentialTypeOAuth: true},
 	ProviderXAI:        {CredentialTypeOAuth: true},
+	ProviderZAI:        {CredentialTypeAPIKey: true},
 }
 
 var allowedAliases = map[string]bool{
@@ -145,7 +169,7 @@ var allowedOwnerKind = map[string]bool{
 
 // SupportedProviders returns the sanctioned provider list.
 func SupportedProviders() []string {
-	return []string{ProviderOpenAI, ProviderAnthropic, ProviderOpenRouter, ProviderChatGPT, ProviderXAI}
+	return []string{ProviderOpenAI, ProviderAnthropic, ProviderOpenRouter, ProviderChatGPT, ProviderXAI, ProviderZAI}
 }
 
 // SupportedAliases returns the routed alias list.
@@ -245,7 +269,13 @@ type Credential struct {
 	ExternalRef        *string       `json:"external_ref,omitempty"`
 	Entitlement        string        `json:"entitlement"`
 	EntitlementMessage string        `json:"entitlement_message,omitempty"`
-	ExpiresAt          *time.Time    `json:"expires_at,omitempty"`
+	// Plan is the Z.ai billing plan (payg|coding); empty for other providers.
+	Plan string `json:"plan,omitempty"`
+	// AuthorizedCodingUse records the user's explicit Coding Plan
+	// authorization acknowledgement (Z.ai only).
+	AuthorizedCodingUse bool       `json:"authorized_coding_use,omitempty"`
+	AuthorizedAt        *time.Time `json:"authorized_at,omitempty"`
+	ExpiresAt           *time.Time `json:"expires_at,omitempty"`
 	Health             domain.Health `json:"health"`
 	LastCheckedAt      *time.Time    `json:"last_checked_at,omitempty"`
 	CreatedAt          time.Time     `json:"created_at"`
@@ -293,14 +323,16 @@ type VirtualKeyWithToken struct {
 
 // CreateCredentialInput holds fields for credential creation.
 type CreateCredentialInput struct {
-	ID             domain.ID `json:"id,omitempty"`
-	Provider       string
-	CredentialType string
-	DisplayName    string
-	SecretID       domain.ID
-	ManagedBy      string
-	ExternalRef    *string
-	ExpiresAt      *time.Time
+	ID                  domain.ID `json:"id,omitempty"`
+	Provider            string
+	CredentialType      string
+	DisplayName         string
+	SecretID            domain.ID
+	ManagedBy           string
+	ExternalRef         *string
+	Plan                string
+	AuthorizedCodingUse bool
+	ExpiresAt           *time.Time
 }
 
 // UpdateCredentialInput holds mutable fields.
@@ -309,6 +341,8 @@ type UpdateCredentialInput struct {
 	SecretID           *domain.ID
 	Entitlement        *string
 	EntitlementMessage *string
+	Plan               *string
+	AuthorizedCodingUse *bool
 	ExpiresAt          *time.Time
 	Health             *domain.Health
 }
@@ -437,6 +471,20 @@ func (s *Service) CreateCredential(ctx context.Context, in CreateCredentialInput
 	if !allowedManagedBy[managedBy] {
 		return nil, fmt.Errorf("%w: unsupported managed_by %q", ErrValidation, managedBy)
 	}
+	plan := strings.ToLower(strings.TrimSpace(in.Plan))
+	if provider == ProviderZAI {
+		if plan == "" {
+			plan = ZAIPlanPAYG
+		}
+		if plan != ZAIPlanPAYG && plan != ZAIPlanCoding {
+			return nil, fmt.Errorf("%w: zai plan must be payg|coding", ErrValidation)
+		}
+		if plan == ZAIPlanCoding && !in.AuthorizedCodingUse {
+			return nil, fmt.Errorf("%w: zai Coding Plan use requires explicit authorization acknowledgement (see %s)", ErrValidation, ZAITermsURL)
+		}
+	} else if plan != "" || in.AuthorizedCodingUse {
+		return nil, fmt.Errorf("%w: plan/authorized_coding_use apply to zai only", ErrValidation)
+	}
 	// Enforce credential_type <-> managed_by mapping: api_key is omahab, oauth is litellm.
 	if credType == CredentialTypeAPIKey && managedBy != ManagedByOmahab {
 		return nil, fmt.Errorf("%w: credential type %q must be managed_by=%q", ErrValidation, credType, ManagedByOmahab)
@@ -494,17 +542,23 @@ func (s *Service) CreateCredential(ctx context.Context, in CreateCredentialInput
 	}
 	now := s.nowUTC()
 	cred := &Credential{
-		ID:             id,
-		Provider:       provider,
-		CredentialType: credType,
-		DisplayName:    displayName,
-		SecretID:       secretID,
-		ManagedBy:      managedBy,
-		ExternalRef:    externalRef,
-		Entitlement:    EntitlementUnknown,
-		Health:         domain.HealthUnknown,
-		CreatedAt:      now,
-		UpdatedAt:      now,
+		ID:                  id,
+		Provider:            provider,
+		CredentialType:      credType,
+		DisplayName:         displayName,
+		SecretID:            secretID,
+		ManagedBy:           managedBy,
+		ExternalRef:         externalRef,
+		Plan:                plan,
+		AuthorizedCodingUse: in.AuthorizedCodingUse && provider == ProviderZAI,
+		Entitlement:         EntitlementUnknown,
+		Health:              domain.HealthUnknown,
+		CreatedAt:           now,
+		UpdatedAt:           now,
+	}
+	if provider == ProviderZAI && plan == ZAIPlanCoding && in.AuthorizedCodingUse {
+		t := now
+		cred.AuthorizedAt = &t
 	}
 	if in.ExpiresAt != nil {
 		t := in.ExpiresAt.UTC()
@@ -524,9 +578,10 @@ func (s *Service) CreateCredential(ctx context.Context, in CreateCredentialInput
 	}
 
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO provider_credentials (id, provider, credential_type, display_name, secret_id, managed_by, external_ref, entitlement, entitlement_message, expires_at, health, last_checked_at, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO provider_credentials (id, provider, credential_type, display_name, secret_id, managed_by, external_ref, plan, authorized_coding_use, authorized_at, entitlement, entitlement_message, expires_at, health, last_checked_at, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		string(cred.ID), cred.Provider, cred.CredentialType, cred.DisplayName, secretIDVal, cred.ManagedBy, externalRefVal,
+		cred.Plan, boolToInt(cred.AuthorizedCodingUse), timePtrToString(cred.AuthorizedAt),
 		cred.Entitlement, cred.EntitlementMessage, timePtrToString(cred.ExpiresAt), string(cred.Health),
 		nil, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
 	)
@@ -556,7 +611,7 @@ func (s *Service) GetCredential(ctx context.Context, id domain.ID) (*Credential,
 		return nil, fmt.Errorf("%w: id is required", ErrValidation)
 	}
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, provider, credential_type, display_name, secret_id, managed_by, external_ref, entitlement, entitlement_message, expires_at, health, last_checked_at, created_at, updated_at
+		`SELECT id, provider, credential_type, display_name, secret_id, managed_by, external_ref, plan, authorized_coding_use, authorized_at, entitlement, entitlement_message, expires_at, health, last_checked_at, created_at, updated_at
 		 FROM provider_credentials WHERE id = ?`, string(id))
 	return scanCredential(row)
 }
@@ -564,7 +619,7 @@ func (s *Service) GetCredential(ctx context.Context, id domain.ID) (*Credential,
 // ListCredentials returns all credentials ordered by provider and creation time.
 func (s *Service) ListCredentials(ctx context.Context) ([]*Credential, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, provider, credential_type, display_name, secret_id, managed_by, external_ref, entitlement, entitlement_message, expires_at, health, last_checked_at, created_at, updated_at
+		`SELECT id, provider, credential_type, display_name, secret_id, managed_by, external_ref, plan, authorized_coding_use, authorized_at, entitlement, entitlement_message, expires_at, health, last_checked_at, created_at, updated_at
 		 FROM provider_credentials ORDER BY provider ASC, created_at ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("list credentials: %w", err)
@@ -588,7 +643,7 @@ func (s *Service) ListCredentialsByProvider(ctx context.Context, provider string
 		return nil, fmt.Errorf("%w: unsupported provider %q", ErrValidation, provider)
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, provider, credential_type, display_name, secret_id, managed_by, external_ref, entitlement, entitlement_message, expires_at, health, last_checked_at, created_at, updated_at
+		`SELECT id, provider, credential_type, display_name, secret_id, managed_by, external_ref, plan, authorized_coding_use, authorized_at, entitlement, entitlement_message, expires_at, health, last_checked_at, created_at, updated_at
 		 FROM provider_credentials WHERE provider = ? ORDER BY created_at ASC`, provider)
 	if err != nil {
 		return nil, fmt.Errorf("list credentials by provider: %w", err)
@@ -651,6 +706,35 @@ func (s *Service) UpdateCredential(ctx context.Context, id domain.ID, in UpdateC
 			return nil, fmt.Errorf("%w: invalid health %q", ErrValidation, *in.Health)
 		}
 	}
+	if in.Plan != nil || in.AuthorizedCodingUse != nil {
+		if existing.Provider != ProviderZAI {
+			return nil, fmt.Errorf("%w: plan/authorized_coding_use apply to zai only", ErrValidation)
+		}
+		wasPlan := existing.Plan
+		plan := wasPlan
+		if in.Plan != nil {
+			plan = strings.ToLower(strings.TrimSpace(*in.Plan))
+			if plan != ZAIPlanPAYG && plan != ZAIPlanCoding {
+				return nil, fmt.Errorf("%w: zai plan must be payg|coding", ErrValidation)
+			}
+		}
+		ack := existing.AuthorizedCodingUse
+		if in.AuthorizedCodingUse != nil {
+			ack = *in.AuthorizedCodingUse
+		}
+		if in.Plan != nil && plan == ZAIPlanCoding && wasPlan != ZAIPlanCoding && (in.AuthorizedCodingUse == nil || !*in.AuthorizedCodingUse) {
+			return nil, fmt.Errorf("%w: re-entering zai Coding Plan use requires explicit authorization acknowledgement (see %s)", ErrValidation, ZAITermsURL)
+		}
+		existing.Plan = plan
+		if existing.Plan == ZAIPlanCoding && !ack {
+			return nil, fmt.Errorf("%w: zai Coding Plan use requires explicit authorization acknowledgement (see %s)", ErrValidation, ZAITermsURL)
+		}
+		existing.AuthorizedCodingUse = ack
+		if existing.Plan == ZAIPlanCoding && ack && existing.AuthorizedAt == nil {
+			t := s.nowUTC()
+			existing.AuthorizedAt = &t
+		}
+	}
 
 	now := s.nowUTC()
 	existing.UpdatedAt = now
@@ -662,8 +746,9 @@ func (s *Service) UpdateCredential(ctx context.Context, id domain.ID, in UpdateC
 		secretIDVal = nil
 	}
 	_, err = s.db.ExecContext(ctx,
-		`UPDATE provider_credentials SET display_name = ?, secret_id = ?, entitlement = ?, entitlement_message = ?, expires_at = ?, health = ?, updated_at = ? WHERE id = ?`,
+		`UPDATE provider_credentials SET display_name = ?, secret_id = ?, entitlement = ?, entitlement_message = ?, plan = ?, authorized_coding_use = ?, authorized_at = ?, expires_at = ?, health = ?, updated_at = ? WHERE id = ?`,
 		existing.DisplayName, secretIDVal, existing.Entitlement, existing.EntitlementMessage,
+		existing.Plan, boolToInt(existing.AuthorizedCodingUse), timePtrToString(existing.AuthorizedAt),
 		timePtrToString(existing.ExpiresAt), string(existing.Health), now.Format(time.RFC3339Nano), string(id),
 	)
 	if err != nil {
@@ -1478,11 +1563,14 @@ func scanCredential(row credScanner) (*Credential, error) {
 		secretID                            sql.NullString
 		managedBy                           sql.NullString
 		externalRef                         sql.NullString
+		plan                                sql.NullString
+		authorizedCodingUse                 sql.NullInt64
+		authorizedAt                        sql.NullString
 		entitlement, entitlementMessage     string
 		expiresAt, lastCheckedAt            sql.NullString
 		health, createdAt, updatedAt        string
 	)
-	if err := row.Scan(&id, &provider, &credType, &displayName, &secretID, &managedBy, &externalRef, &entitlement, &entitlementMessage, &expiresAt, &health, &lastCheckedAt, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&id, &provider, &credType, &displayName, &secretID, &managedBy, &externalRef, &plan, &authorizedCodingUse, &authorizedAt, &entitlement, &entitlementMessage, &expiresAt, &health, &lastCheckedAt, &createdAt, &updatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -1512,6 +1600,14 @@ func scanCredential(row credScanner) (*Credential, error) {
 	if externalRef.Valid {
 		er := externalRef.String
 		c.ExternalRef = &er
+	}
+	if plan.Valid {
+		c.Plan = plan.String
+	}
+	c.AuthorizedCodingUse = authorizedCodingUse.Valid && authorizedCodingUse.Int64 != 0
+	if authorizedAt.Valid {
+		t, _ := time.Parse(time.RFC3339Nano, authorizedAt.String)
+		c.AuthorizedAt = &t
 	}
 	if expiresAt.Valid {
 		t, _ := time.Parse(time.RFC3339Nano, expiresAt.String)
@@ -1611,6 +1707,13 @@ func hashToken(token string) string {
 	}
 	h := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(h[:])
+}
+
+func boolToInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
 }
 
 func timePtrToString(t *time.Time) *string {

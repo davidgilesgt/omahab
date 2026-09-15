@@ -1156,6 +1156,35 @@ func (s *Server) handleForwardProviderOAuthCallback(w http.ResponseWriter, r *ht
 	writeJSON(w, http.StatusOK, sess)
 }
 
+// handleConnectZAI connects a scoped Z.ai key. Admin only; the key travels
+// in the request body to secrets and never persists elsewhere.
+func (s *Server) handleConnectZAI(w http.ResponseWriter, r *http.Request) {
+	var req apitypes.ConnectZAIRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	conn, err := s.backend.ConnectZAI(r.Context(), req)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, conn)
+}
+
+// handleDisconnectProvider revokes provider-owned local auth. Admin only.
+func (s *Server) handleDisconnectProvider(w http.ResponseWriter, r *http.Request) {
+	provider := chi.URLParam(r, "provider")
+	if provider != "chatgpt" && provider != "xai" && provider != "zai" {
+		writeError(w, r, errBadRequest("unsupported provider"))
+		return
+	}
+	if err := s.backend.DisconnectProvider(r.Context(), provider); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"disconnected": true, "provider": provider})
+}
+
 // --- companion enrollment & devices ---
 
 func (s *Server) handleCreateCompanionEnrollment(w http.ResponseWriter, r *http.Request) {

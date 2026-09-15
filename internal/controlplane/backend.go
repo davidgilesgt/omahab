@@ -38,6 +38,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -468,13 +470,35 @@ func (b *Backend) initServices(ctx context.Context) error {
 		cfgDir = "/srv/omahab/apps/litellm/config"
 	}
 	masterKey := secretOrEnv("litellm_master_key", "LITELLM_MASTER_KEY")
-	pinDigest := secretOrEnv("litellm_digest", "LITELLM_DIGEST")
+	// Subscription logins run through the packaged provider-auth helper
+	// (same pinned environment as the gateway), never fake challenges.
+	// Auth state lives under the apps litellm tree, owned by the fixed
+	// litellm service user.
+	authBase := strings.TrimSpace(b.cfg.DataDir) + "/apps/litellm/auth"
+	if strings.TrimSpace(b.cfg.DataDir) == "" {
+		authBase = "/srv/omahab/apps/litellm/auth"
+	}
+	helperPath := strings.TrimSpace(os.Getenv("OMAHAB_PROVIDER_AUTH"))
+	if helperPath == "" {
+		if found, err := exec.LookPath("omahab-provider-auth"); err == nil {
+			helperPath = found
+		}
+	}
+	authAdapter := providers.NewProviderAuthAdapter(providers.ProviderAuthOptions{
+		HelperPath: helperPath,
+		AuthDirs: map[string]string{
+			providers.ProviderChatGPT: filepath.Join(authBase, "chatgpt"),
+			providers.ProviderXAI:     filepath.Join(authBase, "xai"),
+		},
+		ServiceUser: "litellm",
+	})
 	if gw, err := providers.NewLiteLLMGateway(b.db, providers.GatewayOptions{
 		HTTPClient: http.DefaultClient,
 		BaseURL:    "http://127.0.0.1:4000",
 		MasterKey:  masterKey,
 		ConfigDir:  cfgDir,
-		PinDigest:  pinDigest,
+		Runner:     providers.ExecRunner{},
+		AuthAdapter: authAdapter,
 	}); err == nil {
 		b.gateway = gw
 		// Inject gateway into providers service for virtual key issuance

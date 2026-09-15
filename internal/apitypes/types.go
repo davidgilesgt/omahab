@@ -301,7 +301,6 @@ type Operation struct {
 	// Preview describes affected apps/dependents and downtime before confirm.
 	Preview string `json:"preview,omitempty"`
 }
-
 // AdGuardSetup is the one-time DNS setup view. The initial admin password is
 // returned exactly once, then deleted. LAN/upstream state shows the privacy
 // choice; household clients must choose the server LAN address as DNS.
@@ -315,6 +314,27 @@ type AdGuardSetup struct {
 	DNSDetail            string   `json:"dns_detail,omitempty"`
 }
 
+// ConnectZAIRequest connects a scoped Z.ai key. Coding Plan use requires
+// authorized_coding_use (recorded with timestamp). PAYG is explicit; there
+// is no OAuth and no silent paid fallback.
+type ConnectZAIRequest struct {
+	Plan                string `json:"plan,omitempty"`
+	APIKey              string `json:"api_key"`
+	AuthorizedCodingUse bool   `json:"authorized_coding_use,omitempty"`
+	Model               string `json:"model,omitempty"`
+	Deployment          string `json:"deployment,omitempty"`
+	DisplayName         string `json:"display_name,omitempty"`
+}
+
+// ZAIConnection is the created scoped connection (key material never returned).
+type ZAIConnection struct {
+	CredentialID domain.ID `json:"credential_id"`
+	Provider     string    `json:"provider"`
+	Plan         string    `json:"plan"`
+	APIBase      string    `json:"api_base"`
+	Model        string    `json:"model"`
+	Deployment   string    `json:"deployment"`
+}
 // OperationActionRequest drives resume|rollback|dismiss from journal stage.
 type OperationActionRequest struct {
 	Action  string `json:"action"`

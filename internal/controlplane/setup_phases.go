@@ -1272,6 +1272,9 @@ func (b *Backend) renderNativeAppEnv(ctx context.Context, dnsToken, domainName s
 			}
 		}
 	}
+	if pruneLitellmEnv(existing) {
+		providerKeysPruned = true
+	}
 	if err := b.writeAppEnv("litellm", existing, "litellm"); err != nil {
 		return fmt.Errorf("litellm: %w", err)
 	}
@@ -1307,6 +1310,19 @@ func (b *Backend) renderNativeAppEnv(ctx context.Context, dnsToken, domainName s
 		return fmt.Errorf("forgejo: %w", err)
 	}
 	return nil
+}
+
+// pruneLitellmEnv removes entries that must never reach the gateway
+// environment. A process-wide XAI_API_KEY would silently override OAuth
+// models, so xAI subscription deployments stay keyless (use_xai_oauth).
+// Reports whether anything was pruned.
+func pruneLitellmEnv(existing map[string]string) bool {
+	pruned := false
+	if _, ok := existing["XAI_API_KEY"]; ok {
+		delete(existing, "XAI_API_KEY")
+		pruned = true
+	}
+	return pruned
 }
 
 // Phase 5b: Dependent apps — Woodpecker and Hermes after OIDC

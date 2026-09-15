@@ -1307,6 +1307,44 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/providers/zai/connect:
+    post:
+      summary: Connect a scoped Z.ai key
+      description: |
+        Admin only. Connects a Z.ai key scoped to explicitly selected model deployments.
+        Plan payg uses https://api.z.ai/api/paas/v4; coding uses https://api.z.ai/api/coding/paas/v4.
+        Coding Plan use requires authorized_coding_use; the acknowledgement is recorded with a timestamp
+        but is not proof Z.ai granted authorization (see https://docs.z.ai/legal-agreement/subscription-terms).
+        Unauthorized Coding Plan saves fail; entitlement failure stays visible with no silent fallback to paid API usage.
+        The key travels in the request body to secrets and never persists elsewhere.
+      operationId: connectZAI
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConnectZAIRequest' }
+      responses:
+        '201': { description: Z.ai connection, content: { application/json: { schema: { $ref: '#/components/schemas/ZAIConnection' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/providers/{provider}/disconnect:
+    post:
+      summary: Disconnect a provider (revoke local saved auth)
+      description: |
+        Admin only. Revokes or deletes local saved auth through a provider-owned operation.
+        chatgpt|xai disconnect the native gateway session; zai deletes the connection credential and secret.
+        Aliases still referencing the connection block deletion instead of silently breaking routing.
+        Unrelated gateway credentials and models are untouched.
+      operationId: disconnectProvider
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema: { type: string, enum: [chatgpt, xai, zai] }
+      responses:
+        '200': { description: Disconnect result, content: { application/json: { schema: { type: object, properties: { disconnected: { type: boolean }, provider: { type: string } } } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
 
   /api/v1/tool-environment:
     get:
@@ -2790,13 +2828,36 @@ components:
         user_code: { type: string, nullable: true, description: Device-code user code for ChatGPT flow }
         callback_port: { type: integer, nullable: true, description: Loopback callback port for xAI flow (fixed 56121) }
         expires_at: { type: string, format: date-time }
-        status: { type: string, enum: [pending, connected, denied, expired, error] }
+        status: { type: string, enum: [pending, connecting, connected, not_entitled, quota_exceeded, denied, expired, error] }
     StartProviderOAuthRequest:
       type: object
       required: [flow]
       properties:
         flow: { type: string, enum: [device_code, loopback] }
       additionalProperties: false
+    ConnectZAIRequest:
+      type: object
+      description: Connect a scoped Z.ai key. Coding Plan use requires authorized_coding_use (recorded with timestamp; not proof of Z.ai authorization).
+      required: [plan, api_key]
+      properties:
+        plan: { type: string, enum: [payg, coding] }
+        api_key: { type: string, description: Scoped Z.ai key; travels to secrets and never persists elsewhere }
+        authorized_coding_use: { type: boolean, description: Required acknowledgement for Coding Plan use }
+        model: { type: string, description: GLM model to validate and deploy (default glm-4.6) }
+        deployment: { type: string, description: Deployment name (default omahab/zai-<plan>) }
+        display_name: { type: string }
+      additionalProperties: false
+    ZAIConnection:
+      type: object
+      description: Z.ai connection view; never includes the API key.
+      required: [credential_id, provider, plan, api_base, model, deployment]
+      properties:
+        credential_id: { type: string }
+        provider: { type: string, enum: [zai] }
+        plan: { type: string, enum: [payg, coding] }
+        api_base: { type: string, format: uri }
+        model: { type: string }
+        deployment: { type: string }
     ForwardOAuthCallbackRequest:
       type: object
       required: [callback_path]

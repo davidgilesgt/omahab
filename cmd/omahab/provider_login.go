@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/omahab/omahab/internal/apiclient"
+	"github.com/omahab/omahab/internal/apitypes"
 )
 
 // newProviderCmd returns `omahab provider` parent command with `login` subcommand.
@@ -45,6 +46,8 @@ After either flow completes, omahabd calls the concrete model (e.g., omahab/fast
 Never use 'hermes proxy start with a public host binding'.`,
 	}
 	provider.AddCommand(newProviderLoginCmd())
+	provider.AddCommand(newProviderConnectZAICmd())
+	provider.AddCommand(newProviderDisconnectCmd())
 	provider.AddCommand(newProviderStatusCmd())
 	return provider
 }
@@ -131,55 +134,182 @@ Never use 'hermes proxy start with a public host binding' — the integrated pro
 				return pollUntilTerminal(ctx, c, provider, sess.ID)
 			}
 
-			// xAI loopback: open browser, bind local 127.0.0.1:56121, wait for callback, forward.
+		// xAI loopback: open browser, then complete the callback.
+		callbackMode, _ := cmd.Flags().GetString("callback-mode")
+		if callbackMode != "companion" && callbackMode != "ssh" {
+			return handleFailure(fmt.Errorf("invalid --callback-mode %q: use companion or ssh", callbackMode))
+		}
+		if !flagJSON {
+			fmt.Println()
+			fmt.Printf("Opening auth URL: %s\n", sess.VerificationURL)
+		}
+		if !noBrowser && !flagJSON {
+			_ = openBrowser(sess.VerificationURL)
+		} else if !flagJSON {
+			fmt.Println("hint: open the URL above in a browser to authorize")
+			fmt.Println("hint: if no companion is available, use SSH fallback: ssh -L 56121:127.0.0.1:56121 omahab@<server>")
+		}
+		if callbackMode == "ssh" {
+			// SSH mode is mutually exclusive with the local listener: start
+			// and poll without binding 127.0.0.1:56121 locally, so the
+			// tunnel endpoint cannot collide. The provider redirect flows
+			// through the tunnel to the server's fixed loopback.
 			if !flagJSON {
-				fmt.Println()
-				fmt.Printf("Opening auth URL: %s\n", sess.VerificationURL)
+				fmt.Println("callback-mode ssh: polling only (no local listener). Complete the browser login; the tunnel delivers the callback.")
 			}
-			if !noBrowser && !flagJSON {
-				_ = openBrowser(sess.VerificationURL)
-			} else if !flagJSON {
-				fmt.Println("hint: open the URL above in a browser to authorize")
-				fmt.Println("hint: if no companion is available, use SSH fallback: ssh -L 56121:127.0.0.1:56121 omahab@<server>")
+			return pollUntilTerminal(ctx, c, provider, sess.ID)
+		}
+		callbackPath, err := waitForLocalCallback(ctx, sess.ExpiresAt)
+		if err != nil {
+			// If local bind failed or timed out, show fallback hint.
+			if !flagJSON {
+				fmt.Fprintf(os.Stderr, "local callback wait failed: %v\n", err)
+				fmt.Fprintln(os.Stderr, "fallback: ssh -L 56121:127.0.0.1:56121 omahab@<server> then retry; the xAI redirect to http://127.0.0.1:56121 will be forwarded through SSH to LiteLLM's fixed loopback.")
+				fmt.Fprintln(os.Stderr, "Do NOT use 'hermes proxy start with a public host binding' — it lacks per-client limits and handles one upstream.")
 			}
+			return handleFailure(err)
+		}
+		if !flagJSON {
+			fmt.Printf("received callback: %s\n", callbackPath)
+			fmt.Println("forwarding to server session callback API (device-only, argv-safe to http://127.0.0.1:56121 inside LiteLLM container)...")
+		}
+		fwdSess, err := c.ForwardProviderOAuthCallback(ctx, provider, sess.ID, callbackPath)
+		if err != nil {
+			// Check for 403 device requirement
+			if strings.Contains(strings.ToLower(err.Error()), "forbidden") || strings.Contains(err.Error(), "403") {
+				fmt.Fprintln(os.Stderr, "callback forward rejected (403): XAI callback relay only from enrolled companion with allow_provider_oauth=true.")
+				fmt.Fprintln(os.Stderr, "hint: ensure this device is enrolled via 'omahab-clientd enroll' with allow_provider_oauth enabled, or use SSH fallback:")
+				fmt.Fprintln(os.Stderr, "  ssh -L 56121:127.0.0.1:56121 omahab@<server>")
+			}
+			// Also note hermes proxy misuse
+			fmt.Fprintln(os.Stderr, "never use 'hermes proxy start with a public host binding'")
+			return handleFailure(err)
+		}
+		if flagJSON {
+			_ = printJSON(fwdSess)
+		} else {
+			fmt.Printf("callback forwarded, status: %s\n", fwdSess.Status)
+		}
+		// Poll until connected (backend also probes model and maps 401/403/429)
+		return pollUntilTerminal(ctx, c, provider, sess.ID)
+	},
+}
+	cmd.Flags().Bool("no-browser", false, "do not attempt to open browser; print URL only")
+	cmd.Flags().Duration("wait", 10*time.Minute, "maximum wait for callback/poll (default 10m, session expiry)")
+	cmd.Flags().String("callback-mode", "companion", "xai callback mode: companion (bind local loopback and relay) or ssh (no local listener; use with ssh -L tunnel)")
+	return cmd
+}
 
-			callbackPath, err := waitForLocalCallback(ctx, sess.ExpiresAt)
+func newProviderConnectZAICmd() *cobra.Command {
+	var plan, keyFile, keyEnv, model, deployment, displayName string
+	var authorizeCodingUse bool
+	cmd := &cobra.Command{
+		Use:   "connect-zai",
+		Short: "Connect a scoped Z.ai key (PAYG or authorized Coding Plan)",
+		Long: `Connect a Z.ai key scoped to explicitly selected model deployments.
+
+Plans: payg (https://api.z.ai/api/paas/v4) or coding (https://api.z.ai/api/coding/paas/v4).
+Coding Plan use requires --authorize-coding-use: the acknowledgement is recorded
+with a timestamp but is not proof Z.ai granted authorization
+(see https://docs.z.ai/legal-agreement/subscription-terms).
+Unauthorized Coding Plan saves fail; entitlement failure stays visible with no
+silent fallback to paid API usage. Create keys at https://z.ai/manage-apikey/apikey-list.
+The key never travels in argv: use --api-key-file, --api-key-env, or the prompt.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			key, err := readProviderKey(keyFile, keyEnv)
 			if err != nil {
-				// If local bind failed or timed out, show fallback hint.
-				if !flagJSON {
-					fmt.Fprintf(os.Stderr, "local callback wait failed: %v\n", err)
-					fmt.Fprintln(os.Stderr, "fallback: ssh -L 56121:127.0.0.1:56121 omahab@<server> then retry; the xAI redirect to http://127.0.0.1:56121 will be forwarded through SSH to LiteLLM's fixed loopback.")
-					fmt.Fprintln(os.Stderr, "Do NOT use 'hermes proxy start with a public host binding' — it lacks per-client limits and handles one upstream.")
-				}
 				return handleFailure(err)
 			}
-			if !flagJSON {
-				fmt.Printf("received callback: %s\n", callbackPath)
-				fmt.Println("forwarding to server session callback API (device-only, argv-safe to http://127.0.0.1:56121 inside LiteLLM container)...")
-			}
-			fwdSess, err := c.ForwardProviderOAuthCallback(ctx, provider, sess.ID, callbackPath)
+			ctx, cancel := newContext()
+			defer cancel()
+			c, err := resolveClient()
 			if err != nil {
-				// Check for 403 device requirement
-				if strings.Contains(strings.ToLower(err.Error()), "forbidden") || strings.Contains(err.Error(), "403") {
-					fmt.Fprintln(os.Stderr, "callback forward rejected (403): XAI callback relay only from enrolled companion with allow_provider_oauth=true.")
-					fmt.Fprintln(os.Stderr, "hint: ensure this device is enrolled via 'omahab-clientd enroll' with allow_provider_oauth enabled, or use SSH fallback:")
-					fmt.Fprintln(os.Stderr, "  ssh -L 56121:127.0.0.1:56121 omahab@<server>")
-				}
-				// Also note hermes proxy misuse
-				fmt.Fprintln(os.Stderr, "never use 'hermes proxy start with a public host binding'")
+				return handleFailure(err)
+			}
+			conn, err := c.ConnectZAI(ctx, apitypes.ConnectZAIRequest{
+				Plan: plan, APIKey: key, AuthorizedCodingUse: authorizeCodingUse,
+				Model: model, Deployment: deployment, DisplayName: displayName,
+			})
+			if err != nil {
 				return handleFailure(err)
 			}
 			if flagJSON {
-				_ = printJSON(fwdSess)
-			} else {
-				fmt.Printf("callback forwarded, status: %s\n", fwdSess.Status)
+				return printJSON(conn)
 			}
-			// Poll until connected (backend also probes model and maps 401/403/429)
-			return pollUntilTerminal(ctx, c, provider, sess.ID)
+			fmt.Printf("connected z.ai (%s) via %s: deployment %s model %s\n", conn.Plan, conn.APIBase, conn.Deployment, conn.Model)
+			return nil
 		},
 	}
-	cmd.Flags().Bool("no-browser", false, "do not attempt to open browser; print URL only")
-	cmd.Flags().Duration("wait", 10*time.Minute, "maximum wait for callback/poll (default 10m, session expiry)")
+	cmd.Flags().StringVar(&plan, "plan", "payg", "payg or coding (coding requires --authorize-coding-use)")
+	cmd.Flags().StringVar(&keyFile, "api-key-file", "", "read the API key from a file")
+	cmd.Flags().StringVar(&keyEnv, "api-key-env", "", "read the API key from an environment variable")
+	cmd.Flags().StringVar(&model, "model", "glm-4.6", "GLM model to validate and deploy")
+	cmd.Flags().StringVar(&deployment, "deployment", "", "deployment name (default omahab/zai-<plan>)")
+	cmd.Flags().StringVar(&displayName, "display-name", "", "credential display name")
+	cmd.Flags().BoolVar(&authorizeCodingUse, "authorize-coding-use", false, "acknowledge authorized Coding Plan use (recorded with timestamp)")
+	return cmd
+}
+
+func readProviderKey(keyFile, keyEnv string) (string, error) {
+	if strings.TrimSpace(keyFile) != "" {
+		raw, err := os.ReadFile(strings.TrimSpace(keyFile))
+		if err != nil {
+			return "", err
+		}
+		if key := strings.TrimSpace(string(raw)); key != "" {
+			return key, nil
+		}
+		return "", fmt.Errorf("api key file is empty")
+	}
+	if strings.TrimSpace(keyEnv) != "" {
+		if key := strings.TrimSpace(os.Getenv(strings.TrimSpace(keyEnv))); key != "" {
+			return key, nil
+		}
+		return "", fmt.Errorf("env %s is empty", strings.TrimSpace(keyEnv))
+	}
+	if isNonInteractive() {
+		return "", fmt.Errorf("api key required: use --api-key-file or --api-key-env")
+	}
+	fmt.Print("Z.ai API key: ")
+	var key string
+	if _, err := fmt.Scanln(&key); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(key) == "" {
+		return "", fmt.Errorf("api key is required")
+	}
+	return strings.TrimSpace(key), nil
+}
+
+func newProviderDisconnectCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "disconnect [chatgpt|xai|zai]",
+		Short: "Revoke local saved auth for a provider (provider-owned; keeps unrelated credentials/models)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			provider := strings.ToLower(strings.TrimSpace(args[0]))
+			if provider != "chatgpt" && provider != "xai" && provider != "zai" {
+				return handleFailure(fmt.Errorf("unsupported provider %q", provider))
+			}
+			if err := needForceGuard(false); err != nil {
+				return handleFailure(err)
+			}
+			ctx, cancel := newContext()
+			defer cancel()
+			c, err := resolveClient()
+			if err != nil {
+				return handleFailure(err)
+			}
+			if err := c.DisconnectProvider(ctx, provider); err != nil {
+				return handleFailure(err)
+			}
+			if flagJSON {
+				return printJSON(map[string]any{"disconnected": true, "provider": provider})
+			}
+			fmt.Printf("disconnected %s (local saved auth removed; unrelated credentials/models kept)\n", provider)
+			return nil
+		},
+	}
 	return cmd
 }
 
@@ -239,6 +369,16 @@ func pollUntilTerminal(ctx context.Context, c *apiclient.Client, provider, sessi
 				fmt.Println("success: provider OAuth connected; check 'omahab doctor' or dashboard for credential health and entitlement.")
 			}
 			return nil
+		case "not_entitled":
+			if !flagJSON {
+				fmt.Println("not entitled: the subscription does not grant API entitlement. Auth is retained; check the tier restriction, then use the API-key path. Do not loop re-login.")
+			}
+			return nil
+		case "quota_exceeded":
+			if !flagJSON {
+				fmt.Println("quota exceeded (429): rate limited. Wait and retry; no re-login loop and no automatic paid fallback.")
+			}
+			return nil
 		case "denied", "expired", "error":
 			if !flagJSON {
 				fmt.Printf("OAuth terminal status: %s\n", sess.Status)
@@ -250,7 +390,7 @@ func pollUntilTerminal(ctx context.Context, c *apiclient.Client, provider, sessi
 				}
 			}
 			return nil
-		case "pending":
+		case "pending", "connecting":
 			// continue
 		default:
 			return nil

@@ -300,7 +300,7 @@ in
         OMAHAB_LISTEN = cfg.listen;
         OMAHAB_CATALOG = "${nativeCatalog}";
         OMAHAB_NATIVE_LAYOUT = "${nativeLayoutFile}";
-        OMAHAB_WEB_DIR = "${cfg.webPackage}";
+        OMAHAB_PROVIDER_AUTH = let pa = flakePkgs.omahab-provider-auth or null; in if pa != null then "${pa}/bin/omahab-provider-auth" else "";
         # B2: distribution bundle for /dl/* and /install.sh (public on LAN, no auth).
         # Only set if dlPackage is available (flake provides omahab-dl; fallback for standalone use).
         OMAHAB_DL_DIR = let dl = flakePkgs.omahab-dl or null; in if dl != null then "${dl}/share/omahab/dl" else "";

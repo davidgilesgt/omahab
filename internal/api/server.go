@@ -344,7 +344,8 @@ func (s *Server) buildRouter() chi.Router {
 		r.Delete("/api/v1/model-keys/{id}", s.handleDeleteModelKey)
 		r.Post("/api/v1/provider-oauth/{provider}/start", s.withBodyLimit(defaultBodyLimit, s.handleStartProviderOAuth))
 		r.Get("/api/v1/provider-oauth/{provider}/poll/{session_id}", s.handlePollProviderOAuth)
-
+		r.Post("/api/v1/providers/zai/connect", s.withBodyLimit(defaultBodyLimit, s.handleConnectZAI))
+		r.Post("/api/v1/providers/{provider}/disconnect", s.withBodyLimit(defaultBodyLimit, s.handleDisconnectProvider))
 		// Companion — admin (enrollment codes, device lifecycle)
 		r.Post("/api/v1/companion-enrollments", s.handleCreateCompanionEnrollment)
 		r.Get("/api/v1/companion/devices", s.handleListCompanionDevices)

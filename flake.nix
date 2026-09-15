@@ -103,9 +103,21 @@ EOF
           mkdir -p $out
           cp ${./deploy/catalog/catalog.json} $out/catalog.json
         '';
+        # Provider-auth helper: runs the pinned LiteLLM ChatGPT/xAI
+        # authenticators (same interpreter+packages as the native gateway via
+        # nix/litellm-python.nix) and emits the NDJSON challenge protocol the
+        # gateway consumes. No tokens or device-auth material ever print.
+        omahab-provider-auth =
+          let
+            litellmEnv = import ./nix/litellm-python.nix { inherit pkgs; };
+          in
+          pkgs.runCommand "omahab-provider-auth" { nativeBuildInputs = [ pkgs.makeWrapper ]; } ''
+            mkdir -p $out/bin
+            makeWrapper ${litellmEnv.providerPython}/bin/python $out/bin/omahab-provider-auth \
+              --add-flags ${./workers/provider-auth/main.py}
+          '';
         omahab-once = pkgs.buildGoModule {
           pname = "omahab-once";
-          inherit version;
           src = ./third_party/once;
           subPackages = [ "cmd/once" ];
           vendorHash = "sha256-g05AhTYiD+kP9j0hFeojneJ7G95B2KfKGqM+VfJOO7I=";
@@ -186,7 +198,7 @@ EOF
       {
         packages = {
           inherit omahab omahab-web omahab-embedding-worker omahab-catalog omahab-once;
-          inherit omahab-clientd-linux-amd64 omahab-clientd-linux-arm64 omahab-clientd-darwin-arm64 omahab-clientd-darwin-amd64;
+          inherit omahab-provider-auth;
           inherit omarchy-plugin omahab-dl;
           default = omahab;
           # Appliance images (nixos-rebuild build-image under the hood).

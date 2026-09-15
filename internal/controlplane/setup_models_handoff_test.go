@@ -112,6 +112,10 @@ func (g *handoffFakeGateway) PollOAuth(_ context.Context, _ string) (providers.O
 func (g *handoffFakeGateway) ForwardOAuthCallback(_ context.Context, _, _ string) error {
 	return fmt.Errorf("oauth not configured")
 }
+func (g *handoffFakeGateway) Disconnect(_ context.Context, _ string) error { return nil }
+func (g *handoffFakeGateway) ConnectionStatus(_ context.Context, _ string) string {
+	return providers.OAuthStatusNotAuthenticated
+}
 
 func (g *handoffFakeGateway) ProbeModel(_ context.Context, _, _ string) error { return nil }
 

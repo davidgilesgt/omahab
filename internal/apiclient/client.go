@@ -511,6 +511,18 @@ func (c *Client) ImportRepoSnapshots(ctx context.Context, repositoryID string) (
 	return out.Imported, nil
 }
 
+func (c *Client) ConnectZAI(ctx context.Context, req apitypes.ConnectZAIRequest) (*apitypes.ZAIConnection, error) {
+	var out apitypes.ZAIConnection
+	if err := c.post(ctx, "/providers/zai/connect", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) DisconnectProvider(ctx context.Context, provider string) error {
+	var out map[string]any
+	return c.post(ctx, "/providers/"+url.PathEscape(provider)+"/disconnect", map[string]any{}, &out)
+}
 func (c *Client) VerifyBackup(ctx context.Context, id string) (*domain.Backup, error) {
 	var out domain.Backup
 	if err := c.post(ctx, "/backups/"+url.PathEscape(id)+"/verify", map[string]any{}, &out); err != nil {

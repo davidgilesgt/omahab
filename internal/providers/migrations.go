@@ -114,5 +114,15 @@ CREATE TABLE IF NOT EXISTS provider_model_handoff (
 );
 `,
 		},
+		{
+			// Z.ai connection plan: payg or authorized Coding Plan use,
+			// recorded with acknowledgement timestamp.
+			Name: "providers-007-zai-plan",
+			SQL: `
+ALTER TABLE provider_credentials ADD COLUMN plan TEXT NOT NULL DEFAULT '';
+ALTER TABLE provider_credentials ADD COLUMN authorized_coding_use INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE provider_credentials ADD COLUMN authorized_at TEXT;
+`,
+		},
 	}
 }

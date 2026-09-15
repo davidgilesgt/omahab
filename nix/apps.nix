@@ -21,47 +21,13 @@ let
   dataDir = "/srv/omahab";
   litellmConfigDir = "${dataDir}/apps/litellm/config";
   litellmConfig = "${litellmConfigDir}/litellm.yaml";
-  # LiteLLM stays on Python 3.13 while the default is 3.14: the prebuilt
-  # Prisma client is a 25MB types.py (~77k TypedDicts), and on 3.14 every
-  # TypedDict creation goes through typing_extensions'
-  # annotationlib.call_annotate_function (~5 min of 100% CPU per import,
-  # paid 3+ times per startup by the server and its `prisma` children),
-  # so :4000 never opens and the app reports unhealthy.
-  litellmPython = pkgs.python313;
-  litellmPyPackages = pkgs.python313Packages;
-  # Prisma engines matching prisma-client-py 0.15.0 (expects CLI 5.17.0,
-  # engines commit 393aa359). nixpkgs only ships engines_6/_7, whose
-  # schema-engine speaks a newer schemaPush protocol (missing field
-  # `filters`), so `prisma db push` fails and fresh installs never get
-  # tables. Prebuilt upstream binaries for debian-openssl-3.0.x — the same
-  # files client-py downloads at runtime — patchelf'd for NixOS.
-  litellmPrismaEngines =
-    let
-      commit = "393aa359c9ad4a4bb28630fb5613f9c281cde053";
-      platform = "debian-openssl-3.0.x";
-      base = "https://binaries.prisma.sh/all_commits/${commit}/${platform}";
-      fetchEngine = name: sha256: pkgs.fetchurl { url = "${base}/${name}.gz"; inherit sha256; };
-      engines = {
-        query-engine = fetchEngine "query-engine" "9bc857debe0d5760c571ee6271076223d94be981c29a22401de681f3f70e067d";
-        schema-engine = fetchEngine "schema-engine" "98ad433fd64da2ea1eb6d565553a9a4339ecf30f1c211b28b69690f591269a41";
-        prisma-fmt = fetchEngine "prisma-fmt" "e6bf23db1e7fe456ae167f4744a71dfad9075727ce6d0f65582a5bee5fe8793f";
-        libquery_engine = fetchEngine "libquery_engine.so.node" "125d75739bd7fcdb8eabb5428355b5be00f540043e6bc1f5b30268947afab1bd";
-      };
-    in
-    pkgs.stdenv.mkDerivation {
-      name = "litellm-prisma-engines-5.17.0";
-      nativeBuildInputs = [ pkgs.autoPatchelfHook ];
-      buildInputs = [ pkgs.openssl pkgs.zlib pkgs.stdenv.cc.cc.lib ];
-      buildCommand = ''
-        mkdir -p $out/bin $out/lib
-        gunzip -c ${engines."query-engine"} > $out/bin/query-engine
-        gunzip -c ${engines."schema-engine"} > $out/bin/schema-engine
-        gunzip -c ${engines."prisma-fmt"} > $out/bin/prisma-fmt
-        chmod +x $out/bin/query-engine $out/bin/schema-engine $out/bin/prisma-fmt
-        gunzip -c ${engines.libquery_engine} > $out/lib/libquery_engine.node
-        autoPatchelf $out
-      '';
-    };
+  # Pinned LiteLLM Python (gateway + provider-auth helper share one pin
+  # source: nix/litellm-python.nix).
+  litellmEnv = import ./litellm-python.nix { inherit pkgs; };
+  litellmPython = litellmEnv.litellmPython;
+  litellmPyPackages = litellmEnv.litellmPyPackages;
+  litellmPrismaEngines = litellmEnv.litellmPrismaEngines;
+  litellmPrismaClient = litellmEnv.litellmPrismaClient;
   # notesmd-cli (Yakitrak/notesmd-cli, MIT): Obsidian vault CLI that works
   # headless — no Obsidian app needed. Mounted into the Hermes container
   # next to the /vault bind so Hermes edits notes through the CLI, not raw
@@ -82,59 +48,7 @@ let
 
   # Seed mirrors the native DB-ownership bootstrap (internal/controlplane/setup_models.go):
   # no models, DB-owned, prompts never stored, no message logging, no retries/fallbacks.
-  # Prebuilt Prisma client for litellm's schema. prisma-client-py shells
-  # out to the Node Prisma CLI (nodeenv + engine downloads) during
-  # generate, so this runs with network in a fixed-output derivation; the
-  # hashed tree is copied into the prisma package in the litellm python
-  # override below and the final closure stays hermetic. Bump the name +
-  # hash with litellm.
-  litellmPrismaSchema = "${litellmPyPackages.litellm}/${litellmPython.sitePackages}/litellm/proxy/schema.prisma";
-  litellmPrismaClient = pkgs.stdenv.mkDerivation {
-    name = "litellm-prisma-client-1.97.0";
-    outputHashAlgo = "sha256";
-    outputHashMode = "recursive";
-    outputHash = "sha256-SG//W6x30RLYhXG7I/HBT83cExB4GrGMQuO/uqlonGA=";
-    nativeBuildInputs = [
-      pkgs.cacert
-      pkgs.nodejs
-      pkgs.prisma-engines_6
-      (litellmPython.withPackages (ps: [ ps.prisma ]))
-    ];
-    buildCommand = ''
-      # Fixed-output sandboxes start without $out: create it (the
-      # generator mkdirs it too, but copy_tree inherits the read-only
-      # store mode onto it, so own it first while it is still empty).
-      # The vendored query-engine paths must NOT leak into the output
-      # (fixed-output results cannot reference store paths): unset them
-      # so the baked BINARY_PATHS stay cache-local. The unit sets them
-      # at runtime, which the client prefers over baked paths.
-      unset PRISMA_QUERY_ENGINE_BINARY PRISMA_QUERY_ENGINE_LIBRARY
-      mkdir -p $out
-      export SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt
-      export HOME=$TMPDIR/home
-      mkdir -p $HOME
-      export PRISMA_HOME_DIR=$TMPDIR/prisma-home
-      mkdir -p $PRISMA_HOME_DIR
-      # The generator copy_trees its base package onto the output dir,
-      # inheriting the read-only store mode, so run it from a writable
-      # copy of the prisma package (3MB) with the env behind it.
-      PRISMA_PKG=$(python -c "import prisma, os; print(os.path.dirname(prisma.__file__))")
-      mkdir -p $TMPDIR/pkgs
-      mkdir -p $TMPDIR/pkgs/prisma
-      tar -C $PRISMA_PKG -cf - . | tar -C $TMPDIR/pkgs/prisma -xf -
-      chmod -R u+w $TMPDIR/pkgs/prisma
-      export PYTHONPATH=$TMPDIR/pkgs:$PYTHONPATH
-      cp ${litellmPrismaSchema} $TMPDIR/schema.prisma
-      chmod +w $TMPDIR/schema.prisma
-      # Point the generator at $out: client-py copies its base tree there
-      # and renders the models, yielding a complete `prisma` package.
-      sed -i '/provider = "prisma-client-py"/a\  output = "'$out'"' $TMPDIR/schema.prisma
-      (cd $TMPDIR && python -m prisma generate --schema ./schema.prisma)
-      # The packaged schema copy carries the absolute output path used for
-      # generation; a fixed-output result must not reference store paths.
-      sed -i '\|output *= *"/nix/store/|d' $out/schema.prisma
-    '';
-  };
+  # (Prebuilt Prisma client lives in nix/litellm-python.nix.)
   litellmEmptyConfig = pkgs.writeText "litellm-empty.yaml" ''
     # Generated by omahab — do not edit. Native DB ownership; models live in LiteLLM database.
     model_list:
@@ -227,17 +141,44 @@ in
       "z ${dataDir}/apps/immich/immich.json 0600 immich immich - -"
       "d ${dataDir}/apps/jellyfin 0750 jellyfin jellyfin - -"
       "d ${dataDir}/apps/jellyfin/library 0750 jellyfin jellyfin - -"
-      # LiteLLM live config (rendered by omahabd, read by the DynamicUser
-      # service via a static group distinct from the unit name: DynamicUser
-      # implicitly takes user `litellm`, so a static group named `litellm`
-      # collides (217/USER "already exists"). `litellm-cfg` avoids it.
-      # `d` owns the dir; `C` seeds the empty table once (only if missing,
-      # at boot, outside the unit sandbox — ExecStartPre cannot write into
-      # the unit's own ReadOnlyPaths).
+      # LiteLLM live config (rendered by omahabd, read by the service
+      # through the static litellm-cfg group). `d` owns the dir; `C` seeds
+      # the empty table once (only if missing, at boot, outside the unit
+      # sandbox — ExecStartPre cannot write into the unit's own
+      # ReadOnlyPaths).
       "d ${dataDir}/apps/litellm/config 0750 root litellm-cfg - -"
       "d ${dataDir}/apps/litellm/config/secrets 0750 root litellm-cfg - -"
       "C ${dataDir}/apps/litellm/config/litellm.yaml 0640 root litellm-cfg - ${litellmEmptyConfig}"
+      # Subscription token state for the gateway refresh path and the
+      # provider-auth helper (identical CHATGPT/XAI_OAUTH_TOKEN_DIR on
+      # both): 0700 litellm-owned, never group-readable.
+      "d ${dataDir}/apps/litellm/auth 0700 litellm litellm - -"
+      "d ${dataDir}/apps/litellm/auth/chatgpt 0700 litellm litellm - -"
+      "d ${dataDir}/apps/litellm/auth/xai 0700 litellm litellm - -"
     ];
+    # Upgrade from DynamicUser: one-time rechown of prior gateway state to
+    # the fixed litellm user (marker-guarded, runs before the service).
+    systemd.services.omahab-litellm-own = {
+      description = "Migrate Omahab litellm state to fixed user";
+      before = [ "litellm.service" ];
+      wantedBy = [ "multi-user.target" ];
+      unitConfig.ConditionPathExists = "!/var/lib/litellm/.omahab-owned";
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = pkgs.writeShellScript "omahab-litellm-own" ''
+          if [ -d /var/lib/litellm ]; then
+            chown -R litellm:litellm /var/lib/litellm
+          else
+            mkdir -p /var/lib/litellm
+            chown litellm:litellm /var/lib/litellm
+            chmod 0750 /var/lib/litellm
+          fi
+          touch /var/lib/litellm/.omahab-owned
+          chown litellm:litellm /var/lib/litellm/.omahab-owned
+        '';
+        RemainAfterExit = true;
+      };
+    };
     # Root-owned oneshot prepares the caddy config tree before caddy
     # starts (caddy runs as its own user; it cannot create the root
     # state subtree). omahabd later drives the config via the admin API.
@@ -534,44 +475,7 @@ in
       # which collides with the ONCE proxy convention and breaks the
       # health probe, core_apps, and the admin-invite gate.
       port = 4000;
-      package = pkgs.litellm.override {
-        python3Packages = litellmPyPackages.overrideScope (
-          _self: super: {
-            fastapi = super.fastapi.overridePythonAttrs (_old: rec {
-              version = "0.140.6";
-              src = pkgs.fetchFromGitHub {
-                owner = "tiangolo";
-                repo = "fastapi";
-                tag = version;
-                hash = "sha256-ZWLXNHmM2uGE5y7hLYW4zNSeCGo9d9X2KNT70aXK6W0=";
-              };
-            });
-            # a2a-sdk 0.3.26: its suite runs at build time via
-            # installCheckPhase (doInstallCheck defaults true), and one
-            # telemetry assertion fails on Linux in this pin (seen on 3.14, kept for 3.13):
-            # tests/utils/test_telemetry.py::
-            # test_trace_function_sync_attribute_extractor_error_logged.
-            # Same test is already disabled on Darwin upstream, so this
-            # extends that lack of trust to Linux — the other ~820 tests
-            # still run and gate the build.
-            a2a-sdk = super.a2a-sdk.overridePythonAttrs (old: {
-              disabledTests = (old.disabledTests or [ ]) ++ [
-                "test_trace_function_sync_attribute_extractor_error_logged"
-              ];
-            });
-            prisma = super.prisma.overridePythonAttrs (oldPrisma: {
-              # Native DB ownership needs `from prisma import Prisma` at
-              # gateway startup. Copy in the prebuilt client tree (built
-              # with network in litellmPrismaClient below); this step is a
-              # pure store-to-store copy, then assert the import resolves.
-              postInstall = (oldPrisma.postInstall or "") + ''
-                cp -r ${litellmPrismaClient}/. $out/${super.python.sitePackages}/prisma/
-                PYTHONPATH=$out/${super.python.sitePackages}:$PYTHONPATH python -c "from prisma import Prisma"
-              '';
-            });
-          }
-        );
-      };
+      package = litellmEnv.litellmPackage;
       environmentFile = "${appEnv}/litellm.env";
     };
     # The nixpkgs module bakes --config from its immutable `settings`
@@ -584,13 +488,28 @@ in
     # and seeds the empty table once (`C` only-if-missing), the renderer
     # chgrps each render.
     users.groups.litellm-cfg = { };
+    # Fixed litellm service user, shared by the native gateway and the
+    # provider-auth helper (never root or an ephemeral DynamicUser), so
+    # subscription token state stays 0700/0600 owner-only. Precedent:
+    # woodpecker-agent-docker is static for the same group-access reason.
+    # Upgrades from DynamicUser: the Z rule below rechowns prior state.
+    users.users.litellm = {
+      isSystemUser = true;
+      group = "litellm";
+      extraGroups = [ "litellm-cfg" ];
+    };
+    users.groups.litellm = { };
     systemd.services.litellm = mkMerge [
       (gate "litellm")
       {
+        # Subscription token dirs for the gateway refresh path and the
+        # provider-auth helper (identical values on both).
         # Generated client loads engines at connect time; the store and a
-        # DynamicUser home are both unusable for prisma's cache lookup, so
+        # service home are both unusable for prisma's cache lookup, so
         # point it at the vendored 5.17.0 engines above.
         environment = {
+          CHATGPT_TOKEN_DIR = "${dataDir}/apps/litellm/auth/chatgpt";
+          XAI_OAUTH_TOKEN_DIR = "${dataDir}/apps/litellm/auth/xai";
           PRISMA_QUERY_ENGINE_LIBRARY = "${litellmPrismaEngines}/lib/libquery_engine.node";
           PRISMA_QUERY_ENGINE_BINARY = "${litellmPrismaEngines}/bin/query-engine";
           PRISMA_SCHEMA_ENGINE_BINARY = "${litellmPrismaEngines}/bin/schema-engine";
@@ -611,10 +530,12 @@ in
         # to provide `sh` for npm lifecycle scripts.
         path = [ pkgs.openssl.bin pkgs.nodejs pkgs.bash ];
         serviceConfig = {
-          # DynamicUser allocates an ephemeral UID and refuses a static
-          # Group= ("already exists"); a static *supplementary* group is
-          # the supported combination for group-readable files, provided
-          # the group name differs from the dynamic user name.
+          # Fixed litellm user (see users.users.litellm above): shared with
+          # the provider-auth helper for owner-only token state. Keeps the
+          # litellm-cfg supplementary group for group-readable config.
+          DynamicUser = mkForce false;
+          User = "litellm";
+          Group = "litellm";
           SupplementaryGroups = [ "litellm-cfg" ];
           ReadOnlyPaths = [ litellmConfigDir ];
           ExecStart = mkForce (
