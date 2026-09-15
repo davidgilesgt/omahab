@@ -12,12 +12,14 @@
     "deploy": "wrangler deploy",
     "dev": "wrangler dev",
     "generate:vars": "node scripts/generate-vars.mjs --domain",
-    "generate:alias": "node scripts/generate-vars.mjs --alias"
+    "generate:alias": "node scripts/generate-vars.mjs --alias",
+    "knip": "knip"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "4.20250820.0",
+    "knip": "5.88.1",
     "typescript": "5.9.2",
     "vitest": "3.2.4",
-    "wrangler": "4.30.0",
-    "@cloudflare/workers-types": "4.20250820.0"
+    "wrangler": "4.30.0"
   }
 }

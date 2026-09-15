@@ -1,0 +1,1 @@
+{"$schema": "https://unpkg.com/knip@5/schema.json", "entry": ["src/index.ts!", "scripts/generate-vars.mjs", "src/**/*.test.ts"], "project": ["src/**/*.ts", "scripts/**/*.mjs"], "vitest": true, "wrangler": true}

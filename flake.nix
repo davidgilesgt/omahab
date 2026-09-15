@@ -59,7 +59,7 @@
           pname = "omahab-web";
           inherit version;
           src = ./web;
-          npmDepsHash = "sha256-5zyjKjzhJ6StbI7uP+FscGgKDC9IopIr6l0O1rxLWUY=";
+          npmDepsHash = "sha256-cDJ0QbUBwZKM79ZlIHPO8ZMR1TEUK3KcLa26QoBT1R0=";
           installPhase = ''
             runHook preInstall
             mkdir -p $out
