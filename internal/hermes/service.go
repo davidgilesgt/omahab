@@ -2,15 +2,14 @@ package hermes
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/omahab/omahab/internal/domain"
+	"github.com/omahab/omahab/internal/store"
 )
 
 const (
@@ -144,7 +143,7 @@ func (s *Service) RemoteConnectionInfo(ctx context.Context, profileID string) (*
 	}
 	now := time.Now().UTC()
 	rc = RemoteConnection{
-		ID:          newID(),
+		ID:          store.NewID(),
 		ProfileID:   profileID,
 		ServerURL:   serverURL,
 		HermesURL:   hermesURL,
@@ -238,7 +237,7 @@ func (s *Service) upsertLegacy(ctx context.Context, profileID, serverURL, hermes
 	if !errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("lookup remote connection legacy: %w", err)
 	}
-	id := newID()
+	id := store.NewID()
 	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO hermes_remote_connections (id, profile_id, server_url, hermes_url, instance_id, oidc_issuer, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, profileID, serverURL, hermesURL, instanceID, oidcIssuer, nowStr, nowStr)
@@ -273,12 +272,4 @@ func (s *Service) emit(ctx context.Context, typ, severity string, resourceID dom
 	}
 	_ = s.sink.Emit(ctx, domain.Event{Type: typ, Severity: severity, ResourceID: resourceID, Message: msg, Data: data})
 	return nil
-}
-
-func newID() string {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return fmt.Sprintf("%d", time.Now().UnixNano())
-	}
-	return hex.EncodeToString(b[:])
 }

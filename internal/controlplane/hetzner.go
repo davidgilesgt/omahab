@@ -176,7 +176,7 @@ func uploadHetznerKeyDial(ctx context.Context, stateDir, host, username, passwor
 
 	if err := sftpClient.MkdirAll(".ssh"); err != nil {
 		return fmt.Errorf("mkdir remote .ssh: %w", err)
-	 }
+	}
 	primary, err := readRemoteFile(sftpClient, ".ssh/authorized_keys")
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {

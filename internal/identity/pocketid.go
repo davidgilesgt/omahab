@@ -268,12 +268,88 @@ func (d *pocketOidcClientDetailDto) effectiveClientSecret() string {
 	}
 	return d.ClientSecretAlt
 }
-
 func (d *pocketOidcClientDetailDto) effectiveCallbacks() []string {
 	if len(d.CallbackURLs) > 0 {
 		return d.CallbackURLs
 	}
 	return d.CallbackURLsAlt
+}
+
+// Request DTOs carry exactly the fields the client produces today, including
+// the vendor spelling variants the server accepts. Unknown fields are never
+// preserved here: updates read the current object first and resend it whole.
+type pocketCreateUserRequest struct {
+	Username     string   `json:"username"`
+	Email        string   `json:"email"`
+	FirstName    string   `json:"firstName"`
+	DisplayName  string   `json:"displayName"`
+	IsAdmin      bool     `json:"isAdmin"`
+	UserGroupIDs []string `json:"userGroupIds"`
+	// Homelab trust model: no email infrastructure is hooked up, so
+	// verification mails can never arrive. The operator creates every
+	// account by hand, which is the verification. Mark verified so OIDC
+	// email_verified claims are true and downstream auto-linking works.
+	EmailVerified bool `json:"emailVerified"`
+}
+
+type pocketUpdateUserRequest struct {
+	Username    string  `json:"username"`
+	Email       *string `json:"email"`
+	FirstName   string  `json:"firstName"`
+	DisplayName string  `json:"displayName"`
+	IsAdmin     bool    `json:"isAdmin"`
+	Disabled    bool    `json:"disabled"`
+}
+
+type pocketCreateGroupRequest struct {
+	Name         string `json:"name"`
+	FriendlyName string `json:"friendlyName"`
+}
+
+type pocketSetUserGroupsRequest struct {
+	UserGroupIDs []string `json:"userGroupIds"`
+}
+
+type pocketOIDCCreateRequest struct {
+	Name string `json:"name"`
+	// Callback URL spellings accepted across pocket-id versions.
+	CallbackUrls      []string `json:"callbackUrls"`
+	CallbackURLs      []string `json:"callbackURLs"`
+	CallbackURLsSnake []string `json:"callback_urls"`
+	IsPublic          bool     `json:"isPublic"`
+	IsPublicSnake     bool     `json:"is_public"`
+	PKCEEnabled       bool     `json:"pkceEnabled"`
+	PKCEEnabledSnake  bool     `json:"pkce_enabled"`
+}
+
+type pocketOIDCNarrowCreateRequest struct {
+	Name         string   `json:"name"`
+	CallbackURLs []string `json:"callback_urls"`
+}
+
+type pocketOIDCPublicNarrowCreateRequest struct {
+	Name         string   `json:"name"`
+	CallbackURLs []string `json:"callback_urls"`
+	IsPublic     bool     `json:"isPublic"`
+	PKCEEnabled  bool     `json:"pkceEnabled"`
+}
+
+// pocketOIDCSecretResponse decodes the minted secret under any of the
+// envelope spellings the server uses.
+type pocketOIDCSecretResponse struct {
+	Secret            string `json:"secret"`
+	Value             string `json:"value"`
+	ClientSecret      string `json:"clientSecret"`
+	ClientSecretSnake string `json:"client_secret"`
+}
+
+func (r pocketOIDCSecretResponse) first() string {
+	for _, v := range []string{r.Secret, r.Value, r.ClientSecret, r.ClientSecretSnake} {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 type paginatedUsersDto struct {
@@ -445,19 +521,9 @@ func (c *PocketIDClient) CreateUser(ctx context.Context, email, name string, isA
 	if len(username) < 3 {
 		username = username + "user"
 	}
-	payload := map[string]any{
-		"username":     username,
-		"email":        email,
-		"firstName":    name,
-		"displayName":  name,
-		"isAdmin":      isAdmin,
-		"userGroupIds": groupIDs,
-		// Homelab trust model: no email infrastructure is hooked up, so
-		// verification mails can never arrive. The operator creates every
-		// account by hand (single user plus family/friends), which is the
-		// verification. Mark verified so OIDC email_verified claims are
-		// true and downstream auto-linking works (live: POST accepts it).
-		"emailVerified": true,
+	payload := pocketCreateUserRequest{
+		Username: username, Email: email, FirstName: name, DisplayName: name,
+		IsAdmin: isAdmin, UserGroupIDs: groupIDs, EmailVerified: true,
 	}
 	var created pocketUserDto
 	if err := c.doJSON(ctx, http.MethodPost, "/api/users", payload, &created); err != nil {
@@ -562,13 +628,9 @@ func (c *PocketIDClient) DisableUser(ctx context.Context, userID string, disable
 	if err := c.doJSON(ctx, http.MethodGet, "/api/users/"+url.PathEscape(userID), nil, &current); err != nil {
 		return err
 	}
-	payload := map[string]any{
-		"username":    current.Username,
-		"email":       current.Email,
-		"firstName":   current.FirstName,
-		"displayName": current.DisplayName,
-		"isAdmin":     current.IsAdmin,
-		"disabled":    disabled,
+	payload := pocketUpdateUserRequest{
+		Username: current.Username, Email: current.Email, FirstName: current.FirstName,
+		DisplayName: current.DisplayName, IsAdmin: current.IsAdmin, Disabled: disabled,
 	}
 	var updated pocketUserDto
 	return c.doJSON(ctx, http.MethodPut, "/api/users/"+url.PathEscape(userID), payload, &updated)
@@ -677,7 +739,7 @@ func (c *PocketIDClient) CreateGroup(ctx context.Context, name, friendlyName str
 	if err := c.ensureConfigured(); err != nil {
 		return Group{}, err
 	}
-	payload := map[string]any{"name": name, "friendlyName": friendlyName}
+	payload := pocketCreateGroupRequest{Name: name, FriendlyName: friendlyName}
 	var created pocketUserGroupDto
 	if err := c.doJSON(ctx, http.MethodPost, "/api/user-groups", payload, &created); err != nil {
 		return Group{}, err
@@ -772,19 +834,12 @@ func (c *PocketIDClient) SetUserGroups(ctx context.Context, userID string, group
 	if err := c.ensureConfigured(); err != nil {
 		return err
 	}
-	payload := map[string]any{"userGroupIds": groupIDs}
+	payload := pocketSetUserGroupsRequest{UserGroupIDs: groupIDs}
 	var updated pocketUserDto
 	// Pocket ID expects PUT /api/users/:id/user-groups
 	err := c.doJSON(ctx, http.MethodPut, "/api/users/"+url.PathEscape(userID)+"/user-groups", payload, &updated)
 	if err == nil {
 		return nil
-	}
-	// Fallback for case-sensitive path variant
-	if strings.Contains(err.Error(), "not found") {
-		// Try alternate path
-		payload2 := map[string]any{"userIds": groupIDs}
-		// This path is for groups->users, not users->groups, so keep original error
-		_ = payload2
 	}
 	return err
 }
@@ -890,18 +945,15 @@ func (c *PocketIDClient) EnsureOIDCClient(ctx context.Context, name string, call
 		}
 		return cid, sec, nil
 	}
-	payload := map[string]any{
-		"name":          name,
-		"callbackUrls":  callbackURLs,
-		"callbackURLs":  callbackURLs,
-		"callback_urls": callbackURLs,
+	payload := pocketOIDCCreateRequest{
+		Name: name, CallbackUrls: callbackURLs, CallbackURLs: callbackURLs, CallbackURLsSnake: callbackURLs,
 	}
 	var created pocketOidcClientDetailDto
 	err := c.doJSON(ctx, http.MethodPost, "/api/oidc/clients", payload, &created)
 	if err != nil {
 		if errors.Is(err, store.ErrValidation) {
 			var created2 pocketOidcClientDetailDto
-			if err2 := c.doJSON(ctx, http.MethodPost, "/api/oidc/clients", map[string]any{"name": name, "callback_urls": callbackURLs}, &created2); err2 == nil {
+			if err2 := c.doJSON(ctx, http.MethodPost, "/api/oidc/clients", pocketOIDCNarrowCreateRequest{Name: name, CallbackURLs: callbackURLs}, &created2); err2 == nil {
 				created = created2
 				err = nil
 			}
@@ -1001,22 +1053,16 @@ func (c *PocketIDClient) EnsureOIDCPublicClient(ctx context.Context, name string
 			return cid, nil
 		}
 	}
-	payload := map[string]any{
-		"name":          name,
-		"callbackUrls":  callbackURLs,
-		"callbackURLs":  callbackURLs,
-		"callback_urls": callbackURLs,
-		"isPublic":      true,
-		"is_public":     true,
-		"pkceEnabled":   true,
-		"pkce_enabled":  true,
+	payload := pocketOIDCCreateRequest{
+		Name: name, CallbackUrls: callbackURLs, CallbackURLs: callbackURLs, CallbackURLsSnake: callbackURLs,
+		IsPublic: true, IsPublicSnake: true, PKCEEnabled: true, PKCEEnabledSnake: true,
 	}
 	var created pocketOidcClientDetailDto
 	err := c.doJSON(ctx, http.MethodPost, "/api/oidc/clients", payload, &created)
 	if err != nil {
 		if errors.Is(err, store.ErrValidation) {
 			var created2 pocketOidcClientDetailDto
-			if err2 := c.doJSON(ctx, http.MethodPost, "/api/oidc/clients", map[string]any{"name": name, "callback_urls": callbackURLs, "isPublic": true, "pkceEnabled": true}, &created2); err2 == nil {
+			if err2 := c.doJSON(ctx, http.MethodPost, "/api/oidc/clients", pocketOIDCPublicNarrowCreateRequest{Name: name, CallbackURLs: callbackURLs, IsPublic: true, PKCEEnabled: true}, &created2); err2 == nil {
 				created = created2
 				err = nil
 			}
@@ -1044,42 +1090,22 @@ func (c *PocketIDClient) mintOIDCClientSecret(ctx context.Context, clientID stri
 		"/api/oidc/clients/" + url.PathEscape(clientID) + "/secrets",
 		"/api/oidc/clients/" + url.PathEscape(clientID) + "/secret",
 	}
-	var last error
-	for _, path := range paths {
-		var raw map[string]any
-		if err := c.doJSON(ctx, http.MethodPost, path, map[string]any{}, &raw); err != nil {
-			last = err
-			continue
+	for i, path := range paths {
+		var res pocketOIDCSecretResponse
+		if err := c.doJSON(ctx, http.MethodPost, path, struct{}{}, &res); err != nil {
+			// The alternate mint path is a version alternative: try it
+			// only when the first path does not exist.
+			if i == 0 && errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			return "", fmt.Errorf("pocket-id mint oidc client: %w", err)
 		}
-		sec := firstStringField(raw, "secret", "value", "clientSecret", "client_secret")
-		if sec != "" {
+		if sec := res.first(); sec != "" {
 			return sec, nil
 		}
-		last = fmt.Errorf("empty mint response")
+		return "", fmt.Errorf("pocket-id mint oidc client: empty mint response")
 	}
-	if last == nil {
-		last = fmt.Errorf("empty mint response")
-	}
-	return "", fmt.Errorf("pocket-id mint oidc client: %w", last)
-}
-
-func firstStringField(raw map[string]any, keys ...string) string {
-	if raw == nil {
-		return ""
-	}
-	for _, k := range keys {
-		v, ok := raw[k]
-		if !ok {
-			continue
-		}
-		s, ok := v.(string)
-		if ok {
-			if s = strings.TrimSpace(s); s != "" {
-				return s
-			}
-		}
-	}
-	return ""
+	return "", fmt.Errorf("pocket-id mint oidc client: empty mint response")
 }
 
 func (c *PocketIDClient) listOIDCClients(ctx context.Context) []pocketOidcClientDetailDto {

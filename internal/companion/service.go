@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -398,7 +399,7 @@ func (s *Service) EnrollDevice(ctx context.Context, code string) (*Device, strin
 	if err != nil {
 		// Best-effort: log but still return device/token so enrollment succeeds. Caller can surface warning.
 		// We still return creds as nil to indicate failure, but device is enrolled.
-		_ = err
+		log.Printf("companion: machine backup credentials for device %s: %v", deviceID, err)
 		return dev, token, nil, nil
 	}
 	return dev, token, creds, nil

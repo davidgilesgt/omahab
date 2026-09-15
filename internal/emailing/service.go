@@ -2,9 +2,7 @@ package emailing
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"strconv"
@@ -68,6 +66,17 @@ func WithPolicy(p Policy) Option {
 	return func(s *Service) { s.policy = p }
 }
 
+// parseRowTime parses a persisted timestamp. A corrupt value fails with the
+// row id so the bad record is identified instead of silently reading as the
+// zero timestamp or vanishing from otherwise successful results.
+func parseRowTime(value, rowID, column string) (time.Time, error) {
+	t, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parse %s for row %s: %w", column, rowID, err)
+	}
+	return t, nil
+}
+
 // New creates a Service. The store must be non-nil and migrated via Migrations().
 func New(st *store.Store, cfg Config, opts ...Option) (*Service, error) {
 	if st == nil {
@@ -87,16 +96,6 @@ func New(st *store.Store, cfg Config, opts ...Option) (*Service, error) {
 	return svc, nil
 }
 
-// NewID generates an opaque lowercase ID using crypto/rand.
-func NewID() string {
-	// Prefer store.NewID if available; fallback to local.
-	// We attempt to call store.NewID via a helper that may not exist in older store stubs,
-	// so we implement locally and keep store.NewID as optional.
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
-}
-
 // EnrollSender registers an exact sender address. The address is lowercased and
 // trimmed. Initially pending; verification is required via VerifySender after a
 // DKIM-signed test message is observed, but EnrollSender itself does not verify
@@ -106,7 +105,7 @@ func (s *Service) EnrollSender(ctx context.Context, email string) (string, error
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", ErrValidation, err)
 	}
-	id := NewID()
+	id := store.NewID()
 	now := s.cfg.now().UTC().Format(time.RFC3339Nano)
 	_, err = s.db.ExecContext(ctx, `INSERT INTO email_senders (id, email, status, created_at) VALUES (?, ?, 'pending', ?)`, id, normalized, now)
 	if err != nil {
@@ -151,10 +150,16 @@ func (s *Service) ListSenders(ctx context.Context) ([]Sender, error) {
 		if err := rows.Scan(&id, &email, &status, &createdAtStr, &verifiedAt); err != nil {
 			return nil, err
 		}
-		createdAt, _ := time.Parse(time.RFC3339Nano, createdAtStr)
+		createdAt, err := parseRowTime(createdAtStr, id, "created_at")
+		if err != nil {
+			return nil, err
+		}
 		var va *time.Time
 		if verifiedAt.Valid {
-			t, _ := time.Parse(time.RFC3339Nano, verifiedAt.String)
+			t, err := parseRowTime(verifiedAt.String, id, "verified_at")
+			if err != nil {
+				return nil, err
+			}
 			tt := t.UTC()
 			va = &tt
 		}
@@ -178,10 +183,16 @@ func (s *Service) GetSender(ctx context.Context, email string) (Sender, error) {
 		}
 		return Sender{}, err
 	}
-	createdAt, _ := time.Parse(time.RFC3339Nano, createdAtStr)
+	createdAt, err := parseRowTime(createdAtStr, id, "created_at")
+	if err != nil {
+		return Sender{}, err
+	}
 	var va *time.Time
 	if verifiedAt.Valid {
-		t, _ := time.Parse(time.RFC3339Nano, verifiedAt.String)
+		t, err := parseRowTime(verifiedAt.String, id, "verified_at")
+		if err != nil {
+			return Sender{}, err
+		}
 		tt := t.UTC()
 		va = &tt
 	}
@@ -377,7 +388,7 @@ func (s *Service) Ingest(ctx context.Context, req IngestRequest) (IngestResult, 
 	}
 
 	// 13. Success: store as received and route per explicit policy.
-	msgID := NewID()
+	msgID := store.NewID()
 	receivedAt := now.Format(time.RFC3339Nano)
 	createdAt := receivedAt
 	authStr := fmt.Sprintf("dkim=%s", dkim.Domain)
@@ -475,8 +486,8 @@ func (s *Service) quarantine(ctx context.Context, req IngestRequest, reason stri
 			}
 		}
 	}
-	msgID := NewID()
-	quarantineID := NewID()
+	msgID := store.NewID()
+	quarantineID := store.NewID()
 	receivedAt := now.Format(time.RFC3339Nano)
 	createdAt := receivedAt
 	// Use "quarantined" auth status to indicate quarantine.
@@ -532,8 +543,13 @@ func (s *Service) ListMessages(ctx context.Context, limit int) ([]QuarantinedOrR
 		if err := rows.Scan(&m.ID, &m.EnvelopeFrom, &m.HeaderFrom, &m.Recipient, &m.Subject, &m.Authentication, &m.Status, &m.RawSize, &m.DecodedSize, &receivedAt, &createdAt); err != nil {
 			return nil, err
 		}
-		m.ReceivedAt, _ = time.Parse(time.RFC3339Nano, receivedAt)
-		m.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+		var err error
+		if m.ReceivedAt, err = parseRowTime(receivedAt, m.ID, "received_at"); err != nil {
+			return nil, err
+		}
+		if m.CreatedAt, err = parseRowTime(createdAt, m.ID, "created_at"); err != nil {
+			return nil, err
+		}
 		out = append(out, m)
 	}
 	return out, rows.Err()
@@ -551,8 +567,12 @@ func (s *Service) GetMessage(ctx context.Context, id string) (QuarantinedOrRecei
 		}
 		return QuarantinedOrReceived{}, err
 	}
-	m.ReceivedAt, _ = time.Parse(time.RFC3339Nano, receivedAt)
-	m.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	if m.ReceivedAt, err = parseRowTime(receivedAt, m.ID, "received_at"); err != nil {
+		return QuarantinedOrReceived{}, err
+	}
+	if m.CreatedAt, err = parseRowTime(createdAt, m.ID, "created_at"); err != nil {
+		return QuarantinedOrReceived{}, err
+	}
 	return m, nil
 }
 
@@ -570,7 +590,10 @@ func (s *Service) ListQuarantine(ctx context.Context) ([]QuarantineView, error) 
 		if err := rows.Scan(&q.ID, &q.MessageID, &q.Reason, &createdAt, &q.HeaderFrom, &q.Subject); err != nil {
 			return nil, err
 		}
-		q.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+		var err error
+		if q.CreatedAt, err = parseRowTime(createdAt, q.ID, "created_at"); err != nil {
+			return nil, err
+		}
 		out = append(out, q)
 	}
 	return out, rows.Err()

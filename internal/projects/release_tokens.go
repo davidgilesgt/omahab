@@ -51,10 +51,43 @@ func (s *Service) ensureReleaseTokensTable(ctx context.Context) error {
 			return fmt.Errorf("ensure release tokens table: %w", err)
 		}
 	}
-	_, _ = s.db.ExecContext(ctx, `ALTER TABLE project_release_tokens ADD COLUMN last_used_at TEXT`)
-	_, _ = s.db.ExecContext(ctx, `ALTER TABLE project_release_tokens ADD COLUMN last_use TEXT`)
-	_, _ = s.db.ExecContext(ctx, `ALTER TABLE project_release_tokens ADD COLUMN token_prefix TEXT NOT NULL DEFAULT ''`)
+	for _, col := range []struct{ name, ddl string }{
+		{"last_used_at", "ADD COLUMN last_used_at TEXT"},
+		{"last_use", "ADD COLUMN last_use TEXT"},
+		{"token_prefix", "ADD COLUMN token_prefix TEXT NOT NULL DEFAULT ''"},
+	} {
+		exists, err := releaseTokenColumnExists(ctx, s.db, col.name)
+		if err != nil {
+			return fmt.Errorf("inspect release tokens table: %w", err)
+		}
+		if !exists {
+			if _, err := s.db.ExecContext(ctx, `ALTER TABLE project_release_tokens `+col.ddl); err != nil {
+				return fmt.Errorf("migrate release tokens table: %w", err)
+			}
+		}
+	}
 	return nil
+}
+
+func releaseTokenColumnExists(ctx context.Context, db *sql.DB, column string) (bool, error) {
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(project_release_tokens)`)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 func (s *Service) storeReleaseTokenHash(ctx context.Context, projectID domain.ID, token string) error {
@@ -119,7 +152,6 @@ func (s *Service) RotateReleaseToken(ctx context.Context, projectID domain.ID) (
 	}
 	return tok, nil
 }
-
 func tokenVerifyErr(msg string) error {
 	return fmt.Errorf("%w: %w: %s", ErrUnauthorized, ErrReleaseMismatch, msg)
 }
@@ -151,8 +183,9 @@ func (s *Service) VerifyReleaseToken(ctx context.Context, projectID domain.ID, t
 		return tokenVerifyErr("invalid release token")
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, _ = s.db.ExecContext(ctx, `UPDATE project_release_tokens SET last_used_at = ?, updated_at = ?, last_use = ? WHERE project_id = ?`, now, now, now, string(projectID))
-	_, _ = s.db.ExecContext(ctx, `UPDATE project_release_tokens SET last_use = ? WHERE project_id = ?`, now, string(projectID))
+	if _, err := s.db.ExecContext(ctx, `UPDATE project_release_tokens SET last_used_at = ?, updated_at = ?, last_use = ? WHERE project_id = ?`, now, now, now, string(projectID)); err != nil {
+		return fmt.Errorf("record release token use: %w", err)
+	}
 	return nil
 }
 

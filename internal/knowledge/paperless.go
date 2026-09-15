@@ -12,7 +12,10 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/omahab/omahab/internal/store"
 )
+
 // MemoryPaperlessClient is an in-memory Paperless client for testing.
 // It does not copy full archives; it stores metadata and snippets only.
 type MemoryPaperlessClient struct {
@@ -150,7 +153,7 @@ func (m *MemoryPaperlessClient) Upload(_ context.Context, filename string, conte
 	if len(content) == 0 {
 		return "", validation("content is required")
 	}
-	id := newID()
+	id := store.NewID()
 	doc := &PaperlessDocument{
 		ID:       id,
 		Title:    filename,
@@ -214,7 +217,7 @@ func (n *NoopPaperlessClient) Upload(_ context.Context, filename string, content
 	if len(content) == 0 {
 		return "", validation("content is required")
 	}
-	return newID(), nil
+	return store.NewID(), nil
 }
 
 // HTTPPaperlessClient is the production Paperless-ngx REST client. It uses
@@ -301,15 +304,15 @@ func mapPaperlessError(resp *http.Response, body []byte) error {
 
 // paperlessDocRaw is a flexible view for search results.
 type paperlessDocRaw struct {
-	ID             any    `json:"id"`
-	Title          string `json:"title"`
-	Correspondent  any    `json:"correspondent"`
-	DocumentType   any    `json:"document_type"`
-	Tags           []any  `json:"tags"`
-	Content        string `json:"content"`
-	Created        string `json:"created"`
-	Added          string `json:"added"`
-	Modified       string `json:"modified"`
+	ID            any    `json:"id"`
+	Title         string `json:"title"`
+	Correspondent any    `json:"correspondent"`
+	DocumentType  any    `json:"document_type"`
+	Tags          []any  `json:"tags"`
+	Content       string `json:"content"`
+	Created       string `json:"created"`
+	Added         string `json:"added"`
+	Modified      string `json:"modified"`
 }
 
 func toStringID(v any) string {
@@ -634,7 +637,7 @@ func (c *HTTPPaperlessClient) Upload(ctx context.Context, filename string, conte
 	if err := json.Unmarshal(body, &idStr); err == nil {
 		return idStr, nil
 	}
-	return newID(), nil
+	return store.NewID(), nil
 }
 
 func (c *HTTPPaperlessClient) AddTag(ctx context.Context, docID, tag string) error {

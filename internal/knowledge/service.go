@@ -2,9 +2,7 @@ package knowledge
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -69,7 +67,7 @@ func (s *Service) RegisterSource(ctx context.Context, kind, name, baseURL string
 	if len(baseURL) > 2048 {
 		return nil, validation("base_url too long")
 	}
-	id := newID()
+	id := store.NewID()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO knowledge_sources (id, kind, name, base_url, health, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -84,7 +82,7 @@ func (s *Service) RegisterSource(ctx context.Context, kind, name, baseURL string
 	src := &Source{ID: id, Kind: kind, Name: name, BaseURL: baseURL, Health: string(domain.HealthUnknown)}
 	src.CreatedAt, _ = time.Parse(time.RFC3339Nano, now)
 	src.UpdatedAt = src.CreatedAt
-	_ = s.sink.Emit(ctx, domain.Event{ID: domain.ID(newID()), Type: "knowledge.source.registered", Severity: "info", ResourceID: domain.ID(id), Message: "knowledge source registered", Data: map[string]any{"kind": kind, "name": name}, CreatedAt: time.Now().UTC()})
+	_ = s.sink.Emit(ctx, domain.Event{ID: domain.ID(store.NewID()), Type: "knowledge.source.registered", Severity: "info", ResourceID: domain.ID(id), Message: "knowledge source registered", Data: map[string]any{"kind": kind, "name": name}, CreatedAt: time.Now().UTC()})
 	return src, nil
 }
 
@@ -177,7 +175,7 @@ func (s *Service) grantAccess(ctx context.Context, sourceID, principal, perm str
 	if _, err := s.GetSource(ctx, sourceID); err != nil {
 		return err
 	}
-	id := newID()
+	id := store.NewID()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO knowledge_source_permissions (id, source_id, principal, permission, granted_at) VALUES (?, ?, ?, ?, ?)`,
@@ -190,7 +188,7 @@ func (s *Service) grantAccess(ctx context.Context, sourceID, principal, perm str
 		}
 		return fmt.Errorf("grant access: %w", err)
 	}
-	_ = s.sink.Emit(ctx, domain.Event{ID: domain.ID(newID()), Type: "knowledge.permission.granted", Severity: "info", ResourceID: domain.ID(sourceID), Message: "source permission granted", Data: map[string]any{"principal": principal}, CreatedAt: time.Now().UTC()})
+	_ = s.sink.Emit(ctx, domain.Event{ID: domain.ID(store.NewID()), Type: "knowledge.permission.granted", Severity: "info", ResourceID: domain.ID(sourceID), Message: "source permission granted", Data: map[string]any{"principal": principal}, CreatedAt: time.Now().UTC()})
 	return nil
 }
 
@@ -212,7 +210,7 @@ func (s *Service) RevokeAccess(ctx context.Context, sourceID, principal string) 
 	if n == 0 {
 		return notFoundf("permission for %s on %s not found", principal, sourceID)
 	}
-	_ = s.sink.Emit(ctx, domain.Event{ID: domain.ID(newID()), Type: "knowledge.permission.revoked", Severity: "info", ResourceID: domain.ID(sourceID), Message: "source permission revoked", Data: map[string]any{"principal": principal}, CreatedAt: time.Now().UTC()})
+	_ = s.sink.Emit(ctx, domain.Event{ID: domain.ID(store.NewID()), Type: "knowledge.permission.revoked", Severity: "info", ResourceID: domain.ID(sourceID), Message: "source permission revoked", Data: map[string]any{"principal": principal}, CreatedAt: time.Now().UTC()})
 	return nil
 }
 
@@ -589,7 +587,7 @@ func (s *Service) RecordConsent(ctx context.Context, principal, provider, scope 
 	if len(provider) > 256 {
 		return nil, validation("provider too long")
 	}
-	id := newID()
+	id := store.NewID()
 	now := time.Now().UTC()
 	nowStr := now.Format(time.RFC3339Nano)
 	_, err := s.db.ExecContext(ctx,
@@ -604,7 +602,7 @@ func (s *Service) RecordConsent(ctx context.Context, principal, provider, scope 
 		return nil, fmt.Errorf("record consent: %w", err)
 	}
 	c := &Consent{ID: id, Principal: principal, Provider: provider, Scope: scope, Granted: true, GrantedAt: now, CreatedAt: now, UpdatedAt: now}
-	_ = s.sink.Emit(ctx, domain.Event{ID: domain.ID(newID()), Type: "knowledge.consent.granted", Severity: "info", ResourceID: domain.ID(id), Message: "summarization consent recorded", Data: map[string]any{"principal": principal, "provider": provider, "scope": scope}, CreatedAt: now})
+	_ = s.sink.Emit(ctx, domain.Event{ID: domain.ID(store.NewID()), Type: "knowledge.consent.granted", Severity: "info", ResourceID: domain.ID(id), Message: "summarization consent recorded", Data: map[string]any{"principal": principal, "provider": provider, "scope": scope}, CreatedAt: now})
 	return c, nil
 }
 
@@ -681,7 +679,7 @@ func (s *Service) RevokeConsent(ctx context.Context, consentID string) error {
 	if n == 0 {
 		return notFoundf("consent %s not found", consentID)
 	}
-	_ = s.sink.Emit(ctx, domain.Event{ID: domain.ID(newID()), Type: "knowledge.consent.revoked", Severity: "info", ResourceID: domain.ID(consentID), Message: "consent revoked", CreatedAt: time.Now().UTC()})
+	_ = s.sink.Emit(ctx, domain.Event{ID: domain.ID(store.NewID()), Type: "knowledge.consent.revoked", Severity: "info", ResourceID: domain.ID(consentID), Message: "consent revoked", CreatedAt: time.Now().UTC()})
 	return nil
 }
 
@@ -786,7 +784,7 @@ func (s *Service) SetSummarizationConsent(ctx context.Context, principal, provid
 	if granted {
 		now := time.Now().UTC()
 		nowStr := now.Format(time.RFC3339Nano)
-		id := newID()
+		id := store.NewID()
 		_, err := s.db.ExecContext(ctx,
 			`INSERT INTO knowledge_consents (id, principal, provider, scope, granted, granted_at, revoked_at, created_at, updated_at)
 			 VALUES (?, ?, ?, 'summarization', 1, ?, NULL, ?, ?)
@@ -962,12 +960,6 @@ func firstN(s string, n int) string {
 		return s
 	}
 	return string(r[:n])
-}
-
-func newID() string {
-	var b [16]byte
-	_, _ = rand.Read(b[:])
-	return hex.EncodeToString(b[:])
 }
 
 func isUniqueViolation(err error) bool {

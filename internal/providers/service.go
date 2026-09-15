@@ -70,9 +70,6 @@ const (
 	ManagedByLiteLLM = "litellm"
 )
 
-// Alias for compatibility with differing capitalization expectations.
-const ManagedByLitellm = ManagedByLiteLLM
-
 // ExternalRef values for provider_credentials.external_ref (litellm-managed).
 const (
 	ExternalRefChatGPT = "chatgpt"

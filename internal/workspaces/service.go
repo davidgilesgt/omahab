@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
 	"regexp"
 	"strings"
@@ -377,8 +378,10 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*domain.Workspace
 		if err := s.runner.Up(ctx, id, in.ProjectID, branch, agent, RunnerOpts{DevcontainerSource: devcontainerSource}); err != nil {
 			return s.rollbackCreate(ctx, id, "", "", fmt.Errorf("runner up: %w", err))
 		}
-		_, _ = s.db.ExecContext(ctx, `UPDATE workspaces SET status = ?, updated_at = ? WHERE id = ?`,
-			StatusRunning, now.Format(time.RFC3339Nano), id)
+		if _, err := s.db.ExecContext(ctx, `UPDATE workspaces SET status = ?, updated_at = ? WHERE id = ?`,
+			StatusRunning, now.Format(time.RFC3339Nano), id); err != nil {
+			return nil, fmt.Errorf("mark workspace running: %w", err)
+		}
 		ws.Status = StatusRunning
 		return ws, nil
 	}
@@ -607,8 +610,10 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*domain.Workspace
 	}
 
 	// Mark running on success
-	_, _ = s.db.ExecContext(ctx, `UPDATE workspaces SET status = ?, updated_at = ? WHERE id = ?`,
-		StatusRunning, now.Format(time.RFC3339Nano), id)
+	if _, err := s.db.ExecContext(ctx, `UPDATE workspaces SET status = ?, updated_at = ? WHERE id = ?`,
+		StatusRunning, now.Format(time.RFC3339Nano), id); err != nil {
+		return nil, fmt.Errorf("mark workspace running: %w", err)
+	}
 	ws.Status = StatusRunning
 
 	return ws, nil
@@ -751,7 +756,9 @@ func (s *Service) Attach(ctx context.Context, id string) error {
 		return fmt.Errorf("runner attach: %w", err)
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, _ = s.db.ExecContext(ctx, `UPDATE workspaces SET last_active_at = ?, updated_at = ? WHERE id = ?`, now, now, id)
+	if _, err := s.db.ExecContext(ctx, `UPDATE workspaces SET last_active_at = ?, updated_at = ? WHERE id = ?`, now, now, id); err != nil {
+		log.Printf("workspaces: refresh last_active_at for %s: %v", id, err)
+	}
 	return nil
 }
 
@@ -787,7 +794,9 @@ func (s *Service) Send(ctx context.Context, id string, message string) error {
 		return fmt.Errorf("runner send: %w", err)
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, _ = s.db.ExecContext(ctx, `UPDATE workspaces SET last_active_at = ?, updated_at = ? WHERE id = ?`, now, now, id)
+	if _, err := s.db.ExecContext(ctx, `UPDATE workspaces SET last_active_at = ?, updated_at = ? WHERE id = ?`, now, now, id); err != nil {
+		log.Printf("workspaces: refresh last_active_at for %s: %v", id, err)
+	}
 	return nil
 }
 
@@ -809,7 +818,9 @@ func (s *Service) RunPrint(ctx context.Context, id string, prompt string) ([]byt
 		return nil, fmt.Errorf("runner runprint: %w", err)
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, _ = s.db.ExecContext(ctx, `UPDATE workspaces SET last_active_at = ?, updated_at = ? WHERE id = ?`, now, now, id)
+	if _, err := s.db.ExecContext(ctx, `UPDATE workspaces SET last_active_at = ?, updated_at = ? WHERE id = ?`, now, now, id); err != nil {
+		log.Printf("workspaces: refresh last_active_at for %s: %v", id, err)
+	}
 	return out, nil
 }
 

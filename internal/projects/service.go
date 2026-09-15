@@ -140,7 +140,7 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (*Project, error) 
 	now := fmtTimeNow()
 	proj := &Project{
 		Project: domain.Project{
-			ID:            newID(),
+			ID:            domain.ID(store.NewID()),
 			Slug:          slug,
 			Name:          name,
 			RepositoryURL: repoURL,

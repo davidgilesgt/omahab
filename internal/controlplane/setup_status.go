@@ -12,7 +12,6 @@ import (
 	"github.com/omahab/omahab/internal/apps"
 	"github.com/omahab/omahab/internal/domain"
 	"github.com/omahab/omahab/internal/health"
-	"github.com/omahab/omahab/internal/store"
 )
 
 // GetSetupStatus derives the first-run setup checklist live from instance,
@@ -734,7 +733,3 @@ func (b *Backend) unreadCloudflareDNSFailure(ctx context.Context) (string, bool)
 	return "Cloudflare DNS token was rejected or lacks DNS permissions", true
 }
 
-// Ensure GetSetupStatus satisfies apitypes.Backend at compile time.
-// This is verified via var _ apitypes.Backend = (*Backend)(nil) in backend.go.
-
-var _ = store.ErrNotFound // avoid unused import if needed

@@ -662,10 +662,12 @@ func (d *Daemon) dispatchSocket(req SocketRequest) SocketResponse {
 			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: "not connected to server"}}
 		}
 		// Read local Syncthing device ID + API key
-		apiKey := syncthingAPIKey()
+		apiKey, err := syncthingAPIKey()
+		if err != nil {
+			return SocketResponse{ID: req.ID, Error: &SocketError{Code: "internal", Message: fmt.Sprintf("syncthing configuration: %v", err)}}
+		}
 		deviceID, err := syncthingDeviceID(apiKey)
 		if err != nil || strings.TrimSpace(deviceID) == "" {
-			// If Syncthing not running, still try server creation with empty device ID? Better fail with internal.
 			// Attempt to provide helpful error.
 			msg := "syncthing not available locally (is Syncthing running at 127.0.0.1:8384?)"
 			if err != nil {
@@ -1031,7 +1033,10 @@ func (d *Daemon) serverHost() string {
 
 // syncthingAPIKey reads the Syncthing API key from ~/.config/syncthing/config.xml
 // It looks for apikey="..." attribute or <apikey> element.
-func syncthingAPIKey() string {
+// Absent files and keyless configs yield ("", nil): no key is configured.
+// A present but malformed config yields ("", err) so the caller reports the
+// error instead of silently proceeding without a key.
+func syncthingAPIKey() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		home = os.Getenv("HOME")
@@ -1048,6 +1053,7 @@ func syncthingAPIKey() string {
 	if dir := os.Getenv("XDG_STATE_HOME"); strings.TrimSpace(dir) != "" {
 		candidates = append(candidates, filepath.Join(strings.TrimSpace(dir), "syncthing", "config.xml"))
 	}
+	var malformed error
 	for _, path := range candidates {
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -1060,7 +1066,7 @@ func syncthingAPIKey() string {
 			if end := strings.Index(content[start:], "\""); end != -1 {
 				key := strings.TrimSpace(content[start : start+end])
 				if key != "" {
-					return key
+					return key, nil
 				}
 			}
 		}
@@ -1070,7 +1076,7 @@ func syncthingAPIKey() string {
 			if end := strings.Index(content[start:], "</apikey>"); end != -1 {
 				key := strings.TrimSpace(content[start : start+end])
 				if key != "" {
-					return key
+					return key, nil
 				}
 			}
 		}
@@ -1082,11 +1088,17 @@ func syncthingAPIKey() string {
 			GUI gui `xml:"gui"`
 		}
 		var c cfg
-		if err := xml.Unmarshal(data, &c); err == nil && strings.TrimSpace(c.GUI.APIKey) != "" {
-			return strings.TrimSpace(c.GUI.APIKey)
+		if err := xml.Unmarshal(data, &c); err != nil {
+			if malformed == nil {
+				malformed = fmt.Errorf("parse syncthing config %s: %w", path, err)
+			}
+			continue
+		}
+		if key := strings.TrimSpace(c.GUI.APIKey); key != "" {
+			return key, nil
 		}
 	}
-	return ""
+	return "", malformed
 }
 
 // syncthingDeviceID fetches the local Syncthing device ID via REST.

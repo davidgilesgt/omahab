@@ -12,14 +12,12 @@ import (
 	"os/exec"
 	"os/user"
 	"path"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/omahab/omahab/internal/health"
-	"github.com/omahab/omahab/internal/store"
 )
 
 // forgejoBaseURL returns the Forgejo base URL for API calls.
@@ -540,11 +538,7 @@ func (b *Backend) ensureForgejoOrgTeams(ctx context.Context, baseURL, token stri
 	if err != nil {
 		if status == http.StatusNotFound {
 			// Create org
-			payload := map[string]any{
-				"username":    "omahab",
-				"visibility":  "private",
-				"description": "Omahab organization",
-			}
+			payload := forgejoCreateOrgRequest{Username: "omahab", Visibility: "private", Description: "Omahab organization"}
 			var created map[string]any
 			if _, cerr := b.forgejoAPIRequest(ctx, baseURL, token, http.MethodPost, "/api/v1/orgs", payload, &created); cerr != nil {
 				return fmt.Errorf("create org omahab: %w", redactForgejoError(cerr))
@@ -560,13 +554,12 @@ func (b *Backend) ensureForgejoOrgTeams(ctx context.Context, baseURL, token stri
 	if err != nil && status != http.StatusNotFound {
 		return fmt.Errorf("list teams: %w", redactForgejoError(err))
 	}
-	// Build map name -> team
-	teamByName := map[string]map[string]any{}
+	// Build map name -> team through the single spelling-tolerant decoder.
+	teamByName := map[string]forgejoTeam{}
 	for _, t := range teams {
-		if n, ok := t["name"].(string); ok {
-			teamByName[strings.ToLower(strings.TrimSpace(n))] = t
-		} else if n, ok := t["Name"].(string); ok {
-			teamByName[strings.ToLower(strings.TrimSpace(n))] = t
+		team := decodeForgejoTeam(t)
+		if team.Name != "" {
+			teamByName[strings.ToLower(strings.TrimSpace(team.Name))] = team
 		}
 	}
 	desired := []struct {
@@ -585,51 +578,28 @@ func (b *Backend) ensureForgejoOrgTeams(ctx context.Context, baseURL, token stri
 			unitsMap[u] = d.permission
 		}
 		if existing, ok := teamByName[strings.ToLower(d.name)]; ok {
-			// Check permission and includes_all_repositories
-			perm := ""
-			if p, ok := existing["permission"].(string); ok {
-				perm = p
-			} else if p, ok := existing["Permission"].(string); ok {
-				perm = p
-			}
-			includesAll := false
-			if v, ok := existing["includes_all_repositories"].(bool); ok {
-				includesAll = v
-			} else if v, ok := existing["includesAllRepositories"].(bool); ok {
-				includesAll = v
-			}
-			if strings.EqualFold(perm, d.permission) && includesAll {
+			if strings.EqualFold(existing.Permission, d.permission) && existing.IncludesAllRepositories {
 				continue
 			}
 			// Need to update
-			id := extractTeamID(existing)
-			if id == 0 {
+			if existing.ID == 0 {
 				continue
 			}
-			payload := map[string]any{
-				"name":                      d.name,
-				"permission":                d.permission,
-				"includes_all_repositories": true,
-				"can_create_org_repo":       false,
-				"units_map":                 unitsMap,
+			payload := forgejoUpdateTeamRequest{
+				Name: d.name, Permission: d.permission, IncludesAllRepositories: true,
+				CanCreateOrgRepo: false, UnitsMap: unitsMap,
 			}
-			patchPath := fmt.Sprintf("/api/v1/teams/%d", id)
+			patchPath := fmt.Sprintf("/api/v1/teams/%d", existing.ID)
 			if _, perr := b.forgejoAPIRequest(ctx, baseURL, token, http.MethodPatch, patchPath, payload, nil); perr != nil {
-				// Try PUT as fallback
-				if _, perr2 := b.forgejoAPIRequest(ctx, baseURL, token, http.MethodPut, patchPath, payload, nil); perr2 != nil {
-					return fmt.Errorf("update team %s: %w", d.name, redactForgejoError(perr))
-				}
+				return fmt.Errorf("update team %s: %w", d.name, redactForgejoError(perr))
 			}
 			continue
 		}
 		// Create team (verified shape against Forgejo 15: no bare permission
 		// key, level carried by units_map).
-		payload := map[string]any{
-			"name":                      d.name,
-			"description":               fmt.Sprintf("Omahab %s", d.name),
-			"can_create_org_repo":       false,
-			"includes_all_repositories": true,
-			"units_map":                 unitsMap,
+		payload := forgejoCreateTeamRequest{
+			Name: d.name, Description: fmt.Sprintf("Omahab %s", d.name),
+			CanCreateOrgRepo: false, IncludesAllRepositories: true, UnitsMap: unitsMap,
 		}
 		var created map[string]any
 		if _, cerr := b.forgejoAPIRequest(ctx, baseURL, token, http.MethodPost, teamsPath, payload, &created); cerr != nil {
@@ -641,34 +611,6 @@ func (b *Backend) ensureForgejoOrgTeams(ctx context.Context, baseURL, token stri
 		}
 	}
 	return nil
-}
-
-func extractTeamID(m map[string]any) int64 {
-	if v, ok := m["id"]; ok {
-		switch vv := v.(type) {
-		case float64:
-			return int64(vv)
-		case int64:
-			return vv
-		case int:
-			return int64(vv)
-		case string:
-			if i, err := strconv.ParseInt(vv, 10, 64); err == nil {
-				return i
-			}
-		}
-	}
-	if v, ok := m["ID"]; ok {
-		switch vv := v.(type) {
-		case float64:
-			return int64(vv)
-		case int64:
-			return vv
-		case int:
-			return int64(vv)
-		}
-	}
-	return 0
 }
 
 func parseAuthSourceID(output, name string) string {
@@ -845,6 +787,93 @@ func (d *oauthAppDTO) effectiveRedirectURIs() []string {
 	return nil
 }
 
+// forgejoTeam is the team view consumed from the Forgejo teams API.
+type forgejoTeam struct {
+	ID                      int64
+	Name                    string
+	Permission              string
+	IncludesAllRepositories bool
+}
+
+// decodeForgejoTeam is the single boundary decoder for team objects. It
+// accepts both snake_case and camelCase spellings the API has used; numbers
+// arrive as JSON floats.
+func decodeForgejoTeam(m map[string]any) forgejoTeam {
+	var t forgejoTeam
+	t.ID = forgejoTeamID(m)
+	if s, ok := m["name"].(string); ok {
+		t.Name = s
+	} else if s, ok := m["Name"].(string); ok {
+		t.Name = s
+	}
+	if s, ok := m["permission"].(string); ok {
+		t.Permission = s
+	} else if s, ok := m["Permission"].(string); ok {
+		t.Permission = s
+	}
+	if v, ok := m["includes_all_repositories"].(bool); ok {
+		t.IncludesAllRepositories = v
+	} else if v, ok := m["includesAllRepositories"].(bool); ok {
+		t.IncludesAllRepositories = v
+	}
+	return t
+}
+
+func forgejoTeamID(m map[string]any) int64 {
+	for _, key := range []string{"id", "ID"} {
+		switch v := m[key].(type) {
+		case float64:
+			return int64(v)
+		case int64:
+			return v
+		case int:
+			return int64(v)
+		case string:
+			if i, err := strconv.ParseInt(v, 10, 64); err == nil {
+				return i
+			}
+		}
+	}
+	return 0
+}
+
+// forgejoCreateOrgRequest creates the omahab organization.
+type forgejoCreateOrgRequest struct {
+	Username    string `json:"username"`
+	Visibility  string `json:"visibility"`
+	Description string `json:"description"`
+}
+
+// forgejoCreateTeamRequest creates a team. Forgejo 15 derives the team
+// permission from units_map; no bare permission key is sent.
+type forgejoCreateTeamRequest struct {
+	Name                    string            `json:"name"`
+	Description             string            `json:"description"`
+	CanCreateOrgRepo        bool              `json:"can_create_org_repo"`
+	IncludesAllRepositories bool              `json:"includes_all_repositories"`
+	UnitsMap                map[string]string `json:"units_map"`
+}
+
+// forgejoUpdateTeamRequest updates a team in place.
+type forgejoUpdateTeamRequest struct {
+	Name                    string            `json:"name"`
+	Permission              string            `json:"permission"`
+	IncludesAllRepositories bool              `json:"includes_all_repositories"`
+	CanCreateOrgRepo        bool              `json:"can_create_org_repo"`
+	UnitsMap                map[string]string `json:"units_map"`
+}
+
+// forgejoOAuthAppRequest creates or updates the Woodpecker OAuth2 application.
+// Both redirect URI spellings are sent; the server applies the ones it
+// knows. confidential_client is always sent: the update handler applies it
+// unconditionally, so omission would flip a confidential app to public.
+type forgejoOAuthAppRequest struct {
+	Name               string   `json:"name"`
+	RedirectURIs       []string `json:"redirect_uris"`
+	RedirectURIsAlt    []string `json:"redirectUris"`
+	ConfidentialClient bool     `json:"confidential_client"`
+}
+
 // ensureWoodpeckerOAuthApp ensures the Woodpecker OAuth2 application exists in Forgejo.
 func (b *Backend) ensureWoodpeckerOAuthApp(ctx context.Context, baseURL, token, domain string) (string, string, error) {
 	redirect := fmt.Sprintf("https://ci.%s/authorize", strings.TrimSpace(domain))
@@ -898,22 +927,14 @@ func (b *Backend) ensureWoodpeckerOAuthApp(ctx context.Context, baseURL, token, 
 		// confidential_client: the field defaults to false (public) when
 		// omitted, and the update handler applies it unconditionally, so an
 		// omission would flip a confidential app back to public.
-		payload := map[string]any{
-			"name":                "Woodpecker",
-			"redirect_uris":       []string{redirect},
-			"confidential_client": true,
+		payload := forgejoOAuthAppRequest{
+			Name: "Woodpecker", RedirectURIs: []string{redirect},
+			RedirectURIsAlt: []string{redirect}, ConfidentialClient: true,
 		}
-		// Include alternative key for compatibility
-		payload["redirectUris"] = []string{redirect}
 		var updated oauthAppDTO
 		patchPath := fmt.Sprintf("/api/v1/user/applications/oauth2/%d", existing.ID)
-		_, perr := b.forgejoAPIRequest(ctx, baseURL, token, http.MethodPatch, patchPath, payload, &updated)
-		if perr != nil {
-			// Fallback to PUT
-			_, perr = b.forgejoAPIRequest(ctx, baseURL, token, http.MethodPut, patchPath, payload, &updated)
-			if perr != nil {
-				return "", "", fmt.Errorf("patch woodpecker oauth: %w", redactForgejoError(perr))
-			}
+		if _, perr := b.forgejoAPIRequest(ctx, baseURL, token, http.MethodPatch, patchPath, payload, &updated); perr != nil {
+			return "", "", fmt.Errorf("patch woodpecker oauth: %w", redactForgejoError(perr))
 		}
 		cid2 := updated.effectiveClientID()
 		sec2 := updated.effectiveClientSecret()
@@ -954,12 +975,10 @@ func (b *Backend) ensureWoodpeckerOAuthApp(ctx context.Context, baseURL, token, 
 	// omitted, which breaks Woodpecker's secret-based exchange (PKCE
 	// required for public clients). Woodpecker has no PKCE support, so it
 	// must be a confidential client.
-	payload := map[string]any{
-		"name":                "Woodpecker",
-		"redirect_uris":       []string{redirect},
-		"confidential_client": true,
+	payload := forgejoOAuthAppRequest{
+		Name: "Woodpecker", RedirectURIs: []string{redirect},
+		RedirectURIsAlt: []string{redirect}, ConfidentialClient: true,
 	}
-	payload["redirectUris"] = []string{redirect}
 	var created oauthAppDTO
 	if _, cerr := b.forgejoAPIRequest(ctx, baseURL, token, http.MethodPost, listPath, payload, &created); cerr != nil {
 		return "", "", fmt.Errorf("create woodpecker oauth: %w", redactForgejoError(cerr))
@@ -996,7 +1015,6 @@ func (b *Backend) ensureWoodpeckerOAuthApp(ctx context.Context, baseURL, token, 
 
 // forgejoHTTPClientOverride and forgejoBaseURLOverride are test injectables.
 // They are set via Backend fields for tests.
-var _ = store.ErrNotFound
 
 // ensureHermesForgejoToken creates a limited Forgejo token for the Hermes MCP
 // server (platform-app/hermes_forgejo_token) with scopes
@@ -1088,6 +1106,3 @@ func (b *Backend) ensureHermesForgejoToken(ctx context.Context, domain string) e
 	}
 	return nil
 }
-
-var _ = filepath.Join
-var _ = health.RedactDetail

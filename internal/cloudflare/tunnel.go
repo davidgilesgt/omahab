@@ -11,7 +11,6 @@ import (
 	"time"
 
 	cloudflare "github.com/cloudflare/cloudflare-go/v2"
-	"github.com/cloudflare/cloudflare-go/v2/option"
 	"github.com/omahab/omahab/internal/exposure"
 	"github.com/omahab/omahab/internal/store"
 )
@@ -373,5 +372,3 @@ func NewTunnelCreator(accountID, token string, httpClient *http.Client, baseURL 
 	return newTunnelClient(c, accountID, "")
 }
 
-// Ensure tunnelCreator uses option import to avoid unused.
-var _ = option.WithAPIToken

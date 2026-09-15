@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/omahab/omahab/internal/domain"
+	"github.com/omahab/omahab/internal/store"
 )
 
 const (
@@ -20,7 +21,7 @@ func (s *Service) emit(ctx context.Context, typ, severity string, resource domai
 		return
 	}
 	evt := domain.Event{
-		ID:         newID(),
+		ID:         domain.ID(store.NewID()),
 		Type:       typ,
 		Severity:   severity,
 		ResourceID: resource,
@@ -38,23 +39,26 @@ func (s *Service) emit(ctx context.Context, typ, severity string, resource domai
 // per stage to stdout; the control plane consumes it via IngestOnceEvent.
 //
 // Contract (upstreamable, versioned):
-//   {
-//     "event_type": "deploy_started" | "deploy_completed" | "deploy_failed" | "health_probe",
-//     "timestamp": "2026-08-21T12:34:56.123456789Z" (RFC3339Nano, optional defaults to now),
-//     "project_id": "opaque-id" (optional if slug supplied),
-//     "slug": "blog" (project slug, optional if project_id supplied),
-//     "commit": "abc123" (optional),
-//     "digest": "sha256:..." (optional, required for deploy_completed),
-//     "version": "v1.2.3" (optional runner version),
-//     "healthy": true|false (for health_probe),
-//     "error": "reason" (for deploy_failed)
-//   }
+//
+//	{
+//	  "event_type": "deploy_started" | "deploy_completed" | "deploy_failed" | "health_probe",
+//	  "timestamp": "2026-08-21T12:34:56.123456789Z" (RFC3339Nano, optional defaults to now),
+//	  "project_id": "opaque-id" (optional if slug supplied),
+//	  "slug": "blog" (project slug, optional if project_id supplied),
+//	  "commit": "abc123" (optional),
+//	  "digest": "sha256:..." (optional, required for deploy_completed),
+//	  "version": "v1.2.3" (optional runner version),
+//	  "healthy": true|false (for health_probe),
+//	  "error": "reason" (for deploy_failed)
+//	}
+//
 // Unknown fields are preserved in Raw for forward compatibility.
 // Example invocation:
-//   omahab-once deploy --app blog --image ... --json
-//   -> {"event_type":"deploy_started","timestamp":"...","slug":"blog",...}
-//   omahab-once --json health --app blog
-//   -> {"event_type":"health_probe","healthy":true}
+//
+//	omahab-once deploy --app blog --image ... --json
+//	-> {"event_type":"deploy_started","timestamp":"...","slug":"blog",...}
+//	omahab-once --json health --app blog
+//	-> {"event_type":"health_probe","healthy":true}
 type OnceLifecycleEvent struct {
 	EventType string          `json:"event_type"`
 	Timestamp time.Time       `json:"timestamp"`
@@ -206,7 +210,7 @@ func (s *Service) IngestOnceEvent(ctx context.Context, raw []byte) error {
 	}
 	// Use evt.Timestamp as CreatedAt for the domain event to preserve upstream timing
 	domainEvt := domain.Event{
-		ID:         newID(),
+		ID:         domain.ID(store.NewID()),
 		Type:       domType,
 		Severity:   severity,
 		ResourceID: projectID,
@@ -228,4 +232,3 @@ func (s *Service) IngestOnceEvents(ctx context.Context, raws [][]byte) []error {
 	}
 	return errs
 }
-

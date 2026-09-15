@@ -649,5 +649,3 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%dd", int(d.Hours()/24))
 }
 
-// Ensure import of store for NewID usage; reference to avoid unused import if needed.
-var _ = store.NewID

@@ -1,25 +1,13 @@
 package projects
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"net/url"
 	"regexp"
 	"strings"
 	"time"
-
-	"github.com/omahab/omahab/internal/domain"
 )
 
 const timeFormat = "2006-01-02T15:04:05.000000000Z07:00"
-
-func newID() domain.ID {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		panic("projects: crypto/rand unavailable: " + err.Error())
-	}
-	return domain.ID(hex.EncodeToString(b[:]))
-}
 
 func formatTime(t time.Time) string {
 	return t.UTC().Format(timeFormat)
@@ -82,6 +70,7 @@ var (
 	hexPattern      = regexp.MustCompile(`^[0-9a-f]+$`)
 	deriveSlugRe    = regexp.MustCompile(`[^a-z0-9]+`)
 )
+
 func validateSlug(s string) (string, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {

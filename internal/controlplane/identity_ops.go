@@ -48,7 +48,9 @@ func (b *Backend) ListUsers(ctx context.Context, p apitypes.Pagination) ([]domai
 			return nil, translateError(scanErr)
 		}
 		var groups []string
-		_ = json.Unmarshal([]byte(groupsJSON), &groups)
+		if err := json.Unmarshal([]byte(groupsJSON), &groups); err != nil {
+			return nil, fmt.Errorf("decode groups for user %s: %w", id, err)
+		}
 		if groups == nil {
 			groups = []string{}
 		}
@@ -87,7 +89,9 @@ func (b *Backend) GetUser(ctx context.Context, id domain.ID) (domain.User, error
 		}
 	}
 	var groups []string
-	_ = json.Unmarshal([]byte(groupsJSON), &groups)
+	if err := json.Unmarshal([]byte(groupsJSON), &groups); err != nil {
+		return domain.User{}, fmt.Errorf("decode groups for user %s: %w", id, err)
+	}
 	if groups == nil {
 		groups = []string{}
 	}

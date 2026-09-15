@@ -2,9 +2,7 @@ package syncer
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -14,6 +12,7 @@ import (
 	"time"
 
 	"github.com/omahab/omahab/internal/domain"
+	"github.com/omahab/omahab/internal/store"
 )
 
 // Sentinel errors for API callers.
@@ -219,7 +218,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*domain.SyncFolde
 		return nil, ErrGitRejected
 	}
 
-	id := newID()
+	id := store.NewID()
 	now := time.Now().UTC()
 
 	_, err = s.db.ExecContext(ctx,
@@ -246,7 +245,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*domain.SyncFolde
 
 	if in.ShareWithAI {
 		if err := s.registrar.Register(ctx, id, serverPath); err != nil {
-			_ = err
+			s.warnRegistrar(ctx, id, "register", err)
 		}
 	}
 
@@ -325,9 +324,13 @@ func (s *Service) Update(ctx context.Context, id string, in UpdateInput) (*domai
 
 	// Handle Share-with-AI registration transitions.
 	if !existing.ShareWithAI && shareWithAI {
-		_ = s.registrar.Register(ctx, id, existing.ServerPath)
+		if err := s.registrar.Register(ctx, id, existing.ServerPath); err != nil {
+			s.warnRegistrar(ctx, id, "register", err)
+		}
 	} else if existing.ShareWithAI && !shareWithAI {
-		_ = s.registrar.Unregister(ctx, id)
+		if err := s.registrar.Unregister(ctx, id); err != nil {
+			s.warnRegistrar(ctx, id, "unregister", err)
+		}
 	}
 
 	existing.Name = name
@@ -365,7 +368,7 @@ func (s *Service) EnrollDevice(ctx context.Context, folderID, deviceID, deviceNa
 	if _, err := s.Get(ctx, folderID); err != nil {
 		return nil, err
 	}
-	id := newID()
+	id := store.NewID()
 	now := time.Now().UTC()
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO sync_devices (id, folder_id, device_id, device_name, created_at) VALUES (?, ?, ?, ?, ?)`,
@@ -463,7 +466,7 @@ func (s *Service) CheckConflicts(ctx context.Context) error {
 			continue
 		}
 		ev := domain.Event{
-			ID:         domain.ID(newID()),
+			ID:         domain.ID(store.NewID()),
 			Type:       "syncthing.conflict",
 			Severity:   "warning",
 			ResourceID: f.ID,
@@ -528,7 +531,7 @@ func (s *Service) CheckDeviceStaleness(ctx context.Context) error {
 			continue
 		}
 		ev := domain.Event{
-			ID:         domain.ID(newID()),
+			ID:         domain.ID(store.NewID()),
 			Type:       "syncthing.device_stale",
 			Severity:   "warning",
 			ResourceID: domain.ID(deviceID),
@@ -670,12 +673,6 @@ func scanFolder(row folderScanner) (*domain.SyncFolder, error) {
 	}, nil
 }
 
-func newID() string {
-	var b [16]byte
-	_, _ = rand.Read(b[:])
-	return hex.EncodeToString(b[:])
-}
-
 func boolToInt(b bool) int {
 	if b {
 		return 1
@@ -689,4 +686,18 @@ func isUniqueViolation(err error) bool {
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "UNIQUE constraint failed") || strings.Contains(msg, "unique constraint")
+}
+
+// warnRegistrar reports a best-effort knowledge registration failure without
+// undoing the folder operation that already succeeded.
+func (s *Service) warnRegistrar(ctx context.Context, id, op string, err error) {
+	_ = s.sink.Emit(ctx, domain.Event{
+		ID:         domain.ID(store.NewID()),
+		Type:       "syncthing.registrar_failed",
+		Severity:   "warning",
+		ResourceID: domain.ID(id),
+		Message:    fmt.Sprintf("knowledge %s failed for sync folder %q", op, id),
+		Data:       map[string]any{"folder_id": id, "op": op, "error": err.Error()},
+		CreatedAt:  s.now().UTC(),
+	})
 }

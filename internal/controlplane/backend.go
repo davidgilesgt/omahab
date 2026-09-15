@@ -1263,11 +1263,6 @@ func (k *knowledgeSink) Emit(ctx context.Context, ev domain.Event) error {
 	return k.domainEventSink.Emit(ctx, ev)
 }
 
-func newKnowledgeSinkWrapper(svc *events.Service) *knowledgeSink { return newKnowledgeSink(svc) }
-
-// Ensure knowledge sink param type matches; knowledge expects EventSink with Emit(domain.Event)
-var _ = newKnowledgeSinkWrapper
-
 type syncerSink struct{ *domainEventSink }
 
 func newSyncerSink(svc *events.Service) *syncerSink {

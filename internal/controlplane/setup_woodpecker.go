@@ -318,7 +318,6 @@ func (b *Backend) pingPodmanEndpoint(ctx context.Context, socketPath, url string
 	return nil
 }
 
-var _ = store.ErrNotFound
 
 func (b *Backend) SetupWoodpecker(ctx context.Context, req apitypes.SetupWoodpeckerRequest) error {
 	username := strings.TrimSpace(req.Username)

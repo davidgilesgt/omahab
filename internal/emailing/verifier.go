@@ -1132,7 +1132,6 @@ func organizationalDomain(d string) string {
 	// handle known two-level publicsuffix approximations: co.uk, com.au etc.
 	// For simplicity, return last 2 labels. This covers example.com test cases.
 	if len(parts) >= 3 {
-		last2 := strings.Join(parts[len(parts)-2:], ".")
 		// naive check for ccTLD with second-level: if last part length==2 and second-last in {"co","com","net","org","gov","ac","edu","ltd"}
 		// then include third last.
 		if len(parts[len(parts)-1]) == 2 {
@@ -1141,7 +1140,6 @@ func organizationalDomain(d string) string {
 				return strings.Join(parts[len(parts)-3:], ".")
 			}
 		}
-		_ = last2
 	}
 	return strings.Join(parts[len(parts)-2:], ".")
 }

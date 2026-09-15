@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/omahab/omahab/internal/domain"
+	"github.com/omahab/omahab/internal/store"
 )
 
 // DeployParams carry theWoodpecker-observed release facts for a project
@@ -93,7 +94,6 @@ func (s *Service) Deploy(ctx context.Context, p DeployParams) (*domain.Release, 
 	if lerr != nil {
 		return nil, lerr
 	}
-	_ = derr
 	return out, derr
 }
 
@@ -152,7 +152,6 @@ func (s *Service) Release(ctx context.Context, p ReleaseParams) (*domain.Release
 	if lerr != nil {
 		return nil, lerr
 	}
-	_ = derr
 	return out, derr
 }
 
@@ -204,7 +203,6 @@ func (s *Service) Rollback(ctx context.Context, p RollbackParams) (*domain.Relea
 	if lerr != nil {
 		return nil, lerr
 	}
-	_ = derr
 	return out, derr
 }
 
@@ -393,7 +391,7 @@ func (s *Service) beginRelease(ctx context.Context, projectID domain.ID, commit,
 		now := umtimeNow()
 		nowS := formatTime(now)
 		rel := &domain.Release{
-			ID:        newID(),
+			ID:        domain.ID(store.NewID()),
 			ProjectID: projectID,
 			Commit:    commit,
 			Digest:    digest,

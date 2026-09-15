@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/omahab/omahab/internal/store"
 )
 
 // MemoryKarakeepClient is an in-memory Karakeep client for testing.
@@ -92,7 +94,7 @@ func (m *MemoryKarakeepClient) CaptureBookmark(_ context.Context, url, title str
 	if title == "" {
 		title = url
 	}
-	id := newID()
+	id := store.NewID()
 	bm := &KarakeepBookmark{
 		ID:       id,
 		URL:      url,
@@ -133,13 +135,13 @@ func (n *NoopKarakeepClient) CaptureBookmark(_ context.Context, url, title strin
 	if strings.TrimSpace(url) == "" {
 		return "", validation("url is required")
 	}
-	return newID(), nil
+	return store.NewID(), nil
 }
 func (n *NoopKarakeepClient) CaptureArticle(_ context.Context, url string, _ CaptureOptions) (string, error) {
 	if strings.TrimSpace(url) == "" {
 		return "", validation("url is required")
 	}
-	return newID(), nil
+	return store.NewID(), nil
 }
 func (n *NoopKarakeepClient) ListTags(_ context.Context) ([]string, error) { return nil, nil }
 
@@ -385,7 +387,7 @@ func (c *HTTPKarakeepClient) CaptureBookmark(ctx context.Context, urlStr, title 
 	if err := json.Unmarshal(body, &idStr); err == nil {
 		return idStr, nil
 	}
-	return newID(), nil
+	return store.NewID(), nil
 }
 
 func (c *HTTPKarakeepClient) CaptureArticle(ctx context.Context, urlStr string, opts CaptureOptions) (string, error) {
