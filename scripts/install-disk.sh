@@ -1822,8 +1822,10 @@ install_stage() {
   # --no-channel-copy: the appliance upgrades via flakes (releaseRef), never
   # legacy channels. Stderr carries stage-relative timestamps (live to the
   # console and appended to the log); a redirect, not a pipe, so the exit
-  INSTALL_T0=$SECONDS
-  if ! nixos-install --root "$MNT" --flake "$TARGET_FLAKE#$FLAKE_ATTR" --no-root-passwd --no-channel-copy --option sandbox false --max-jobs "$jobs" --cores 2 --option http-connections 50 "${extra_subst[@]}" 2> >(while IFS= read -r line; do printf '[install+%ss] %s\n' "$((SECONDS - INSTALL_T0))" "$line" | tee -a "$LOG_FILE" >&2; done); then
+  # SECONDS is reset so the trace shows stage-relative time. (Explicit
+  # assignment: the repo gate requires every used name to be assigned.)
+  SECONDS=0
+  if ! nixos-install --root "$MNT" --flake "$TARGET_FLAKE#$FLAKE_ATTR" --no-root-passwd --no-channel-copy --option sandbox false --max-jobs "$jobs" --cores 2 --option http-connections 50 "${extra_subst[@]}" 2> >(while IFS= read -r line; do printf '[install+%ss] %s\n' "$SECONDS" "$line" | tee -a "$LOG_FILE" >&2; done); then
     progress "install" "failed" "nixos-install failed — see $LOG_FILE"
     die "nixos-install failed"
   fi
