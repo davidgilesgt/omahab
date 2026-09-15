@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -135,14 +136,21 @@ func (b *Backend) renderHermesKeyEnv(ctx context.Context, token string) error {
 	} else if oidcClientID != "" {
 		kv["HERMES_DASHBOARD_OIDC_CLIENT_ID"] = oidcClientID
 	}
+	prev, _ := b.readAppEnv("hermes")
 	if err := b.writeAppEnv("hermes", kv, ""); err != nil {
 		return fmt.Errorf("write hermes appenv: %w", err)
+	}
+	if maps.Equal(prev, kv) {
+		log.Printf("setup dependent_apps: hermes env unchanged")
+		return nil
 	}
 	log.Printf("setup dependent_apps: hermes env rendered")
 	// Restart so a new LiteLLM token is picked up (mirrors renderHermesConfig).
 	ctx2, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_ = exec.CommandContext(ctx2, "systemctl", "restart", "docker-hermes.service").Run()
+	if err := exec.CommandContext(ctx2, "systemctl", "restart", "docker-hermes.service").Run(); err != nil {
+		log.Printf("setup dependent_apps: hermes restart failed: %v", err)
+	}
 	return nil
 }
 

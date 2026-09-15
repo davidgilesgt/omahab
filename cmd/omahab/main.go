@@ -1325,6 +1325,52 @@ func newProjectCmd() *cobra.Command {
 	}
 	rmCmd.Flags().Bool("force", false, "force without confirmation")
 	proj.AddCommand(rmCmd)
+	// update
+	updateCmd := &cobra.Command{
+		Use:   "update <id|slug>",
+		Short: "Update project name, hostname, or exposure",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name, _ := cmd.Flags().GetString("name")
+			hostname, _ := cmd.Flags().GetString("hostname")
+			exposure, _ := cmd.Flags().GetString("exposure")
+			if strings.TrimSpace(name) == "" && strings.TrimSpace(hostname) == "" && strings.TrimSpace(exposure) == "" {
+				return handleFailure(errors.New("at least one of --name, --hostname, --exposure is required"))
+			}
+			var req apitypes.UpdateProjectRequest
+			if strings.TrimSpace(name) != "" {
+				v := strings.TrimSpace(name)
+				req.Name = &v
+			}
+			if strings.TrimSpace(hostname) != "" {
+				v := strings.TrimSpace(hostname)
+				req.Hostname = &v
+			}
+			if strings.TrimSpace(exposure) != "" {
+				v := domain.Exposure(strings.TrimSpace(exposure))
+				req.Exposure = &v
+			}
+			ctx, cancel := newContext()
+			defer cancel()
+			c, err := resolveClient()
+			if err != nil {
+				return handleFailure(err)
+			}
+			p, err := c.UpdateProject(ctx, args[0], req)
+			if err != nil {
+				return handleFailure(err)
+			}
+			if flagJSON {
+				return printJSON(p)
+			}
+			fmt.Printf("updated %s (name %q hostname %q exposure %s)\n", p.Slug, p.Name, p.Hostname, p.Exposure)
+			return nil
+		},
+	}
+	updateCmd.Flags().String("name", "", "new display name")
+	updateCmd.Flags().String("hostname", "", "new hostname")
+	updateCmd.Flags().String("exposure", "", "new exposure (private|shared|public)")
+	proj.AddCommand(updateCmd)
 
 	// releases subcommands under project
 	releases := &cobra.Command{

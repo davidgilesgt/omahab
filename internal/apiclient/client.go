@@ -146,6 +146,14 @@ func (c *Client) del(ctx context.Context, path string, out any) error {
 	return c.do(req, out)
 }
 
+func (c *Client) patch(ctx context.Context, path string, body any, out any) error {
+	req, err := c.newRequest(ctx, http.MethodPatch, path, body)
+	if err != nil {
+		return err
+	}
+	return c.do(req, out)
+}
+
 func (c *Client) deleteWithBody(ctx context.Context, path string, body any, out any) error {
 	req, err := c.newRequest(ctx, http.MethodDelete, path, body)
 	if err != nil {
@@ -408,6 +416,14 @@ func (c *Client) GetProject(ctx context.Context, idOrSlug string) (*domain.Proje
 func (c *Client) CreateProject(ctx context.Context, req CreateProjectRequest) (*domain.Project, error) {
 	var out domain.Project
 	if err := c.post(ctx, "/projects", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) UpdateProject(ctx context.Context, id string, req apitypes.UpdateProjectRequest) (*domain.Project, error) {
+	var out domain.Project
+	if err := c.patch(ctx, "/projects/"+url.PathEscape(id), req, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
