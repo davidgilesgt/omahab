@@ -923,11 +923,14 @@ func translateError(err error) error {
 	if errors.Is(err, apps.ErrAlreadyExists) {
 		return fmt.Errorf("%w: %v", apitypes.ErrAlreadyExists, err)
 	}
-	if errors.Is(err, apps.ErrInvalid) {
-		return fmt.Errorf("%w: %v", apitypes.ErrValidation, err)
-	}
 	if errors.Is(err, apps.ErrMaintained) || errors.Is(err, apps.ErrConflict) {
 		return fmt.Errorf("%w: %v", apitypes.ErrConflict, err)
+	}
+	if errors.Is(err, ErrRecoveryPhraseRequired) {
+		return fmt.Errorf("%w: %v", apitypes.ErrValidation, err)
+	}
+	if errors.Is(err, ErrRecoveryPhraseMismatch) {
+		return fmt.Errorf("%w: %v", apitypes.ErrForbidden, err)
 	}
 	if errors.Is(err, backups.ErrNotFound) {
 		return fmt.Errorf("%w: %v", apitypes.ErrNotFound, err)

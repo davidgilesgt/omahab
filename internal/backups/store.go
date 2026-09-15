@@ -70,17 +70,19 @@ func isSingleActiveViolation(err error) bool {
 
 // --- repositories ---
 
-const repositoryColumns = "id, label, location, secret_id, secret_version, created_at, updated_at"
+const repositoryColumns = "id, label, location, secret_id, secret_version, attached, created_at, updated_at"
 
 func scanRepository(sc rowScanner) (Repository, error) {
 	var (
 		r       Repository
+		attached int
 		created string
 		updated string
 	)
-	if err := sc.Scan(&r.ID, &r.Label, &r.Location, &r.SecretRef.ID, &r.SecretRef.Version, &created, &updated); err != nil {
+	if err := sc.Scan(&r.ID, &r.Label, &r.Location, &r.SecretRef.ID, &r.SecretRef.Version, &attached, &created, &updated); err != nil {
 		return Repository{}, err
 	}
+	r.Attached = attached != 0
 	var err error
 	if r.CreatedAt, err = parseTime(created); err != nil {
 		return Repository{}, fmt.Errorf("parse repository created_at: %w", err)
@@ -118,15 +120,22 @@ func (s *Service) getRepository(ctx context.Context, id string) (Repository, err
 
 func (s *Service) insertRepository(ctx context.Context, r Repository) error {
 	_, err := s.st.DB().ExecContext(ctx,
-		"INSERT INTO backup_repositories (id, label, location, secret_id, secret_version, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
-		r.ID, r.Label, r.Location, r.SecretRef.ID, r.SecretRef.Version, fmtTime(r.CreatedAt), fmtTime(r.UpdatedAt))
+		"INSERT INTO backup_repositories (id, label, location, secret_id, secret_version, attached, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+		r.ID, r.Label, r.Location, r.SecretRef.ID, r.SecretRef.Version, boolInt(r.Attached), fmtTime(r.CreatedAt), fmtTime(r.UpdatedAt))
 	return mapConflict(err, "a repository already exists for this location")
+}
+
+func boolInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
 }
 
 func (s *Service) updateRepository(ctx context.Context, r Repository) error {
 	_, err := s.st.DB().ExecContext(ctx,
-		"UPDATE backup_repositories SET label = ?, location = ?, secret_id = ?, secret_version = ?, updated_at = ? WHERE id = ?",
-		r.Label, r.Location, r.SecretRef.ID, r.SecretRef.Version, fmtTime(r.UpdatedAt), r.ID)
+		"UPDATE backup_repositories SET label = ?, location = ?, secret_id = ?, secret_version = ?, attached = ?, updated_at = ? WHERE id = ?",
+		r.Label, r.Location, r.SecretRef.ID, r.SecretRef.Version, boolInt(r.Attached), fmtTime(r.UpdatedAt), r.ID)
 	return mapConflict(err, "a repository already exists for this location")
 }
 

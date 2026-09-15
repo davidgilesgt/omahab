@@ -17,6 +17,7 @@ import (
 
 	"github.com/omahab/omahab/internal/apitypes"
 	"github.com/omahab/omahab/internal/backups"
+	"github.com/omahab/omahab/internal/domain"
 	"github.com/omahab/omahab/internal/events"
 	"github.com/omahab/omahab/internal/secrets"
 	"github.com/omahab/omahab/internal/setupguide"
@@ -52,6 +53,9 @@ var (
 	// recovery phrase for Hetzner backup password derivation.
 	lastConfirmedSeed     *[32]byte
 	lastConfirmedSeedTime time.Time
+	// lastConfirmedFingerprint binds the cached seed to the kit it
+	// confirmed, so a stale cache never authenticates a rotated kit.
+	lastConfirmedFingerprint string
 )
 
 type recoveryPending struct {
@@ -182,14 +186,12 @@ func (b *Backend) persistRecoveryKit(ctx context.Context, fingerprint string, se
 		return fmt.Errorf("persist recovery.kit: %w", err)
 	}
 	_ = os.Chmod(path, 0o600)
-	if err := upsertSecret(ctx, b.secrets, "platform-app", "recovery_fingerprint", fingerprint); err != nil {
-		return fmt.Errorf("store recovery fingerprint: %w", err)
-	}
 	recoveryMu.Lock()
 	// Cache seed for Hetzner backup password derivation shortly after confirm.
 	seedCopy := seed
 	lastConfirmedSeed = &seedCopy
 	lastConfirmedSeedTime = time.Now()
+	lastConfirmedFingerprint = strings.ToLower(strings.TrimSpace(fingerprint))
 	delete(recoveryPend, fingerprint)
 	recoveryMu.Unlock()
 	return nil
@@ -287,7 +289,32 @@ func (b *Backend) CreateBackupRepository(ctx context.Context, req apitypes.Creat
 	}
 	var location string
 	var password string
+	mode := strings.ToLower(strings.TrimSpace(req.Mode))
+	if mode == "" {
+		mode = "create"
+	}
+	if mode != "create" && mode != "attach" {
+		return backups.Repository{}, fmt.Errorf("%w: mode must be create|attach", store.ErrValidation)
+	}
 	if isHetzner {
+		// Authenticate the recovery phrase BEFORE generating/uploading an SSH
+		// key or mutating repository configuration. A valid supplied phrase
+		// authenticates against the saved kit; otherwise the confirmed seed
+		// still held in memory and bound to that kit applies. There is no
+		// random fallback: an unrecoverable repository must never be created
+		// silently.
+		var seed [32]byte
+		if strings.TrimSpace(req.Phrase) != "" {
+			s, err := b.authenticateRecoverySeed(req.Phrase)
+			if err != nil {
+				return backups.Repository{}, err
+			}
+			seed = s
+		} else if s, err := b.confirmedRecoverySeed(); err == nil {
+			seed = s
+		} else {
+			return backups.Repository{}, ErrRecoveryPhraseRequired
+		}
 		username := strings.TrimSpace(req.Username)
 		host := strings.TrimSpace(req.Host)
 		subPass := req.SubAccountPassword // keep as is, may contain spaces
@@ -320,74 +347,35 @@ func (b *Backend) CreateBackupRepository(ctx context.Context, req apitypes.Creat
 		}
 		// Discard password (never stored)
 		subPass = ""
-		// 3. Instance ID for location suffix
-		instanceID := ""
-		if inst, err := b.store.Instance(ctx); err == nil {
-			instanceID = string(inst.ID)
-		}
-		if instanceID == "" {
-			instanceID = "omahab"
-		}
-		// Sanitize instanceID to be filesystem-safe (alphanumeric + -)
-		safeID := strings.Map(func(r rune) rune {
-			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
-				return r
+		if mode == "attach" {
+			// Attach preserves the caller's exact repository URL: no
+			// instance suffix is appended and no empty namespace is created.
+			location = strings.TrimSpace(req.Location)
+			if location == "" {
+				return backups.Repository{}, fmt.Errorf("%w: location is required for attach (exact source repository URL)", store.ErrValidation)
 			}
-			return '-'
-		}, instanceID)
-		location = fmt.Sprintf("sftp://%s@%s:23/./omahab/%s", username, host, safeID)
-		// 4. Derive restic password from recovery phrase seed
-		seedFound := false
-		var seed [32]byte
-		// a) phrase in request if provided
-		if !seedFound && strings.TrimSpace(req.Phrase) != "" {
-			words := strings.Fields(req.Phrase)
-			if len(words) == 24 {
-				if s, err := secrets.PhraseToSeed(words); err == nil {
-					seed = s
-					seedFound = true
-				}
-			}
-		}
-		// b) pending map
-		if !seedFound {
-			recoveryMu.Lock()
-			for _, pend := range recoveryPend {
-				if time.Now().Before(pend.expires) {
-					seed = pend.seed
-					seedFound = true
-					break
-				}
-			}
-			recoveryMu.Unlock()
-		}
-		// c) last confirmed
-		if !seedFound {
-			recoveryMu.Lock()
-			if lastConfirmedSeed != nil && time.Since(lastConfirmedSeedTime) < 24*time.Hour {
-				seed = *lastConfirmedSeed
-				seedFound = true
-			}
-			recoveryMu.Unlock()
-		}
-		if seedFound {
-			password = secrets.DeriveResticPassword(seed)
 		} else {
-			// Fallback: generate random 32-byte hex (64 chars). Still stored as credential;
-			// restore will require phrase, but this allows setup to proceed when seed is
-			// not in memory (e.g., after restart). The derived password will be re-derived
-			// on restore from phrase, so fallback is only for dev/test without phrase.
-			var rnd [32]byte
-			if _, err := rand.Read(rnd[:]); err != nil {
-				return backups.Repository{}, fmt.Errorf("generate restic password: %w", err)
+			// 3. Instance ID for location suffix
+			instanceID := ""
+			if inst, err := b.store.Instance(ctx); err == nil {
+				instanceID = string(inst.ID)
 			}
-			password = secrets.DeriveResticPassword(rnd)
-			_, _ = b.events.Publish(ctx, events.PublishInput{
-				Type:     "backups.hetzner_derivation_fallback",
-				Severity: "warning",
-				Message:  "Hetzner backup password derived from random fallback (phrase not in memory); restore will require re-entering phrase derived password manually",
-			})
+			if instanceID == "" {
+				instanceID = "omahab"
+			}
+			// Sanitize instanceID to be filesystem-safe (alphanumeric + -)
+			safeID := strings.Map(func(r rune) rune {
+				if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+					return r
+				}
+				return '-'
+			}, instanceID)
+			location = fmt.Sprintf("sftp://%s@%s:23/./omahab/%s", username, host, safeID)
 		}
+		// 4. Derive restic password from the authenticated phrase seed.
+		// Existing HKDF (omahab-recovery-v1, restic-password) is kept so
+		// valid repositories remain readable.
+		password = secrets.DeriveResticPassword(seed)
 	} else {
 		location = strings.TrimSpace(req.Location)
 		if location == "" {
@@ -397,33 +385,70 @@ func (b *Backend) CreateBackupRepository(ctx context.Context, req apitypes.Creat
 		if password == "" {
 			return backups.Repository{}, fmt.Errorf("%w: password is required", store.ErrValidation)
 		}
+		if mode == "attach" {
+			// Preserve the exact source repository URL/instance suffix;
+			// attach never appends a new machine ID.
+			location = strings.TrimSpace(req.Location)
+		}
 		// Allow location with Env overrides; keep as is.
 	}
-	// Credential material -> secrets store.
-	secretName := "backup_repo_credentials"
-	value := password
-	// Ensure we don't log password
-	sec, err := b.secrets.Put(ctx, "platform-app", secretName, value)
-	if err != nil {
-		if _, err2 := b.secrets.RotateByName(ctx, "platform-app", secretName, value); err2 != nil {
-			return backups.Repository{}, fmt.Errorf("store credentials: %w", err)
-		}
-		sec, err = b.secrets.GetByName(ctx, "platform-app", secretName)
+	// Each repository gets its own secret record instead of rotating the
+	// shared backup_repo_credentials name. Existing references migrate
+	// without changing their actual passwords (see migrateSharedRepoSecrets).
+	// The per-repo name needs the repository ID, so credentials stage under
+	// a provisional name first and move once the repository exists.
+	putRepoSecret := func(value string, key string) (backups.SecretRef, error) {
+		name := "backup_repo_" + sanitizeSecretName(key)
+		sec, err := b.secrets.Put(ctx, "platform-app", name, value)
 		if err != nil {
-			return backups.Repository{}, fmt.Errorf("load credential ref: %w", err)
+			if _, err2 := b.secrets.RotateByName(ctx, "platform-app", name, value); err2 != nil {
+				return backups.SecretRef{}, fmt.Errorf("store credentials: %w", err)
+			}
+			sec, err = b.secrets.GetByName(ctx, "platform-app", name)
+			if err != nil {
+				return backups.SecretRef{}, fmt.Errorf("load credential ref: %w", err)
+			}
 		}
+		return backups.SecretRef{ID: string(sec.ID), Version: sec.Version}, nil
 	}
-	repo, err := b.backups.Configure(ctx, backups.ConfigureRequest{
-		Label: label,
-		Location: location,
-		SecretRef: backups.SecretRef{
-			ID:      string(sec.ID),
-			Version: sec.Version,
-		},
-	})
+	stageKey := "staging"
+	var rnd [4]byte
+	if _, err := rand.Read(rnd[:]); err == nil {
+		stageKey = fmt.Sprintf("staging-%s", hex.EncodeToString(rnd[:]))
+	}
+	stageRef, err := putRepoSecret(password, stageKey)
+	if err != nil {
+		return backups.Repository{}, err
+	}
+	var repo backups.Repository
+	if mode == "attach" {
+		// Attach runs `restic snapshots`, never init, against the exact
+		// source URL (no new machine-ID suffix).
+		repo, err = b.backups.AttachRepository(ctx, backups.ConfigureRequest{
+			Label: label, Location: location, SecretRef: stageRef,
+		})
+	} else {
+		repo, err = b.backups.Configure(ctx, backups.ConfigureRequest{
+			Label: label, Location: location, SecretRef: stageRef,
+		})
+	}
 	if err != nil {
 		return backups.Repository{}, translateError(err)
 	}
+	// Move credentials to the per-repo record with the value unchanged, point
+	// the repository at it, and drop the staging record (best-effort).
+	repoRef, err := putRepoSecret(password, repo.ID)
+	password = ""
+	if err != nil {
+		return backups.Repository{}, err
+	}
+	if repo, err = b.backups.Configure(ctx, backups.ConfigureRequest{
+		ID: repo.ID, Label: label, Location: repo.Location, SecretRef: repoRef,
+	}); err != nil {
+		return backups.Repository{}, translateError(err)
+	}
+	_ = b.secrets.DeleteByName(ctx, "platform-app", "backup_repo_"+sanitizeSecretName(stageKey))
+	b.migrateSharedRepoSecrets(ctx)
 	b.enableBackupTimers(ctx)
 	// After creation run first backup immediately then verify so recovery_tested passes day one.
 	// Fire in background to not block the API response.
@@ -449,10 +474,70 @@ func (b *Backend) CreateBackupRepository(ctx context.Context, req apitypes.Creat
 	return repo, nil
 }
 
-
 // DeleteBackupRepository removes a repository (audit-retained when runs exist).
 func (b *Backend) DeleteBackupRepository(ctx context.Context, id string) error {
 	return b.backups.DeleteRepository(ctx, id)
+}
+// sanitizeSecretName maps arbitrary keys into the secrets name alphabet.
+func sanitizeSecretName(s string) string {
+	s = strings.TrimSpace(s)
+	var b strings.Builder
+	for _, r := range s {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' || r == '.' {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('-')
+		}
+	}
+	out := strings.Trim(b.String(), "-._")
+	if out == "" {
+		out = "repo"
+	}
+	if len(out) > 100 {
+		out = out[:100]
+	}
+	return out
+}
+
+// migrateSharedRepoSecrets gives each repository referencing the legacy
+// shared backup_repo_credentials record its own secret record, preserving
+// actual passwords. It runs opportunistically after repository setup.
+func (b *Backend) migrateSharedRepoSecrets(ctx context.Context) {
+	if b.backups == nil || b.secrets == nil {
+		return
+	}
+	shared, err := b.secrets.RevealByName(ctx, "platform-app", "backup_repo_credentials")
+	if err != nil || strings.TrimSpace(shared) == "" {
+		return
+	}
+	repos, err := b.backups.Repositories(ctx)
+	if err != nil {
+		return
+	}
+	for _, repo := range repos {
+		meta, err := b.secrets.Get(ctx, domain.ID(repo.SecretRef.ID))
+		if err != nil {
+			continue
+		}
+		if meta.Name != "backup_repo_credentials" {
+			continue
+		}
+		name := "backup_repo_" + sanitizeSecretName(repo.ID)
+		sec, err := b.secrets.Put(ctx, "platform-app", name, shared)
+		if err != nil {
+			if _, err2 := b.secrets.RotateByName(ctx, "platform-app", name, shared); err2 != nil {
+				continue
+			}
+			sec, err = b.secrets.GetByName(ctx, "platform-app", name)
+			if err != nil {
+				continue
+			}
+		}
+		_, _ = b.backups.Configure(ctx, backups.ConfigureRequest{
+			ID: repo.ID, Label: repo.Label, Location: repo.Location,
+			SecretRef: backups.SecretRef{ID: string(sec.ID), Version: sec.Version},
+		})
+	}
 }
 
 // enableBackupTimers turns on the daily backup + weekly verify timers.

@@ -16,6 +16,7 @@ import (
 
 	"github.com/omahab/omahab/internal/apitypes"
 	"github.com/omahab/omahab/internal/backups"
+	"github.com/omahab/omahab/internal/secrets"
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 )
@@ -504,13 +505,23 @@ func TestCreateBackupRepositoryFailsClosedOnUploadError(t *testing.T) {
 		Secrets: backupSecretSource{service: b.secrets},
 		Events:  newBackupsSink(b.events),
 	})
+	// Phrase authentication now precedes key generation/upload: confirm a
+	// phrase so the request reaches the upload step.
+	words, seed, err := secrets.GenerateRecoveryPhrase()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.persistRecoveryKit(ctx, seedFingerprint(seed), seed); err != nil {
+		t.Fatalf("persist kit: %v", err)
+	}
 
-	_, err := b.CreateBackupRepository(ctx, apitypes.CreateBackupRepositoryRequest{
+	_, err = b.CreateBackupRepository(ctx, apitypes.CreateBackupRepositoryRequest{
 		Kind:               "hetzner_storagebox",
 		Label:              "hetzner",
 		Username:           "u12345",
 		Host:               "127.0.0.1",
 		SubAccountPassword: "secret-pass",
+		Phrase:             strings.Join(words, " "),
 	})
 	if err == nil || !strings.Contains(err.Error(), "upload backup ssh key") {
 		t.Fatalf("expected upload failure, got %v", err)

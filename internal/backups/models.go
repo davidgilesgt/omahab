@@ -84,6 +84,9 @@ type Repository struct {
 	Label     string    `json:"label"`
 	Location  string    `json:"location"`
 	SecretRef SecretRef `json:"secret_ref"`
+	// Attached marks a repository adopted from another machine: its exact
+	// source URL is preserved and no instance suffix is appended at run time.
+	Attached  bool      `json:"attached"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }

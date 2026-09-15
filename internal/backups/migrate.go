@@ -114,5 +114,11 @@ func Migrations() []store.Migration {
 	evaluated_at TEXT NOT NULL
 )`,
 		},
+		{
+			// Attached repositories keep their exact source URL: the
+			// instance suffix is never appended at run time.
+			Name: "backups_0012_repositories_attached",
+			SQL:  `ALTER TABLE backup_repositories ADD COLUMN attached INTEGER NOT NULL DEFAULT 0`,
+		},
 	}
 }

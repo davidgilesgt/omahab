@@ -185,7 +185,11 @@ func (s *Service) nowUTC() time.Time { return s.now().UTC() }
 // installation folder: <location>/<instance-id>. Appending is idempotent so
 // a location already ending in the instance folder is never doubled. With
 // no instance ID source configured the repository is returned unchanged.
+// Attached repositories keep their exact source URL: no suffix is appended.
 func (s *Service) scopedRepository(ctx context.Context, repo Repository) Repository {
+	if repo.Attached {
+		return repo
+	}
 	if s.instanceID == nil {
 		return repo
 	}

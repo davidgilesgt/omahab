@@ -94,8 +94,11 @@ func (c *CommandRunner) env(repo Repository, creds Credentials) []string {
 }
 
 // sftpCommandArgs returns restic global -o sftp.command option for sftp repos.
-// For sftp://<user>@<host>:23/./path it returns ["-o", "sftp.command=ssh -p 23 -i <key> -o UserKnownHostsFile=<known_hosts> -o BatchMode=yes <user>@<host> -s sftp"].
-// Otherwise returns nil. Stub: if parsing fails, returns nil to avoid breaking generic sftp repos.
+// The port comes from the repository URL (explicit :23 in generated Hetzner
+// URLs, 22 by default for generic SFTP). Fragments are shell-quoted so
+// unvalidated user/host/path text can never inject options; host keys stay
+// enforced with the retained known-hosts file. Returns nil when parsing
+// fails or no user is present (restic uses default ssh).
 func sftpCommandArgs(repo Repository) []string {
 	if !strings.HasPrefix(repo.Location, "sftp://") {
 		return nil
@@ -116,7 +119,13 @@ func sftpCommandArgs(repo Repository) []string {
 		// No user in URL; don't inject command (let restic use default ssh).
 		return nil
 	}
-	// Build ssh command. Port is always 23 per Hetzner spec; generic sftp repos use same.
+	if !validSSHFragment(user) || !validSSHFragment(host) {
+		return nil
+	}
+	port := u.Port()
+	if port == "" {
+		port = "22"
+	}
 	keyPath := BackupSSHKeyPath
 	if v := os.Getenv("OMAHAB_STATE_DIR"); v != "" {
 		if _, err := os.Stat(v + "/backup_ssh/id_ed25519"); err == nil {
@@ -129,8 +138,30 @@ func sftpCommandArgs(repo Repository) []string {
 			knownHosts = v + "/backup_ssh/known_hosts"
 		}
 	}
-	cmd := fmt.Sprintf("ssh -p 23 -i %s -o UserKnownHostsFile=%s -o BatchMode=yes %s@%s -s sftp", keyPath, knownHosts, user, host)
+	cmd := fmt.Sprintf("ssh -p %s -i %s -o UserKnownHostsFile=%s -o StrictHostKeyChecking=yes -o BatchMode=yes %s -s sftp",
+		shellQuote(port), shellQuote(keyPath), shellQuote(knownHosts), shellQuote(user+"@"+host))
 	return []string{"-o", "sftp.command=" + cmd}
+}
+
+// validSSHFragment rejects shell metacharacters and leading dashes in
+// user/host fragments so they can never inject ssh options.
+func validSSHFragment(s string) bool {
+	if s == "" || strings.HasPrefix(s, "-") {
+		return false
+	}
+	for _, r := range s {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' ||
+			r == '.' || r == '_' || r == '-' || r == '@' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// shellQuote single-quotes a fragment for the ssh command line.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 // withSFTP prepends global sftp options before the restic subcommand.

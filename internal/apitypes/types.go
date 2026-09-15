@@ -341,6 +341,10 @@ type CreateBackupRepositoryRequest struct {
 	// Phrase allows deriving the restic password from the recovery phrase
 	// when configuring Hetzner without a stored seed; optional.
 	Phrase string `json:"phrase,omitempty"`
+	// Mode distinguishes new and existing repository setup: create
+	// initializes the repository, attach verifies an existing one with
+	// `restic snapshots` (never init) and preserves its exact URL.
+	Mode string `json:"mode,omitempty"`
 }
 
 // CatalogBundle is the installable view of one curated bundle. Compose
