@@ -17,7 +17,7 @@ const TILES: TileDef[] = [
   { id: "paperless-ngx", name: "Archive", purpose: "Document archive", route: "archive", group: "everyday" },
   { id: "karakeep", name: "Keep", purpose: "Bookmarks & saves", route: "keep", group: "everyday" },
   { id: "syncthing", name: "Sync", purpose: "File sync", route: "sync", group: "everyday" },
-  { id: "hermes", name: "AI", purpose: "Your AI assistant", route: "ai", group: "everyday" },
+  { id: "hermes", name: "AI", purpose: "Chat with your assistant", route: "ai", group: "everyday" },
   { id: "forgejo", name: "Git", purpose: "Code hosting", route: "git", group: "build" },
   { id: "woodpecker", name: "CI", purpose: "Builds & deploys", route: "ci", group: "build" },
 ];
@@ -69,6 +69,12 @@ export function HomePage() {
     refetchInterval: 15_000,
     retry: false,
   });
+  const instanceQuery = useQuery({
+    queryKey: ["instance"],
+    queryFn: client.instance,
+    retry: false,
+  });
+  const assistant = instanceQuery.data?.assistant_name?.trim() || "Hermes";
 
   const healthById = new Map<string, string>();
   const launchById = new Map<string, string>();
@@ -87,6 +93,7 @@ export function HomePage() {
       <header className="page-header">
         <div>
           <h1>Welcome home</h1>
+          <p className="muted">{assistant} is looking after this household.</p>
         </div>
         <div className="page-actions">
           <a className="button secondary" href="/admin">
@@ -151,7 +158,8 @@ export function HomePage() {
 
 
       <p className="muted" style={{ marginTop: 16, fontSize: "0.875rem" }}>
-        Health dots are live and refresh every 15 seconds. Access is controlled by Pocket ID — your tailnet membership is the gate.
+        Health dots are live and refresh every 15 seconds. Sign-in is handled by Pocket ID;
+        each app's household access (members or admins) is enforced at the edge.
       </p>
 
     </div>

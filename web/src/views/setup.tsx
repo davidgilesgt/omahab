@@ -1072,6 +1072,7 @@ export function SetupPage() {
                 <span style={{ opacity: 0.7, fontSize: "0.85em" }}>Fingerprint: {recovery.fingerprint}</span>
               </div>
               <p style={{ opacity: 0.9 }}>This phrase unlocks your backups and this server if everything else is lost. Store it offline (Bitwarden, 1Password, paper). Omahab cannot show it again.</p>
+              <p className="muted">It encrypts the backup password and the secret store — not the disk itself. Disk encryption is a separate doctor check.</p>
               <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
                 <input type="checkbox" checked={recoveryAck} onChange={(e) => setRecoveryAck(e.target.checked)} />
                 I saved this in my password manager
