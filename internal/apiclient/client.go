@@ -342,6 +342,45 @@ func (c *Client) SetProjectExposure(ctx context.Context, projectID string, expos
 	return &out, nil
 }
 
+// --- storage placements & operations ---
+
+func (c *Client) ListDisks(ctx context.Context) ([]apitypes.Disk, error) {
+	var env ListEnvelope[apitypes.Disk]
+	if err := c.get(ctx, "/system/disks", &env); err != nil {
+		// Fall back to a bare array response.
+		var arr []apitypes.Disk
+		if err2 := c.get(ctx, "/system/disks", &arr); err2 != nil {
+			return nil, err
+		}
+		return arr, nil
+	}
+	return env.Items, nil
+}
+
+func (c *Client) ConfigureStorage(ctx context.Context, req apitypes.ConfigureStorageRequest) (*apitypes.Operation, error) {
+	var out apitypes.Operation
+	if err := c.put(ctx, "/system/storage", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) GetOperation(ctx context.Context, id string) (*apitypes.Operation, error) {
+	var out apitypes.Operation
+	if err := c.get(ctx, "/operations/"+url.PathEscape(id), &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) DoOperationAction(ctx context.Context, id, action string) (*apitypes.Operation, error) {
+	var out apitypes.Operation
+	if err := c.post(ctx, "/operations/"+url.PathEscape(id)+"/actions", map[string]any{"action": action, "confirm": true}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // --- projects & releases ---
 
 type CreateProjectRequest struct {

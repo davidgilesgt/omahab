@@ -268,6 +268,44 @@ type VerifyCloudflareTokenResult struct {
 	Detail string `json:"detail,omitempty"`
 }
 
+// StoragePlacement assigns a filesystem to one volume. volume identifies
+// <bundle-id>:<DataVolume.Name>, "postgresql", or "server-data";
+// fs_uuid:null means the system disk.
+type StoragePlacement struct {
+	Volume string  `json:"volume"`
+	FSUUID *string `json:"fs_uuid"`
+}
+
+// ConfigureStorageRequest replaces placements. migrate:true moves existing
+// data through a journaled operation (confirm:true required); without migrate
+// the placements are validated and recorded pending.
+type ConfigureStorageRequest struct {
+	Placements []StoragePlacement `json:"placements"`
+	Migrate    bool               `json:"migrate,omitempty"`
+	Confirm    bool               `json:"confirm,omitempty"`
+}
+
+// Operation is the shared progress record for storage/restore work.
+type Operation struct {
+	ID          string   `json:"id"`
+	Kind        string   `json:"kind"`
+	Status      string   `json:"status"`
+	Stage       string   `json:"stage"`
+	AffectedApp []string `json:"affected_apps"`
+	Progress    int      `json:"progress"`
+	Error       string   `json:"error,omitempty"`
+	CanResume   bool     `json:"can_resume"`
+	CanRollback bool     `json:"can_rollback"`
+	CreatedAt   string   `json:"created_at"`
+	UpdatedAt   string   `json:"updated_at"`
+}
+
+// OperationActionRequest drives resume|rollback|dismiss from journal stage.
+type OperationActionRequest struct {
+	Action  string `json:"action"`
+	Confirm bool   `json:"confirm"`
+}
+
 // RecoveryKeyMaterial is the one-time response of recovery phrase generation.
 // The phrase is shown once and never persisted; fingerprint identifies the
 // recovery kit (first 8 hex of SHA-256(seed)).
@@ -284,12 +322,6 @@ type Disk struct {
 	FSType     string `json:"fstype"`
 	UUID       string `json:"uuid"`
 	Mountpoint string `json:"mountpoint,omitempty"`
-}
-
-// ConfigureStorageRequest assigns a filesystem to a volume role.
-type ConfigureStorageRequest struct {
-	Volume string `json:"volume"` // "media" | "data"
-	FSUUID string `json:"fs_uuid"`
 }
 
 // CreateBackupRepositoryRequest carries repository credentials to the

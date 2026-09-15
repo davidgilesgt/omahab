@@ -222,56 +222,8 @@ func (b *Backend) ListDisks(ctx context.Context) ([]apitypes.Disk, error) {
 	return out2, nil
 }
 
-// ConfigureStorage appends a volume placement to <StateDir>/storage.json.
-// The omahab-storage oneshot unit consumes it at boot.
-func (b *Backend) ConfigureStorage(ctx context.Context, req apitypes.ConfigureStorageRequest) error {
-	volume := strings.TrimSpace(req.Volume)
-	uuid := strings.TrimSpace(req.FSUUID)
-	if volume != "media" && volume != "data" {
-		return fmt.Errorf("%w: volume must be media or data", store.ErrValidation)
-	}
-	if uuid == "" {
-		return fmt.Errorf("%w: fs_uuid is required", store.ErrValidation)
-	}
-	path := filepath.Join(b.cfg.StateDir, "storage.json")
-	var entries []storageEntry
-	if data, err := os.ReadFile(path); err == nil {
-		_ = jsonUnmarshalStorage(data, &entries)
-	}
-	// Reject a change once the target dir is non-empty.
-	target := "/srv/omahab"
-	if volume == "media" {
-		target = "/srv/omahab/apps/immich"
-	}
-	alreadyConfigured := false
-	for _, e := range entries {
-		if e.Volume == volume {
-			alreadyConfigured = true
-			break
-		}
-	}
-	if !alreadyConfigured {
-		if items, rerr := os.ReadDir(target); rerr == nil && len(items) > 0 {
-			return fmt.Errorf("%w: %s already holds data; changing placement after data exists is unsupported", store.ErrValidation, target)
-		}
-	}
-	// Replace any prior entry for the same volume.
-	for i := range entries {
-		if entries[i].Volume == volume {
-			entries = append(entries[:i], entries[i+1:]...)
-			break
-		}
-	}
-	entries = append(entries, storageEntry{Volume: volume, FSUUID: uuid})
-	raw, err := jsonMarshalStorage(entries)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(b.cfg.StateDir, 0o700); err != nil {
-		return err
-	}
-	return os.WriteFile(path, raw, 0o600)
-}
+// ConfigureStorage lives in storage.go (v2 versioned placements with a
+// journaled migration operation).
 
 // ---------------------------------------------------------------------------
 // Backup repositories (wizard): HTTP bridge to backups.Service.Configure,
@@ -517,17 +469,11 @@ func (b *Backend) enableBackupTimers(ctx context.Context) {
 }
 
 
+// storageEntry is the legacy v1 placement record (kept for migration in
+// storage.go).
 type storageEntry struct {
 	Volume string `json:"volume"`
 	FSUUID string `json:"fs_uuid"`
-}
-
-func jsonMarshalStorage(entries []storageEntry) ([]byte, error) {
-	return json.MarshalIndent(entries, "", "  ")
-}
-
-func jsonUnmarshalStorage(data []byte, out *[]storageEntry) error {
-	return json.Unmarshal(data, out)
 }
 
 // lsblkDevices models the lsblk -J output.

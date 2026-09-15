@@ -154,12 +154,26 @@ let
   # the control-plane database holds the UI view. Both the per-app marker
   # and the global server marker gate every app unit, including services
   # that start without appenv (via maintenanceGate below).
+  #
+  # Storage: every consumer Requires/After its volumes' preparation units
+  # (nix/storage.nix). A missing selected disk fails only its dependents
+  # closed; the system disk needs no unit and succeeds trivially.
+  nativeLayout = import ./app-data.nix { inherit config stateDir dataDir; };
+  storageSlugsFor = bundle:
+    let e = nativeLayout.${bundle} or { data = [ ]; databases = [ ]; };
+    in map (v: "${bundle}-${v.name}") (e.data or [ ]);
+  dbClientBundles = builtins.filter (b: (nativeLayout.${b}.databases or [ ]) != [ ]) (builtins.attrNames nativeLayout);
+  storageDepsFor = bundle:
+    (map (s: "omahab-storage-${s}.service") (storageSlugsFor bundle))
+    ++ lib.optionals (builtins.elem bundle dbClientBundles) [ "omahab-storage-postgresql.service" ];
   gate = bundle: {
     unitConfig.ConditionPathExists = [
       "${appEnv}/${bundle}.env"
       "!${stateDir}/maintenance/apps/${bundle}"
       "!${stateDir}/maintenance/server"
     ];
+    requires = storageDepsFor bundle;
+    after = storageDepsFor bundle;
   };
   # Maintenance-only gate for units that start without an appenv file
   # (e.g. syncthing): never gated on enrollment, always gated on pause.
@@ -168,6 +182,8 @@ let
       "!${stateDir}/maintenance/apps/${bundle}"
       "!${stateDir}/maintenance/server"
     ];
+    requires = storageDepsFor bundle;
+    after = storageDepsFor bundle;
   };
 in
 {
@@ -244,13 +260,16 @@ in
         '';
       };
     };
-    systemd.services.caddy = {
-      after = [ "omahab-caddy-init.service" ];
-      requires = [ "omahab-caddy-init.service" ];
-      serviceConfig = {
-        EnvironmentFile = [ "-${appEnv}/caddy.env" ];
-      };
-    } // (maintenanceGate "caddy");
+    systemd.services.caddy = mkMerge [
+      (maintenanceGate "caddy")
+      {
+        after = [ "omahab-caddy-init.service" ];
+        requires = [ "omahab-caddy-init.service" ];
+        serviceConfig = {
+          EnvironmentFile = [ "-${appEnv}/caddy.env" ];
+        };
+      }
+    ];
 
     # ----------------------------------------------------------------
     # Pocket ID — passkey-first OIDC IdP. Domain-gated.
@@ -743,45 +762,10 @@ in
     ];
 
     # ----------------------------------------------------------------
-    # Storage placement: mounts volumes recorded in storage.json before
-    # app units start. No-op when the file is absent (root disk holds
-    # everything; the wizard step is skippable).
+    # Storage placement: per-volume preparation units live in
+    # nix/storage.nix (generated from nix/app-data.nix). Consumers order
+    # after their volumes through gate/maintenanceGate above.
     # ----------------------------------------------------------------
-    systemd.services.omahab-storage = {
-      description = "Mount Omahab storage volumes (storage.json)";
-      wantedBy = [ "multi-user.target" ];
-      before = [
-        "postgresql.service"
-        "immich-server.service"
-        "syncthing.service"
-      ];
-      unitConfig = {
-        ConditionPathExists = "${stateDir}/storage.json";
-        RequiresMountsFor = [ "/srv/omahab" ];
-      };
-      serviceConfig = {
-        Type = "oneshot";
-        ExecStart = pkgs.writeShellScript "omahab-storage" ''
-          set -euo pipefail
-          CFG="${stateDir}/storage.json"
-          mkdir -p /srv/omahab/disks
-          ${pkgs.jq}/bin/jq -c '.[]' "$CFG" | while read -r entry; do
-            vol=$(echo "$entry" | ${pkgs.jq}/bin/jq -r '.volume')
-            uuid=$(echo "$entry" | ${pkgs.jq}/bin/jq -r '.fs_uuid')
-            mnt="/srv/omahab/disks/$uuid"
-            mkdir -p "$mnt"
-            if ! mountpoint -q "$mnt"; then
-              mount -U "$uuid" "$mnt"
-            fi
-            if [ "$vol" = "media" ]; then
-              mkdir -p "$mnt/media" /srv/omahab/apps/immich/library
-              mountpoint -q /srv/omahab/apps/immich/library || mount --bind "$mnt/media" /srv/omahab/apps/immich/library
-            fi
-          done
-        '';
-        RemainAfterExit = true;
-      };
-    };
 
     # ----------------------------------------------------------------
     # Shared PostgreSQL — per-app databases provisioned by modules above

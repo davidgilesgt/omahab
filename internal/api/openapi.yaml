@@ -199,29 +199,71 @@ paths:
 
   /api/v1/system/storage:
     put:
-      summary: Assign a filesystem to a volume role
-      description: Appends to /var/lib/omahab/storage.json (consumed by the omahab-storage oneshot unit). volume is media or data; rejected once the target holds data.
+      summary: Configure versioned volume placements
+      description: >-
+        Replaces storage.json with versioned placements [{volume, fs_uuid}].
+        volume is <bundle-id>:<name>, postgresql, or server-data; fs_uuid null
+        means the system disk. Without migrate the placements are validated and
+        recorded pending. migrate+confirm moves existing data through a journaled
+        operation (rsync copy, checksum verify, atomic activate, rollback).
+        Returns HTTP 202 plus an operation_id with progress.
       operationId: configureStorage
       requestBody:
         required: true
         content:
           application/json:
-            schema:
-              type: object
-              required: [volume, fs_uuid]
-              properties:
-                volume: { type: string, enum: [media, data] }
-                fs_uuid: { type: string }
+            schema: { $ref: '#/components/schemas/ConfigureStorageRequest' }
       responses:
-        '200':
-          description: Placement recorded
+        '202':
+          description: Operation accepted
           content:
             application/json:
-              schema:
-                type: object
-                properties:
-                  configured: { type: boolean }
-        '400': { $ref: '#/components/responses/Error' }
+              schema: { $ref: '#/components/schemas/Operation' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/Error' }
+
+  /api/v1/operations/{id}:
+    get:
+      summary: Get operation progress
+      description: Shared storage/restore progress record with stage, affected apps, and resume/rollback capability from the journal stage.
+      operationId: getOperation
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      responses:
+        '200':
+          description: Operation
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Operation' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/operations/{id}/actions:
+    post:
+      summary: Act on an operation
+      description: resume|rollback|dismiss with confirm:true, gated by journal stage capability.
+      operationId: doOperationAction
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OperationActionRequest' }
+      responses:
+        '200':
+          description: Operation
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Operation' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/Error' }
 
   /api/v1/system/ssh-keys:
     get:
@@ -2464,6 +2506,47 @@ components:
       required: [reason]
       properties:
         reason: { type: string, enum: [import] }
+      additionalProperties: false
+    StoragePlacement:
+      type: object
+      required: [volume]
+      properties:
+        volume: { type: string, description: '<bundle-id>:<name>, postgresql, or server-data' }
+        fs_uuid: { type: string, nullable: true, description: 'Filesystem UUID; null means the system disk' }
+      additionalProperties: false
+
+    ConfigureStorageRequest:
+      type: object
+      required: [placements]
+      properties:
+        placements:
+          type: array
+          items: { $ref: '#/components/schemas/StoragePlacement' }
+        migrate: { type: boolean }
+        confirm: { type: boolean }
+      additionalProperties: false
+
+    Operation:
+      type: object
+      required: [id, kind, status, stage]
+      properties:
+        id: { type: string }
+        kind: { type: string }
+        status: { type: string, enum: [pending, running, paused, completed, failed, rolled_back] }
+        stage: { type: string }
+        affected_apps: { type: array, items: { type: string } }
+        progress: { type: integer }
+        error: { type: string }
+        can_resume: { type: boolean }
+        can_rollback: { type: boolean }
+      additionalProperties: false
+
+    OperationActionRequest:
+      type: object
+      required: [action, confirm]
+      properties:
+        action: { type: string, enum: [resume, rollback, dismiss] }
+        confirm: { type: boolean }
       additionalProperties: false
 
     MaintenanceResumeRequest:

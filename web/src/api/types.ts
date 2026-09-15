@@ -93,6 +93,32 @@ export interface Backup {
   error?: string;
 }
 
+export interface Disk {
+  name: string;
+  size: string;
+  type: string;
+  fstype: string;
+  uuid: string;
+  mountpoint?: string;
+}
+
+export interface StoragePlacement {
+  volume: string;
+  fs_uuid: string | null;
+}
+
+export interface Operation {
+  id: ID;
+  kind: string;
+  status: "pending" | "running" | "paused" | "completed" | "failed" | "rolled_back";
+  stage: string;
+  affected_apps: string[];
+  progress: number;
+  error?: string;
+  can_resume: boolean;
+  can_rollback: boolean;
+}
+
 export interface ControlEvent {
   id: ID;
   type: string;

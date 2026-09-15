@@ -10,6 +10,7 @@ import type {
   CreateCompanionEnrollmentResponse,
   CreateModelKeyResponse,
   DeleteSSHKeyRequest,
+  Disk,
   DoctorReport,
   Exposure,
   ExposureState,
@@ -24,6 +25,7 @@ import type {
   ModelSetupStatus,
   NtfyConfig,
   OAuthSession,
+  Operation,
   Project,
   PublicStatusResponse,
   RecoverySession,
@@ -32,6 +34,7 @@ import type {
   SetupStatus,
   SSHKey,
   Status,
+  StoragePlacement,
   SyncFolder,
   SystemSSHKeysResponse,
   ToolVariableMeta,
@@ -167,6 +170,16 @@ export class ApiClient {
   backups = () => this.list<Backup>("/backups");
   createBackup = () => this.request<Backup>("/backups", { method: "POST", body: JSON.stringify({}) });
   verifyBackup = (id: string) => this.request<Backup>(`/backups/${encodeURIComponent(id)}/verify`, { method: "POST", body: JSON.stringify({}) });
+
+  disks = () => this.list<Disk>("/system/disks");
+  configureStorage = (input: { placements: StoragePlacement[]; migrate?: boolean; confirm?: boolean }) =>
+    this.request<Operation>("/system/storage", { method: "PUT", body: JSON.stringify(input) });
+  operation = (id: string) => this.request<Operation>(`/operations/${encodeURIComponent(id)}`);
+  operationAction = (id: string, action: "resume" | "rollback" | "dismiss") =>
+    this.request<Operation>(`/operations/${encodeURIComponent(id)}/actions`, {
+      method: "POST",
+      body: JSON.stringify({ action, confirm: true }),
+    });
 
   events = () => this.list<ControlEvent>("/events");
   markEventRead = (id: string) => this.request<ControlEvent>(`/events/${encodeURIComponent(id)}/read`, { method: "POST", body: JSON.stringify({}) });

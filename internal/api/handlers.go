@@ -2120,17 +2120,49 @@ func (s *Server) handleListDisks(w http.ResponseWriter, r *http.Request) {
 	writeList(w, disks)
 }
 
-// handleConfigureStorage assigns a filesystem to a volume role.
+// handleConfigureStorage validates v2 placements and starts a journaled
+// migration operation (HTTP 202 plus operation_id with progress).
 func (s *Server) handleConfigureStorage(w http.ResponseWriter, r *http.Request) {
 	var req apitypes.ConfigureStorageRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if err := s.backend.ConfigureStorage(r.Context(), req); err != nil {
+	op, err := s.backend.ConfigureStorage(r.Context(), req)
+	if err != nil {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"configured": true})
+	writeJSON(w, http.StatusAccepted, op)
+}
+
+func (s *Server) handleGetOperation(w http.ResponseWriter, r *http.Request) {
+	op, err := s.backend.GetOperation(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, op)
+}
+
+func (s *Server) handleOperationAction(w http.ResponseWriter, r *http.Request) {
+	var req apitypes.OperationActionRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.Action != "resume" && req.Action != "rollback" && req.Action != "dismiss" {
+		writeError(w, r, errBadRequest("action must be resume|rollback|dismiss"))
+		return
+	}
+	if !req.Confirm {
+		writeError(w, r, errBadRequest("confirm:true is required"))
+		return
+	}
+	op, err := s.backend.DoOperationAction(r.Context(), chi.URLParam(r, "id"), req.Action, req.Confirm)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, op)
 }
 
 // handleListBackupRepositories lists configured backup repositories.

@@ -395,12 +395,28 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (apitypes.SetupStatus, err
 
 	// --- storage_configured check (optional; skipped when unset) ---
 	storageCheck := apitypes.SetupCheck{ID: "storage_configured"}
-	if _, err := os.Stat(filepath.Join(b.cfg.StateDir, "storage.json")); err == nil {
-		storageCheck.Status = "ok"
-		storageCheck.Detail = "volume placement configured"
-	} else {
+	sf, exists, serr := loadStorageFile(filepath.Join(b.cfg.StateDir, "storage.json"))
+	switch {
+	case serr != nil:
+		storageCheck.Status = "failed"
+		storageCheck.Detail = "storage.json unreadable"
+	case !exists || len(sf.Placements) == 0:
 		storageCheck.Status = "skipped"
 		storageCheck.Detail = "root disk holds everything"
+	default:
+		pending := 0
+		for _, p := range sf.Placements {
+			if p.Pending {
+				pending++
+			}
+		}
+		if pending > 0 {
+			storageCheck.Status = "pending"
+			storageCheck.Detail = "volume placement recorded but not applied"
+		} else {
+			storageCheck.Status = "ok"
+			storageCheck.Detail = "volume placement configured"
+		}
 	}
 	checks = append(checks, storageCheck)
 

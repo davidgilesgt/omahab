@@ -98,6 +98,7 @@ Use --server to target a different control plane (env OMAHAB_SERVER, then ~/.con
 	root.AddCommand(newProjectCmd())
 	root.AddCommand(newExposureCmd())
 	root.AddCommand(newBackupCmd())
+	root.AddCommand(newStorageCmd())
 	root.AddCommand(newBackupDriveCmd())
 	root.AddCommand(newDropsCmd())
 	root.AddCommand(newEventCmd())
@@ -1072,6 +1073,132 @@ func newAppCmd() *cobra.Command {
 		},
 	})
 	return app
+}
+
+func newStorageCmd() *cobra.Command {
+	stor := &cobra.Command{
+		Use:   "storage",
+		Short: "Manage per-volume disk placement",
+	}
+	stor.AddCommand(&cobra.Command{
+		Use:   "disks",
+		Short: "List candidate storage filesystems",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, cancel := newContext()
+			defer cancel()
+			c, err := resolveClient()
+			if err != nil {
+				return handleFailure(err)
+			}
+			disks, err := c.ListDisks(ctx)
+			if err != nil {
+				return handleFailure(err)
+			}
+			if flagJSON {
+				return printJSON(disks)
+			}
+			for _, d := range disks {
+				fmt.Printf("%s %s %s %s %s\n", d.UUID, d.Name, d.Size, d.FSType, d.Mountpoint)
+			}
+			return nil
+		},
+	})
+	var placements []string
+	var migrate, confirm bool
+	configureCmd := &cobra.Command{
+		Use:   "configure",
+		Short: "Set volume placements (volume=uuid, repeatable; empty uuid means system disk)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := needForceGuard(false); err != nil {
+				return handleFailure(err)
+			}
+			var reqPl []apitypes.StoragePlacement
+			for _, p := range placements {
+				vol, uuid, _ := strings.Cut(p, "=")
+				vol = strings.TrimSpace(vol)
+				uuid = strings.TrimSpace(uuid)
+				if vol == "" {
+					return handleFailure(errors.New("placement must be volume=uuid"))
+				}
+				var up *string
+				if uuid != "" {
+					u := uuid
+					up = &u
+				}
+				reqPl = append(reqPl, apitypes.StoragePlacement{Volume: vol, FSUUID: up})
+			}
+			ctx, cancel := newContext()
+			defer cancel()
+			c, err := resolveClient()
+			if err != nil {
+				return handleFailure(err)
+			}
+			op, err := c.ConfigureStorage(ctx, apitypes.ConfigureStorageRequest{Placements: reqPl, Migrate: migrate, Confirm: confirm})
+			if err != nil {
+				return handleFailure(err)
+			}
+			if flagJSON {
+				return printJSON(op)
+			}
+			fmt.Printf("operation %s: %s/%s\n", op.ID, op.Status, op.Stage)
+			return nil
+		},
+	}
+	configureCmd.Flags().StringArrayVar(&placements, "placement", nil, "volume=uuid (repeatable); empty uuid selects the system disk")
+	configureCmd.Flags().BoolVar(&migrate, "migrate", false, "move existing data through a journaled operation")
+	configureCmd.Flags().BoolVar(&confirm, "confirm", false, "confirm a live data move")
+	stor.AddCommand(configureCmd)
+	stor.AddCommand(&cobra.Command{
+		Use:   "operation <id>",
+		Short: "Show operation progress",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, cancel := newContext()
+			defer cancel()
+			c, err := resolveClient()
+			if err != nil {
+				return handleFailure(err)
+			}
+			op, err := c.GetOperation(ctx, args[0])
+			if err != nil {
+				return handleFailure(err)
+			}
+			if flagJSON {
+				return printJSON(op)
+			}
+			fmt.Printf("operation %s: %s/%s error=%s resumable=%v rollbackable=%v\n", op.ID, op.Status, op.Stage, op.Error, op.CanResume, op.CanRollback)
+			return nil
+		},
+	})
+	for _, action := range []string{"resume", "rollback", "dismiss"} {
+		action := action
+		stor.AddCommand(&cobra.Command{
+			Use:   action + " <id>",
+			Short: "Run an operation action (" + action + ")",
+			Args:  cobra.ExactArgs(1),
+			RunE: func(cmd *cobra.Command, args []string) error {
+				if err := needForceGuard(false); err != nil {
+					return handleFailure(err)
+				}
+				ctx, cancel := newContext()
+				defer cancel()
+				c, err := resolveClient()
+				if err != nil {
+					return handleFailure(err)
+				}
+				op, err := c.DoOperationAction(ctx, args[0], action)
+				if err != nil {
+					return handleFailure(err)
+				}
+				if flagJSON {
+					return printJSON(op)
+				}
+				fmt.Printf("operation %s: %s/%s\n", op.ID, op.Status, op.Stage)
+				return nil
+			},
+		})
+	}
+	return stor
 }
 
 func newProjectCmd() *cobra.Command {

@@ -310,6 +310,8 @@ func (s *Server) buildRouter() chi.Router {
 		r.Post("/api/v1/recovery/confirm", s.withBodyLimit(defaultBodyLimit, s.handleConfirmRecoveryKey))
 		r.Get("/api/v1/system/disks", s.handleListDisks)
 		r.Put("/api/v1/system/storage", s.withBodyLimit(defaultBodyLimit, s.handleConfigureStorage))
+		r.Get("/api/v1/operations/{id}", s.handleGetOperation)
+		r.Post("/api/v1/operations/{id}/actions", s.withBodyLimit(defaultBodyLimit, s.handleOperationAction))
 		r.Get("/api/v1/system/ssh-keys", s.handleListSystemSSHKeys)
 		r.Post("/api/v1/system/ssh-keys", s.withBodyLimit(64<<10, s.handleAddSystemSSHKeys))
 		r.Delete("/api/v1/system/ssh-keys", s.withBodyLimit(64<<10, s.handleDeleteSystemSSHKeys))

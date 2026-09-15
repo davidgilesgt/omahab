@@ -126,6 +126,31 @@ func (b *Backend) appsByBundle(ctx context.Context, bundleID string) ([]apps.Sta
 // PauseAppForImport stops writers (dependents first, desired state preserved)
 // and records import maintenance with markers. Admin API/CLI only.
 func (b *Backend) PauseAppForImport(ctx context.Context, appID domain.ID) (apps.Maintenance, error) {
+	var result apps.Maintenance
+	err := withMaintenanceLock(func() error {
+		var err error
+		result, err = b.pauseAppLocked(ctx, appID, apps.MaintenanceImport)
+		return err
+	})
+	return result, err
+}
+
+// pauseAppWithReason is the shared pause path for import/storage/restore
+// owners. Only the import reason is clearable by generic resume. It serializes
+// on the global maintenance lock.
+func (b *Backend) pauseAppWithReason(ctx context.Context, appID domain.ID, reason string) (apps.Maintenance, error) {
+	var result apps.Maintenance
+	err := withMaintenanceLock(func() error {
+		var err error
+		result, err = b.pauseAppLocked(ctx, appID, reason)
+		return err
+	})
+	return result, err
+}
+
+// pauseAppLocked runs the pause body assuming the global maintenance lock is
+// already held (used by migration workers that hold it across stages).
+func (b *Backend) pauseAppLocked(ctx context.Context, appID domain.ID, reason string) (apps.Maintenance, error) {
 	if b.apps == nil {
 		return apps.Maintenance{}, fmt.Errorf("%w: apps not configured", ErrNotConfigured)
 	}
@@ -134,40 +159,34 @@ func (b *Backend) PauseAppForImport(ctx context.Context, appID domain.ID) (apps.
 		return apps.Maintenance{}, translateError(err)
 	}
 	var result apps.Maintenance
-	err = withMaintenanceLock(func() error {
-		affected, err := b.affectedBundles(st.BundleID)
-		if err != nil {
-			return err
-		}
-		// Stop writers in reverse dependency order without overwriting
-		// prior desired state.
-		for i := len(affected) - 1; i >= 0; i-- {
-			for _, a := range mustAppsByBundle(ctx, b, affected[i].ID) {
-				if _, err := b.apps.Quiesce(ctx, a.ID); err != nil {
-					return translateError(err)
-				}
-			}
-		}
-		opID := newOperationID()
-		for _, bd := range affected {
-			m, err := b.apps.PauseForMaintenance(ctx, bd.ID, apps.MaintenanceImport, opID)
-			if err != nil {
-				return translateError(err)
-			}
-			if err := writeMarker(b.appMarkerPath(bd.ID)); err != nil {
-				return err
-			}
-			if bd.ID == st.BundleID {
-				result = m
-			}
-		}
-		if result.BundleID == "" {
-			result = apps.Maintenance{BundleID: st.BundleID, Reason: apps.MaintenanceImport, OperationID: opID}
-		}
-		return nil
-	})
+	affected, err := b.affectedBundles(st.BundleID)
 	if err != nil {
 		return apps.Maintenance{}, err
+	}
+	// Stop writers in reverse dependency order without overwriting
+	// prior desired state.
+	for i := len(affected) - 1; i >= 0; i-- {
+		for _, a := range mustAppsByBundle(ctx, b, affected[i].ID) {
+			if _, err := b.apps.Quiesce(ctx, a.ID); err != nil {
+				return apps.Maintenance{}, translateError(err)
+			}
+		}
+	}
+	opID := newOperationID()
+	for _, bd := range affected {
+		m, err := b.apps.PauseForMaintenance(ctx, bd.ID, reason, opID)
+		if err != nil {
+			return apps.Maintenance{}, translateError(err)
+		}
+		if err := writeMarker(b.appMarkerPath(bd.ID)); err != nil {
+			return apps.Maintenance{}, err
+		}
+		if bd.ID == st.BundleID {
+			result = m
+		}
+	}
+	if result.BundleID == "" {
+		result = apps.Maintenance{BundleID: st.BundleID, Reason: reason, OperationID: opID}
 	}
 	return result, nil
 }

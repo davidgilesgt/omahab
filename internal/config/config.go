@@ -43,6 +43,11 @@ type Config struct {
 
 	// AdminUser is the Linux administrator account name. Default "omahab".
 	AdminUser string
+
+	// NativeLayoutPath is the JSON rendering of nix/app-data.nix (the single
+	// native layout used by storage generation). Empty means layout features
+	// that need postgresql/server-data paths are unavailable.
+	NativeLayoutPath string
 }
 
 func Load() (Config, error) {
@@ -53,6 +58,7 @@ func Load() (Config, error) {
 		ShutdownGrace: 15 * time.Second,
 		CatalogPath:   envOr("OMAHAB_CATALOG", DefaultCatalogPath),
 		AdminUser:     envOr("OMAHAB_ADMIN_USER", "omahab"),
+		NativeLayoutPath: envOr("OMAHAB_NATIVE_LAYOUT", ""),
 	}
 	cfg.DatabasePath = envOr("OMAHAB_DATABASE", filepath.Join(cfg.StateDir, "control.db"))
 	cfg.MasterKeyPath = envOr("OMAHAB_MASTER_KEY", filepath.Join(cfg.StateDir, "master.key"))

@@ -1,0 +1,271 @@
+package controlplane
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/omahab/omahab/internal/apitypes"
+)
+
+func execCommand(name string, args ...string) (string, error) {
+	out, err := exec.Command(name, args...).CombinedOutput()
+	return string(out), err
+}
+// current journal stage, never from arbitrary journal paths.
+const (
+	OpPending   = "pending"
+	OpRunning   = "running"
+	OpPaused    = "paused"
+	OpCompleted = "completed"
+	OpFailed    = "failed"
+	OpRolledBak = "rolled_back"
+)
+
+// Operation is the shared progress record for storage/restore/import work.
+// It aliases the API type so handlers return it without conversion.
+type Operation = apitypes.Operation
+
+func newOperation(kind string, affected []string) Operation {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	return Operation{
+		ID:          newOperationID(),
+		Kind:        kind,
+		Status:      OpPending,
+		Stage:       "preflight",
+		AffectedApp: affected,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+}
+
+func operationsDir(stateDir, kind string) string {
+	return filepath.Join(stateDir, kind+"-operations")
+}
+
+func operationJournalPath(stateDir, kind, id string) string {
+	return filepath.Join(operationsDir(stateDir, kind), id, "journal.json")
+}
+
+func writeOperationJournal(stateDir string, op Operation) error {
+	op.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	path := operationJournalPath(stateDir, op.Kind, op.ID)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	raw, err := json.MarshalIndent(op, "", "  ")
+	if err != nil {
+		return err
+	}
+	return syncWriteFile(path, append(raw, '\n'), 0o600)
+}
+
+func syncWriteFile(path string, data []byte, mode os.FileMode) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, mode); err != nil {
+		return err
+	}
+	if f, err := os.OpenFile(tmp, os.O_RDWR, mode); err == nil {
+		_ = f.Sync()
+		_ = f.Close()
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	if d, err := os.Open(filepath.Dir(path)); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
+}
+
+// loadOperation searches storage and restore journals for an operation ID.
+func loadOperation(stateDir, id string) (Operation, error) {
+	for _, kind := range []string{"storage", "restore"} {
+		raw, err := os.ReadFile(operationJournalPath(stateDir, kind, id))
+		if err != nil {
+			continue
+		}
+		// Storage journals wrap the operation; restore journals may too.
+		var sj storageJournal
+		if err := json.Unmarshal(raw, &sj); err == nil && sj.Operation.ID == id {
+			return sj.Operation, nil
+		}
+		var op Operation
+		if err := json.Unmarshal(raw, &op); err == nil && op.ID == id {
+			return op, nil
+		}
+	}
+	return Operation{}, fmt.Errorf("%w: operation %q not found", apitypes.ErrNotFound, id)
+}
+
+// storageJournal persists a storage migration across restarts.
+type storageJournal struct {
+	Operation  Operation          `json:"operation"`
+	Placements []StoragePlacement `json:"placements"`
+	Previous   []StoragePlacement `json:"previous"`
+}
+
+func writeStorageJournal(stateDir string, j storageJournal) error {
+	j.Operation.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	raw, err := json.MarshalIndent(j, "", "  ")
+	if err != nil {
+		return err
+	}
+	return syncWriteFile(operationJournalPath(stateDir, "storage", j.Operation.ID), append(raw, '\n'), 0o600)
+}
+
+func loadStorageJournal(stateDir, id string) (storageJournal, error) {
+	raw, err := os.ReadFile(operationJournalPath(stateDir, "storage", id))
+	if err != nil {
+		return storageJournal{}, fmt.Errorf("%w: storage operation %q not found", apitypes.ErrNotFound, id)
+	}
+	var j storageJournal
+	if err := json.Unmarshal(raw, &j); err != nil {
+		return storageJournal{}, fmt.Errorf("parse storage journal: %w", err)
+	}
+	return j, nil
+}
+
+// GetOperation returns the shared progress record for polling.
+func (b *Backend) GetOperation(ctx context.Context, id string) (Operation, error) {
+	op, err := loadOperation(b.cfg.StateDir, strings.TrimSpace(id))
+	if err != nil {
+		return Operation{}, err
+	}
+	return op, nil
+}
+
+// DoOperationAction runs resume|rollback|dismiss from the journal stage.
+func (b *Backend) DoOperationAction(ctx context.Context, id string, action string, confirm bool) (Operation, error) {
+	if !confirm {
+		return Operation{}, fmt.Errorf("%w: confirm:true is required", apitypes.ErrValidation)
+	}
+	id = strings.TrimSpace(id)
+	switch strings.TrimSpace(action) {
+	case "dismiss":
+		return b.dismissOperation(id)
+	case "rollback":
+		return b.rollbackStorageOperation(ctx, id)
+	case "resume":
+		return b.resumeStorageOperation(ctx, id)
+	default:
+		return Operation{}, fmt.Errorf("%w: action must be resume|rollback|dismiss", apitypes.ErrValidation)
+	}
+}
+
+func (b *Backend) dismissOperation(id string) (Operation, error) {
+	op, err := loadOperation(b.cfg.StateDir, id)
+	if err != nil {
+		return Operation{}, err
+	}
+	if op.Status == OpRunning || op.Status == OpPending || op.Status == OpPaused {
+		return Operation{}, fmt.Errorf("%w: cannot dismiss %s operation", apitypes.ErrConflict, op.Status)
+	}
+	// Dismiss removes only this operation's validated staging tree and its
+	// journal; live state is untouched.
+	_ = os.RemoveAll(filepath.Join(operationsDir(b.cfg.StateDir, op.Kind), id))
+	op.Status = OpCompleted
+	return op, nil
+}
+
+func (b *Backend) resumeStorageOperation(ctx context.Context, id string) (Operation, error) {
+	j, err := loadStorageJournal(b.cfg.StateDir, id)
+	if err != nil {
+		return Operation{}, err
+	}
+	if !j.Operation.CanResume {
+		return Operation{}, fmt.Errorf("%w: operation cannot resume from stage %q", apitypes.ErrConflict, j.Operation.Stage)
+	}
+	j.Operation.Status = OpRunning
+	j.Operation.CanResume = false
+	if err := writeStorageJournal(b.cfg.StateDir, j); err != nil {
+		return Operation{}, err
+	}
+	go b.runStorageMigration(id)
+	return j.Operation, nil
+}
+
+func (b *Backend) rollbackStorageOperation(ctx context.Context, id string) (Operation, error) {
+	j, err := loadStorageJournal(b.cfg.StateDir, id)
+	if err != nil {
+		return Operation{}, err
+	}
+	if !j.Operation.CanRollback {
+		return Operation{}, fmt.Errorf("%w: operation cannot roll back from stage %q", apitypes.ErrConflict, j.Operation.Stage)
+	}
+	go b.runStorageRollback(id)
+	j.Operation.Status = "rolling_back"
+	_ = writeStorageJournal(b.cfg.StateDir, j)
+	return j.Operation, nil
+}
+
+// runStorageRollback restores the previous mapping and prior unit state after
+// a failed migration. Old data was kept untouched, so rollback re-persists
+// the old file, re-binds, and resumes apps.
+func (b *Backend) runStorageRollback(id string) {
+	_ = withMaintenanceLock(func() error {
+		j, err := loadStorageJournal(b.cfg.StateDir, id)
+		if err != nil {
+			return err
+		}
+		ctx := context.Background()
+		prev := storageFile{Version: storageFileVersion, Placements: j.Previous}
+		if err := writeStorageFile(storageJSONPath(b.cfg.StateDir), prev); err != nil {
+			return failStorageOp(b.cfg.StateDir, &j, err.Error())
+		}
+		known, _ := b.knownVolumes(ctx)
+		for _, p := range j.Previous {
+			if p.FSUUID == nil {
+				continue
+			}
+			if cp := known[p.Volume]; cp != "" {
+				_ = resumeBindMount(known, p)
+			}
+			_ = restartStorageUnit(p.Volume)
+		}
+		if err := resumeStorageApps(b, ctx, j); err != nil {
+			return failStorageOp(b.cfg.StateDir, &j, "rollback resume: "+err.Error())
+		}
+		j.Operation.Status = OpRolledBak
+		j.Operation.Stage = OpRolledBak
+		j.Operation.CanResume = false
+		j.Operation.CanRollback = false
+		_ = writeStorageJournal(b.cfg.StateDir, j)
+		return nil
+	})
+}
+
+func resumeBindMount(known map[string]string, p StoragePlacement) error {
+	if p.FSUUID == nil {
+		return nil
+	}
+	cp := known[p.Volume]
+	if cp == "" {
+		return nil
+	}
+	uuid := strings.TrimSpace(*p.FSUUID)
+	src := managedSubdir(uuid, p.Volume)
+	if p.Legacy {
+		src = filepath.Join(diskMountpoint(uuid), "media")
+	}
+	out, err := execCommand("mount", "--bind", src, cp)
+	if err != nil {
+		return fmt.Errorf("bind %q -> %q: %v: %s", src, cp, err, strings.TrimSpace(out))
+	}
+	return nil
+}
+
+func restartStorageUnit(volume string) error {
+	out, err := execCommand("systemctl", "restart", "omahab-storage-"+volumeSlug(volume)+".service")
+	if err != nil {
+		return fmt.Errorf("restart storage unit: %v: %s", err, strings.TrimSpace(out))
+	}
+	return nil
+}
+

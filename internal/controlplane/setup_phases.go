@@ -216,6 +216,7 @@ func (b *Backend) runReservedSetup(ctx context.Context) error {
 		{"preconditions", b.setupPhasePreconditions},
 		{"tunnel", b.setupPhaseTunnel},
 		{"secrets", b.setupPhaseSecrets},
+		{"storage", b.setupPhaseStorage},
 		{"core_apps", b.setupPhaseCoreApps},
 		{"oidc", b.setupPhaseOIDC},
 		{"login_exposure", b.setupPhaseLoginExposure},

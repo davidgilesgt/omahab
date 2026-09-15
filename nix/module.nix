@@ -39,6 +39,7 @@ let
   # its own package.
   nativeLayout = import ./app-data.nix { inherit config stateDir dataDir; };
   nativeLayoutJson = builtins.toJSON nativeLayout;
+  nativeLayoutFile = pkgs.writeText "omahab-native-layout.json" nativeLayoutJson;
   nativeCatalog = pkgs.runCommand "omahab-catalog-native" { nativeBuildInputs = [ pkgs.jq ]; } ''
     layout="$TMPDIR/layout.json"
     printf '%s' ${lib.escapeShellArg nativeLayoutJson} > "$layout"
@@ -156,7 +157,7 @@ in
     };
   };
 
-  imports = [ ./apps.nix ];
+  imports = [ ./apps.nix ./storage.nix ];
 
   config = mkIf cfg.enable {
     assertions = [
@@ -297,8 +298,8 @@ in
         OMAHAB_STATE_DIR = stateDir;
         OMAHAB_DATA_DIR = dataDir;
         OMAHAB_LISTEN = cfg.listen;
-        OMAHAB_PLACEMENT = cfg.placement;
         OMAHAB_CATALOG = "${nativeCatalog}";
+        OMAHAB_NATIVE_LAYOUT = "${nativeLayoutFile}";
         OMAHAB_WEB_DIR = "${cfg.webPackage}";
         # B2: distribution bundle for /dl/* and /install.sh (public on LAN, no auth).
         # Only set if dlPackage is available (flake provides omahab-dl; fallback for standalone use).
@@ -825,6 +826,6 @@ in
       devpod
       tmux
     ];
-    systemd.services.omahabd.path = [ omahabOncePkg pkgs.tailscale pkgs.docker pkgs.systemd pkgs.restic pkgs.postgresql pkgs.nftables pkgs.util-linux ];
+    systemd.services.omahabd.path = [ omahabOncePkg pkgs.tailscale pkgs.docker pkgs.systemd pkgs.restic pkgs.postgresql pkgs.nftables pkgs.util-linux pkgs.rsync pkgs.jq ];
   };
 }
