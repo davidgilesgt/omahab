@@ -19,7 +19,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
-from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -73,7 +72,7 @@ class DeterministicTestAdapter(EmbeddingModel):
             rng = np.random.RandomState(seed % (2**32))
             vec = rng.randn(self._dimensions).astype(np.float64)
             # L2 normalize to unit length
-            norm = np.linalg.norm(vec)
+            norm: float = float(np.linalg.norm(vec))
             if norm < 1e-12:
                 # Extremely unlikely with randn, but handle
                 vec = np.zeros(self._dimensions, dtype=np.float64)

@@ -29,7 +29,7 @@ import random
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import TypedDict
 
 import numpy as np
 
@@ -38,6 +38,73 @@ from .checksum import content_checksum, embedding_input_checksum
 from .config import load_config
 from .protocol import EmbedRequest
 from .worker import EmbeddingWorker
+
+
+class CorpusItem(TypedDict):
+    id: str
+    text: str
+
+
+class QueryItem(TypedDict):
+    id: str
+    text: str
+    relevant_ids: list[str]
+
+
+class LatencyStats(TypedDict):
+    p50: float
+    p95: float
+    p99: float
+    mean: float
+    min: float
+    max: float
+
+
+class QueryLatencyStats(TypedDict):
+    p50: float
+    mean: float
+
+
+class ThroughputStats(TypedDict):
+    chunks_per_sec: float
+    requests_per_sec: float
+    wall_seconds: float
+
+
+class MemoryStats(TypedDict):
+    rss_before: float | None
+    rss_after: float | None
+    delta: float | None
+
+
+class RecallStats(TypedDict):
+    k: int
+    mean: float
+    scores: list[float]
+    num_scored: int
+
+
+class ChecksumStats(TypedDict):
+    content_sha256_sample: list[str]
+    batch_checksum_sample: str
+    reindex_note: str
+
+
+class BenchmarkReport(TypedDict):
+    version: str
+    model_alias: str
+    model_id: str
+    corpus_size: int
+    queries: int
+    batch_size: int
+    iterations: int
+    k: int
+    latency_ms: LatencyStats
+    query_latency_ms: QueryLatencyStats
+    throughput: ThroughputStats
+    memory_mb: MemoryStats
+    recall_at_k: RecallStats
+    checksums: ChecksumStats
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -60,21 +127,47 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def _load_jsonl(path: Path) -> list[dict[str, Any]]:
-    out = []
+def _load_corpus(path: Path) -> list[CorpusItem]:
+    items: list[CorpusItem] = []
     with path.open(encoding="utf-8") as f:
-        for line in f:
+        for lineno, line in enumerate(f, 1):
             line = line.strip()
             if not line:
                 continue
-            out.append(json.loads(line))
-    return out
+            try:
+                raw: object = json.loads(line)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"{path}:{lineno}: invalid JSON: {e}") from e
+            if not isinstance(raw, dict) or not isinstance(raw.get("id"), str) or not isinstance(raw.get("text"), str):
+                raise ValueError(f"{path}:{lineno}: corpus entry must have string id/text")
+            items.append({"id": raw["id"], "text": raw["text"]})
+    return items
 
 
-def _synthetic_corpus(n_docs: int, seed: int = 42) -> list[dict[str, Any]]:
+def _load_queries(path: Path) -> list[QueryItem]:
+    items: list[QueryItem] = []
+    with path.open(encoding="utf-8") as f:
+        for lineno, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                raw: object = json.loads(line)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"{path}:{lineno}: invalid JSON: {e}") from e
+            if not isinstance(raw, dict) or not isinstance(raw.get("id"), str) or not isinstance(raw.get("text"), str):
+                raise ValueError(f"{path}:{lineno}: query entry must have string id/text")
+            relevant = raw.get("relevant_ids", [])
+            if not isinstance(relevant, list) or not all(isinstance(r, str) for r in relevant):
+                raise ValueError(f"{path}:{lineno}: relevant_ids must be a list of strings")
+            items.append({"id": raw["id"], "text": raw["text"], "relevant_ids": relevant})
+    return items
+
+
+def _synthetic_corpus(n_docs: int, seed: int = 42) -> list[CorpusItem]:
     rng = random.Random(seed)
     topics = ["paperless", "immich", "forgejo", "hermes", "omahab", "tailscale", "cloudflare", "backup", "syncthing"]
-    docs = []
+    docs: list[CorpusItem] = []
     for i in range(n_docs):
         topic = rng.choice(topics)
         filler = " ".join(rng.choice(topics) for _ in range(rng.randint(5, 15)))
@@ -83,9 +176,9 @@ def _synthetic_corpus(n_docs: int, seed: int = 42) -> list[dict[str, Any]]:
     return docs
 
 
-def _synthetic_queries(corpus: list[dict[str, Any]], n_queries: int, seed: int = 42) -> list[dict[str, Any]]:
+def _synthetic_queries(corpus: list[CorpusItem], n_queries: int, seed: int = 42) -> list[QueryItem]:
     rng = random.Random(seed + 1)
-    queries = []
+    queries: list[QueryItem] = []
     for i in range(n_queries):
         # Pick a random doc as relevant; query is paraphrase of its text prefix
         doc = rng.choice(corpus)
@@ -126,10 +219,10 @@ def _memory_rss_mb() -> float | None:
         import psutil  # type: ignore
 
         proc = psutil.Process(os.getpid())
-        return proc.memory_info().rss / (1024 * 1024)
+        return float(proc.memory_info().rss) / (1024 * 1024)
     except ImportError:
         try:
-            import resource  # type: ignore
+            import resource
 
             # ru_maxrss is KB on Linux, bytes on macOS — handle Linux
             rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
@@ -162,8 +255,8 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(2)
 
     # Load or synthesize data
-    corpus: list[dict[str, Any]]
-    queries: list[dict[str, Any]]
+    corpus: list[CorpusItem]
+    queries: list[QueryItem]
     if args.synthetic:
         corpus = _synthetic_corpus(args.synthetic, seed=args.seed)
         queries = _synthetic_queries(corpus, args.num_queries, seed=args.seed)
@@ -171,9 +264,17 @@ def main(argv: list[str] | None = None) -> None:
         if not args.corpus:
             print("Provide --corpus or --synthetic N", file=sys.stderr)
             sys.exit(2)
-        corpus = _load_jsonl(Path(args.corpus))
+        try:
+            corpus = _load_corpus(Path(args.corpus))
+        except (OSError, ValueError) as e:
+            print(f"FATAL: {e}", file=sys.stderr)
+            sys.exit(2)
         if args.queries:
-            queries = _load_jsonl(Path(args.queries))
+            try:
+                queries = _load_queries(Path(args.queries))
+            except (OSError, ValueError) as e:
+                print(f"FATAL: {e}", file=sys.stderr)
+                sys.exit(2)
         else:
             queries = []
 
@@ -200,12 +301,10 @@ def main(argv: list[str] | None = None) -> None:
 
     # Timed corpus embedding
     latencies: list[float] = []
-    all_vectors: list[np.ndarray] = []
     id_to_vec: dict[str, np.ndarray] = {}
     total_chunks = 0
     t0 = time.perf_counter()
     for it in range(iterations):
-        iter_vecs: list[np.ndarray] = []
         for i in range(0, len(corpus), batch_size):
             batch = corpus[i : i + batch_size]
             texts = [d["text"] for d in batch]
@@ -223,10 +322,7 @@ def main(argv: list[str] | None = None) -> None:
             if it == 0:
                 for doc_id, v in zip(ids, vecs):
                     id_to_vec[doc_id] = v
-                    iter_vecs.append(v)
             total_chunks += len(texts)
-        if it == 0:
-            all_vectors = iter_vecs
 
     t1 = time.perf_counter()
     rss_after = _memory_rss_mb()
@@ -265,10 +361,10 @@ def main(argv: list[str] | None = None) -> None:
     rss_delta = (rss_after - rss_before) if (rss_after is not None and rss_before is not None) else None
 
     # Build report
-    report: dict[str, Any] = {
+    report: BenchmarkReport = {
         "version": __version__,
         "model_alias": alias,
-        "model_id": cfg.models.get(alias).model_id if alias in cfg.models else alias,
+        "model_id": cfg.models[alias].model_id if alias in cfg.models else alias,
         "corpus_size": len(corpus),
         "queries": len(queries),
         "batch_size": batch_size,

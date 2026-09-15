@@ -3,33 +3,22 @@ package knowledge
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"hash"
 	"strings"
 	"time"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/omahab/omahab/internal/domain"
 	"github.com/omahab/omahab/internal/store"
 )
 
-// Allowed model aliases — must match workers/embedding/limits.py
-var allowedAliases = map[string]bool{
-	"omahab-embed-english":   true,
-	"omahab-embed-worldwide": true,
-}
-
-// Service owns knowledge source registration, permissions, semantic index, and retrieval.
 type Service struct {
 	db        *sql.DB
 	paperless PaperlessClient
 	karakeep  KarakeepClient
-	embedder  EmbeddingWorker
 	sink      EventSink
 }
 
@@ -37,11 +26,10 @@ type Service struct {
 type ServiceOption struct {
 	Paperless PaperlessClient
 	Karakeep  KarakeepClient
-	Embedder  EmbeddingWorker
 	Sink      EventSink
 }
 
-// New creates a Service. Clients and embedder may be nil, in which case no-ops are used.
+// New creates a Service. Clients may be nil, in which case no-ops are used.
 func New(db *sql.DB, opts ServiceOption) *Service {
 	if opts.Paperless == nil {
 		opts.Paperless = NewNoopPaperlessClient()
@@ -52,23 +40,13 @@ func New(db *sql.DB, opts ServiceOption) *Service {
 	if opts.Sink == nil {
 		opts.Sink = NoopSink{}
 	}
-	// Embedder may remain nil (tests can set later); TriggerReindex handles nil as immediate success with dummy checksum for non-worker tests.
 	return &Service{
 		db:        db,
 		paperless: opts.Paperless,
 		karakeep:  opts.Karakeep,
-		embedder:  opts.Embedder,
 		sink:      opts.Sink,
 	}
 }
-
-// NewService is an alias for New.
-func NewService(db *sql.DB, paperless PaperlessClient, karakeep KarakeepClient, embedder EmbeddingWorker, sink EventSink) *Service {
-	return New(db, ServiceOption{Paperless: paperless, Karakeep: karakeep, Embedder: embedder, Sink: sink})
-}
-
-// SetEmbedder replaces the embedding worker (useful for testing reindex failure injection).
-func (s *Service) SetEmbedder(w EmbeddingWorker) { s.embedder = w }
 
 // --- Sources ---
 
@@ -593,303 +571,6 @@ func (s *Service) SearchKarakeep(ctx context.Context, principal, query string, o
 	return s.KarakeepSearch(ctx, principal, query, opts)
 }
 
-// --- Semantic index (generations, jobs, worker handoff, checksums) ---
-
-func (s *Service) GetActiveGeneration(ctx context.Context, sourceID, modelAlias string) (*IndexGeneration, error) {
-	sourceID = strings.TrimSpace(sourceID)
-	modelAlias = strings.TrimSpace(modelAlias)
-	if sourceID == "" || modelAlias == "" {
-		return nil, validation("source id and model alias are required")
-	}
-	if !allowedAliases[modelAlias] {
-		return nil, validationf("model alias %q not allowed", modelAlias)
-	}
-	var (
-		id, sid, alias, modelID, status, checksum, failureReason, createdAt, updatedAt string
-		activatedAt                                                                    sql.NullString
-	)
-	err := s.db.QueryRowContext(ctx,
-		`SELECT id, source_id, model_alias, model_id, status, checksum, failure_reason, created_at, activated_at, updated_at
-		 FROM knowledge_index_generations
-		 WHERE source_id = ? AND model_alias = ? AND status = 'active' LIMIT 1`, sourceID, modelAlias).
-		Scan(&id, &sid, &alias, &modelID, &status, &checksum, &failureReason, &createdAt, &activatedAt, &updatedAt)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, notFoundf("active generation for %s/%s not found", sourceID, modelAlias)
-		}
-		return nil, fmt.Errorf("get active generation: %w", err)
-	}
-	ca, _ := time.Parse(time.RFC3339Nano, createdAt)
-	ua, _ := time.Parse(time.RFC3339Nano, updatedAt)
-	gen := &IndexGeneration{ID: id, SourceID: sid, ModelAlias: alias, ModelID: modelID, Status: status, Checksum: checksum, FailureReason: failureReason, CreatedAt: ca, UpdatedAt: ua}
-	if activatedAt.Valid {
-		t, _ := time.Parse(time.RFC3339Nano, activatedAt.String)
-		gen.ActivatedAt = &t
-	}
-	return gen, nil
-}
-
-func (s *Service) ListGenerations(ctx context.Context, sourceID string) ([]*IndexGeneration, error) {
-	sourceID = strings.TrimSpace(sourceID)
-	if sourceID == "" {
-		return nil, validation("source id is required")
-	}
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, source_id, model_alias, model_id, status, checksum, failure_reason, created_at, activated_at, updated_at
-		 FROM knowledge_index_generations WHERE source_id = ? ORDER BY created_at DESC`, sourceID)
-	if err != nil {
-		return nil, fmt.Errorf("list generations: %w", err)
-	}
-	defer rows.Close()
-	var out []*IndexGeneration
-	for rows.Next() {
-		var id, sid, alias, modelID, status, checksum, failureReason, caStr, uaStr string
-		var activatedAt sql.NullString
-		if err := rows.Scan(&id, &sid, &alias, &modelID, &status, &checksum, &failureReason, &caStr, &activatedAt, &uaStr); err != nil {
-			return nil, err
-		}
-		ca, _ := time.Parse(time.RFC3339Nano, caStr)
-		ua, _ := time.Parse(time.RFC3339Nano, uaStr)
-		gen := &IndexGeneration{ID: id, SourceID: sid, ModelAlias: alias, ModelID: modelID, Status: status, Checksum: checksum, FailureReason: failureReason, CreatedAt: ca, UpdatedAt: ua}
-		if activatedAt.Valid {
-			t, _ := time.Parse(time.RFC3339Nano, activatedAt.String)
-			gen.ActivatedAt = &t
-		}
-		out = append(out, gen)
-	}
-	return out, rows.Err()
-}
-
-func (s *Service) ListIndexGenerations(ctx context.Context, sourceID string) ([]*IndexGeneration, error) {
-	return s.ListGenerations(ctx, sourceID)
-}
-
-func (s *Service) GetGeneration(ctx context.Context, id string) (*IndexGeneration, error) {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return nil, validation("generation id is required")
-	}
-	var (
-		sid, alias, modelID, status, checksum, failureReason, caStr, uaStr string
-		activatedAt                                                        sql.NullString
-	)
-	err := s.db.QueryRowContext(ctx,
-		`SELECT id, source_id, model_alias, model_id, status, checksum, failure_reason, created_at, activated_at, updated_at
-		 FROM knowledge_index_generations WHERE id = ?`, id).
-		Scan(&id, &sid, &alias, &modelID, &status, &checksum, &failureReason, &caStr, &activatedAt, &uaStr)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, notFoundf("generation %s not found", id)
-		}
-		return nil, fmt.Errorf("get generation: %w", err)
-	}
-	ca, _ := time.Parse(time.RFC3339Nano, caStr)
-	ua, _ := time.Parse(time.RFC3339Nano, uaStr)
-	gen := &IndexGeneration{ID: id, SourceID: sid, ModelAlias: alias, ModelID: modelID, Status: status, Checksum: checksum, FailureReason: failureReason, CreatedAt: ca, UpdatedAt: ua}
-	if activatedAt.Valid {
-		t, _ := time.Parse(time.RFC3339Nano, activatedAt.String)
-		gen.ActivatedAt = &t
-	}
-	return gen, nil
-}
-
-// TriggerReindex creates a new generation and hands off to the isolated embedding worker.
-// Previous generation stays active until the new one succeeds; on failure the previous remains active.
-func (s *Service) TriggerReindex(ctx context.Context, sourceID, modelAlias string) (*IndexJob, error) {
-	sourceID = strings.TrimSpace(sourceID)
-	modelAlias = strings.TrimSpace(modelAlias)
-	if sourceID == "" {
-		return nil, validation("source id is required")
-	}
-	if modelAlias == "" {
-		return nil, validation("model alias is required")
-	}
-	if !allowedAliases[modelAlias] {
-		return nil, validationf("model alias %q not allowed; allowed: omahab-embed-english, omahab-embed-worldwide", modelAlias)
-	}
-	// Verify source exists
-	if _, err := s.GetSource(ctx, sourceID); err != nil {
-		return nil, err
-	}
-	// Find current active generation (if any) to preserve on failure
-	active, _ := s.GetActiveGeneration(ctx, sourceID, modelAlias)
-	// Create new generation in building state
-	genID := newID()
-	now := time.Now().UTC()
-	nowStr := now.Format(time.RFC3339Nano)
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO knowledge_index_generations (id, source_id, model_alias, model_id, status, checksum, failure_reason, created_at, activated_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		genID, sourceID, modelAlias, "", "building", "", "", nowStr, nil, nowStr,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("create generation: %w", err)
-	}
-	// Create job in running state
-	jobID := newID()
-	startedStr := nowStr
-	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO knowledge_index_jobs (id, generation_id, source_id, model_alias, status, attempts, error, created_at, started_at, finished_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		jobID, genID, sourceID, modelAlias, "running", 1, "", nowStr, startedStr, nil, nowStr,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("create job: %w", err)
-	}
-	// Hand off to isolated embedding worker
-	if s.embedder == nil {
-		// No worker configured: simulate successful embedding with deterministic checksum
-		// This keeps previous-index-active semantics testable without a real worker.
-		cs := chunkChecksum("dummy content for "+genID, modelAlias)
-		modelID := modelAlias // use alias as model_id when no worker
-		activatedStr := nowStr
-		_, _ = s.db.ExecContext(ctx,
-			`UPDATE knowledge_index_generations SET status='active', model_id=?, checksum=?, activated_at=?, updated_at=? WHERE id=?`,
-			modelID, cs, activatedStr, nowStr, genID,
-		)
-		if active != nil {
-			_, _ = s.db.ExecContext(ctx,
-				`UPDATE knowledge_index_generations SET status='superseded', updated_at=? WHERE id=?`, nowStr, active.ID)
-		}
-		_, _ = s.db.ExecContext(ctx,
-			`UPDATE knowledge_index_jobs SET status='succeeded', finished_at=?, updated_at=? WHERE id=?`, nowStr, nowStr, jobID)
-		_ = s.sink.Emit(ctx, domain.Event{ID: domain.ID(newID()), Type: "knowledge.reindex.succeeded", Severity: "info", ResourceID: domain.ID(sourceID), Message: "reindex succeeded", Data: map[string]any{"model_alias": modelAlias, "generation_id": genID}, CreatedAt: time.Now().UTC()})
-		return s.GetJob(ctx, jobID)
-	}
-	// Call worker — scope is limited to content chunks, no archival copy, no provider credentials
-	req := EmbedRequest{JobID: jobID, ModelAlias: modelAlias, Inputs: []string{"reindex probe for " + genID}}
-	resp, embedErr := s.embedder.Embed(ctx, req)
-	if embedErr != nil {
-		errMsg := embedErr.Error()
-		if len(errMsg) > 1024 {
-			errMsg = errMsg[:1024]
-		}
-		_, _ = s.db.ExecContext(ctx,
-			`UPDATE knowledge_index_generations SET status='failed', failure_reason=?, updated_at=? WHERE id=?`, errMsg, nowStr, genID)
-		_, _ = s.db.ExecContext(ctx,
-			`UPDATE knowledge_index_jobs SET status='failed', error=?, finished_at=?, updated_at=? WHERE id=?`, errMsg, nowStr, nowStr, jobID)
-		_ = s.sink.Emit(ctx, domain.Event{ID: domain.ID(newID()), Type: "knowledge.reindex.failed", Severity: "error", ResourceID: domain.ID(sourceID), Message: "reindex failed", Data: map[string]any{"model_alias": modelAlias, "error": errMsg}, CreatedAt: time.Now().UTC()})
-		// Do NOT deactivate previous active generation — failed reindex leaves previous active
-		job, _ := s.GetJob(ctx, jobID)
-		return job, fmt.Errorf("%w: reindex failed: %v", ErrValidation, embedErr)
-	}
-	// Success: compute checksum from worker response or generate one
-	checksum := ""
-	if len(resp.Checksums) > 0 && resp.Checksums[0] != "" {
-		checksum = resp.Checksums[0]
-	} else {
-		checksum = chunkChecksum(strings.Join(req.Inputs, "\n"), modelAlias)
-	}
-	modelID := resp.ModelID
-	if modelID == "" {
-		modelID = modelAlias
-	}
-	activatedStr := nowStr
-	_, _ = s.db.ExecContext(ctx,
-		`UPDATE knowledge_index_generations SET status='active', model_id=?, checksum=?, activated_at=?, updated_at=? WHERE id=?`,
-		modelID, checksum, activatedStr, nowStr, genID,
-	)
-	if active != nil {
-		_, _ = s.db.ExecContext(ctx,
-			`UPDATE knowledge_index_generations SET status='superseded', updated_at=? WHERE id=?`, nowStr, active.ID)
-	}
-	// Store derived chunk checksums (not canonical archive copy) — one probe chunk
-	chunkID := newID()
-	_, _ = s.db.ExecContext(ctx,
-		`INSERT INTO knowledge_index_chunks (id, generation_id, source_document_id, chunk_index, content_checksum, vector, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		chunkID, genID, "probe", 0, checksum, nil, nowStr,
-	)
-	_, _ = s.db.ExecContext(ctx,
-		`UPDATE knowledge_index_jobs SET status='succeeded', finished_at=?, updated_at=? WHERE id=?`, nowStr, nowStr, jobID)
-	_ = s.sink.Emit(ctx, domain.Event{ID: domain.ID(newID()), Type: "knowledge.reindex.succeeded", Severity: "info", ResourceID: domain.ID(sourceID), Message: "reindex succeeded", Data: map[string]any{"model_alias": modelAlias, "generation_id": genID}, CreatedAt: time.Now().UTC()})
-	return s.GetJob(ctx, jobID)
-}
-
-// Reindex is an alias for TriggerReindex.
-func (s *Service) Reindex(ctx context.Context, sourceID, modelAlias string) (*IndexJob, error) {
-	return s.TriggerReindex(ctx, sourceID, modelAlias)
-}
-
-// StartReindex is an alias for TriggerReindex.
-func (s *Service) StartReindex(ctx context.Context, sourceID, modelAlias string) (*IndexJob, error) {
-	return s.TriggerReindex(ctx, sourceID, modelAlias)
-}
-
-func (s *Service) GetJob(ctx context.Context, jobID string) (*IndexJob, error) {
-	jobID = strings.TrimSpace(jobID)
-	if jobID == "" {
-		return nil, validation("job id is required")
-	}
-	var (
-		id, genID, srcID, alias, status, errMsg, createdAt, updatedAt string
-		attempts                                                      int
-		startedAt, finishedAt                                         sql.NullString
-	)
-	err := s.db.QueryRowContext(ctx,
-		`SELECT id, generation_id, source_id, model_alias, status, attempts, error, created_at, started_at, finished_at, updated_at
-		 FROM knowledge_index_jobs WHERE id = ?`, jobID).
-		Scan(&id, &genID, &srcID, &alias, &status, &attempts, &errMsg, &createdAt, &startedAt, &finishedAt, &updatedAt)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, notFoundf("job %s not found", jobID)
-		}
-		return nil, fmt.Errorf("get job: %w", err)
-	}
-	ca, _ := time.Parse(time.RFC3339Nano, createdAt)
-	ua, _ := time.Parse(time.RFC3339Nano, updatedAt)
-	job := &IndexJob{ID: id, GenerationID: genID, SourceID: srcID, ModelAlias: alias, Status: status, Attempts: attempts, Error: errMsg, CreatedAt: ca, UpdatedAt: ua}
-	if startedAt.Valid {
-		t, _ := time.Parse(time.RFC3339Nano, startedAt.String)
-		job.StartedAt = &t
-	}
-	if finishedAt.Valid {
-		t, _ := time.Parse(time.RFC3339Nano, finishedAt.String)
-		job.FinishedAt = &t
-	}
-	return job, nil
-}
-
-func (s *Service) ListJobs(ctx context.Context, sourceID string) ([]*IndexJob, error) {
-	sourceID = strings.TrimSpace(sourceID)
-	if sourceID == "" {
-		return nil, validation("source id is required")
-	}
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, generation_id, source_id, model_alias, status, attempts, error, created_at, started_at, finished_at, updated_at
-		 FROM knowledge_index_jobs WHERE source_id = ? ORDER BY created_at DESC`, sourceID)
-	if err != nil {
-		return nil, fmt.Errorf("list jobs: %w", err)
-	}
-	defer rows.Close()
-	var out []*IndexJob
-	for rows.Next() {
-		var id, genID, sid, alias, status, errMsg, caStr, uaStr string
-		var attempts int
-		var startedAt, finishedAt sql.NullString
-		if err := rows.Scan(&id, &genID, &sid, &alias, &status, &attempts, &errMsg, &caStr, &startedAt, &finishedAt, &uaStr); err != nil {
-			return nil, err
-		}
-		ca, _ := time.Parse(time.RFC3339Nano, caStr)
-		ua, _ := time.Parse(time.RFC3339Nano, uaStr)
-		job := &IndexJob{ID: id, GenerationID: genID, SourceID: sid, ModelAlias: alias, Status: status, Attempts: attempts, Error: errMsg, CreatedAt: ca, UpdatedAt: ua}
-		if startedAt.Valid {
-			t, _ := time.Parse(time.RFC3339Nano, startedAt.String)
-			job.StartedAt = &t
-		}
-		if finishedAt.Valid {
-			t, _ := time.Parse(time.RFC3339Nano, finishedAt.String)
-			job.FinishedAt = &t
-		}
-		out = append(out, job)
-	}
-	return out, rows.Err()
-}
-
-// ListIndexJobs is alias.
-func (s *Service) ListIndexJobs(ctx context.Context, sourceID string) ([]*IndexJob, error) {
-	return s.ListJobs(ctx, sourceID)
-}
-
 // --- Consents ---
 
 func (s *Service) RecordConsent(ctx context.Context, principal, provider, scope string) (*Consent, error) {
@@ -1283,66 +964,6 @@ func firstN(s string, n int) string {
 	return string(r[:n])
 }
 
-// checksum helpers — mirror workers/embedding/checksum.py logic
-
-func normalizeText(text string) string {
-	// NFKC is approximated by unicode normalization via strings? Use simple whitespace collapse + trim
-	// For Go we do whitespace collapse and preserve case; NFKC requires golang.org/x/text but we avoid import.
-	// We collapse whitespace and trim; adequate for reindex checksum stability.
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return ""
-	}
-	// collapse internal whitespace to single space
-	var b strings.Builder
-	prevSpace := false
-	for _, r := range text {
-		if unicode.IsSpace(r) {
-			if !prevSpace {
-				b.WriteRune(' ')
-				prevSpace = true
-			}
-		} else {
-			b.WriteRune(r)
-			prevSpace = false
-		}
-	}
-	return b.String()
-}
-
-func chunkChecksum(text, modelAlias string) string {
-	norm := normalizeText(text)
-	h := sha256.New()
-	h.Write([]byte("omahab-embedding-v1\n"))
-	h.Write([]byte(modelAlias))
-	h.Write([]byte("\n"))
-	h.Write([]byte(norm))
-	return hex.EncodeToString(h.Sum(nil))
-}
-
-func contentChecksum(text string) string {
-	norm := normalizeText(text)
-	h := sha256.New()
-	h.Write([]byte(norm))
-	return hex.EncodeToString(h.Sum(nil))
-}
-
-func embeddingInputChecksum(texts []string, modelAlias string) string {
-	var h hash.Hash = sha256.New()
-	h.Write([]byte("omahab-embedding-batch-v1\n"))
-	h.Write([]byte(modelAlias))
-	h.Write([]byte("\n"))
-	for _, t := range texts {
-		norm := normalizeText(t)
-		h.Write([]byte(fmt.Sprintf("%d:", len(norm))))
-		h.Write([]byte(norm))
-		h.Write([]byte("\n"))
-	}
-	return hex.EncodeToString(h.Sum(nil))
-}
-
-// ID helpers
-
 func newID() string {
 	var b [16]byte
 	_, _ = rand.Read(b[:])
@@ -1356,67 +977,3 @@ func isUniqueViolation(err error) bool {
 	msg := err.Error()
 	return strings.Contains(msg, "UNIQUE constraint failed") || strings.Contains(msg, "unique constraint")
 }
-
-// ValidateModelAlias returns nil if alias is allowlisted.
-func ValidateModelAlias(alias string) error {
-	if !allowedAliases[alias] {
-		return validationf("model alias %q not allowed", alias)
-	}
-	return nil
-}
-
-// AllowedAliases returns the allowlisted aliases.
-func AllowedAliases() []string {
-	return []string{"omahab-embed-english", "omahab-embed-worldwide"}
-}
-
-// MemoryEmbeddingWorker is an in-memory embedding worker for testing.
-type MemoryEmbeddingWorker struct {
-	FailNext bool
-	FailErr  error
-}
-
-func (m *MemoryEmbeddingWorker) Embed(_ context.Context, req EmbedRequest) (*EmbedResponse, error) {
-	if m.FailNext {
-		m.FailNext = false
-		if m.FailErr != nil {
-			return nil, m.FailErr
-		}
-		return nil, fmt.Errorf("simulated embedding failure")
-	}
-	if !allowedAliases[req.ModelAlias] {
-		return nil, validationf("model alias %q not allowed", req.ModelAlias)
-	}
-	// Deterministic vectors/checksums
-	var vectors [][]float32
-	var checksums []string
-	for _, txt := range req.Inputs {
-		cs := chunkChecksum(txt, req.ModelAlias)
-		checksums = append(checksums, cs)
-		// deterministic fake vector of 4 dims
-		vec := []float32{0.1, 0.2, 0.3, 0.4}
-		vectors = append(vectors, vec)
-	}
-	return &EmbedResponse{
-		JobID:      req.JobID,
-		ModelAlias: req.ModelAlias,
-		ModelID:    req.ModelAlias,
-		Dimensions: 4,
-		Vectors:    vectors,
-		Checksums:  checksums,
-	}, nil
-}
-
-// NoopEmbeddingWorker always succeeds with empty vectors (use when worker is absent).
-type NoopEmbeddingWorker struct{}
-
-func (n *NoopEmbeddingWorker) Embed(_ context.Context, req EmbedRequest) (*EmbedResponse, error) {
-	if !allowedAliases[req.ModelAlias] {
-		return nil, validationf("model alias %q not allowed", req.ModelAlias)
-	}
-	return &EmbedResponse{JobID: req.JobID, ModelAlias: req.ModelAlias, ModelID: req.ModelAlias, Dimensions: 0, Vectors: nil, Checksums: nil}, nil
-}
-
-var _ = store.NewID // ensure import used
-var _ = contentChecksum
-var _ = embeddingInputChecksum

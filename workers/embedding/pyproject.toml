@@ -35,3 +35,11 @@ addopts = "-q"
 
 [tool.ruff]
 line-length = 100
+
+# onnxruntime ships no type stubs. This override is scoped to that
+# third-party boundary only: application code stays under --strict, and no
+# invented SDK shapes are used (runtime behavior comes from the installed
+# package; annotations reference it via TYPE_CHECKING).
+[[tool.mypy.overrides]]
+module = ["onnxruntime", "onnxruntime.*"]
+ignore_missing_imports = true

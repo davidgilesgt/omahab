@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
+import numpy.typing as npt
 
 from .base import EmbeddingModel
 
-log = logging.getLogger(__name__)
+if TYPE_CHECKING:
+    import onnxruntime as ort_types
+    from tokenizers import Encoding, Tokenizer
 
+log = logging.getLogger(__name__)
 
 class OnnxEmbeddingModel(EmbeddingModel):
     """Production adapter backed by ONNX Runtime + HuggingFace tokenizers.
@@ -42,8 +46,8 @@ class OnnxEmbeddingModel(EmbeddingModel):
         self._dimensions = int(dimensions)
         self._max_length = int(max_length)
         self._providers = providers or ["CPUExecutionProvider"]
-        self._session = None
-        self._tokenizer = None
+        self._session: ort_types.InferenceSession | None = None
+        self._tokenizer: Tokenizer | None = None
         self._input_name: str | None = None
         self._attention_name: str | None = None
 
@@ -87,29 +91,25 @@ class OnnxEmbeddingModel(EmbeddingModel):
 
     def _lazy_load(self) -> None:
         try:
-            import onnxruntime as ort  # type: ignore
+            import onnxruntime as ort
         except ImportError as e:
             raise RuntimeError(
                 "onnxruntime is required for production inference but is not installed. "
                 "Install with pip install onnxruntime. Original: " + str(e)
             ) from e
         try:
-            from tokenizers import Tokenizer  # type: ignore
+            from tokenizers import Tokenizer
         except ImportError as e:
             raise RuntimeError(
                 "tokenizers is required for production inference but is not installed. "
                 "Install with pip install tokenizers. Original: " + str(e)
             ) from e
 
-        # Load tokenizer
+        # Load tokenizer. Manual padding below covers truncation/padding, so
+        # tokenizer-level configuration is set directly and failures surface.
         tok = Tokenizer.from_file(str(self._tokenizer_path))
-        # Ensure truncation/padding configured
-        try:
-            tok.enable_truncation(max_length=self._max_length)
-            tok.enable_padding(pad_id=0, pad_token="[PAD]")
-        except Exception:
-            # tokenizers API varies by version; ignore if fails — we pad manually
-            pass
+        tok.enable_truncation(max_length=self._max_length)
+        tok.enable_padding(pad_id=0, pad_token="[PAD]")
         self._tokenizer = tok
 
         sess_opts = ort.SessionOptions()
@@ -117,17 +117,14 @@ class OnnxEmbeddingModel(EmbeddingModel):
         sess_opts.inter_op_num_threads = 1
         sess_opts.intra_op_num_threads = max(1, (os.cpu_count() or 4) // 2)
         sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        import onnxruntime as ort2  # re-import for type
 
-        self._session = ort2.InferenceSession(
+        self._session = ort.InferenceSession(
             str(self._model_file), sess_options=sess_opts, providers=self._providers
         )
         # Discover input names (common: input_ids, attention_mask, token_type_ids)
         input_names = [i.name for i in self._session.get_inputs()]
         self._input_name = "input_ids" if "input_ids" in input_names else input_names[0]
         self._attention_name = "attention_mask" if "attention_mask" in input_names else None
-        if self._attention_name and self._attention_name not in input_names:
-            self._attention_name = None
         log.info("onnx session ready inputs=%s providers=%s", input_names, self._providers)
 
     @property
@@ -145,10 +142,9 @@ class OnnxEmbeddingModel(EmbeddingModel):
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         if self._session is None or self._tokenizer is None:
             raise RuntimeError("onnx model not initialized")
-        # Tokenize batch
-        from tokenizers import Tokenizer  # already checked
-
-        encodings = self._tokenizer.encode_batch(texts)  # type: ignore
+        # Tokenize batch. Encoding.attention_mask is a documented list[int];
+        # truncation/padding were configured at load and applied manually below.
+        encodings: list[Encoding] = self._tokenizer.encode_batch(texts)
         # Build padded arrays
         max_len = max(len(e.ids) for e in encodings) if encodings else 0
         # Clamp to max_length
@@ -158,7 +154,7 @@ class OnnxEmbeddingModel(EmbeddingModel):
         attention_mask: list[list[int]] = []
         for e in encodings:
             ids = e.ids[: self._max_length]
-            mask = e.attention_mask[: self._max_length] if hasattr(e, "attention_mask") else [1] * len(ids)
+            mask = e.attention_mask[: self._max_length]
             # Pad to max_len
             pad = max_len - len(ids)
             if pad > 0:
@@ -172,10 +168,10 @@ class OnnxEmbeddingModel(EmbeddingModel):
             return []
 
         # Prepare numpy
-        np_ids = np.array(input_ids, dtype=np.int64)
-        np_mask = np.array(attention_mask, dtype=np.int64)
+        np_ids: npt.NDArray[np.int64] = np.array(input_ids, dtype=np.int64)
+        np_mask: npt.NDArray[np.int64] = np.array(attention_mask, dtype=np.int64)
 
-        ort_inputs: dict[str, np.ndarray] = {}
+        ort_inputs: dict[str, npt.NDArray[np.int64]] = {}
         # Use discovered names; fall back to common
         assert self._input_name is not None
         ort_inputs[self._input_name] = np_ids
@@ -208,8 +204,8 @@ class OnnxEmbeddingModel(EmbeddingModel):
         elif hidden.ndim == 3:
             batch, seq_len, dims = hidden.shape
             if dims != self._dimensions:
-                log.warning(
-                    "dimension mismatch: model outputs %d but config expects %d", dims, self._dimensions
+                raise RuntimeError(
+                    f"dimension mismatch: model outputs {dims} but config expects {self._dimensions}"
                 )
             for i in range(batch):
                 mask = np_mask[i].astype(np.float64)  # [seq_len]
@@ -221,7 +217,7 @@ class OnnxEmbeddingModel(EmbeddingModel):
                 # hidden[i]: [seq_len, dims]
                 vec = (hidden[i].astype(np.float64) * mask[:, None]).sum(axis=0) / mask_sum
                 vec = _l2_normalize(vec)
-                _validate_vec(vec, self._dimensions if dims == self._dimensions else dims)
+                _validate_vec(vec, self._dimensions)
                 vectors.append(vec.tolist())
         else:
             raise RuntimeError(f"unexpected hidden shape {hidden.shape}")
@@ -233,20 +229,18 @@ class OnnxEmbeddingModel(EmbeddingModel):
         self._tokenizer = None
 
 
-def _l2_normalize(vec: np.ndarray) -> np.ndarray:
+def _l2_normalize(vec: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
     norm = np.linalg.norm(vec)
     if norm < 1e-12:
-        # Return zero-safe vector (all zeros except first 1) but mark as normalized
-        out = np.zeros_like(vec)
-        out[0] = 1.0
-        return out
-    return vec / norm
+        raise RuntimeError("onnx adapter produced zero-norm output")
+    result = vec / norm
+    assert isinstance(result, np.ndarray)
+    return result
 
 
-def _validate_vec(vec: np.ndarray, expected_dims: int) -> None:
+def _validate_vec(vec: npt.NDArray[np.float64], expected_dims: int) -> None:
     if vec.shape[0] != expected_dims:
-        # Allow mismatch but warn; still return
-        pass
+        raise RuntimeError(f"dimension mismatch: got {vec.shape[0]}, expected {expected_dims}")
     for v in vec:
         if not math.isfinite(float(v)):
             raise RuntimeError("onnx adapter produced non-finite value")

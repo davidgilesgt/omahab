@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
+from typing import TypedDict, Union
 
-from .limits import ALLOWED_ALIASES, MAX_BATCH_SIZE, MAX_JOB_ID_LENGTH, MAX_TEXT_LENGTH
+from .limits import ALLOWED_ALIASES, MAX_BATCH_SIZE, MAX_JOB_ID_LENGTH
 
 _JOB_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
@@ -68,6 +68,11 @@ class EmbedRequest:
                 400,
             )
 
+class EmbedUsage(TypedDict):
+    input_count: int
+    truncated_count: int
+    total_chars: int
+
 
 @dataclass
 class EmbedResponse:
@@ -77,13 +82,54 @@ class EmbedResponse:
     dimensions: int
     vectors: list[list[float]]
     checksums: list[str]
-    usage: dict[str, Any]
+    usage: EmbedUsage
 
 
-def error_envelope(code: str, message: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
-    err: dict[str, Any] = {"code": code, "message": message}
-    if details:
-        err["details"] = details
+JsonValue = Union[str, int, float, bool, None, list["JsonValue"], dict[str, "JsonValue"]]
+
+
+class ErrorBody(TypedDict):
+    code: str
+    message: str
+
+
+class ErrorBodyWithDetails(ErrorBody, total=False):
+    details: JsonValue
+
+
+class ErrorEnvelope(TypedDict):
+    error: ErrorBody
+
+
+class ModelHealth(TypedDict):
+    ready: bool
+    model_id: str
+    dimensions: int
+    artifact_path: str
+    expected_memory_mb: int | None
+
+
+class HealthSnapshot(TypedDict):
+    status: str
+    uptime_seconds: float
+    models: dict[str, ModelHealth]
+
+
+class EmbedResponseBody(TypedDict):
+    job_id: str
+    model_alias: str
+    model_id: str
+    dimensions: int
+    vectors: list[list[float]]
+    checksums: list[str]
+    usage: EmbedUsage
+
+
+def error_envelope(code: str, message: str, details: JsonValue | None = None) -> ErrorEnvelope:
+    err: ErrorBody = {"code": code, "message": message}
+    if details is not None:
+        body: ErrorBodyWithDetails = {"code": code, "message": message, "details": details}
+        return {"error": body}
     return {"error": err}
 
 
@@ -95,25 +141,32 @@ class ProtocolError(Exception):
         self.http_status = http_status
 
 
-def parse_embed_request(data: dict[str, Any]) -> EmbedRequest:
+def parse_embed_request(data: object) -> EmbedRequest:
+    """Untrusted JSON boundary: validate keys and types before constructing.
+
+    Malformed input raises ProtocolError with a stable code; a non-string
+    object in any string field (e.g. a dict as model_alias) is a 400 here,
+    never a raw TypeError deeper in validation.
+    """
     if not isinstance(data, dict):
         raise ProtocolError("invalid_json", "request body must be a JSON object", 400)
     job_id = data.get("job_id")
+    if not isinstance(job_id, str):
+        raise ProtocolError("job_id_required", "job_id is required and must be a non-empty string", 400)
     model_alias = data.get("model_alias")
+    if not isinstance(model_alias, str):
+        raise ProtocolError("invalid_model_alias", "model_alias must be a string", 400)
     inputs = data.get("inputs")
+    if not isinstance(inputs, list):
+        raise ProtocolError("inputs_required", "inputs must be a non-empty list of strings", 400)
+    for i, item in enumerate(inputs):
+        if not isinstance(item, str):
+            raise ProtocolError("input_not_string", f"inputs[{i}] must be a string", 400)
     normalize = data.get("normalize", True)
-    if normalize is not None and not isinstance(normalize, bool):
+    if normalize is None:
+        normalize = True
+    if not isinstance(normalize, bool):
         raise ProtocolError("invalid_normalize", "normalize must be a boolean if present", 400)
-    req = EmbedRequest(
-        job_id=job_id if isinstance(job_id, str) else job_id or "",
-        model_alias=model_alias if isinstance(model_alias, str) else model_alias or "",
-        inputs=inputs if isinstance(inputs, list) else [],  # type: ignore
-        normalize=bool(normalize) if normalize is not None else True,
-    )
+    req = EmbedRequest(job_id=job_id, model_alias=model_alias, inputs=inputs, normalize=normalize)
     req.validate()
     return req
-
-
-HEALTH_OK = "ok"
-HEALTH_DEGRADED = "degraded"
-HEALTH_UNHEALTHY = "unhealthy"

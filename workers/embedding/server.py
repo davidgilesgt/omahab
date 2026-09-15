@@ -7,20 +7,20 @@ import json
 import logging
 import os
 import signal
-import socket
 import socketserver
 import sys
 import threading
 import time
+from collections.abc import Mapping
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
-
 from . import __version__
 from .config import WorkerConfig, load_config
 from .limits import DEFAULT_HOST, DEFAULT_PORT, MAX_REQUEST_BYTES
-from .protocol import error_envelope, parse_embed_request, ProtocolError
+from .protocol import EmbedResponseBody, HealthSnapshot, error_envelope, parse_embed_request, ProtocolError
 from .worker import EmbeddingWorker
 
 log = logging.getLogger("omahab.embedding")
@@ -36,7 +36,7 @@ class EmbeddingHTTPHandler(BaseHTTPRequestHandler):
     worker_config: WorkerConfig | None = None
     start_time: float = 0.0
 
-    def log_message(self, fmt: str, *args) -> None:
+    def log_message(self, fmt: str, *args: object) -> None:
         # Structured log without secrets; never log inputs/vectors
         # UDS client_address is a string (""), TCP is (host, port)
         if isinstance(self.client_address, (list, tuple)) and len(self.client_address) > 0:
@@ -64,7 +64,7 @@ class EmbeddingHTTPHandler(BaseHTTPRequestHandler):
 
     def _handle_health(self) -> None:
         assert self.worker is not None
-        snap = self.worker.health_snapshot()
+        snap: HealthSnapshot = self.worker.health_snapshot()
         body = {
             "status": snap["status"],
             "version": __version__,
@@ -133,7 +133,7 @@ class EmbeddingHTTPHandler(BaseHTTPRequestHandler):
             )
             return
 
-        out = {
+        out: EmbedResponseBody = {
             "job_id": resp.job_id,
             "model_alias": resp.model_alias,
             "model_id": resp.model_id,
@@ -144,7 +144,7 @@ class EmbeddingHTTPHandler(BaseHTTPRequestHandler):
         }
         self._send_json(HTTPStatus.OK, out)
 
-    def _send_json(self, status: HTTPStatus, obj: dict) -> None:
+    def _send_json(self, status: HTTPStatus, obj: Mapping[str, Any]) -> None:
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(int(status))
         self.send_header("Content-Type", "application/json")
@@ -179,18 +179,18 @@ class UnixStreamHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStreamS
         p.parent.mkdir(parents=True, exist_ok=True)
         try:
             p.parent.chmod(0o700)
-        except Exception:
-            pass
+        except OSError as e:
+            raise RuntimeError(f"cannot secure socket dir {p.parent}: {e}") from e
         try:
             if p.exists():
                 p.unlink()
-        except Exception:
+        except FileNotFoundError:
             pass
         super().__init__(socket_path, handler)
         try:
             os.chmod(socket_path, 0o600)
-        except Exception:
-            pass
+        except OSError as e:
+            raise RuntimeError(f"cannot secure socket {socket_path}: {e}") from e
 
 
 def run_servers(
@@ -360,15 +360,14 @@ def main(argv: list[str] | None = None) -> None:
     # Signal handling
     stop = threading.Event()
 
-    def _handle_sig(signum, frame):  # type: ignore
+    def _handle_sig(signum, _frame) -> None:  # type: ignore
         log.info("received signal %s, shutting down", signum)
         stop.set()
         for s in servers:
             try:
                 s.shutdown()
-            except Exception:
-                pass
-
+            except Exception as e:
+                log.warning("server shutdown failed: %s", e)
     signal.signal(signal.SIGTERM, _handle_sig)
     signal.signal(signal.SIGINT, _handle_sig)
 

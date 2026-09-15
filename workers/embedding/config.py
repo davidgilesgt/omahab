@@ -39,9 +39,6 @@ class WorkerConfig:
     allow_test_adapter: bool
     config_path: Path | None
 
-    def get_pin(self, alias: str) -> ModelPin:
-        return self.models[alias]
-
 
 # Default search order for config file
 _DEFAULT_CANDIDATES = [
@@ -62,9 +59,10 @@ def _candidate_paths(explicit: str | os.PathLike[str] | None) -> list[Path]:
     # workers/embedding/config.py -> repo root ../../..
     try:
         repo_root = Path(__file__).resolve().parents[2]
+    except (OSError, RuntimeError):
+        repo_root = None
+    if repo_root is not None:
         out.append(repo_root / "workers" / "embedding" / "pinned_models.json")
-    except Exception:
-        pass
     out.extend(_DEFAULT_CANDIDATES)
     return out
 
@@ -77,24 +75,26 @@ def load_config(explicit_path: str | os.PathLike[str] | None = None) -> WorkerCo
     candidates = _candidate_paths(explicit_path)
     chosen: Path | None = None
     data: dict[str, Any] | None = None
-    last_err: str | None = None
     for p in candidates:
-        if p.is_file():
-            try:
-                raw = p.read_text(encoding="utf-8")
-                data = json.loads(raw)
-                chosen = p
-                break
-            except Exception as e:
-                last_err = f"{p}: {e}"
-                continue
+        if not p.is_file():
+            continue
+        try:
+            raw = p.read_text(encoding="utf-8")
+            data = json.loads(raw)
+            chosen = p
+            break
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+            # A chosen file that exists but cannot be read or parsed fails
+            # with filename and cause; only absent candidates fall through.
+            print(f"FATAL: invalid pinned config {p}: {e}", file=sys.stderr)
+            raise SystemExit(2) from e
     if data is None or chosen is None:
         tried = ", ".join(str(c) for c in candidates)
         msg = (
             f"FATAL: pinned embedding config not found. Tried: {tried}. "
             f"Provide --config or set EMBEDDING_WORKER_CONFIG, or place pinned_models.json at "
             f"/etc/omahab/embedding/pinned_models.json. "
-            f"See workers/embedding/pinned_models.json.example. Last error: {last_err}"
+            f"See workers/embedding/pinned_models.json.example."
         )
         print(msg, file=sys.stderr)
         raise SystemExit(2)
@@ -176,14 +176,13 @@ def load_config(explicit_path: str | os.PathLike[str] | None = None) -> WorkerCo
     # omahabd rewrites the config with the chosen pin and restarts it.
 
     if gate_errors:
-        for e in gate_errors:
-            print(f"FATAL: {e}", file=sys.stderr)
+        for err_msg in gate_errors:
+            print(f"FATAL: {err_msg}", file=sys.stderr)
         raise SystemExit(3)
 
     return cfg
 
-
-def _parse_config(data: dict[str, Any], path: Path) -> WorkerConfig:
+def _parse_config(data: object, path: Path) -> WorkerConfig:
     if not isinstance(data, dict):
         raise ValueError("config root must be an object")
     models_raw = data.get("models")
@@ -308,11 +307,11 @@ def _sha256_of_path(p: Path) -> str:
         if not files:
             # Empty dir: hash of empty
             return h.hexdigest()
-        for f in files:
-            rel = f.relative_to(p).as_posix()
+        for fp in files:
+            rel = fp.relative_to(p).as_posix()
             h.update(rel.encode("utf-8"))
             h.update(b"\n")
-            with f.open("rb") as fh:
+            with fp.open("rb") as fh:
                 for chunk in iter(lambda: fh.read(1024 * 1024), b""):
                     h.update(chunk)
             h.update(b"\n")

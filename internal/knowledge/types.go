@@ -28,36 +28,6 @@ type SourcePermission struct {
 	GrantedAt  time.Time `json:"granted_at"`
 }
 
-// IndexGeneration tracks a semantic index build for a source+model alias.
-// Previous generation remains active until the new one succeeds (swap on success).
-type IndexGeneration struct {
-	ID            string     `json:"id"`
-	SourceID      string     `json:"source_id"`
-	ModelAlias    string     `json:"model_alias"`
-	ModelID       string     `json:"model_id"`
-	Status        string     `json:"status"` // pending|building|active|failed|superseded
-	Checksum      string     `json:"checksum"`
-	FailureReason string     `json:"failure_reason,omitempty"`
-	CreatedAt     time.Time  `json:"created_at"`
-	ActivatedAt   *time.Time `json:"activated_at,omitempty"`
-	UpdatedAt     time.Time  `json:"updated_at"`
-}
-
-// IndexJob is the durable job record for a reindex handoff to the embedding worker.
-type IndexJob struct {
-	ID           string     `json:"id"`
-	GenerationID string     `json:"generation_id"`
-	SourceID     string     `json:"source_id"`
-	ModelAlias   string     `json:"model_alias"`
-	Status       string     `json:"status"` // pending|running|succeeded|failed
-	Attempts     int        `json:"attempts"`
-	Error        string     `json:"error,omitempty"`
-	CreatedAt    time.Time  `json:"created_at"`
-	StartedAt    *time.Time `json:"started_at,omitempty"`
-	FinishedAt   *time.Time `json:"finished_at,omitempty"`
-	UpdatedAt    time.Time  `json:"updated_at"`
-}
-
 // Consent records explicit user consent for remote summarization, naming provider.
 type Consent struct {
 	ID        string     `json:"id"`
@@ -157,32 +127,4 @@ type KarakeepClient interface {
 	CaptureBookmark(ctx context.Context, url, title string, opts CaptureOptions) (string, error)
 	CaptureArticle(ctx context.Context, url string, opts CaptureOptions) (string, error)
 	ListTags(ctx context.Context) ([]string, error)
-}
-
-// EmbeddingWorker abstracts the isolated Python embedding worker.
-// It is a narrow, testable interface; the worker owns tokenization/inference/batching.
-type EmbeddingWorker interface {
-	Embed(ctx context.Context, req EmbedRequest) (*EmbedResponse, error)
-}
-
-// EmbedRequest is the bounded request to the embedding worker.
-type EmbedRequest struct {
-	JobID      string
-	ModelAlias string
-	Inputs     []string
-}
-
-// EmbedResponse is the worker's response with vectors and checksums.
-type EmbedResponse struct {
-	JobID      string
-	ModelAlias string
-	ModelID    string
-	Dimensions int
-	Vectors    [][]float32
-	Checksums  []string
-}
-
-// EmbedderHealth is returned by Health checks.
-type EmbedderHealth struct {
-	Status string
 }

@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import math
 import time
-from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -13,8 +12,8 @@ from .adapters.base import EmbeddingModel
 from .adapters.test import DeterministicTestAdapter
 from .checksum import chunk_checksum
 from .config import ModelPin, WorkerConfig
-from .limits import MAX_BATCH_SIZE, MAX_TEXT_LENGTH, MAX_TOTAL_CHARS_PER_REQUEST
-from .protocol import EmbedRequest, EmbedResponse, ProtocolError
+from .limits import MAX_TEXT_LENGTH, MAX_TOTAL_CHARS_PER_REQUEST
+from .protocol import EmbedRequest, EmbedResponse, EmbedUsage, HealthSnapshot, ModelHealth, ProtocolError
 
 log = logging.getLogger(__name__)
 
@@ -100,8 +99,8 @@ class EmbeddingWorker:
                 return model
         raise ProtocolError("invalid_model_alias", f"model alias {alias!r} not configured", 400)
 
-    def health_snapshot(self) -> dict:
-        models_info: dict[str, dict] = {}
+    def health_snapshot(self) -> HealthSnapshot:
+        models_info: dict[str, ModelHealth] = {}
         for alias, pin in self.config.models.items():
             model = self.models.get(alias)
             ready = model is not None
@@ -198,7 +197,7 @@ class EmbeddingWorker:
                 "inference_failed", f"inference failed: {e.__class__.__name__}: {e}", 500
             ) from e
 
-        usage = {
+        usage: EmbedUsage = {
             "input_count": len(texts),
             "truncated_count": truncated_count,
             "total_chars": sum(len(t) for t in texts),
@@ -246,8 +245,7 @@ def _normalize(vec: list[float]) -> list[float]:
     arr = np.array(vec, dtype=np.float64)
     n = float(np.linalg.norm(arr))
     if n < 1e-12:
-        # Zero vector — return unit vector along first dim (already handled by adapter)
-        out = np.zeros_like(arr)
-        out[0] = 1.0
-        return out.tolist()
-    return (arr / n).tolist()
+        # Adapters must never emit zero vectors; manufacturing a one-hot
+        # vector here would hide an inference failure.
+        raise ProtocolError("not_normalized", "zero vector cannot be normalized", 500)
+    return [float(x) for x in (arr / n)]
