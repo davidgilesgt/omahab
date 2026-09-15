@@ -643,12 +643,12 @@ Model traffic goes through LiteLLM at `http://127.0.0.1:4000/v1` (`https://model
 
 Hermes tools are provided via a streamable-HTTP MCP server inside omahabd at `http://127.0.0.1:8484/mcp` (Bearer `OMAHAB_MCP_TOKEN`, SHA-256 verified; admin and `oma_dev_` tokens are rejected with 403; the server is mounted at `POST/GET /mcp` outside `bearerAuth`). All tools return JSON text content.
 
-Wire names (36 tools):
+Wire names (35 tools):
 
-- Forgejo / repos: `repos_list`, `repo_get`, `repo_archive`, `repo_unarchive`, `branches_list`, `branch_create`, `file_get`, `file_put`, `issues_list`, `issue_get`, `issue_create`, `issue_comment`, `prs_list`, `pr_get`, `pr_diff`, `pr_create`, `pr_comment`
+- Forgejo / repos: `repos_list`, `repo_get`, `repo_archive`, `repo_unarchive`, `branches_list`, `branch_create`, `file_get`, `issues_list`, `issue_get`, `issue_create`, `issue_comment`, `prs_list`, `pr_get`, `pr_diff`, `pr_create`, `pr_comment`
 - Paperless / docs: `docs_search`, `doc_get`, `docs_tags`, `docs_correspondents`, `docs_types`, `doc_add_tag`, `doc_upload`
 - Projects / CI: `projects_list`, `project_get`, `releases_list`, `ci_runs`, `ci_run_logs`
-- Workspaces: `workspaces_list`, `workspace_create`, `workspace_get`, `workspace_send`, `workspace_stop` (small `WorkspacesProvider` interface in `internal/mcp`; controlplane wires a stub returning unimplemented until Step 5; `workspace_delete` never exists)
+- Workspaces: `workspaces_list`, `workspace_create`, `workspace_get`, `workspace_send`, `workspace_stop` (small `WorkspacesProvider` interface in `internal/mcp`; controlplane wires it to the workspaces service; `workspace_delete` never exists)
 - Control plane: `events_recent`, `backup_status`
 
 Rules: archive, never delete; never merge; never force-push; never delete a branch. `repo_delete`, `doc_delete`, `pr_merge`, `workspace_delete`, branch delete and force-push tools do not exist and must not be emulated. The Forgejo token for Hermes is a dedicated `platform-app/hermes_forgejo_token` (created via `CreateAccessToken("omahab","hermes", ["read:repository","write:repository","read:issue","write:issue"])` in `forgejo_bootstrap.go`; destructive exclusion is enforced by the tool surface, not by scope). `file_get` returns base64 alongside text; `doc_upload` takes `filename, base64, tags`.

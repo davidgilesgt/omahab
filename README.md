@@ -95,9 +95,9 @@ Cross-app integrations are provisioned automatically: Pocket ID OIDC clients for
 
 Hermes (the `nousresearch/hermes-agent` dashboard at `https://ai.<domain>`) talks to `omahabd` over a streamable-HTTP MCP server at `http://127.0.0.1:8484/mcp` (`POST/GET /mcp` outside `bearerAuth`, `Authorization: Bearer ${OMAHAB_MCP_TOKEN}` SHA-256 verified; admin and `oma_dev_` tokens are rejected with 403). All tools return JSON text content.
 
-Tool surface (36 wire names, no destructive tools):
+Tool surface (35 wire names, no destructive tools):
 
-- Forgejo: `repos_list`, `repo_get`, `repo_archive`/`repo_unarchive` (archive is reversible), `branches_list`, `branch_create`, `file_get`/`file_put`, `issues_list`/`issue_get`/`issue_create`/`issue_comment`, `prs_list`/`pr_get`/`pr_diff`/`pr_create`/`pr_comment`
+- Forgejo: `repos_list`, `repo_get`, `repo_archive`/`repo_unarchive` (archive is reversible), `branches_list`, `branch_create`, `file_get`, `issues_list`/`issue_get`/`issue_create`/`issue_comment`, `prs_list`/`pr_get`/`pr_diff`/`pr_create`/`pr_comment`
 - Paperless: `docs_search`, `doc_get`, `docs_tags`, `docs_correspondents`, `docs_types`, `doc_add_tag`, `doc_upload` (Paperless-ngx is §15.1; see DESIGN §13.2 for the canonical list)
 - Projects / CI: `projects_list`, `project_get`, `releases_list`, `ci_runs`, `ci_run_logs`
 - Workspaces: `workspaces_list`, `workspace_create`, `workspace_get`, `workspace_send`, `workspace_stop` (via `WorkspacesProvider`; no `workspace_delete`)

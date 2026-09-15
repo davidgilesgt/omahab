@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"net/http"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/omahab/omahab/internal/backups"
+	"github.com/omahab/omahab/internal/domain"
+	"github.com/omahab/omahab/internal/knowledge"
+	"github.com/omahab/omahab/internal/scm"
 )
 
 // Server wraps the MCP SDK server and its streamable HTTP handler.
@@ -18,7 +21,6 @@ type Server struct {
 }
 
 // Deps wires MCP tools to existing services via small provider interfaces.
-// Workspace tools use WorkspacesProvider stub until Step 5.
 type Deps struct {
 	Forgejo    ForgejoProvider
 	Docs       DocsProvider
@@ -31,28 +33,27 @@ type Deps struct {
 
 // ForgejoProvider is the Forgejo surface exposed to Hermes via MCP.
 type ForgejoProvider interface {
-	ReposList(ctx context.Context) ([]any, error)
-	RepoGet(ctx context.Context, owner, name string) (any, error)
+	ReposList(ctx context.Context) ([]RepositorySummary, error)
+	RepoGet(ctx context.Context, owner, name string) (Repository, error)
 	RepoArchive(ctx context.Context, owner, name string, archived bool) error
 	BranchesList(ctx context.Context, owner, name string) ([]string, error)
 	BranchCreate(ctx context.Context, owner, name, newBranch, fromRef string) error
 	FileGet(ctx context.Context, owner, name, path, ref string) ([]byte, error)
-	FilePut(ctx context.Context, owner, name, path string, content []byte, message, branch string) error
-	IssuesList(ctx context.Context, owner, name string) ([]any, error)
-	IssueGet(ctx context.Context, owner, name string, index int64) (any, error)
-	IssueCreate(ctx context.Context, owner, name, title, body string) (any, error)
+	IssuesList(ctx context.Context, owner, name string) ([]Issue, error)
+	IssueGet(ctx context.Context, owner, name string, index int64) (Issue, error)
+	IssueCreate(ctx context.Context, owner, name, title, body string) (Issue, error)
 	IssueComment(ctx context.Context, owner, name string, index int64, body string) error
-	PRsList(ctx context.Context, owner, name, state string) ([]any, error)
-	PRGet(ctx context.Context, owner, name string, index int64) (any, error)
+	PRsList(ctx context.Context, owner, name, state string) ([]PullRequest, error)
+	PRGet(ctx context.Context, owner, name string, index int64) (PullRequest, error)
 	PRDiff(ctx context.Context, owner, name string, index int64) (string, error)
-	PRCreate(ctx context.Context, owner, name, title, body, head, base string) (any, error)
+	PRCreate(ctx context.Context, owner, name, title, body, head, base string) (PullRequest, error)
 	PRComment(ctx context.Context, owner, name string, index int64, body string) error
 }
 
 // DocsProvider is the Paperless surface exposed via MCP.
 type DocsProvider interface {
-	Search(ctx context.Context, query string, limit int) ([]any, error)
-	Get(ctx context.Context, id string) (any, error)
+	Search(ctx context.Context, query string, limit int) ([]knowledge.Citation, error)
+	Get(ctx context.Context, id string) (Document, error)
 	ListTags(ctx context.Context) ([]string, error)
 	ListCorrespondents(ctx context.Context) ([]string, error)
 	ListTypes(ctx context.Context) ([]string, error)
@@ -62,34 +63,34 @@ type DocsProvider interface {
 
 // ProjectsProvider exposes project and release listings.
 type ProjectsProvider interface {
-	List(ctx context.Context) ([]any, error)
-	Get(ctx context.Context, slug string) (any, error)
-	ListReleases(ctx context.Context, slug string) ([]any, error)
+	List(ctx context.Context) ([]ProjectSummary, error)
+	Get(ctx context.Context, slug string) (ProjectSummary, error)
+	ListReleases(ctx context.Context, slug string) ([]ReleaseSummary, error)
 }
 
 // SCMProvider exposes CI run history.
 type SCMProvider interface {
-	ListRuns(ctx context.Context, slug string, limit int) ([]any, error)
-	GetRunLogs(ctx context.Context, slug string, number int) (any, error)
+	ListRuns(ctx context.Context, slug string, limit int) ([]RunSummary, error)
+	GetRunLogs(ctx context.Context, slug string, number int) ([]*scm.LogRef, error)
 }
 
-// WorkspacesProvider is the small contract from the assignment: stub until Step 5.
+// WorkspacesProvider is the workspace surface exposed via MCP.
 type WorkspacesProvider interface {
-	List(ctx context.Context) ([]any, error)
-	Create(ctx context.Context, projectSlug, taskTitle, instructions string) (any, error)
-	Get(ctx context.Context, id string) (any, error)
+	List(ctx context.Context) ([]domain.Workspace, error)
+	Create(ctx context.Context, projectSlug, taskTitle, instructions string) (domain.Workspace, error)
+	Get(ctx context.Context, id string) (domain.Workspace, error)
 	Send(ctx context.Context, id, message string) error
 	Stop(ctx context.Context, id string) error
 }
 
 // EventsProvider exposes recent events.
 type EventsProvider interface {
-	Recent(ctx context.Context, limit int) ([]any, error)
+	Recent(ctx context.Context, limit int) ([]EventSummary, error)
 }
 
 // BackupsProvider exposes backup status.
 type BackupsProvider interface {
-	Status(ctx context.Context) (any, error)
+	Status(ctx context.Context) (backups.StatusReport, error)
 }
 
 // New creates an MCP server with all wire-named tools registered. Every tool
@@ -167,7 +168,7 @@ func registerForgejo(srv *sdk.Server, p ForgejoProvider, names *[]string) {
 			return errResult(err.Error())
 		}
 		if list == nil {
-			list = []any{}
+			list = []RepositorySummary{}
 		}
 		return jsonResult(list)
 	})
@@ -356,45 +357,6 @@ func registerForgejo(srv *sdk.Server, p ForgejoProvider, names *[]string) {
 	})
 
 	addTool(srv, names, &sdk.Tool{
-		Name:        "file_put",
-		Description: "Create or update a file via PutFile",
-		InputSchema: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"owner":   map[string]any{"type": "string"},
-				"name":    map[string]any{"type": "string"},
-				"path":    map[string]any{"type": "string"},
-				"content": map[string]any{"type": "string", "description": "file content (utf8) or base64 if base64 flag true"},
-				"message": map[string]any{"type": "string"},
-				"branch":  map[string]any{"type": "string"},
-			},
-			"required": []string{"owner", "name", "path", "content", "message"},
-		},
-	}, func(ctx context.Context, req *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
-		var args struct {
-			Owner   string `json:"owner"`
-			Name    string `json:"name"`
-			Path    string `json:"path"`
-			Content string `json:"content"`
-			Message string `json:"message"`
-			Branch  string `json:"branch"`
-		}
-		if err := parseArgs(req.Params.Arguments, &args); err != nil {
-			return errResult("invalid arguments: " + err.Error())
-		}
-		if p == nil {
-			return errResult("forgejo not configured")
-		}
-		// file_put content per spec is raw text; also accept base64 if caller sent base64-encoded
-		content := []byte(args.Content)
-		// Heuristic: if it decodes as base64 and re-encodes equal, prefer decoded? But spec says file_put content/message/branch raw, so keep raw.
-		if err := p.FilePut(ctx, args.Owner, args.Name, args.Path, content, args.Message, args.Branch); err != nil {
-			return errResult(err.Error())
-		}
-		return jsonResult(map[string]any{"path": args.Path, "branch": args.Branch})
-	})
-
-	addTool(srv, names, &sdk.Tool{
 		Name:        "issues_list",
 		Description: "List issues for a repository",
 		InputSchema: map[string]any{
@@ -421,7 +383,7 @@ func registerForgejo(srv *sdk.Server, p ForgejoProvider, names *[]string) {
 			return errResult(err.Error())
 		}
 		if list == nil {
-			list = []any{}
+			list = []Issue{}
 		}
 		return jsonResult(list)
 	})
@@ -551,7 +513,7 @@ func registerForgejo(srv *sdk.Server, p ForgejoProvider, names *[]string) {
 			return errResult(err.Error())
 		}
 		if list == nil {
-			list = []any{}
+			list = []PullRequest{}
 		}
 		return jsonResult(list)
 	})
@@ -686,7 +648,6 @@ func registerForgejo(srv *sdk.Server, p ForgejoProvider, names *[]string) {
 		}
 		return jsonResult(map[string]any{"commented": true, "index": args.Index})
 	})
-	_ = fmt.Sprintf
 }
 
 func registerDocs(srv *sdk.Server, p DocsProvider, names *[]string) {
@@ -720,7 +681,7 @@ func registerDocs(srv *sdk.Server, p DocsProvider, names *[]string) {
 			return errResult(err.Error())
 		}
 		if list == nil {
-			list = []any{}
+			list = []knowledge.Citation{}
 		}
 		return jsonResult(list)
 	})
@@ -736,7 +697,9 @@ func registerDocs(srv *sdk.Server, p DocsProvider, names *[]string) {
 			"required": []string{"id"},
 		},
 	}, func(ctx context.Context, req *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
-		var args struct{ ID string `json:"id"` }
+		var args struct {
+			ID string `json:"id"`
+		}
 		if err := parseArgs(req.Params.Arguments, &args); err != nil {
 			return errResult("invalid arguments: " + err.Error())
 		}
@@ -887,7 +850,7 @@ func registerProjects(srv *sdk.Server, p ProjectsProvider, names *[]string) {
 			return errResult(err.Error())
 		}
 		if list == nil {
-			list = []any{}
+			list = []ProjectSummary{}
 		}
 		return jsonResult(list)
 	})
@@ -896,12 +859,14 @@ func registerProjects(srv *sdk.Server, p ProjectsProvider, names *[]string) {
 		Name:        "project_get",
 		Description: "Get project by slug",
 		InputSchema: map[string]any{
-			"type": "object",
+			"type":       "object",
 			"properties": map[string]any{"slug": map[string]any{"type": "string"}},
-			"required": []string{"slug"},
+			"required":   []string{"slug"},
 		},
 	}, func(ctx context.Context, req *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
-		var args struct{ Slug string `json:"slug"` }
+		var args struct {
+			Slug string `json:"slug"`
+		}
 		if err := parseArgs(req.Params.Arguments, &args); err != nil {
 			return errResult("invalid arguments: " + err.Error())
 		}
@@ -919,12 +884,14 @@ func registerProjects(srv *sdk.Server, p ProjectsProvider, names *[]string) {
 		Name:        "releases_list",
 		Description: "List releases for a project slug",
 		InputSchema: map[string]any{
-			"type": "object",
+			"type":       "object",
 			"properties": map[string]any{"slug": map[string]any{"type": "string"}},
-			"required": []string{"slug"},
+			"required":   []string{"slug"},
 		},
 	}, func(ctx context.Context, req *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
-		var args struct{ Slug string `json:"slug"` }
+		var args struct {
+			Slug string `json:"slug"`
+		}
 		if err := parseArgs(req.Params.Arguments, &args); err != nil {
 			return errResult("invalid arguments: " + err.Error())
 		}
@@ -936,7 +903,7 @@ func registerProjects(srv *sdk.Server, p ProjectsProvider, names *[]string) {
 			return errResult(err.Error())
 		}
 		if list == nil {
-			list = []any{}
+			list = []ReleaseSummary{}
 		}
 		return jsonResult(list)
 	})
@@ -973,7 +940,7 @@ func registerSCM(srv *sdk.Server, p SCMProvider, names *[]string) {
 			return errResult(err.Error())
 		}
 		if list == nil {
-			list = []any{}
+			list = []RunSummary{}
 		}
 		return jsonResult(list)
 	})
@@ -1022,7 +989,7 @@ func registerWorkspaces(srv *sdk.Server, p WorkspacesProvider, names *[]string) 
 			return errResult(err.Error())
 		}
 		if list == nil {
-			list = []any{}
+			list = []domain.Workspace{}
 		}
 		return jsonResult(list)
 	})
@@ -1062,12 +1029,14 @@ func registerWorkspaces(srv *sdk.Server, p WorkspacesProvider, names *[]string) 
 		Name:        "workspace_get",
 		Description: "Get workspace by id",
 		InputSchema: map[string]any{
-			"type": "object",
+			"type":       "object",
 			"properties": map[string]any{"id": map[string]any{"type": "string"}},
-			"required": []string{"id"},
+			"required":   []string{"id"},
 		},
 	}, func(ctx context.Context, req *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
-		var args struct{ ID string `json:"id"` }
+		var args struct {
+			ID string `json:"id"`
+		}
 		if err := parseArgs(req.Params.Arguments, &args); err != nil {
 			return errResult("invalid arguments: " + err.Error())
 		}
@@ -1113,12 +1082,14 @@ func registerWorkspaces(srv *sdk.Server, p WorkspacesProvider, names *[]string) 
 		Name:        "workspace_stop",
 		Description: "Stop a workspace",
 		InputSchema: map[string]any{
-			"type": "object",
+			"type":       "object",
 			"properties": map[string]any{"id": map[string]any{"type": "string"}},
-			"required": []string{"id"},
+			"required":   []string{"id"},
 		},
 	}, func(ctx context.Context, req *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
-		var args struct{ ID string `json:"id"` }
+		var args struct {
+			ID string `json:"id"`
+		}
 		if err := parseArgs(req.Params.Arguments, &args); err != nil {
 			return errResult("invalid arguments: " + err.Error())
 		}
@@ -1137,11 +1108,13 @@ func registerEvents(srv *sdk.Server, p EventsProvider, names *[]string) {
 		Name:        "events_recent",
 		Description: "List recent events",
 		InputSchema: map[string]any{
-			"type": "object",
+			"type":       "object",
 			"properties": map[string]any{"limit": map[string]any{"type": "integer"}},
 		},
 	}, func(ctx context.Context, req *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
-		var args struct{ Limit int `json:"limit"` }
+		var args struct {
+			Limit int `json:"limit"`
+		}
 		_ = parseArgs(req.Params.Arguments, &args)
 		if args.Limit == 0 {
 			args.Limit = 10
@@ -1154,7 +1127,7 @@ func registerEvents(srv *sdk.Server, p EventsProvider, names *[]string) {
 			return errResult(err.Error())
 		}
 		if list == nil {
-			list = []any{}
+			list = []EventSummary{}
 		}
 		return jsonResult(list)
 	})

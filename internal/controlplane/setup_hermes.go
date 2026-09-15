@@ -157,7 +157,7 @@ This skill describes the Omahab MCP server at `+"`http://127.0.0.1:8484/mcp`"+` 
 - `+"`repo_archive(owner, name)`"+` / `+"`repo_unarchive(owner, name)`"+` — archive is reversible; never delete
 - `+"`branches_list(owner, name)`"+` — list branches
 - `+"`branch_create(owner, name, new_branch, from_ref)`"+` — create via Forgejo `+"`POST /repos/{o}/{r}/branches`"+`
-- `+"`file_get(owner, name, path, ref)`"+` / `+"`file_put(owner, name, path, content, message, branch)`"+` — read/write files
+- `+"`file_get(owner, name, path, ref)`"+` — read files
 - `+"`issues_list/issue_get/issue_create/issue_comment`"+` — issue lifecycle
 - `+"`prs_list/pr_get/pr_diff/pr_create/pr_comment`"+` — pull requests
 

@@ -27,7 +27,7 @@ func TestToolSurface(t *testing.T) {
 	// Ensure expected tools present
 	expected := []string{
 		"repos_list", "repo_get", "repo_archive", "repo_unarchive",
-		"branches_list", "branch_create", "file_get", "file_put",
+		"branches_list", "branch_create", "file_get",
 		"issues_list", "issue_get", "issue_create", "issue_comment",
 		"prs_list", "pr_get", "pr_diff", "pr_create", "pr_comment",
 		"docs_search", "doc_get", "docs_tags", "docs_correspondents", "docs_types", "doc_add_tag", "doc_upload",

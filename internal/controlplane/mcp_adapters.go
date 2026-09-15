@@ -2,14 +2,16 @@ package controlplane
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/omahab/omahab/internal/backups"
 	"github.com/omahab/omahab/internal/domain"
 	"github.com/omahab/omahab/internal/events"
 	"github.com/omahab/omahab/internal/knowledge"
 	"github.com/omahab/omahab/internal/mcp"
+	"github.com/omahab/omahab/internal/scm"
 	"github.com/omahab/omahab/internal/workspaces"
 )
 
@@ -28,62 +30,63 @@ func (b *Backend) MCPToken(ctx context.Context) string {
 
 type mcpWorkspacesAdapter struct{ backend *Backend }
 
-func newMCPWorkspacesAdapter(b *Backend) *mcpWorkspacesAdapter { return &mcpWorkspacesAdapter{backend: b} }
+func newMCPWorkspacesAdapter(b *Backend) *mcpWorkspacesAdapter {
+	return &mcpWorkspacesAdapter{backend: b}
+}
 
-func (a *mcpWorkspacesAdapter) List(ctx context.Context) ([]any, error) {
+func (a *mcpWorkspacesAdapter) List(ctx context.Context) ([]domain.Workspace, error) {
 	if a.backend.workspaces == nil {
-		return []any{}, nil
+		return []domain.Workspace{}, nil
 	}
 	list, err := a.backend.workspaces.List(ctx)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]any, 0, len(list))
+	out := make([]domain.Workspace, 0, len(list))
 	for _, w := range list {
 		out = append(out, *w)
 	}
 	return out, nil
 }
-func (a *mcpWorkspacesAdapter) Create(ctx context.Context, projectSlug, taskTitle, instructions string) (any, error) {
+func (a *mcpWorkspacesAdapter) Create(ctx context.Context, projectSlug, taskTitle, instructions string) (domain.Workspace, error) {
 	if a.backend.workspaces == nil {
-		return nil, fmt.Errorf("workspaces not configured")
+		return domain.Workspace{}, fmt.Errorf("workspaces not configured")
 	}
 	if a.backend.projects == nil {
-		return nil, fmt.Errorf("projects not configured")
+		return domain.Workspace{}, fmt.Errorf("projects not configured")
 	}
 	slug := strings.TrimSpace(projectSlug)
 	if slug == "" {
-		return nil, fmt.Errorf("project_slug is required")
+		return domain.Workspace{}, fmt.Errorf("project_slug is required")
 	}
 	title := strings.TrimSpace(taskTitle)
 	if title == "" {
-		return nil, fmt.Errorf("task_title is required")
+		return domain.Workspace{}, fmt.Errorf("task_title is required")
 	}
 	proj, err := a.backend.projects.GetBySlug(ctx, slug)
 	if err != nil {
-		return nil, err
+		return domain.Workspace{}, err
 	}
 	ws, err := a.backend.workspaces.Create(ctx, workspaces.CreateInput{
-		ProjectID: proj.ID,
-		Title:     title,
-		Instructions: instructions,
-		Agent:     "omp",
+		ProjectID:          proj.ID,
+		Title:              title,
+		Instructions:       instructions,
+		Agent:              "omp",
 		DevcontainerSource: "default",
 	})
 	if err != nil {
-		return nil, err
+		return domain.Workspace{}, err
 	}
 	return *ws, nil
 }
 
-
-func (a *mcpWorkspacesAdapter) Get(ctx context.Context, id string) (any, error) {
+func (a *mcpWorkspacesAdapter) Get(ctx context.Context, id string) (domain.Workspace, error) {
 	if a.backend.workspaces == nil {
-		return nil, fmt.Errorf("workspaces not configured")
+		return domain.Workspace{}, fmt.Errorf("workspaces not configured")
 	}
 	w, err := a.backend.workspaces.Get(ctx, strings.TrimSpace(id))
 	if err != nil {
-		return nil, err
+		return domain.Workspace{}, err
 	}
 	return *w, nil
 }
@@ -105,139 +108,348 @@ func (a *mcpWorkspacesAdapter) Stop(ctx context.Context, id string) error {
 var _ mcp.WorkspacesProvider = (*mcpWorkspacesAdapter)(nil)
 
 type mcpForgejoAdapter struct{ backend *Backend }
+
 func newMCPForgejoAdapter(b *Backend) *mcpForgejoAdapter { return &mcpForgejoAdapter{backend: b} }
-func (a *mcpForgejoAdapter) ReposList(ctx context.Context) ([]any, error) {
+
+// forgejo resolves the authenticated Forgejo client owned by the SCM
+// service. No second HTTP/auth stack is created here. A missing service is
+// a real error on every operation, including listings.
+func (a *mcpForgejoAdapter) forgejo() (scm.ForgejoClient, error) {
+	fc := a.backend.scm.ForgejoClient()
+	if fc == nil {
+		return nil, errors.New("forgejo not configured")
+	}
+	return fc, nil
+}
+
+func forgejoRef(owner, name string) scm.RepoRef {
+	return scm.RepoRef{Owner: strings.TrimSpace(owner), Name: strings.TrimSpace(name)}
+}
+
+func (a *mcpForgejoAdapter) ReposList(ctx context.Context) ([]mcp.RepositorySummary, error) {
 	if a.backend.projects == nil {
-		return []any{}, nil
+		return nil, errors.New("forgejo not configured")
 	}
 	projects, err := a.backend.projects.List(ctx)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]any, 0, len(projects))
+	out := make([]mcp.RepositorySummary, 0, len(projects))
 	for _, p := range projects {
-		out = append(out, map[string]any{"owner": "omahab", "name": p.Slug, "slug": p.Slug, "id": string(p.ID)})
+		out = append(out, mcp.RepositorySummary{Owner: "omahab", Name: p.Slug, Slug: p.Slug, ID: p.ID})
 	}
 	return out, nil
 }
-func (a *mcpForgejoAdapter) RepoGet(ctx context.Context, owner, name string) (any, error) {
-	return map[string]any{"owner": owner, "name": name}, nil
+
+func toMCPRepository(owner, name string, r *scm.Repo) mcp.Repository {
+	return mcp.Repository{
+		Owner:          owner,
+		Name:           name,
+		CloneURL:       r.CloneURL,
+		Private:        r.Private,
+		DefaultBranch:  r.DefaultBranch,
+		ActionsEnabled: r.ActionsEnabled,
+		RemoteID:       r.RemoteID,
+		Archived:       r.Archived,
+	}
 }
-func (a *mcpForgejoAdapter) RepoArchive(ctx context.Context, owner, name string, archived bool) error { return nil }
-func (a *mcpForgejoAdapter) BranchesList(ctx context.Context, owner, name string) ([]string, error) { return []string{}, nil }
-func (a *mcpForgejoAdapter) BranchCreate(ctx context.Context, owner, name, newBranch, fromRef string) error { return nil }
-func (a *mcpForgejoAdapter) FileGet(ctx context.Context, owner, name, path, ref string) ([]byte, error) { return nil, fmt.Errorf("not implemented until Step 4") }
-func (a *mcpForgejoAdapter) FilePut(ctx context.Context, owner, name, path string, content []byte, message, branch string) error { return nil }
-func (a *mcpForgejoAdapter) IssuesList(ctx context.Context, owner, name string) ([]any, error) { return []any{}, nil }
-func (a *mcpForgejoAdapter) IssueGet(ctx context.Context, owner, name string, index int64) (any, error) {
-	return map[string]any{"owner": owner, "name": name, "index": index}, nil
+
+func (a *mcpForgejoAdapter) RepoGet(ctx context.Context, owner, name string) (mcp.Repository, error) {
+	fc, err := a.forgejo()
+	if err != nil {
+		return mcp.Repository{}, err
+	}
+	ref := forgejoRef(owner, name)
+	r, err := fc.GetRepo(ctx, ref)
+	if err != nil {
+		return mcp.Repository{}, err
+	}
+	return toMCPRepository(ref.Owner, ref.Name, r), nil
 }
-func (a *mcpForgejoAdapter) IssueCreate(ctx context.Context, owner, name, title, body string) (any, error) {
-	return map[string]any{"owner": owner, "name": name, "title": title, "body": body}, nil
+
+func (a *mcpForgejoAdapter) RepoArchive(ctx context.Context, owner, name string, archived bool) error {
+	fc, err := a.forgejo()
+	if err != nil {
+		return err
+	}
+	return fc.ArchiveRepo(ctx, forgejoRef(owner, name), archived)
 }
-func (a *mcpForgejoAdapter) IssueComment(ctx context.Context, owner, name string, index int64, body string) error { return nil }
-func (a *mcpForgejoAdapter) PRsList(ctx context.Context, owner, name, state string) ([]any, error) { return []any{}, nil }
-func (a *mcpForgejoAdapter) PRGet(ctx context.Context, owner, name string, index int64) (any, error) {
-	return map[string]any{"owner": owner, "name": name, "index": index}, nil
+
+func (a *mcpForgejoAdapter) BranchesList(ctx context.Context, owner, name string) ([]string, error) {
+	fc, err := a.forgejo()
+	if err != nil {
+		return nil, err
+	}
+	branches, err := fc.ListBranches(ctx, forgejoRef(owner, name))
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(branches))
+	for _, b := range branches {
+		names = append(names, b.Name)
+	}
+	return names, nil
 }
-func (a *mcpForgejoAdapter) PRDiff(ctx context.Context, owner, name string, index int64) (string, error) { return "", nil }
-func (a *mcpForgejoAdapter) PRCreate(ctx context.Context, owner, name, title, body, head, base string) (any, error) {
-	return map[string]any{"owner": owner, "name": name, "title": title, "head": head, "base": base}, nil
+
+func (a *mcpForgejoAdapter) BranchCreate(ctx context.Context, owner, name, newBranch, fromRef string) error {
+	fc, err := a.forgejo()
+	if err != nil {
+		return err
+	}
+	return fc.CreateBranch(ctx, forgejoRef(owner, name), newBranch, fromRef)
 }
-func (a *mcpForgejoAdapter) PRComment(ctx context.Context, owner, name string, index int64, body string) error { return nil }
+
+func (a *mcpForgejoAdapter) FileGet(ctx context.Context, owner, name, path, ref string) ([]byte, error) {
+	fc, err := a.forgejo()
+	if err != nil {
+		return nil, err
+	}
+	return fc.GetFile(ctx, forgejoRef(owner, name), path, ref)
+}
+
+func toMCPIssue(owner, name string, is *scm.Issue) mcp.Issue {
+	return mcp.Issue{
+		Owner:   owner,
+		Name:    name,
+		Index:   is.Index,
+		Title:   is.Title,
+		Body:    is.Body,
+		State:   is.State,
+		Author:  is.Author,
+		HTMLURL: is.HTMLURL,
+	}
+}
+
+func (a *mcpForgejoAdapter) IssuesList(ctx context.Context, owner, name string) ([]mcp.Issue, error) {
+	fc, err := a.forgejo()
+	if err != nil {
+		return nil, err
+	}
+	ref := forgejoRef(owner, name)
+	issues, err := fc.ListIssues(ctx, ref, "")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]mcp.Issue, 0, len(issues))
+	for _, is := range issues {
+		out = append(out, toMCPIssue(ref.Owner, ref.Name, is))
+	}
+	return out, nil
+}
+
+func (a *mcpForgejoAdapter) IssueGet(ctx context.Context, owner, name string, index int64) (mcp.Issue, error) {
+	fc, err := a.forgejo()
+	if err != nil {
+		return mcp.Issue{}, err
+	}
+	ref := forgejoRef(owner, name)
+	is, err := fc.GetIssue(ctx, ref, index)
+	if err != nil {
+		return mcp.Issue{}, err
+	}
+	return toMCPIssue(ref.Owner, ref.Name, is), nil
+}
+
+func (a *mcpForgejoAdapter) IssueCreate(ctx context.Context, owner, name, title, body string) (mcp.Issue, error) {
+	fc, err := a.forgejo()
+	if err != nil {
+		return mcp.Issue{}, err
+	}
+	ref := forgejoRef(owner, name)
+	is, err := fc.CreateIssue(ctx, ref, scm.CreateIssueInput{Title: title, Body: body})
+	if err != nil {
+		return mcp.Issue{}, err
+	}
+	return toMCPIssue(ref.Owner, ref.Name, is), nil
+}
+
+func (a *mcpForgejoAdapter) IssueComment(ctx context.Context, owner, name string, index int64, body string) error {
+	fc, err := a.forgejo()
+	if err != nil {
+		return err
+	}
+	return fc.CreateIssueComment(ctx, forgejoRef(owner, name), index, body)
+}
+
+func toMCPPull(owner, name string, pr *scm.PullRequest) mcp.PullRequest {
+	return mcp.PullRequest{
+		Owner:   owner,
+		Name:    name,
+		Index:   pr.Index,
+		Title:   pr.Title,
+		Body:    pr.Body,
+		State:   pr.State,
+		Author:  pr.Author,
+		HTMLURL: pr.HTMLURL,
+		Head:    pr.HeadBranch,
+		Base:    pr.BaseBranch,
+		HeadSHA: pr.HeadSHA,
+	}
+}
+
+func (a *mcpForgejoAdapter) PRsList(ctx context.Context, owner, name, state string) ([]mcp.PullRequest, error) {
+	fc, err := a.forgejo()
+	if err != nil {
+		return nil, err
+	}
+	ref := forgejoRef(owner, name)
+	pulls, err := fc.ListPulls(ctx, ref, state)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]mcp.PullRequest, 0, len(pulls))
+	for _, pr := range pulls {
+		out = append(out, toMCPPull(ref.Owner, ref.Name, pr))
+	}
+	return out, nil
+}
+
+func (a *mcpForgejoAdapter) PRGet(ctx context.Context, owner, name string, index int64) (mcp.PullRequest, error) {
+	fc, err := a.forgejo()
+	if err != nil {
+		return mcp.PullRequest{}, err
+	}
+	ref := forgejoRef(owner, name)
+	pr, err := fc.GetPull(ctx, ref, index)
+	if err != nil {
+		return mcp.PullRequest{}, err
+	}
+	return toMCPPull(ref.Owner, ref.Name, pr), nil
+}
+
+func (a *mcpForgejoAdapter) PRDiff(ctx context.Context, owner, name string, index int64) (string, error) {
+	fc, err := a.forgejo()
+	if err != nil {
+		return "", err
+	}
+	return fc.GetPullDiff(ctx, forgejoRef(owner, name), index)
+}
+
+func (a *mcpForgejoAdapter) PRCreate(ctx context.Context, owner, name, title, body, head, base string) (mcp.PullRequest, error) {
+	fc, err := a.forgejo()
+	if err != nil {
+		return mcp.PullRequest{}, err
+	}
+	ref := forgejoRef(owner, name)
+	pr, err := fc.CreatePull(ctx, ref, scm.CreatePullInput{Title: title, Body: body, HeadBranch: head, BaseBranch: base})
+	if err != nil {
+		return mcp.PullRequest{}, err
+	}
+	return toMCPPull(ref.Owner, ref.Name, pr), nil
+}
+
+// PRComment posts an ordinary conversation comment on the pull request. It
+// is not an approval or a review.
+func (a *mcpForgejoAdapter) PRComment(ctx context.Context, owner, name string, index int64, body string) error {
+	fc, err := a.forgejo()
+	if err != nil {
+		return err
+	}
+	return fc.CreateIssueComment(ctx, forgejoRef(owner, name), index, body)
+}
+
 var _ mcp.ForgejoProvider = (*mcpForgejoAdapter)(nil)
 
 type mcpDocsAdapter struct{ backend *Backend }
+
 func newMCPDocsAdapter(b *Backend) *mcpDocsAdapter { return &mcpDocsAdapter{backend: b} }
-func (a *mcpDocsAdapter) Search(ctx context.Context, query string, limit int) ([]any, error) {
+
+func (a *mcpDocsAdapter) Search(ctx context.Context, query string, limit int) ([]knowledge.Citation, error) {
 	if a.backend.knowledge == nil {
-		return []any{}, nil
+		return []knowledge.Citation{}, nil
 	}
 	cits, err := a.backend.knowledge.PaperlessSearch(ctx, "hermes", query, knowledge.SearchOptions{Limit: limit})
 	if err != nil {
 		return nil, err
 	}
-	out := make([]any, 0, len(cits))
-	for _, c := range cits {
-		b, _ := json.Marshal(c)
-		var m map[string]any
-		_ = json.Unmarshal(b, &m)
-		out = append(out, m)
-	}
-	return out, nil
+	return cits, nil
 }
-func (a *mcpDocsAdapter) Get(ctx context.Context, id string) (any, error) {
+
+func (a *mcpDocsAdapter) Get(ctx context.Context, id string) (mcp.Document, error) {
 	if a.backend.knowledge == nil {
-		return nil, fmt.Errorf("knowledge not configured")
+		return mcp.Document{}, fmt.Errorf("knowledge not configured")
 	}
 	meta, err := a.backend.knowledge.PaperlessGetMetadata(ctx, "hermes", id)
 	if err != nil {
-		return nil, err
+		return mcp.Document{}, err
 	}
-	text, _ := a.backend.knowledge.PaperlessGetText(ctx, "hermes", id)
-	return map[string]any{"metadata": meta, "text": text}, nil
+	text, err := a.backend.knowledge.PaperlessGetText(ctx, "hermes", id)
+	if err != nil {
+		return mcp.Document{}, err
+	}
+	return mcp.Document{Metadata: meta, Text: text}, nil
 }
+
 func (a *mcpDocsAdapter) ListTags(ctx context.Context) ([]string, error) {
 	if a.backend.knowledge == nil {
 		return []string{}, nil
 	}
 	return a.backend.knowledge.PaperlessListTags(ctx, "hermes")
 }
+
 func (a *mcpDocsAdapter) ListCorrespondents(ctx context.Context) ([]string, error) {
 	if a.backend.knowledge == nil {
 		return []string{}, nil
 	}
 	return a.backend.knowledge.PaperlessListCorrespondents(ctx, "hermes")
 }
+
 func (a *mcpDocsAdapter) ListTypes(ctx context.Context) ([]string, error) {
 	if a.backend.knowledge == nil {
 		return []string{}, nil
 	}
 	return a.backend.knowledge.PaperlessListDocumentTypes(ctx, "hermes")
 }
+
 func (a *mcpDocsAdapter) AddTag(ctx context.Context, id, tag string) error {
 	if a.backend.knowledge == nil {
 		return fmt.Errorf("knowledge not configured")
 	}
 	return a.backend.knowledge.PaperlessAddTag(ctx, "hermes", id, tag)
 }
+
 func (a *mcpDocsAdapter) Upload(ctx context.Context, filename string, content []byte, tags []string) (string, error) {
 	if a.backend.knowledge == nil {
 		return "", fmt.Errorf("knowledge not configured")
 	}
 	return a.backend.knowledge.PaperlessUpload(ctx, "hermes", filename, content, tags)
 }
+
 var _ mcp.DocsProvider = (*mcpDocsAdapter)(nil)
 
 type mcpProjectsAdapter struct{ backend *Backend }
+
 func newMCPProjectsAdapter(b *Backend) *mcpProjectsAdapter { return &mcpProjectsAdapter{backend: b} }
-func (a *mcpProjectsAdapter) List(ctx context.Context) ([]any, error) {
+
+func (a *mcpProjectsAdapter) List(ctx context.Context) ([]mcp.ProjectSummary, error) {
 	if a.backend.projects == nil {
-		return []any{}, nil
+		return []mcp.ProjectSummary{}, nil
 	}
 	list, err := a.backend.projects.List(ctx)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]any, 0, len(list))
+	out := make([]mcp.ProjectSummary, 0, len(list))
 	for _, p := range list {
-		out = append(out, map[string]any{"id": string(p.ID), "slug": p.Slug, "name": p.Name, "repository_url": p.RepositoryURL, "hostname": p.Hostname, "created_at": p.CreatedAt})
+		out = append(out, mcp.ProjectSummary{ID: p.ID, Slug: p.Slug, Name: p.Name, RepositoryURL: p.RepositoryURL, Hostname: p.Hostname, CreatedAt: p.CreatedAt})
 	}
 	return out, nil
 }
-func (a *mcpProjectsAdapter) Get(ctx context.Context, slug string) (any, error) {
+
+func (a *mcpProjectsAdapter) Get(ctx context.Context, slug string) (mcp.ProjectSummary, error) {
 	if a.backend.projects == nil {
-		return nil, fmt.Errorf("projects not configured")
+		return mcp.ProjectSummary{}, fmt.Errorf("projects not configured")
 	}
 	p, err := a.backend.projects.GetBySlug(ctx, slug)
 	if err != nil {
-		return nil, err
+		return mcp.ProjectSummary{}, err
 	}
-	return map[string]any{"id": string(p.ID), "slug": p.Slug, "name": p.Name, "repository_url": p.RepositoryURL, "hostname": p.Hostname, "created_at": p.CreatedAt}, nil
+	return mcp.ProjectSummary{ID: p.ID, Slug: p.Slug, Name: p.Name, RepositoryURL: p.RepositoryURL, Hostname: p.Hostname, CreatedAt: p.CreatedAt}, nil
 }
-func (a *mcpProjectsAdapter) ListReleases(ctx context.Context, slug string) ([]any, error) {
+
+func (a *mcpProjectsAdapter) ListReleases(ctx context.Context, slug string) ([]mcp.ReleaseSummary, error) {
 	if a.backend.projects == nil {
-		return []any{}, nil
+		return []mcp.ReleaseSummary{}, nil
 	}
 	p, err := a.backend.projects.GetBySlug(ctx, slug)
 	if err != nil {
@@ -247,19 +459,22 @@ func (a *mcpProjectsAdapter) ListReleases(ctx context.Context, slug string) ([]a
 	if err != nil {
 		return nil, err
 	}
-	out := make([]any, 0, len(releases))
+	out := make([]mcp.ReleaseSummary, 0, len(releases))
 	for _, r := range releases {
-		out = append(out, map[string]any{"id": string(r.ID), "project_id": string(r.ProjectID), "commit": r.Commit, "digest": r.Digest, "status": r.Status, "active": r.Active, "created_at": r.CreatedAt})
+		out = append(out, mcp.ReleaseSummary{ID: r.ID, ProjectID: r.ProjectID, Commit: r.Commit, Digest: r.Digest, Status: r.Status, Active: r.Active, CreatedAt: r.CreatedAt})
 	}
 	return out, nil
 }
+
 var _ mcp.ProjectsProvider = (*mcpProjectsAdapter)(nil)
 
 type mcpSCMAdapter struct{ backend *Backend }
+
 func newMCPSCMAdapter(b *Backend) *mcpSCMAdapter { return &mcpSCMAdapter{backend: b} }
-func (a *mcpSCMAdapter) ListRuns(ctx context.Context, slug string, limit int) ([]any, error) {
+
+func (a *mcpSCMAdapter) ListRuns(ctx context.Context, slug string, limit int) ([]mcp.RunSummary, error) {
 	if a.backend.scm == nil || a.backend.projects == nil {
-		return []any{}, nil
+		return []mcp.RunSummary{}, nil
 	}
 	p, err := a.backend.projects.GetBySlug(ctx, slug)
 	if err != nil {
@@ -269,14 +484,14 @@ func (a *mcpSCMAdapter) ListRuns(ctx context.Context, slug string, limit int) ([
 	if err != nil {
 		return nil, err
 	}
-	out := make([]any, 0, len(runs))
+	out := make([]mcp.RunSummary, 0, len(runs))
 	for _, r := range runs {
-		out = append(out, map[string]any{"id": string(r.ID), "number": r.Number, "status": r.Status, "commit_sha": r.CommitSHA, "branch": r.Branch, "event": r.Event, "created_at": r.CreatedAt, "author": r.Author})
+		out = append(out, mcp.RunSummary{ID: r.ID, Number: r.Number, Status: r.Status, CommitSHA: r.CommitSHA, Branch: r.Branch, Event: r.Event, CreatedAt: r.CreatedAt, Author: r.Author})
 	}
-	_ = domain.ID("")
 	return out, nil
 }
-func (a *mcpSCMAdapter) GetRunLogs(ctx context.Context, slug string, number int) (any, error) {
+
+func (a *mcpSCMAdapter) GetRunLogs(ctx context.Context, slug string, number int) ([]*scm.LogRef, error) {
 	if a.backend.scm == nil || a.backend.projects == nil {
 		return nil, fmt.Errorf("scm not configured")
 	}
@@ -284,19 +499,18 @@ func (a *mcpSCMAdapter) GetRunLogs(ctx context.Context, slug string, number int)
 	if err != nil {
 		return nil, err
 	}
-	refs, err := a.backend.scm.LogRefs(ctx, p.ID, number)
-	if err != nil {
-		return nil, err
-	}
-	return refs, nil
+	return a.backend.scm.LogRefs(ctx, p.ID, number)
 }
+
 var _ mcp.SCMProvider = (*mcpSCMAdapter)(nil)
 
 type mcpEventsAdapter struct{ backend *Backend }
+
 func newMCPEventsAdapter(b *Backend) *mcpEventsAdapter { return &mcpEventsAdapter{backend: b} }
-func (a *mcpEventsAdapter) Recent(ctx context.Context, limit int) ([]any, error) {
+
+func (a *mcpEventsAdapter) Recent(ctx context.Context, limit int) ([]mcp.EventSummary, error) {
 	if a.backend.events == nil {
-		return []any{}, nil
+		return []mcp.EventSummary{}, nil
 	}
 	if limit <= 0 {
 		limit = 10
@@ -308,24 +522,24 @@ func (a *mcpEventsAdapter) Recent(ctx context.Context, limit int) ([]any, error)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]any, 0, len(list))
+	out := make([]mcp.EventSummary, 0, len(list))
 	for _, e := range list {
-		out = append(out, map[string]any{"id": string(e.ID), "type": e.Type, "severity": e.Severity, "message": e.Message, "data": e.Data, "created_at": e.CreatedAt})
+		out = append(out, mcp.EventSummary{ID: e.ID, Type: e.Type, Severity: e.Severity, Message: e.Message, Data: e.Data, CreatedAt: e.CreatedAt})
 	}
 	return out, nil
 }
+
 var _ mcp.EventsProvider = (*mcpEventsAdapter)(nil)
 
 type mcpBackupsAdapter struct{ backend *Backend }
+
 func newMCPBackupsAdapter(b *Backend) *mcpBackupsAdapter { return &mcpBackupsAdapter{backend: b} }
-func (a *mcpBackupsAdapter) Status(ctx context.Context) (any, error) {
+
+func (a *mcpBackupsAdapter) Status(ctx context.Context) (backups.StatusReport, error) {
 	if a.backend.backups == nil {
-		return map[string]any{"status": "backups not configured"}, nil
+		return backups.StatusReport{}, fmt.Errorf("backups not configured")
 	}
-	st, err := a.backend.backups.Status(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return st, nil
+	return a.backend.backups.Status(ctx)
 }
+
 var _ mcp.BackupsProvider = (*mcpBackupsAdapter)(nil)
