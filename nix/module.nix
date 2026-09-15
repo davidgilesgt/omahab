@@ -32,6 +32,32 @@ let
   dataDir = "/srv/omahab";
   appEnvDir = "${stateDir}/appenv";
   secretsDir = "${stateDir}/secrets";
+  # Single native layout (nix/app-data.nix) parameterized by the evaluated
+  # config: the only native data/database/unit metadata used by storage
+  # generation and the installed catalog. cfg.catalogPackage stays the base
+  # metadata input so evaluating the native catalog never recurses into
+  # its own package.
+  nativeLayout = import ./app-data.nix { inherit config stateDir dataDir; };
+  nativeLayoutJson = builtins.toJSON nativeLayout;
+  nativeCatalog = pkgs.runCommand "omahab-catalog-native" { nativeBuildInputs = [ pkgs.jq ]; } ''
+    layout="$TMPDIR/layout.json"
+    printf '%s' ${lib.escapeShellArg nativeLayoutJson} > "$layout"
+    ${pkgs.jq}/bin/jq --slurpfile layout "$layout" '
+      ($layout[0]) as $native
+      | .bundles |= map(
+          (.id) as $id
+          | ($native[$id] // null) as $n
+          | if $n == null then .
+            else
+              .data = ($n.data // [])
+              | .backup = ((.backup // {}) + {
+                  databases: ($n.databases // []),
+                  quiesce_units: ($n.quiesce_units // [])
+                })
+            end
+        )
+    ' "${cfg.catalogPackage}/catalog.json" > $out
+  '';
 
   hardenBase = {
     NoNewPrivileges = true;
@@ -272,7 +298,7 @@ in
         OMAHAB_DATA_DIR = dataDir;
         OMAHAB_LISTEN = cfg.listen;
         OMAHAB_PLACEMENT = cfg.placement;
-        OMAHAB_CATALOG = "${cfg.catalogPackage}/catalog.json";
+        OMAHAB_CATALOG = "${nativeCatalog}";
         OMAHAB_WEB_DIR = "${cfg.webPackage}";
         # B2: distribution bundle for /dl/* and /install.sh (public on LAN, no auth).
         # Only set if dlPackage is available (flake provides omahab-dl; fallback for standalone use).

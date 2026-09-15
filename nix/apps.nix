@@ -193,6 +193,8 @@ in
       "d ${dataDir}/apps/immich 0750 immich immich - -"
       "d ${dataDir}/apps/immich/library 0700 immich immich - -"
       "z ${dataDir}/apps/immich/immich.json 0600 immich immich - -"
+      "d ${dataDir}/apps/jellyfin 0750 jellyfin jellyfin - -"
+      "d ${dataDir}/apps/jellyfin/library 0750 jellyfin jellyfin - -"
       # LiteLLM live config (rendered by omahabd, read by the DynamicUser
       # service via a static group distinct from the unit name: DynamicUser
       # implicitly takes user `litellm`, so a static group named `litellm`
@@ -440,6 +442,34 @@ in
       environmentFile = "${appEnv}/ntfy.env";
     };
     systemd.services.ntfy-sh = gate "ntfy";
+    # ----------------------------------------------------------------
+    # Jellyfin — media. Private UI first-run admin creation; no native OIDC.
+    # Upstream may bind broadly; nftables (nix/network.nix) rejects direct
+    # LAN/WAN :8096 and admits only the Caddy path. Data layout owned by
+    # nix/app-data.nix (state ${dataDir}/apps/jellyfin, library/ beneath).
+    # ----------------------------------------------------------------
+    services.jellyfin = {
+      enable = true;
+      dataDir = "${dataDir}/apps/jellyfin";
+      openFirewall = false;
+    };
+    systemd.services.jellyfin = gate "jellyfin";
+
+    # ----------------------------------------------------------------
+    # AdGuard Home — household DNS filtering on LAN :53. Web UI on 127.0.0.1:3002.
+    # LAN addresses live in generated mutable YAML, not Nix secrets. nftables
+    # admits LAN-only TCP+UDP 53; never a public resolver. Web liveness at `/`
+    # (not /control/status which needs auth); DNS readiness is a separate query.
+    # ----------------------------------------------------------------
+    services.adguardhome = {
+      enable = true;
+      host = "127.0.0.1";
+      port = 3002;
+      mutableSettings = true;
+      allowDHCP = false;
+      openFirewall = false;
+    };
+    systemd.services.adguardhome = gate "adguard-home";
 
     # ----------------------------------------------------------------
     # LiteLLM — model gateway. Config rendered by omahabd; its env file

@@ -2454,6 +2454,15 @@ func newCatalogCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			path := args[0]
+			installed, _ := cmd.Flags().GetBool("installed")
+			if installed {
+				c, err := apps.LoadInstalledCatalogFile(path)
+				if err != nil {
+					return err
+				}
+				fmt.Printf("ok: %d bundles (installed)\n", len(c.Bundles()))
+				return nil
+			}
 			c, err := apps.LoadCatalogFile(path)
 			if err != nil {
 				return err
@@ -2462,6 +2471,7 @@ func newCatalogCmd() *cobra.Command {
 			return nil
 		},
 	}
+	validate.Flags().Bool("installed", false, "Require native data completeness (installed catalog)")
 	cat.AddCommand(validate)
 	return cat
 }

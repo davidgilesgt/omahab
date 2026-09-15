@@ -30,8 +30,8 @@ func bundlesForTest() []apps.Bundle {
 		Name: "Forgejo",
 		Units: []string{"forgejo.service"},
 		Backup: apps.BackupHooks{
-			PreBackup:   []string{"/bin/sh", "-c", "pg_dump -Fc forgejo -f /tmp/forgejo.pgdump"},
-			PostRestore: []string{"/bin/sh", "-c", "pg_restore --clean --if-exists /tmp/forgejo.pgdump"},
+			PreBackup:   []string{"/bin/sh", "-c", "echo quiesce forgejo"},
+			PostRestore: []string{"/bin/sh", "-c", "echo activate forgejo"},
 		},
 	}
 	b2 := apps.Bundle{
@@ -39,8 +39,8 @@ func bundlesForTest() []apps.Bundle {
 		Name: "Immich",
 		Units: []string{"immich.service"},
 		Backup: apps.BackupHooks{
-			PreBackup:   []string{"/bin/sh", "-c", "pg_dump -Fc immich -f /tmp/immich.pgdump"},
-			PostRestore: []string{"/bin/sh", "-c", "pg_restore --clean --if-exists /tmp/immich.pgdump && restart"},
+			PreBackup:   []string{"/bin/sh", "-c", "echo quiesce immich"},
+			PostRestore: []string{"/bin/sh", "-c", "echo activate immich && restart"},
 		},
 	}
 	b3 := apps.Bundle{
@@ -279,7 +279,7 @@ func TestAppHookSourcePostRestoreHookFailureAbortsRestore(t *testing.T) {
 		Name: "Immich",
 		Units: []string{"immich.service"},
 		Backup: apps.BackupHooks{
-			PostRestore: []string{"/bin/sh", "-c", "pg_restore --clean --if-exists /tmp/immich.pgdump"},
+			PostRestore: []string{"/bin/sh", "-c", "echo activate immich"},
 		},
 	}
 	cat, err := apps.NewCatalog(b)

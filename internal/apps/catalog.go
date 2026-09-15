@@ -2,6 +2,7 @@ package apps
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -28,20 +29,25 @@ var (
 	routeRe    = regexp.MustCompile(`^[a-z0-9-]*$`)
 )
 
-// DataVolume declares one piece of persistent application data. Names map to
-// the Compose volume, Path to the mount point inside the service.
+// DataVolume declares one piece of persistent application data. Name is the
+// logical volume identity consumed by backup and storage (state|library|
+// config); Path is the canonical native host path, never a disk-specific
+// physical path or a container mount point.
 type DataVolume struct {
 	Name string `json:"name"`
 	Path string `json:"path"`
 }
 
-// BackupHooks names the database-safe hooks a bundle supplies. Values are
-// argv vectors (typically ["/bin/sh","-c","..."]) because hooks execute
-// without a shell; copying live database files is not a valid backup, so
-// bundles with a database must declare pre_backup and post_restore.
+// BackupHooks carries typed native consistency metadata. QuiesceUnits lists
+// systemd units stopped for a consistent snapshot; Databases lists logical
+// PostgreSQL databases dumped with pg_dump. Legacy PreBackup/PostRestore
+// argv hooks are container-era and must not carry container paths or database
+// dumps; new code uses typed orchestration instead of shell strings.
 type BackupHooks struct {
-	PreBackup   []string `json:"pre_backup,omitempty"`
-	PostRestore []string `json:"post_restore,omitempty"`
+	PreBackup    []string `json:"pre_backup,omitempty"`
+	PostRestore  []string `json:"post_restore,omitempty"`
+	QuiesceUnits []string `json:"quiesce_units,omitempty"`
+	Databases    []string `json:"databases,omitempty"`
 }
 
 // OIDCConfig records whether the application supports native OIDC.
@@ -107,12 +113,12 @@ type Bundle struct {
 	// AppPath is the browser entry point below the bundle's hostname
 	// ("/" or "/ui"). Empty means the bundle has no browser interface
 	// and never produces a launch URL.
-	AppPath             string           `json:"app_path,omitempty"`
-	Dependencies        []string         `json:"dependencies,omitempty"`
-	SecretSources       []string         `json:"secret_sources,omitempty"`
-	PipelineImage       string           `json:"pipeline_image,omitempty"`
-	Units               []string         `json:"units,omitempty"`
-	Groups              []string         `json:"groups,omitempty"`
+	AppPath       string   `json:"app_path,omitempty"`
+	Dependencies  []string `json:"dependencies,omitempty"`
+	SecretSources []string `json:"secret_sources,omitempty"`
+	PipelineImage string   `json:"pipeline_image,omitempty"`
+	Units         []string `json:"units,omitempty"`
+	Groups        []string `json:"groups,omitempty"`
 }
 
 // exposureRank orders exposure so requests can be checked against a bundle's
@@ -227,7 +233,34 @@ func (b Bundle) validate() (Bundle, error) {
 			if strings.TrimSpace(arg) == "" {
 				problems = append(problems, fmt.Sprintf("backup hook %s contains an empty argument", name))
 			}
+			lower := strings.ToLower(arg)
+			for _, bad := range []string{"/app/backend/data", "/var/lib/postgresql", "/var/lib/omahab/dumps", "pg_dump", "pg_restore", "sqlite3"} {
+				if strings.Contains(lower, strings.ToLower(bad)) {
+					problems = append(problems, fmt.Sprintf("backup hook %s must not contain container-era %q; use quiesce_units/databases", name, bad))
+					break
+				}
+			}
 		}
+	}
+	seenQuiesce := map[string]bool{}
+	for _, u := range b.Backup.QuiesceUnits {
+		if !strings.HasSuffix(u, ".service") && !strings.HasSuffix(u, ".socket") && !strings.HasSuffix(u, ".timer") {
+			problems = append(problems, fmt.Sprintf("quiesce unit %q must name a .service/.socket/.timer unit", u))
+		}
+		if seenQuiesce[u] {
+			problems = append(problems, fmt.Sprintf("quiesce unit %q listed twice", u))
+		}
+		seenQuiesce[u] = true
+	}
+	seenDB := map[string]bool{}
+	for _, d := range b.Backup.Databases {
+		if !validSlug(d) && !volumeName.MatchString(d) {
+			problems = append(problems, fmt.Sprintf("database %q must be [a-z0-9_-]", d))
+		}
+		if seenDB[d] {
+			problems = append(problems, fmt.Sprintf("database %q listed twice", d))
+		}
+		seenDB[d] = true
 	}
 	if b.Resources.MemoryMB < 0 {
 		problems = append(problems, "resources.memory_mb must not be negative")
@@ -398,6 +431,58 @@ func LoadCatalogFile(path string) (*Catalog, error) {
 	}
 	defer f.Close()
 	return ParseCatalog(f)
+}
+
+// ValidateInstalled enforces native data completeness for the installed
+// catalog: every bundle must declare canonical data volumes and units.
+// Raw bundle metadata (source catalog) is validated by validate(); the
+// Nix-merged installed catalog additionally requires data completeness.
+// Database-only bundles (e.g. woodpecker, whose durable records live in the
+// shared PostgreSQL cluster) may declare databases without file volumes.
+func (b Bundle) ValidateInstalled() error {
+	var problems []string
+	if len(b.Units) == 0 {
+		problems = append(problems, "units is required in installed catalog")
+	}
+	if len(b.Data) == 0 {
+		// No file volumes: allowed for database-only or stateless bundles.
+	} else {
+		for _, v := range b.Data {
+			if v.Path == "/data" || v.Path == "/config" || strings.HasPrefix(v.Path, "/app/") || strings.HasPrefix(v.Path, "/var/lib/postgresql") {
+				problems = append(problems, fmt.Sprintf("data volume %q path %q is a container-era path; use native host path", v.Name, v.Path))
+			}
+			if strings.HasPrefix(v.Path, "/mnt/") {
+				problems = append(problems, fmt.Sprintf("data volume %q path %q must be canonical, not disk-specific", v.Name, v.Path))
+			}
+		}
+	}
+	if len(problems) > 0 {
+		return &ValidationError{Problems: problems}
+	}
+	return nil
+}
+func LoadInstalledCatalogFile(path string) (*Catalog, error) {
+	c, err := LoadCatalogFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var problems []string
+	for _, id := range c.order {
+		if err := c.byID[id].ValidateInstalled(); err != nil {
+			var ve *ValidationError
+			if errors.As(err, &ve) {
+				for _, p := range ve.Problems {
+					problems = append(problems, fmt.Sprintf("bundle %q: %s", id, p))
+				}
+			} else {
+				problems = append(problems, fmt.Sprintf("bundle %q: %v", id, err))
+			}
+		}
+	}
+	if len(problems) > 0 {
+		return nil, &ValidationError{Problems: problems}
+	}
+	return c, nil
 }
 
 // Get returns the bundle with the given ID.

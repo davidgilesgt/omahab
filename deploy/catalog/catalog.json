@@ -12,23 +12,6 @@
         "port": 2019
       },
       "startup_grace_seconds": 60,
-      "data": [
-        {
-          "name": "caddy_data",
-          "path": "/data"
-        },
-        {
-          "name": "caddy_config",
-          "path": "/config"
-        }
-      ],
-      "backup": {
-        "post_restore": [
-          "/bin/sh",
-          "-c",
-          "systemctl reload caddy || true"
-        ]
-      },
       "oidc": {
         "supported": false
       },
@@ -56,24 +39,6 @@
         "port": 1411
       },
       "startup_grace_seconds": 180,
-      "data": [
-        {
-          "name": "pocket_id_data",
-          "path": "/app/backend/data"
-        }
-      ],
-      "backup": {
-        "pre_backup": [
-          "/bin/sh",
-          "-c",
-          "sqlite3 /app/backend/data/data.db \".backup '/var/lib/omahab/dumps/pocket-id.db'\" || cp /app/backend/data/data.db /var/lib/omahab/dumps/pocket-id.db"
-        ],
-        "post_restore": [
-          "/bin/sh",
-          "-c",
-          "cp /var/lib/omahab/dumps/pocket-id.db /app/backend/data/data.db && systemctl restart pocket-id.service"
-        ]
-      },
       "oidc": {
         "supported": true,
         "mode": "provider"
@@ -110,28 +75,6 @@
         "port": 3000
       },
       "startup_grace_seconds": 180,
-      "data": [
-        {
-          "name": "forgejo_data",
-          "path": "/data"
-        },
-        {
-          "name": "forgejo_postgres_data",
-          "path": "/var/lib/postgresql/data"
-        }
-      ],
-      "backup": {
-        "pre_backup": [
-          "/bin/sh",
-          "-c",
-          "pg_dump -Fc -d forgejo -f /var/lib/omahab/dumps/forgejo.pgdump"
-        ],
-        "post_restore": [
-          "/bin/sh",
-          "-c",
-          "pg_restore --clean --if-exists -d forgejo /var/lib/omahab/dumps/forgejo.pgdump && systemctl restart forgejo.service"
-        ]
-      },
       "oidc": {
         "supported": true,
         "mode": "native",
@@ -171,28 +114,6 @@
         "port": 8000
       },
       "startup_grace_seconds": 120,
-      "data": [
-        {
-          "name": "woodpecker_data",
-          "path": "/var/lib/woodpecker"
-        },
-        {
-          "name": "woodpecker_postgres_data",
-          "path": "/var/lib/postgresql/data"
-        }
-      ],
-      "backup": {
-        "pre_backup": [
-          "/bin/sh",
-          "-c",
-          "pg_dump -Fc -d woodpecker -f /var/lib/omahab/dumps/woodpecker.pgdump"
-        ],
-        "post_restore": [
-          "/bin/sh",
-          "-c",
-          "pg_restore --clean --if-exists -d woodpecker /var/lib/omahab/dumps/woodpecker.pgdump && systemctl restart woodpecker-server.service woodpecker-agent-docker.service"
-        ]
-      },
       "oidc": {
         "supported": false
       },
@@ -236,32 +157,6 @@
         "port": 2283
       },
       "startup_grace_seconds": 600,
-      "data": [
-        {
-          "name": "immich_postgres_data",
-          "path": "/var/lib/postgresql/data"
-        },
-        {
-          "name": "immich_redis_data",
-          "path": "/data"
-        },
-        {
-          "name": "immich_model_cache",
-          "path": "/cache"
-        }
-      ],
-      "backup": {
-        "pre_backup": [
-          "/bin/sh",
-          "-c",
-          "pg_dump -Fc -d immich -f /var/lib/omahab/dumps/immich.pgdump"
-        ],
-        "post_restore": [
-          "/bin/sh",
-          "-c",
-          "pg_restore --clean --if-exists -d immich /var/lib/omahab/dumps/immich.pgdump && systemctl restart immich-server.service immich-machine-learning.service"
-        ]
-      },
       "oidc": {
         "supported": true,
         "mode": "native",
@@ -301,24 +196,6 @@
         "port": 28981
       },
       "startup_grace_seconds": 300,
-      "data": [
-        {
-          "name": "paperless_postgres_data",
-          "path": "/var/lib/postgresql/data"
-        }
-      ],
-      "backup": {
-        "pre_backup": [
-          "/bin/sh",
-          "-c",
-          "pg_dump -Fc -d paperless -f /var/lib/omahab/dumps/paperless-ngx.pgdump"
-        ],
-        "post_restore": [
-          "/bin/sh",
-          "-c",
-          "pg_restore --clean --if-exists -d paperless /var/lib/omahab/dumps/paperless-ngx.pgdump && systemctl restart paperless-web.service paperless-consumer.service paperless-scheduler.service"
-        ]
-      },
       "oidc": {
         "supported": true,
         "mode": "native",
@@ -363,32 +240,6 @@
         "port": 3010
       },
       "startup_grace_seconds": 300,
-      "data": [
-        {
-          "name": "karakeep_data",
-          "path": "/data"
-        },
-        {
-          "name": "karakeep_postgres_data",
-          "path": "/var/lib/postgresql/data"
-        },
-        {
-          "name": "karakeep_meili_data",
-          "path": "/meili_data"
-        }
-      ],
-      "backup": {
-        "pre_backup": [
-          "/bin/sh",
-          "-c",
-          "pg_dump -Fc -d karakeep -f /var/lib/omahab/dumps/karakeep.pgdump"
-        ],
-        "post_restore": [
-          "/bin/sh",
-          "-c",
-          "pg_restore --clean --if-exists -d karakeep /var/lib/omahab/dumps/karakeep.pgdump && systemctl restart karakeep-web.service karakeep-workers.service karakeep-browser.service"
-        ]
-      },
       "oidc": {
         "supported": true,
         "mode": "native",
@@ -431,19 +282,6 @@
         "port": 8384
       },
       "startup_grace_seconds": 120,
-      "data": [
-        {
-          "name": "syncthing_config",
-          "path": "/var/syncthing/config"
-        }
-      ],
-      "backup": {
-        "post_restore": [
-          "/bin/sh",
-          "-c",
-          "systemctl restart syncthing.service"
-        ]
-      },
       "oidc": {
         "supported": false
       },
@@ -480,28 +318,6 @@
         "port": 4000
       },
       "startup_grace_seconds": 180,
-      "data": [
-        {
-          "name": "litellm_postgres_data",
-          "path": "/var/lib/postgresql/data"
-        },
-        {
-          "name": "litellm_auth",
-          "path": "/var/lib/litellm-auth"
-        }
-      ],
-      "backup": {
-        "pre_backup": [
-          "/bin/sh",
-          "-c",
-          "pg_dump -Fc -d litellm -f /var/lib/omahab/dumps/litellm.pgdump"
-        ],
-        "post_restore": [
-          "/bin/sh",
-          "-c",
-          "pg_restore --clean --if-exists -d litellm /var/lib/omahab/dumps/litellm.pgdump && systemctl restart litellm.service"
-        ]
-      },
       "oidc": {
         "supported": true,
         "mode": "native",
@@ -539,19 +355,6 @@
         "kind": "none"
       },
       "startup_grace_seconds": 60,
-      "data": [
-        {
-          "name": "embedding_models",
-          "path": "/models"
-        }
-      ],
-      "backup": {
-        "post_restore": [
-          "/bin/sh",
-          "-c",
-          "systemctl restart omahab-embedding-worker.service"
-        ]
-      },
       "oidc": {
         "supported": false
       },
@@ -579,23 +382,6 @@
         "port": 2586
       },
       "startup_grace_seconds": 60,
-      "data": [
-        {
-          "name": "ntfy_cache",
-          "path": "/var/cache/ntfy"
-        },
-        {
-          "name": "ntfy_config",
-          "path": "/etc/ntfy"
-        }
-      ],
-      "backup": {
-        "post_restore": [
-          "/bin/sh",
-          "-c",
-          "systemctl restart ntfy-sh.service"
-        ]
-      },
       "oidc": {
         "supported": false
       },
@@ -630,12 +416,6 @@
         "port": 8085
       },
       "startup_grace_seconds": 300,
-      "data": [
-        {
-          "name": "hermes_home",
-          "path": "/var/lib/omahab/hermes"
-        }
-      ],
       "oidc": {
         "supported": true,
         "mode": "native",
@@ -671,12 +451,6 @@
         "port": 8500
       },
       "startup_grace_seconds": 60,
-      "data": [
-        {
-          "name": "machine_backups",
-          "path": "/srv/omahab/machine-backups"
-        }
-      ],
       "oidc": {
         "supported": false
       },
@@ -690,6 +464,69 @@
       ],
       "units": [
         "restic-rest-server.service"
+      ],
+      "groups": [
+        "admins"
+      ]
+    },
+    {
+      "id": "jellyfin",
+      "name": "Jellyfin",
+      "port": 8096,
+      "default_exposure": "private",
+      "max_exposure": "shared",
+      "health_check": {
+        "kind": "http",
+        "path": "/health",
+        "port": 8096
+      },
+      "startup_grace_seconds": 300,
+      "oidc": {
+        "supported": false
+      },
+      "resources": {
+        "memory_mb": 1024
+      },
+      "default": true,
+      "route": "media",
+      "app_path": "/",
+      "dependencies": [
+        "caddy"
+      ],
+      "units": [
+        "jellyfin.service"
+      ],
+      "groups": [
+        "members",
+        "admins"
+      ]
+    },
+    {
+      "id": "adguard-home",
+      "name": "AdGuard Home",
+      "port": 3002,
+      "default_exposure": "private",
+      "max_exposure": "private",
+      "health_check": {
+        "kind": "http",
+        "path": "/",
+        "port": 3002
+      },
+      "startup_grace_seconds": 120,
+      "oidc": {
+        "supported": false
+      },
+      "resources": {
+        "memory_mb": 256
+      },
+      "default": true,
+      "route": "dns",
+      "app_path": "/",
+      "dependencies": [
+        "caddy"
+      ],
+      "units": [
+        "adguardhome.service"
       ],
       "groups": [
         "admins"
