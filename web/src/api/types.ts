@@ -290,14 +290,6 @@ export interface NtfyConfig {
   topic?: string | null;
 }
 
-export interface CompanionEnrollment {
-  id: ID;
-  code: string;
-  expires_at: string;
-  created_at: string;
-  consumed_at?: string | null;
-}
-
 export interface CreateCompanionEnrollmentResponse {
   id: string;
   code: string;

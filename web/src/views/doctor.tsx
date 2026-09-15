@@ -137,4 +137,3 @@ export function DoctorPage() {
   );
 }
 
-export default DoctorPage;

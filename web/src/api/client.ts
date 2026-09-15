@@ -54,16 +54,40 @@ export class ApiError extends Error {
   }
 }
 
-export function isApiError(error: unknown): error is ApiError {
-  return error instanceof ApiError;
-}
-
-export function isUnauthorizedError(error: unknown): boolean {
-  return error instanceof ApiError && error.status === 401;
-}
 
 function isEnvelope<T>(value: T[] | ListEnvelope<T>): value is ListEnvelope<T> {
   return !Array.isArray(value);
+}
+
+export class EventConsumerError extends Error {
+  constructor(message = "The live event consumer failed.", options?: ErrorOptions) {
+    super(message, options);
+    this.name = "EventConsumerError";
+  }
+}
+
+function parseControlEvent(data: string): ControlEvent | null {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(data);
+  } catch {
+    return null;
+  }
+  if (typeof raw !== "object" || raw === null) return null;
+  const v = raw as Record<string, unknown>;
+  if (
+    typeof v.id !== "string" ||
+    typeof v.type !== "string" ||
+    typeof v.severity !== "string" ||
+    typeof v.message !== "string" ||
+    typeof v.created_at !== "string"
+  ) {
+    return null;
+  }
+  if (v.resource_id !== undefined && typeof v.resource_id !== "string") return null;
+  if (v.read_at !== undefined && typeof v.read_at !== "string") return null;
+  if (v.data !== undefined && (typeof v.data !== "object" || v.data === null)) return null;
+  return raw as ControlEvent;
 }
 
 export class ApiClient {
@@ -152,6 +176,8 @@ export class ApiClient {
   createUser = (input: { name: string; email: string; groups?: string[] }) => this.request<User>("/users", { method: "POST", body: JSON.stringify(input) });
   setUserDisabled = (id: string, disabled: boolean) =>
     this.request<User>(`/users/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ disabled }) });
+  setUserGroups = (id: string, groups: string[]) =>
+    this.request<User>(`/users/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ groups }) });
   beginRecovery = (id: string) =>
     this.request<RecoverySession>(`/users/${encodeURIComponent(id)}/recovery`, { method: "POST", body: JSON.stringify({}) });
   issueEnrollment = (id: string) => this.request<User>(`/users/${encodeURIComponent(id)}/enrollment`, { method: "POST", body: JSON.stringify({}) });
@@ -240,76 +266,25 @@ export class ApiClient {
   knowledgePinnedModels = () => this.list<ModelInfo>("/knowledge/pinned-models");
 
   knowledgeGetConsent = (
-    providerOrInput: string | { provider: string; principal?: string },
-    principalMaybe?: string,
+    input: { provider: string; principal?: string },
   ): Promise<KnowledgeConsent> => {
-    let provider: string;
-    let principal = "default";
-    if (typeof providerOrInput === "string") {
-      if (principalMaybe !== undefined && typeof principalMaybe === "string") {
-        // Handle both (provider, principal) and (principal, provider) by detecting if first is a known principal placeholder
-        // Prefer provider-first as per task, but also support principal-first for backend shape
-        const looksLikePrincipal = providerOrInput === "default" || providerOrInput.includes("@");
-        const secondLooksLikePrincipal = principalMaybe === "default" || principalMaybe.includes("@");
-        if (looksLikePrincipal && !secondLooksLikePrincipal) {
-          principal = providerOrInput;
-          provider = principalMaybe;
-        } else if (!looksLikePrincipal && secondLooksLikePrincipal) {
-          provider = providerOrInput;
-          principal = principalMaybe;
-        } else {
-          // Default to provider first to match task description
-          provider = providerOrInput;
-          principal = principalMaybe;
-        }
-      } else {
-        provider = providerOrInput;
-      }
-    } else {
-      provider = providerOrInput.provider;
-      principal = providerOrInput.principal ?? "default";
-    }
+    const provider = input.provider;
+    const principal = input.principal ?? "default";
     const qs = `principal=${encodeURIComponent(principal)}&provider=${encodeURIComponent(provider)}`;
     return this.request<KnowledgeConsent>(`/knowledge/consent?${qs}`);
   };
 
   knowledgeSetConsent = (
-    providerOrInput: string | { provider: string; granted: boolean; principal?: string },
-    grantedMaybe?: boolean,
-    principalMaybe?: string,
+    input: { provider: string; granted: boolean; principal?: string },
   ): Promise<KnowledgeConsent> => {
-    let provider: string;
-    let granted: boolean;
-    let principal = "default";
-    if (typeof providerOrInput === "object") {
-      provider = providerOrInput.provider;
-      granted = providerOrInput.granted;
-      principal = providerOrInput.principal ?? "default";
-    } else if (typeof grantedMaybe === "boolean") {
-      provider = providerOrInput;
-      granted = grantedMaybe;
-      if (typeof principalMaybe === "string") principal = principalMaybe;
-    } else if (typeof grantedMaybe === "string" && typeof principalMaybe === "boolean") {
-      // (principal, provider, granted) shape
-      principal = providerOrInput;
-      provider = grantedMaybe as unknown as string;
-      granted = principalMaybe as unknown as boolean;
-    } else {
-      provider = providerOrInput;
-      granted = false;
-    }
+    const provider = input.provider;
+    const granted = input.granted;
+    const principal = input.principal ?? "default";
     return this.request<KnowledgeConsent>("/knowledge/consent", {
       method: "PUT",
       body: JSON.stringify({ principal, provider, granted }),
     });
   };
-
-  // Backwards compatible aliases that mirror openapi operationIds
-  getKnowledgeConsent = this.knowledgeGetConsent;
-  setKnowledgeConsent = this.knowledgeSetConsent;
-  getKnowledgeIndexSetupOptions = this.knowledgeIndexSetupOptions;
-  getKnowledgePinnedModels = this.knowledgePinnedModels;
-
   async streamEvents(signal: AbortSignal, onEvent: (event: ControlEvent) => void, lastEventId?: string): Promise<void> {
     const token = this.getToken();
     const url = lastEventId ? `${API_ROOT}/events/stream?lastEventId=${encodeURIComponent(lastEventId)}` : `${API_ROOT}/events/stream`;
@@ -337,10 +312,13 @@ export class ApiClient {
           .map((line) => line.slice(5).trimStart())
           .join("\n");
         if (!data) continue;
+        const event = parseControlEvent(data);
+        // Malformed external frames are isolated; the next frame still delivers.
+        if (!event) continue;
         try {
-          onEvent(JSON.parse(data) as ControlEvent);
-        } catch {
-          // A malformed event must not stop subsequent control-plane events.
+          onEvent(event);
+        } catch (err) {
+          throw new EventConsumerError("The live event consumer failed.", { cause: err });
         }
       }
     }

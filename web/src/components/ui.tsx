@@ -73,6 +73,11 @@ export function ErrorState({ error, retry }: { error: unknown; retry?: () => voi
   );
 }
 
+export function InlineError({ error }: { error: unknown }) {
+  if (!error) return null;
+  return <p className="inline-error" role="alert">{error instanceof Error ? error.message : "The operation failed."}</p>;
+}
+
 export function EmptyState({ title, description, action }: { title: string; description: string; action?: ReactNode }) {
   return (
     <div className="empty-state">

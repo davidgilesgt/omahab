@@ -3,69 +3,13 @@ import { Link, useLocation } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../auth";
 import type { Application, Backup, Exposure, Project, Release } from "../api/types";
-import { EmptyState, ErrorState, formatDate, humanizeStatus, LoadingState, PageHeader, Section, shortDigest, StatusPill } from "../components/ui";
+import { EmptyState, ErrorState, formatDate, humanizeStatus, InlineError, LoadingState, PageHeader, Section, shortDigest, StatusPill } from "../components/ui";
+import { DestructiveConfirm } from "../components/destructiveConfirm";
 import { QRCode } from "../components/qr";
 import { useToast } from "../components/toast";
 import { CopyButton } from "../components/copyButton";
 import { AppIcon } from "../components/appIcon";
 
-function MutationNotice({ error }: { error: unknown }) {
-  if (!error) return null;
-  return <p className="inline-error" role="alert">{error instanceof Error ? error.message : "The operation failed."}</p>;
-}
-
-function DestructiveConfirm({
-  title,
-  description,
-  confirmValue,
-  confirmLabel,
-  onConfirm,
-  onClose,
-  pending,
-  error,
-}: {
-  title: string;
-  description: string;
-  confirmValue: string;
-  confirmLabel: string;
-  onConfirm: () => void;
-  onClose: () => void;
-  pending?: boolean;
-  error?: unknown;
-}) {
-  const [input, setInput] = useState("");
-  const dialogRef = useRef<HTMLDialogElement>(null);
-  useEffect(() => {
-    const dialog = dialogRef.current;
-    const returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    if (dialog && !dialog.open) dialog.showModal();
-    return () => {
-      if (dialog?.open) dialog.close();
-      returnFocus?.focus();
-    };
-  }, []);
-  const confirmed = input === confirmValue;
-  return (
-    <dialog ref={dialogRef} className="modal" aria-labelledby="confirm-title" onCancel={(event) => { event.preventDefault(); onClose(); }}>
-      <header><div><h2 id="confirm-title">{title}</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="Close">×</button></header>
-      <div className="form-stack">
-        <p>{description}</p>
-        <div className="danger-zone">
-          <strong>This action cannot be undone.</strong>
-          <p>Type <span className="mono">{confirmValue}</span> to continue.</p>
-          <label>{confirmLabel} <span className="mono">{confirmValue}</span>
-            <input value={input} onChange={(event) => setInput(event.currentTarget.value)} autoComplete="off" spellCheck={false} />
-          </label>
-        </div>
-        {error ? <p className="inline-error" role="alert">{error instanceof Error ? error.message : "The operation failed."}</p> : null}
-        <div className="modal-actions">
-          <button type="button" className="button secondary" onClick={onClose}>Cancel</button>
-          <button type="button" className="button danger" disabled={!confirmed || pending} onClick={onConfirm}>{pending ? "Working…" : "Confirm"}</button>
-        </div>
-      </div>
-    </dialog>
-  );
-}
 
 export function OverviewPage() {
   const { client } = useAuth();
@@ -212,7 +156,7 @@ function ExposureReview({ resource, item, onClose }: ExposureReviewProps) {
               </label>
             </div>
           )}
-          <MutationNotice error={mutation.error} />
+          <InlineError error={mutation.error} />
           <div className="modal-actions">
             <button type="button" className="button secondary" onClick={onClose}>Cancel</button>
             <button type="button" className={mode === "public" ? "button danger" : "button primary"} disabled={!publicConfirmed || mutation.isPending || mode === item.exposure} onClick={() => mutation.mutate()}>
@@ -292,7 +236,7 @@ export function ApplicationsPage() {
               </tbody>
             </table>
           </div>
-          <MutationNotice error={mutation.error} />
+          <InlineError error={mutation.error} />
         </>
       )}
       {review && <ExposureReview resource="applications" item={review} onClose={() => setReview(null)} />}
@@ -343,7 +287,7 @@ function ProjectReleases({ project }: { project: Project }) {
           {!release.active && <button className="button ghost" type="button" disabled={rollback.isPending} onClick={() => setConfirmRelease(release)}>Roll back to this</button>}
         </div>
       ))}
-      <MutationNotice error={rollback.error} />
+      <InlineError error={rollback.error} />
       {confirmRelease && (
         <DestructiveConfirm
           title="Roll back release"
@@ -435,7 +379,7 @@ export function ProjectsPage() {
             </>
           )}
           {formError ? <p className="inline-error" role="alert">{formError}</p> : null}
-          <MutationNotice error={create.error} />
+          <InlineError error={create.error} />
         </form>
       )}
       {query.isLoading ? <LoadingState label="Loading projects" /> : query.isError ? <ErrorState error={query.error} retry={() => void query.refetch()} /> : !projects.length ? <EmptyState title="No projects" description="Create a project to connect a Forgejo repository and deployment pipeline." action={<div className="form-stack"><button className="button primary" type="button" disabled={creationBlocked || create.isPending} onClick={openForm}>New project</button>{creationBlocked ? <p className="muted">Set up a domain before creating projects. <Link to={`${adminPrefix}/setup`}>Continue setup</Link></p> : null}</div>} /> : (
@@ -471,7 +415,7 @@ export function BackupsPage() {
   return (
     <div className="page">
       <PageHeader title="Backups" actions={<button className="button primary" type="button" disabled={create.isPending} onClick={() => create.mutate()}>{create.isPending ? "Starting…" : "Back up now"}</button>} />
-      <MutationNotice error={create.error ?? verify.error} />
+      <InlineError error={create.error ?? verify.error} />
       {query.isLoading ? <LoadingState label="Loading backup history" /> : query.isError ? <ErrorState error={query.error} retry={() => void query.refetch()} /> : !backups.length ? <EmptyState title="No backup history" description="Start an encrypted backup, then run restore verification before relying on it." action={<button className="button primary" type="button" disabled={create.isPending} onClick={() => create.mutate()}>{create.isPending ? "Starting…" : "Back up now"}</button>} /> : (
         <div className="table-wrap"><table><thead><tr><th>Status</th><th>Snapshot</th><th>Started</th><th>Restore verification</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>{backups.map((backup) => <tr key={backup.id}><td><StatusPill value={backup.status} />{backup.error && <span className="cell-error">{backup.error}</span>}</td><td className="mono">{backup.snapshot_id ? <><span>{shortDigest(backup.snapshot_id)}</span> <CopyButton text={backup.snapshot_id} label="Copy" /></> : "—"}</td><td>{formatDate(backup.started_at)}</td><td>{backup.verified_at ? <><StatusPill value="verified" /><small>{formatDate(backup.verified_at)}</small></> : <StatusPill value="not verified" />}</td><td><button className="button secondary" type="button" disabled={!backup.snapshot_id || verify.isPending} onClick={() => verify.mutate(backup.id)}>Verify restore</button></td></tr>)}</tbody></table></div>
       )}
@@ -549,7 +493,7 @@ export function EventsPage() {
       {query.isLoading ? <LoadingState label="Loading events" /> : query.isError ? <ErrorState error={query.error} retry={() => void query.refetch()} /> : !grouped?.length ? <EmptyState title="Inbox is clear" description="New operational events will appear here as they happen." /> : (
         <ol className="event-list">{grouped.map((event) => <li key={event.id} className={event.read_at ? "read" : "unread"}><span className="event-time">{formatDate(event.created_at)}</span><StatusPill value={event.severity} /><div className="event-message"><strong>{event.message}</strong><p>{event.type.replaceAll(".", " · ")}</p></div>{!event.read_at && <button className="button ghost" type="button" disabled={read.isPending} onClick={() => read.mutate(event.id)}>Mark read</button>}</li>)}</ol>
       )}
-      <MutationNotice error={read.error ?? markAll.error} />
+      <InlineError error={read.error ?? markAll.error} />
     </div>
   );
 }

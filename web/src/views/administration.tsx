@@ -2,15 +2,13 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../auth";
 import type { RecoverySession, SSHKey, User, Workspace } from "../api/types";
-import { EmptyState, ErrorState, formatDate, LoadingState, PageHeader, Section, StatusPill } from "../components/ui";
+import { EmptyState, ErrorState, formatDate, InlineError, LoadingState, PageHeader, Section, StatusPill } from "../components/ui";
+import { DestructiveConfirm } from "../components/destructiveConfirm";
 import { useToast } from "../components/toast";
 import { CopyButton } from "../components/copyButton";
 
 const GROUP_OPTIONS = ["admins", "members", "guests"] as const;
 
-function OperationError({ error }: { error: unknown }) {
-  return error ? <p className="inline-error" role="alert">{error instanceof Error ? error.message : "The operation failed."}</p> : null;
-}
 function welcomeUrlFromEnrollment(enrollmentUrl: string): string | null {
   try {
     const u = new URL(enrollmentUrl);
@@ -36,60 +34,6 @@ function welcomeUrlFromEnrollment(enrollmentUrl: string): string | null {
   } catch {
     return null;
   }
-}
-
-
-function DestructiveConfirm({
-  title,
-  description,
-  confirmValue,
-  confirmLabel,
-  onConfirm,
-  onClose,
-  pending,
-  error,
-}: {
-  title: string;
-  description: string;
-  confirmValue: string;
-  confirmLabel: string;
-  onConfirm: () => void;
-  onClose: () => void;
-  pending?: boolean;
-  error?: unknown;
-}) {
-  const [input, setInput] = useState("");
-  const dialogRef = useRef<HTMLDialogElement>(null);
-  useEffect(() => {
-    const dialog = dialogRef.current;
-    const returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    if (dialog && !dialog.open) dialog.showModal();
-    return () => {
-      if (dialog?.open) dialog.close();
-      returnFocus?.focus();
-    };
-  }, []);
-  const confirmed = input === confirmValue;
-  return (
-    <dialog ref={dialogRef} className="modal" aria-labelledby="confirm-title" onCancel={(event) => { event.preventDefault(); onClose(); }}>
-      <header><div><h2 id="confirm-title">{title}</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="Close">×</button></header>
-      <div className="form-stack">
-        <p>{description}</p>
-        <div className="danger-zone">
-          <strong>This action cannot be undone.</strong>
-          <p>Type <span className="mono">{confirmValue}</span> to continue.</p>
-          <label>{confirmLabel} <span className="mono">{confirmValue}</span>
-            <input value={input} onChange={(event) => setInput(event.currentTarget.value)} autoComplete="off" spellCheck={false} />
-          </label>
-        </div>
-        {error ? <p className="inline-error" role="alert">{error instanceof Error ? error.message : "The operation failed."}</p> : null}
-        <div className="modal-actions">
-          <button type="button" className="button secondary" onClick={onClose}>Cancel</button>
-          <button type="button" className="button danger" disabled={!confirmed || pending} onClick={onConfirm}>{pending ? "Working…" : "Confirm"}</button>
-        </div>
-      </div>
-    </dialog>
-  );
 }
 
 function GroupMultiSelect({
@@ -167,7 +111,7 @@ export function SyncFoldersPage() {
           {query.isLoading ? <LoadingState label="Loading folders" /> : query.isError ? <ErrorState error={query.error} retry={() => void query.refetch()} /> : !folders.length ? <EmptyState title="No synchronized folders" description="Add a server folder to begin syncing it with trusted devices." /> : (
             <div className="compact-list">{folders.map((folder) => <div key={folder.id}><div><strong>{folder.name}</strong><span className="mono">{folder.server_path} <CopyButton text={folder.server_path} label="Copy" /></span></div><StatusPill value={folder.health} /><label className="switch"><input type="checkbox" checked={folder.share_with_ai} disabled={update.isPending} onChange={(event) => update.mutate({ id: folder.id, share: event.currentTarget.checked })} /><span>Share with AI</span></label></div>)}</div>
           )}
-          <OperationError error={update.error} />
+          <InlineError error={update.error} />
         </Section>
         <Section title="Add folder" description="The server path must already exist and be writable by the sync service.">
           <form className="form-stack" onSubmit={submit}>
@@ -175,7 +119,7 @@ export function SyncFoldersPage() {
             <label>Server path<input name="path" className="mono" required /></label>
             <label className="check-row"><input name="share" type="checkbox" /><span><strong>Share with AI</strong><small>The default assistant may read this folder.</small></span></label>
             <button className="button primary" type="submit" disabled={create.isPending}>{create.isPending ? "Adding…" : "Add folder"}</button>
-            <OperationError error={create.error} />
+            <InlineError error={create.error} />
           </form>
         </Section>
       </div>
@@ -225,7 +169,7 @@ export function WorkspacesPage() {
               const project = projectItems.find((item) => item.id === workspace.project_id);
               return <tr key={workspace.id}><td><strong>{project?.name ?? workspace.project_id}</strong></td><td>{workspace.branch} <CopyButton text={workspace.branch} label="Copy" /></td><td>{workspace.agent}</td><td><StatusPill value={workspace.status} /></td><td>{formatDate(workspace.last_active_at)}</td><td>{workspace.expires_at ? formatDate(workspace.expires_at) : "—"}</td><td className="cell-actions">{workspace.status !== "stopped" && <button className="button secondary" type="button" disabled={stop.isPending} onClick={() => setStopConfirm(workspace)}>Stop</button>}</td></tr>})}</tbody></table></div>
           )}
-          <OperationError error={stop.error} />
+          <InlineError error={stop.error} />
         </Section>
         <Section title="New workspace">
           {projects.isLoading ? <LoadingState label="Loading projects" /> : projects.isError ? <ErrorState error={projects.error} /> : (
@@ -235,7 +179,7 @@ export function WorkspacesPage() {
               <label>Agent<select name="agent" defaultValue="omp"><option value="omp">OMP</option><option value="codex">Codex</option></select></label>
               <button className="button primary" type="submit" disabled={create.isPending || !projectItems.length}>{create.isPending ? "Creating…" : "Create workspace"}</button>
               {!projectItems.length && <p className="muted">Create a project before starting a workspace.</p>}
-              <OperationError error={create.error} />
+              <InlineError error={create.error} />
             </form>
           )}
         </Section>
@@ -257,7 +201,7 @@ export function WorkspacesPage() {
 }
 
 export function PeoplePage() {
-  const { client, token } = useAuth();
+  const { client } = useAuth();
   const queryClient = useQueryClient();
   const toast = useToast();
   const query = useQuery({ queryKey: ["users"], queryFn: client.users });
@@ -269,8 +213,7 @@ export function PeoplePage() {
   const [enrollmentUrl, setEnrollmentUrl] = useState<string | null>(null);
   const [enrollmentExpires, setEnrollmentExpires] = useState<string | null>(null);
   const create = useMutation({
-    mutationFn: (input: { name: string; email: string; groups: string[] }) =>
-      (client.createUser as unknown as (i: { name: string; email: string; groups: string[] }) => Promise<User>)(input),
+    mutationFn: (input: { name: string; email: string; groups: string[] }) => client.createUser(input),
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["users"] });
       if (data.enrollment_url) {
@@ -311,23 +254,7 @@ export function PeoplePage() {
     onError: (err) => toast.error(err instanceof Error ? err.message : "Recovery failed"),
   });
   const updateGroups = useMutation({
-    mutationFn: async ({ id, groups }: { id: string; groups: string[] }) => {
-      const url = `/api/v1/users/${encodeURIComponent(id)}`;
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (token) headers.Authorization = `Bearer ${token}`;
-      const res = await fetch(url, { method: "PATCH", headers, body: JSON.stringify({ groups }) });
-      if (!res.ok) {
-        let message = res.statusText;
-        try {
-          const data = (await res.json()) as { error?: { message?: string } };
-          if (data.error?.message) message = data.error.message;
-        } catch {
-          // ignore parse failure
-        }
-        throw new Error(message);
-      }
-      return (await res.json()) as User;
-    },
+    mutationFn: ({ id, groups }: { id: string; groups: string[] }) => client.setUserGroups(id, groups),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["users"] });
       toast.success("Groups updated");
@@ -417,7 +344,7 @@ export function PeoplePage() {
           {query.isLoading ? <LoadingState label="Loading users" /> : query.isError ? <ErrorState error={query.error} retry={() => void query.refetch()} /> : !users.length ? <EmptyState title="No users" description="Invite the first person to begin Pocket ID enrollment." /> : (
             <div className="compact-list">{users.map((user) => <div key={user.id}><div><strong>{user.name}</strong><span>{user.email} <CopyButton text={user.email} label="Copy" /></span><small>{(user.groups ?? []).join(", ") || "No groups"}</small></div><StatusPill value={user.disabled ? "disabled" : "active"} /><div className="row-actions"><button className="button ghost" type="button" onClick={() => openGroupEditor(user)}>Groups</button><button className="button ghost" type="button" disabled={recover.isPending || user.disabled} onClick={() => recover.mutate(user.id)}>Recover</button><button className="button ghost" type="button" disabled={enrollment.isPending} onClick={() => enrollment.mutate(user.id)}>Enrollment link</button><button className="button secondary" type="button" disabled={update.isPending} onClick={() => setToggleTarget(user)}>{user.disabled ? "Enable" : "Disable"}</button></div></div>)}</div>
           )}
-          <OperationError error={update.error ?? recover.error ?? updateGroups.error ?? enrollment.error} />
+          <InlineError error={update.error ?? recover.error ?? updateGroups.error ?? enrollment.error} />
         </Section>
         <Section title="Invite user" description="The person completes passkey enrollment through Pocket ID.">
           <form className="form-stack" onSubmit={submit}>
@@ -425,7 +352,7 @@ export function PeoplePage() {
             <label>Email<input name="email" type="email" required autoComplete="email" /></label>
             <GroupMultiSelect values={createGroups} onChange={setCreateGroups} idPrefix="create-user" />
             <button className="button primary" type="submit" disabled={create.isPending}>{create.isPending ? "Inviting…" : "Invite user"}</button>
-            <OperationError error={create.error} />
+            <InlineError error={create.error} />
           </form>
         </Section>
       </div>
@@ -458,7 +385,7 @@ export function PeoplePage() {
               <label>GitHub username<input value={sshGithubUser} onChange={(e) => setSshGithubUser(e.target.value)} placeholder="your-github-username" autoComplete="off" /></label>
               <label>…or paste public keys (one per line, end with blank line)<textarea value={sshPaste} onChange={(e) => setSshPaste(e.target.value)} rows={4} placeholder="ssh-ed25519 AAAA…" className="mono" /></label>
               <button className="button primary" type="submit" disabled={sshAdd.isPending}>{sshAdd.isPending ? "Adding…" : "Add keys"}</button>
-              <OperationError error={sshAdd.error} />
+              <InlineError error={sshAdd.error} />
             </form>
           </>
         )}

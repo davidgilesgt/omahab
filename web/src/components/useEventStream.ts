@@ -1,7 +1,9 @@
 import { useEffect, useRef } from "react";
 import { QueryClient, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../auth";
+import { EventConsumerError } from "../api/client";
 import type { Application, Backup, ControlEvent, Workspace } from "../api/types";
+import { useToast } from "./toast";
 
 function routeEvent(type: string): string[] {
   if (type.startsWith("setup.")) return ["setup"];
@@ -125,8 +127,13 @@ function tryPatchCache(ev: ControlEvent, queryClient: QueryClient): boolean {
 export function useEventStream() {
   const { client, token, lanBypass } = useAuth();
   const queryClient = useQueryClient();
-  const lastIdRef = useRef<string | null>(null);
+  const toast = useToast();
+  // The stream effect must not restart when the toast context value
+  // re-renders; reach the latest error announcer through a ref.
+  const toastRef = useRef(toast);
+  toastRef.current = toast;
   const authorized = token !== null || lanBypass === true;
+  const lastIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!authorized) return;
@@ -140,7 +147,7 @@ export function useEventStream() {
     let retryTimer: number | undefined;
 
     async function run() {
-      while (!stopped && !controller.signal.aborted) {
+      while (!stopped && controller.signal.aborted === false) {
         try {
           await client.streamEvents(
             controller.signal,
@@ -161,8 +168,12 @@ export function useEventStream() {
             lastIdRef.current ?? undefined,
           );
           if (stopped || controller.signal.aborted) break;
-        } catch {
+        } catch (err) {
           if (stopped || controller.signal.aborted) break;
+          if (err instanceof EventConsumerError) {
+            toastRef.current.error("Live updates stopped: the event consumer failed.");
+            break;
+          }
         }
         if (stopped || controller.signal.aborted) break;
         await new Promise<void>((resolve) => {

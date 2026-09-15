@@ -62,12 +62,12 @@ function ProviderConsentRow({ provider, managementUrl }: { provider: string; man
   const queryClient = useQueryClient();
   const consentQuery = useQuery({
     queryKey: ["knowledge", "consent", PRINCIPAL, provider],
-    queryFn: () => client.knowledgeGetConsent(provider, PRINCIPAL),
+    queryFn: () => client.knowledgeGetConsent({ provider, principal: PRINCIPAL }),
     enabled: provider !== "unknown",
   });
   const [dialogOpen, setDialogOpen] = useState(false);
   const setConsent = useMutation({
-    mutationFn: (granted: boolean) => client.knowledgeSetConsent(provider, granted, PRINCIPAL),
+    mutationFn: (granted: boolean) => client.knowledgeSetConsent({ provider, granted, principal: PRINCIPAL }),
     onSuccess: (_data, granted) => {
       void queryClient.invalidateQueries({ queryKey: ["knowledge", "consent", PRINCIPAL, provider] });
       toast.success(granted ? `Consent granted for ${provider}` : `Consent declined for ${provider}`);
@@ -289,4 +289,3 @@ export function AssistantKnowledgePanel() {
   );
 }
 
-export default AssistantKnowledgePanel;

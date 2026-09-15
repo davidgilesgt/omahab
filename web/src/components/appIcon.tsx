@@ -20,4 +20,3 @@ export function AppIcon({ bundleId, size = 18 }: { bundleId: string; size?: numb
   return <Icon size={size} strokeWidth={1.75} aria-hidden="true" />;
 }
 
-export default AppIcon;

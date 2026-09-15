@@ -74,23 +74,3 @@ export function useToast(): ToastContextValue {
   return value;
 }
 
-export function Toast({
-  tone,
-  message,
-  onDismiss,
-}: {
-  tone: ToastTone;
-  message: string;
-  onDismiss?: () => void;
-}) {
-  return (
-    <div className={`toast toast-${tone}`} role="status">
-      <span className="toast-message">{message}</span>
-      {onDismiss && (
-        <button type="button" className="toast-dismiss" aria-label="Dismiss" onClick={onDismiss}>
-          ×
-        </button>
-      )}
-    </div>
-  );
-}
