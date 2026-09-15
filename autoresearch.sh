@@ -16,9 +16,9 @@
 # from-scratch guest build (Go module graphs, pnpm, python envs — the
 # OOM/tmpfs killers noted in scripts/e2e-iso-install.sh). Fewer missing bytes
 # = faster install. The metric is monotonic in all levers: shrinking the
-# installed closure, swapping fat deps for slim ones (tesseract languages),
-# deferring payloads to post-install (gated services), and widening ISO
-# storeContents coverage (bounded by the 2048 MiB ISO cap).
+# installed closure, swapping fat deps for slim ones, deferring payloads to
+# post-install (gated services), and widening ISO storeContents coverage
+# (bounded by the 3 GiB ISO cap).
 #
 # Determinism: drv resolution (`nix eval --offline` on the locked flake),
 # closure graphs (`nix-store -qR`, local), and sizes (`nix path-info
