@@ -28,7 +28,7 @@ func isGitHubUpstreamError(err error) bool {
 func (s *Server) handleListSystemSSHKeys(w http.ResponseWriter, r *http.Request) {
 	keys, err := s.backend.ListSSHKeys(r.Context())
 	if err != nil {
-		writeError(w, r, newAPIError(http.StatusInternalServerError, CodeInternal, "failed to read SSH keys"))
+		writeError(w, r, newAPIError(http.StatusInternalServerError, apitypes.CodeInternal, "failed to read SSH keys"))
 		return
 	}
 	if keys == nil {
@@ -57,7 +57,7 @@ func (s *Server) handleAddSystemSSHKeys(w http.ResponseWriter, r *http.Request) 
 			msg = "private key not allowed"
 		}
 		if errors.Is(err, apitypes.ErrValidation) {
-			writeError(w, r, newAPIError(http.StatusBadRequest, CodeBadRequest, msg))
+			writeError(w, r, newAPIError(http.StatusBadRequest, apitypes.CodeBadRequest, msg))
 			return
 		}
 		lower := strings.ToLower(msg)
@@ -69,21 +69,21 @@ func (s *Server) handleAddSystemSSHKeys(w http.ResponseWriter, r *http.Request) 
 			strings.Contains(lower, "username required") ||
 			strings.Contains(lower, "no usable keys") {
 			if strings.Contains(lower, "github") && strings.Contains(lower, "no usable keys") {
-				writeError(w, r, newAPIError(http.StatusBadGateway, CodeInternal, msg))
+				writeError(w, r, newAPIError(http.StatusBadGateway, apitypes.CodeInternal, msg))
 				return
 			}
-			writeError(w, r, newAPIError(http.StatusBadRequest, CodeBadRequest, msg))
+			writeError(w, r, newAPIError(http.StatusBadRequest, apitypes.CodeBadRequest, msg))
 			return
 		}
 		if isGitHubUpstreamError(err) {
-			writeError(w, r, newAPIError(http.StatusBadGateway, CodeInternal, msg))
+			writeError(w, r, newAPIError(http.StatusBadGateway, apitypes.CodeInternal, msg))
 			return
 		}
 		if strings.Contains(lower, "github") {
-			writeError(w, r, newAPIError(http.StatusBadGateway, CodeInternal, msg))
+			writeError(w, r, newAPIError(http.StatusBadGateway, apitypes.CodeInternal, msg))
 			return
 		}
-		writeError(w, r, newAPIError(http.StatusInternalServerError, CodeInternal, "failed to add SSH keys"))
+		writeError(w, r, newAPIError(http.StatusInternalServerError, apitypes.CodeInternal, "failed to add SSH keys"))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]int{"added": added})
@@ -99,7 +99,7 @@ func (s *Server) handleDeleteSystemSSHKeys(w http.ResponseWriter, r *http.Reques
 	}
 	fp := strings.TrimSpace(req.Fingerprint)
 	if fp == "" {
-		writeError(w, r, newAPIError(http.StatusBadRequest, CodeBadRequest, "fingerprint is required"))
+		writeError(w, r, newAPIError(http.StatusBadRequest, apitypes.CodeBadRequest, "fingerprint is required"))
 		return
 	}
 	confirm := false
@@ -109,19 +109,19 @@ func (s *Server) handleDeleteSystemSSHKeys(w http.ResponseWriter, r *http.Reques
 	err := s.backend.DeleteSSHKey(r.Context(), fp, confirm)
 	if err != nil {
 		if errors.Is(err, sshkeys.ErrLastKeyConfirmation) {
-			writeError(w, r, newAPIError(http.StatusConflict, CodeConflict, err.Error()))
+			writeError(w, r, newAPIError(http.StatusConflict, apitypes.CodeConflict, err.Error()))
 			return
 		}
 		if errors.Is(err, apitypes.ErrNotFound) {
-			writeError(w, r, newAPIError(http.StatusNotFound, CodeNotFound, "ssh key not found"))
+			writeError(w, r, newAPIError(http.StatusNotFound, apitypes.CodeNotFound, "ssh key not found"))
 			return
 		}
 		if errors.Is(err, apitypes.ErrValidation) {
-			writeError(w, r, newAPIError(http.StatusBadRequest, CodeBadRequest, err.Error()))
+			writeError(w, r, newAPIError(http.StatusBadRequest, apitypes.CodeBadRequest, err.Error()))
 			return
 		}
 		// Without leaking fs details.
-		writeError(w, r, newAPIError(http.StatusInternalServerError, CodeInternal, "failed to delete SSH key"))
+		writeError(w, r, newAPIError(http.StatusInternalServerError, apitypes.CodeInternal, "failed to delete SSH key"))
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

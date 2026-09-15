@@ -21,6 +21,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/omahab/omahab/internal/apitypes"
 	"github.com/omahab/omahab/internal/companion"
 	"github.com/omahab/omahab/internal/controlplane"
 	"github.com/omahab/omahab/internal/netenv"
@@ -152,7 +153,7 @@ func (s *Server) buildRouter() chi.Router {
 		writeError(w, req, errNotFound("not found"))
 	})
 	r.MethodNotAllowed(func(w http.ResponseWriter, req *http.Request) {
-		writeError(w, req, newAPIError(http.StatusMethodNotAllowed, CodeNotFound, "method not allowed"))
+		writeError(w, req, newAPIError(http.StatusMethodNotAllowed, apitypes.CodeNotFound, "method not allowed"))
 	})
 
 	// Public routes (no bearer auth).
@@ -176,7 +177,7 @@ func (s *Server) buildRouter() chi.Router {
 	r.Get("/dl/{file}", s.handleDL)
 	r.Get("/install.sh", s.handleInstallSh)
 
-	// OpenAPI spec — public (no auth, like /dl), served from embedded api/openapi.yaml.
+	// OpenAPI spec — public (no auth, like /dl), served from the embedded internal/api/openapi.yaml.
 	r.Get("/api/openapi.yaml", s.handleOpenAPI)
 
 	// MCP server for Hermes (outside bearerAuth, behind dedicated mcpAuth).
@@ -506,7 +507,7 @@ func (s *Server) handleInstallSh(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data)
 }
 
-// handleOpenAPI serves the embedded OpenAPI spec (api/openapi.yaml) with no auth.
+// handleOpenAPI serves the embedded OpenAPI spec (internal/api/openapi.yaml) with no auth.
 // It is public via nftables (same as /dl/* and /up).
 func (s *Server) handleOpenAPI(w http.ResponseWriter, r *http.Request) {
 	if len(openAPISpec) == 0 {
@@ -565,7 +566,7 @@ func safeRecovery(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
-				writeError(w, r, newAPIError(http.StatusInternalServerError, CodeInternal, "internal error"))
+				writeError(w, r, newAPIError(http.StatusInternalServerError, apitypes.CodeInternal, "internal error"))
 			}
 		}()
 		next.ServeHTTP(w, r)
@@ -607,6 +608,7 @@ func (s *Server) timeoutMiddleware(d time.Duration) func(http.Handler) http.Hand
 		})
 	}
 }
+
 // bearerAuth enforces constant-time bearer token comparison. Skipped only for /up and HMAC routes
 // which are not inside the authenticated group. Device tokens (oma_dev_...) are rejected with 403
 // on every admin route to enforce allowlist: companion devices may only call device-endpoints.
@@ -866,7 +868,7 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 }
 
 // parsePagination parses limit/offset or page/per_page. Defaults limit=50, max 100.
-func parsePagination(r *http.Request) Pagination {
+func parsePagination(r *http.Request) apitypes.Pagination {
 	q := r.URL.Query()
 	limit := 50
 	offset := 0
@@ -908,7 +910,7 @@ func parsePagination(r *http.Request) Pagination {
 	if offset < 0 {
 		offset = 0
 	}
-	return Pagination{Limit: limit, Offset: offset}
+	return apitypes.Pagination{Limit: limit, Offset: offset}
 }
 
 // parseID extracts domain.ID from URL param.

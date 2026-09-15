@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/omahab/omahab/internal/api"
+	"github.com/omahab/omahab/internal/apitypes"
 	"github.com/omahab/omahab/internal/domain"
 )
 
@@ -234,16 +234,16 @@ func (c *Client) RestartApplication(ctx context.Context, id string) (*AppActionR
 // --- exposure ---
 
 type ExposureRequest struct {
-	Target   string `json:"target"`   // "app:<id>" or "project:<id>" or service name
-	Exposure string `json:"exposure"` // private|shared|public
-	Hostname string `json:"hostname,omitempty"`
+	Target   string          `json:"target"`   // "app:<id>" or "project:<id>" or service name
+	Exposure domain.Exposure `json:"exposure"` // private|shared|public
+	Hostname string          `json:"hostname,omitempty"`
 }
 
 type ExposureResponse struct {
-	Target   string `json:"target"`
-	Exposure string `json:"exposure"`
-	Hostname string `json:"hostname"`
-	Message  string `json:"message,omitempty"`
+	Target   string          `json:"target"`
+	Exposure domain.Exposure `json:"exposure"`
+	Hostname string          `json:"hostname"`
+	Message  string          `json:"message,omitempty"`
 }
 
 func (c *Client) GetExposure(ctx context.Context, target string) (*ExposureResponse, error) {
@@ -296,9 +296,9 @@ func (c *Client) GetAppExposure(ctx context.Context, appID string) (*ExposureRes
 	return &out, nil
 }
 
-func (c *Client) SetAppExposure(ctx context.Context, appID, exposure string) (*ExposureResponse, error) {
+func (c *Client) SetAppExposure(ctx context.Context, appID string, exposure domain.Exposure) (*ExposureResponse, error) {
 	var out ExposureResponse
-	if err := c.put(ctx, "/applications/"+url.PathEscape(appID)+"/exposure", map[string]string{"exposure": exposure}, &out); err != nil {
+	if err := c.put(ctx, "/applications/"+url.PathEscape(appID)+"/exposure", map[string]string{"exposure": string(exposure)}, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -312,9 +312,9 @@ func (c *Client) GetProjectExposure(ctx context.Context, projectID string) (*Exp
 	return &out, nil
 }
 
-func (c *Client) SetProjectExposure(ctx context.Context, projectID, exposure string) (*ExposureResponse, error) {
+func (c *Client) SetProjectExposure(ctx context.Context, projectID string, exposure domain.Exposure) (*ExposureResponse, error) {
 	var out ExposureResponse
-	if err := c.put(ctx, "/projects/"+url.PathEscape(projectID)+"/exposure", map[string]string{"exposure": exposure}, &out); err != nil {
+	if err := c.put(ctx, "/projects/"+url.PathEscape(projectID)+"/exposure", map[string]string{"exposure": string(exposure)}, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -372,12 +372,7 @@ func (c *Client) GetRelease(ctx context.Context, projectID, releaseID string) (*
 	return &out, nil
 }
 
-type CreateReleaseRequest struct {
-	Commit string `json:"commit"`
-	Digest string `json:"digest"`
-}
-
-func (c *Client) CreateRelease(ctx context.Context, projectID string, req CreateReleaseRequest) (*domain.Release, error) {
+func (c *Client) CreateRelease(ctx context.Context, projectID string, req apitypes.CreateReleaseRequest) (*domain.Release, error) {
 	var out domain.Release
 	if err := c.post(ctx, "/projects/"+url.PathEscape(projectID)+"/releases", req, &out); err != nil {
 		return nil, err
@@ -413,10 +408,6 @@ func (c *Client) GetSecret(ctx context.Context, id string) (*domain.Secret, erro
 
 // --- backups ---
 
-type CreateBackupRequest struct {
-	Repository string `json:"repository,omitempty"`
-}
-
 func (c *Client) ListBackups(ctx context.Context) ([]domain.Backup, error) {
 	var env ListEnvelope[domain.Backup]
 	if err := c.get(ctx, "/backups", &env); err != nil {
@@ -433,7 +424,7 @@ func (c *Client) GetBackup(ctx context.Context, id string) (*domain.Backup, erro
 	return &out, nil
 }
 
-func (c *Client) CreateBackup(ctx context.Context, req CreateBackupRequest) (*domain.Backup, error) {
+func (c *Client) CreateBackup(ctx context.Context, req apitypes.CreateBackupRequest) (*domain.Backup, error) {
 	var out domain.Backup
 	if err := c.post(ctx, "/backups", req, &out); err != nil {
 		return nil, err
@@ -586,12 +577,6 @@ func parseSSE(ctx context.Context, r io.Reader, out chan<- domain.Event) error {
 
 // --- sync folders ---
 
-type CreateSyncFolderRequest struct {
-	Name        string `json:"name"`
-	ServerPath  string `json:"server_path"`
-	ShareWithAI bool   `json:"share_with_ai"`
-}
-
 func (c *Client) ListSyncFolders(ctx context.Context) ([]domain.SyncFolder, error) {
 	var env ListEnvelope[domain.SyncFolder]
 	if err := c.get(ctx, "/sync/folders", &env); err != nil {
@@ -608,7 +593,7 @@ func (c *Client) GetSyncFolder(ctx context.Context, id string) (*domain.SyncFold
 	return &out, nil
 }
 
-func (c *Client) CreateSyncFolder(ctx context.Context, req CreateSyncFolderRequest) (*domain.SyncFolder, error) {
+func (c *Client) CreateSyncFolder(ctx context.Context, req apitypes.CreateSyncFolderRequest) (*domain.SyncFolder, error) {
 	var out domain.SyncFolder
 	if err := c.post(ctx, "/sync/folders", req, &out); err != nil {
 		return nil, err
@@ -739,17 +724,17 @@ func (c *Client) GetEmail(ctx context.Context, id string) (*domain.EmailMessage,
 
 // StartProviderOAuth initiates subscription OAuth for chatgpt (device_code) or xai (loopback).
 // Returns verification URL and session metadata; never returns device codes, tokens, or master key.
-func (c *Client) StartProviderOAuth(ctx context.Context, provider, flow string) (*api.OAuthSession, error) {
-	var out api.OAuthSession
-	if err := c.post(ctx, "/provider-oauth/"+url.PathEscape(provider)+"/start", api.StartProviderOAuthRequest{Flow: flow}, &out); err != nil {
+func (c *Client) StartProviderOAuth(ctx context.Context, provider, flow string) (*apitypes.OAuthSession, error) {
+	var out apitypes.OAuthSession
+	if err := c.post(ctx, "/provider-oauth/"+url.PathEscape(provider)+"/start", apitypes.StartProviderOAuthRequest{Flow: flow}, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
 // PollProviderOAuth polls OAuth session status; returns safe OAuthSession without device codes, tokens, or master key.
-func (c *Client) PollProviderOAuth(ctx context.Context, provider, sessionID string) (*api.OAuthSession, error) {
-	var out api.OAuthSession
+func (c *Client) PollProviderOAuth(ctx context.Context, provider, sessionID string) (*apitypes.OAuthSession, error) {
+	var out apitypes.OAuthSession
 	if err := c.get(ctx, "/provider-oauth/"+url.PathEscape(provider)+"/poll/"+url.PathEscape(sessionID), &out); err != nil {
 		return nil, err
 	}
@@ -759,9 +744,9 @@ func (c *Client) PollProviderOAuth(ctx context.Context, provider, sessionID stri
 // ForwardProviderOAuthCallback forwards only the received /callback?<query> path to LiteLLM's fixed loopback at 127.0.0.1:56121.
 // Requires device token from an enrolled companion with allow_provider_oauth=true; admin bearer is rejected with 403.
 // This is device-only; for CLI non-QML use the same relay is attempted, but fallback is SSH local forward: ssh -L 56121:127.0.0.1:56121 omahab@<server>.
-func (c *Client) ForwardProviderOAuthCallback(ctx context.Context, provider, sessionID, callbackPath string) (*api.OAuthSession, error) {
-	var out api.OAuthSession
-	if err := c.post(ctx, "/provider-oauth/"+url.PathEscape(provider)+"/callback/"+url.PathEscape(sessionID), api.ForwardProviderOAuthCallbackRequest{CallbackPath: callbackPath}, &out); err != nil {
+func (c *Client) ForwardProviderOAuthCallback(ctx context.Context, provider, sessionID, callbackPath string) (*apitypes.OAuthSession, error) {
+	var out apitypes.OAuthSession
+	if err := c.post(ctx, "/provider-oauth/"+url.PathEscape(provider)+"/callback/"+url.PathEscape(sessionID), apitypes.ForwardProviderOAuthCallbackRequest{CallbackPath: callbackPath}, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

@@ -320,7 +320,7 @@ type UpdateSecretRequest struct {
 }
 
 type CreateBackupRequest struct {
-	Repository string `json:"repository"`
+	Repository string `json:"repository,omitempty"`
 }
 
 type UpdateExposureRequest struct {

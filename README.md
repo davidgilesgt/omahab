@@ -200,7 +200,7 @@ Repository layout:
 | `workers/` | Embedding worker (Python) and email worker (Cloudflare, TypeScript) |
 | `companion/omarchy/` | Omarchy shell plugin |
 | `third_party/once` | ONCE fork for project deploys (patch list in `PATCHES.md`) |
-| `api/openapi.yaml` | API specification |
+| `internal/api/openapi.yaml` | API specification (served at `/api/openapi.yaml`) |
 | `scripts/` | `build.sh` (nix wrapper), `check.sh`, `install-disk.sh` (ISO disk installer), `e2e-iso-install.sh` (E2E ISO harness) |
 
 

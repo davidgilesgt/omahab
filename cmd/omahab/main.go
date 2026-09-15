@@ -21,6 +21,7 @@ import (
 	goterm "golang.org/x/term"
 
 	"github.com/omahab/omahab/internal/apiclient"
+	"github.com/omahab/omahab/internal/apitypes"
 	"github.com/omahab/omahab/internal/apps"
 	"github.com/omahab/omahab/internal/domain"
 	"github.com/omahab/omahab/internal/netenv"
@@ -1198,7 +1199,7 @@ func newProjectCmd() *cobra.Command {
 			if err != nil {
 			return handleFailure(err)
 		}
-			rel, err := c.CreateRelease(ctx, args[0], apiclient.CreateReleaseRequest{Commit: deployCommit, Digest: deployDigest})
+			rel, err := c.CreateRelease(ctx, args[0], apitypes.CreateReleaseRequest{Commit: deployCommit, Digest: deployDigest})
 			if err != nil {
 			return handleFailure(err)
 		}
@@ -1441,11 +1442,11 @@ Changing to shared/public is a public-route change; inspectable and reversible.`
 			var out *apiclient.ExposureResponse
 			var reqErr error
 			if appID != "" {
-				out, reqErr = c.SetAppExposure(ctx, appID, exposure)
+				out, reqErr = c.SetAppExposure(ctx, appID, domain.Exposure(exposure))
 			} else if projID != "" {
-				out, reqErr = c.SetProjectExposure(ctx, projID, exposure)
+				out, reqErr = c.SetProjectExposure(ctx, projID, domain.Exposure(exposure))
 			} else {
-				out, reqErr = c.SetExposure(ctx, apiclient.ExposureRequest{Target: target, Exposure: exposure, Hostname: hostname})
+				out, reqErr = c.SetExposure(ctx, apiclient.ExposureRequest{Target: target, Exposure: domain.Exposure(exposure), Hostname: hostname})
 			}
 			if reqErr != nil {
 			return handleFailure(reqErr)
@@ -1570,7 +1571,7 @@ func newBackupCmd() *cobra.Command {
 			if err != nil {
 			return handleFailure(err)
 		}
-			b, err := c.CreateBackup(ctx, apiclient.CreateBackupRequest{Repository: repo})
+			b, err := c.CreateBackup(ctx, apitypes.CreateBackupRequest{Repository: repo})
 			if err != nil {
 			return handleFailure(err)
 		}
@@ -1849,7 +1850,7 @@ func newSyncCmd() *cobra.Command {
 			return handleFailure(err)
 		}
 			// Try server first
-			f, err := c.CreateSyncFolder(ctx, apiclient.CreateSyncFolderRequest{Name: addName, ServerPath: addPath, ShareWithAI: addShare})
+			f, err := c.CreateSyncFolder(ctx, apitypes.CreateSyncFolderRequest{Name: addName, ServerPath: addPath, ShareWithAI: addShare})
 			if err != nil {
 				return handleFailure(err)
 			}

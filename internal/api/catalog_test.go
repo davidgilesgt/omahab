@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/omahab/omahab/internal/apitypes"
 	"github.com/omahab/omahab/internal/config"
 	"github.com/omahab/omahab/internal/domain"
 )
@@ -53,7 +54,7 @@ func TestListCatalogRoute(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
 	}
 	var envelope struct {
-		Items []CatalogBundle `json:"items"`
+		Items []apitypes.CatalogBundle `json:"items"`
 	}
 	if err := json.Unmarshal(res.Body.Bytes(), &envelope); err != nil {
 		t.Fatal(err)

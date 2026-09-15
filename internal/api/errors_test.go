@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/omahab/omahab/internal/apitypes"
 	"github.com/omahab/omahab/internal/store"
 )
 
@@ -17,9 +18,9 @@ func TestStoreSentinelMapping(t *testing.T) {
 		status int
 		code   string
 	}{
-		{fmt.Errorf("%w: nope", store.ErrNotFound), http.StatusNotFound, CodeNotFound},
-		{fmt.Errorf("%w: clash", store.ErrConflict), http.StatusConflict, CodeConflict},
-		{fmt.Errorf("%w: bad", store.ErrValidation), http.StatusBadRequest, CodeBadRequest},
+		{fmt.Errorf("%w: nope", store.ErrNotFound), http.StatusNotFound, apitypes.CodeNotFound},
+		{fmt.Errorf("%w: clash", store.ErrConflict), http.StatusConflict, apitypes.CodeConflict},
+		{fmt.Errorf("%w: bad", store.ErrValidation), http.StatusBadRequest, apitypes.CodeBadRequest},
 	}
 	for _, c := range cases {
 		if got := httpStatus(c.err); got != c.status {

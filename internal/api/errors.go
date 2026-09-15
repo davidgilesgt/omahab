@@ -9,34 +9,6 @@ import (
 	"github.com/omahab/omahab/internal/store"
 )
 
-const (
-	CodeBadRequest         = apitypes.CodeBadRequest
-	CodeUnauthorized       = apitypes.CodeUnauthorized
-	CodeForbidden          = apitypes.CodeForbidden
-	CodeNotFound           = apitypes.CodeNotFound
-	CodeConflict           = apitypes.CodeConflict
-	CodeUnprocessable      = apitypes.CodeUnprocessable
-	CodeTooManyRequests    = apitypes.CodeTooManyRequests
-	CodeInternal           = apitypes.CodeInternal
-	CodeInvalidJSON        = apitypes.CodeInvalidJSON
-	CodeUnknownField       = apitypes.CodeUnknownField
-	CodeConfirmation       = apitypes.CodeConfirmation
-	CodePayloadTooLarge    = apitypes.CodePayloadTooLarge
-	CodeUnsupportedMedia   = apitypes.CodeUnsupportedMedia
-	CodeServiceUnavailable = apitypes.CodeServiceUnavailable
-)
-
-// Sentinel domain errors that backends may wrap with %w.
-var (
-	ErrNotFound           = apitypes.ErrNotFound
-	ErrAlreadyExists      = apitypes.ErrAlreadyExists
-	ErrValidation         = apitypes.ErrValidation
-	ErrUnauthorized       = apitypes.ErrUnauthorized
-	ErrForbidden          = apitypes.ErrForbidden
-	ErrConflict           = apitypes.ErrConflict
-	ErrServiceUnavailable = apitypes.ErrServiceUnavailable
-)
-
 type apiError struct {
 	HTTPStatus int    `json:"-"`
 	Code       string `json:"code"`
@@ -55,22 +27,22 @@ func httpStatus(err error) int {
 	if errors.As(err, &ae) {
 		return ae.HTTPStatus
 	}
-	if errors.Is(err, ErrNotFound) || errors.Is(err, store.ErrNotFound) || errors.Is(err, backups.ErrNotFound) {
+	if errors.Is(err, apitypes.ErrNotFound) || errors.Is(err, store.ErrNotFound) || errors.Is(err, backups.ErrNotFound) {
 		return http.StatusNotFound
 	}
-	if errors.Is(err, ErrAlreadyExists) || errors.Is(err, ErrConflict) || errors.Is(err, store.ErrConflict) || errors.Is(err, backups.ErrConflict) || errors.Is(err, backups.ErrOperationInProgress) {
+	if errors.Is(err, apitypes.ErrAlreadyExists) || errors.Is(err, apitypes.ErrConflict) || errors.Is(err, store.ErrConflict) || errors.Is(err, backups.ErrConflict) || errors.Is(err, backups.ErrOperationInProgress) {
 		return http.StatusConflict
 	}
-	if errors.Is(err, ErrValidation) || errors.Is(err, store.ErrValidation) || errors.Is(err, backups.ErrInvalid) {
+	if errors.Is(err, apitypes.ErrValidation) || errors.Is(err, store.ErrValidation) || errors.Is(err, backups.ErrInvalid) {
 		return http.StatusBadRequest
 	}
-	if errors.Is(err, ErrUnauthorized) {
+	if errors.Is(err, apitypes.ErrUnauthorized) {
 		return http.StatusUnauthorized
 	}
-	if errors.Is(err, ErrForbidden) {
+	if errors.Is(err, apitypes.ErrForbidden) {
 		return http.StatusForbidden
 	}
-	if errors.Is(err, ErrServiceUnavailable) {
+	if errors.Is(err, apitypes.ErrServiceUnavailable) {
 		return http.StatusServiceUnavailable
 	}
 	return http.StatusInternalServerError
@@ -82,25 +54,25 @@ func errorCode(err error) string {
 	if errors.As(err, &ae) {
 		return ae.Code
 	}
-	if errors.Is(err, ErrNotFound) || errors.Is(err, store.ErrNotFound) || errors.Is(err, backups.ErrNotFound) {
-		return CodeNotFound
+	if errors.Is(err, apitypes.ErrNotFound) || errors.Is(err, store.ErrNotFound) || errors.Is(err, backups.ErrNotFound) {
+		return apitypes.CodeNotFound
 	}
-	if errors.Is(err, ErrAlreadyExists) || errors.Is(err, ErrConflict) || errors.Is(err, store.ErrConflict) || errors.Is(err, backups.ErrConflict) || errors.Is(err, backups.ErrOperationInProgress) {
-		return CodeConflict
+	if errors.Is(err, apitypes.ErrAlreadyExists) || errors.Is(err, apitypes.ErrConflict) || errors.Is(err, store.ErrConflict) || errors.Is(err, backups.ErrConflict) || errors.Is(err, backups.ErrOperationInProgress) {
+		return apitypes.CodeConflict
 	}
-	if errors.Is(err, ErrValidation) || errors.Is(err, store.ErrValidation) || errors.Is(err, backups.ErrInvalid) {
-		return CodeBadRequest
+	if errors.Is(err, apitypes.ErrValidation) || errors.Is(err, store.ErrValidation) || errors.Is(err, backups.ErrInvalid) {
+		return apitypes.CodeBadRequest
 	}
-	if errors.Is(err, ErrUnauthorized) {
-		return CodeUnauthorized
+	if errors.Is(err, apitypes.ErrUnauthorized) {
+		return apitypes.CodeUnauthorized
 	}
-	if errors.Is(err, ErrForbidden) {
-		return CodeForbidden
+	if errors.Is(err, apitypes.ErrForbidden) {
+		return apitypes.CodeForbidden
 	}
-	if errors.Is(err, ErrServiceUnavailable) {
-		return CodeServiceUnavailable
+	if errors.Is(err, apitypes.ErrServiceUnavailable) {
+		return apitypes.CodeServiceUnavailable
 	}
-	return CodeInternal
+	return apitypes.CodeInternal
 }
 
 func errorMessage(err error) string {
@@ -116,31 +88,39 @@ func errorMessage(err error) string {
 }
 
 // common constructors
-func errBadRequest(msg string) error { return newAPIError(http.StatusBadRequest, CodeBadRequest, msg) }
+func errBadRequest(msg string) error {
+	return newAPIError(http.StatusBadRequest, apitypes.CodeBadRequest, msg)
+}
 func errInvalidJSON(msg string) error {
-	return newAPIError(http.StatusBadRequest, CodeInvalidJSON, msg)
+	return newAPIError(http.StatusBadRequest, apitypes.CodeInvalidJSON, msg)
 }
 func errUnknownField(msg string) error {
-	return newAPIError(http.StatusBadRequest, CodeUnknownField, msg)
+	return newAPIError(http.StatusBadRequest, apitypes.CodeUnknownField, msg)
 }
 func errUnauthorized(msg string) error {
-	return newAPIError(http.StatusUnauthorized, CodeUnauthorized, msg)
+	return newAPIError(http.StatusUnauthorized, apitypes.CodeUnauthorized, msg)
 }
-func errForbidden(msg string) error { return newAPIError(http.StatusForbidden, CodeForbidden, msg) }
-func errNotFound(msg string) error  { return newAPIError(http.StatusNotFound, CodeNotFound, msg) }
-func errConflict(msg string) error  { return newAPIError(http.StatusConflict, CodeConflict, msg) }
+func errForbidden(msg string) error {
+	return newAPIError(http.StatusForbidden, apitypes.CodeForbidden, msg)
+}
+func errNotFound(msg string) error {
+	return newAPIError(http.StatusNotFound, apitypes.CodeNotFound, msg)
+}
+func errConflict(msg string) error {
+	return newAPIError(http.StatusConflict, apitypes.CodeConflict, msg)
+}
 func errPayloadTooLarge(msg string) error {
-	return newAPIError(http.StatusRequestEntityTooLarge, CodePayloadTooLarge, msg)
+	return newAPIError(http.StatusRequestEntityTooLarge, apitypes.CodePayloadTooLarge, msg)
 }
 func errUnsupportedMedia(msg string) error {
-	return newAPIError(http.StatusUnsupportedMediaType, CodeUnsupportedMedia, msg)
+	return newAPIError(http.StatusUnsupportedMediaType, apitypes.CodeUnsupportedMedia, msg)
 }
 func errUnprocessable(msg string) error {
-	return newAPIError(http.StatusUnprocessableEntity, CodeUnprocessable, msg)
+	return newAPIError(http.StatusUnprocessableEntity, apitypes.CodeUnprocessable, msg)
 }
 func errConfirmation(msg string) error {
-	return newAPIError(http.StatusBadRequest, CodeConfirmation, msg)
+	return newAPIError(http.StatusBadRequest, apitypes.CodeConfirmation, msg)
 }
 func errServiceUnavailable(msg string) error {
-	return newAPIError(http.StatusServiceUnavailable, CodeServiceUnavailable, msg)
+	return newAPIError(http.StatusServiceUnavailable, apitypes.CodeServiceUnavailable, msg)
 }

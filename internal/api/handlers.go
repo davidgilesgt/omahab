@@ -108,7 +108,7 @@ func (s *Server) handleGetApplication(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleUpdateApplication(w http.ResponseWriter, r *http.Request) {
 	id := domain.ID(chi.URLParam(r, "id"))
-	var req UpdateApplicationRequest
+	var req apitypes.UpdateApplicationRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
@@ -126,7 +126,7 @@ func (s *Server) handleUpdateApplication(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) handleApplicationAction(w http.ResponseWriter, r *http.Request) {
 	id := domain.ID(chi.URLParam(r, "id"))
-	var req ApplicationActionRequest
+	var req apitypes.ApplicationActionRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
@@ -143,7 +143,7 @@ func (s *Server) handleApplicationAction(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleInstallApplication(w http.ResponseWriter, r *http.Request) {
-	var req InstallApplicationRequest
+	var req apitypes.InstallApplicationRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
@@ -199,7 +199,7 @@ func (s *Server) handleGetExposure(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUpdateExposure(w http.ResponseWriter, r *http.Request) {
 	kind := chi.URLParam(r, "kind")
 	id := domain.ID(chi.URLParam(r, "id"))
-	var req UpdateExposureRequest
+	var req apitypes.UpdateExposureRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
@@ -221,7 +221,7 @@ func (s *Server) handleUpdateExposure(w http.ResponseWriter, r *http.Request) {
 
 // confirmPublicExposure enforces typed confirmation when making a resource
 // public: the caller must repeat the exact hostname being exposed.
-func (s *Server) confirmPublicExposure(r *http.Request, kind string, id domain.ID, req UpdateExposureRequest) error {
+func (s *Server) confirmPublicExposure(r *http.Request, kind string, id domain.ID, req apitypes.UpdateExposureRequest) error {
 	if req.Exposure != domain.ExposurePublic {
 		return nil
 	}
@@ -247,7 +247,7 @@ func (s *Server) handleGetApplicationExposure(w http.ResponseWriter, r *http.Req
 
 func (s *Server) handleUpdateApplicationExposure(w http.ResponseWriter, r *http.Request) {
 	id := domain.ID(chi.URLParam(r, "id"))
-	var req UpdateExposureRequest
+	var req apitypes.UpdateExposureRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
@@ -279,7 +279,7 @@ func (s *Server) handleGetProjectExposure(w http.ResponseWriter, r *http.Request
 
 func (s *Server) handleUpdateProjectExposure(w http.ResponseWriter, r *http.Request) {
 	id := domain.ID(chi.URLParam(r, "id"))
-	var req UpdateExposureRequest
+	var req apitypes.UpdateExposureRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
@@ -322,7 +322,7 @@ func (s *Server) handleGetProject(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
-	var req CreateProjectRequest
+	var req apitypes.CreateProjectRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
@@ -344,7 +344,7 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
 	id := domain.ID(chi.URLParam(r, "id"))
-	var req UpdateProjectRequest
+	var req apitypes.UpdateProjectRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
@@ -395,7 +395,7 @@ func (s *Server) handleGetRelease(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateRelease(w http.ResponseWriter, r *http.Request) {
 	pid := domain.ID(chi.URLParam(r, "id"))
-	var req CreateReleaseRequest
+	var req apitypes.CreateReleaseRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
@@ -436,7 +436,7 @@ func (s *Server) handleListSecrets(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateSecret(w http.ResponseWriter, r *http.Request) {
-	var req CreateSecretRequest
+	var req apitypes.CreateSecretRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
@@ -464,7 +464,7 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleUpdateSecret(w http.ResponseWriter, r *http.Request) {
 	id := domain.ID(chi.URLParam(r, "id"))
-	var req UpdateSecretRequest
+	var req apitypes.UpdateSecretRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
@@ -512,7 +512,7 @@ func (s *Server) handleGetBackup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateBackup(w http.ResponseWriter, r *http.Request) {
-	var req CreateBackupRequest
+	var req apitypes.CreateBackupRequest
 	// Allow empty body for default repo; if body present decode.
 	if r.ContentLength != 0 {
 		if !decodeJSON(w, r, &req) {
@@ -561,7 +561,7 @@ func (s *Server) handleVerifyLatestBackup(w http.ResponseWriter, r *http.Request
 func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 	p := parsePagination(r)
 	q := r.URL.Query()
-	filter := EventFilter{
+	filter := apitypes.EventFilter{
 		Type:     q.Get("type"),
 		Severity: q.Get("severity"),
 	}
@@ -632,7 +632,7 @@ func (s *Server) handleGetSyncFolder(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateSyncFolder(w http.ResponseWriter, r *http.Request) {
-	var req CreateSyncFolderRequest
+	var req apitypes.CreateSyncFolderRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
@@ -650,7 +650,7 @@ func (s *Server) handleCreateSyncFolder(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) handleUpdateSyncFolder(w http.ResponseWriter, r *http.Request) {
 	id := domain.ID(chi.URLParam(r, "id"))
-	var req UpdateSyncFolderRequest
+	var req apitypes.UpdateSyncFolderRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
@@ -694,7 +694,7 @@ func (s *Server) handleGetWorkspace(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateWorkspace(w http.ResponseWriter, r *http.Request) {
-	var req CreateWorkspaceRequest
+	var req apitypes.CreateWorkspaceRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
@@ -735,7 +735,7 @@ func (s *Server) handleDeleteWorkspace(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSendWorkspace(w http.ResponseWriter, r *http.Request) {
 	id := domain.ID(chi.URLParam(r, "id"))
-	var req SendWorkspaceRequest
+	var req apitypes.SendWorkspaceRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
@@ -770,7 +770,7 @@ func (s *Server) handleCompanionListWorkspaces(w http.ResponseWriter, r *http.Re
 }
 
 func (s *Server) handleCompanionCreateWorkspace(w http.ResponseWriter, r *http.Request) {
-	var req CompanionCreateWorkspaceRequest
+	var req apitypes.CompanionCreateWorkspaceRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
@@ -801,7 +801,7 @@ func (s *Server) handleCompanionStopWorkspace(w http.ResponseWriter, r *http.Req
 }
 
 func (s *Server) handleCompanionCreateSyncFolder(w http.ResponseWriter, r *http.Request) {
-	var req CreateCompanionSyncFolderRequest
+	var req apitypes.CreateCompanionSyncFolderRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
@@ -844,7 +844,7 @@ func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
-	var req CreateUserRequest
+	var req apitypes.CreateUserRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
@@ -862,7 +862,7 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	id := domain.ID(chi.URLParam(r, "id"))
-	var req UpdateUserRequest
+	var req apitypes.UpdateUserRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
@@ -934,7 +934,7 @@ func (s *Server) handleGetModelSetup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSeedModelAliases(w http.ResponseWriter, r *http.Request) {
-	var req SeedModelAliasesRequest
+	var req apitypes.SeedModelAliasesRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
@@ -960,7 +960,7 @@ func (s *Server) handleListModelKeys(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateModelKey(w http.ResponseWriter, r *http.Request) {
-	var req CreateModelKeyRequest
+	var req apitypes.CreateModelKeyRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
@@ -979,7 +979,7 @@ func (s *Server) handleCreateModelKey(w http.ResponseWriter, r *http.Request) {
 	}
 	// Return metadata plus plaintext key once. Never persist plaintext.
 	type createResp struct {
-		ModelKey
+		apitypes.ModelKey
 		Key string `json:"key"`
 	}
 	writeJSON(w, http.StatusCreated, createResp{ModelKey: key, Key: token})
@@ -1000,7 +1000,7 @@ func (s *Server) handleStartProviderOAuth(w http.ResponseWriter, r *http.Request
 		writeError(w, r, errBadRequest("unsupported provider"))
 		return
 	}
-	var req StartProviderOAuthRequest
+	var req apitypes.StartProviderOAuthRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
@@ -1056,7 +1056,7 @@ func (s *Server) handleForwardProviderOAuthCallback(w http.ResponseWriter, r *ht
 		writeError(w, r, errBadRequest("session_id is required"))
 		return
 	}
-	var req ForwardProviderOAuthCallbackRequest
+	var req apitypes.ForwardProviderOAuthCallbackRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
@@ -1251,7 +1251,7 @@ func (s *Server) handleCompanionStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCompanionEvents(w http.ResponseWriter, r *http.Request) {
 	p := parsePagination(r)
 	// Companion events: same as admin events but filtered; for now return all.
-	items, err := s.backend.ListEvents(r.Context(), p, EventFilter{})
+	items, err := s.backend.ListEvents(r.Context(), p, apitypes.EventFilter{})
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -1270,7 +1270,7 @@ func (s *Server) handleCompanionProjects(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleCompanionCreateProject(w http.ResponseWriter, r *http.Request) {
-	var req CreateProjectRequest
+	var req apitypes.CreateProjectRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
@@ -1307,7 +1307,7 @@ func (s *Server) handlePutToolEnv(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, errBadRequest("name is required"))
 		return
 	}
-	var req PutToolEnvRequest
+	var req apitypes.PutToolEnvRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
@@ -1443,7 +1443,7 @@ func (s *Server) handleEmailIngestHMAC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	msg, err := s.backend.IngestEmail(r.Context(), EmailIngestRequest{
+	msg, err := s.backend.IngestEmail(r.Context(), apitypes.EmailIngestRequest{
 		From: payload.From, To: payload.To, Timestamp: payload.Timestamp,
 		Nonce: payload.Nonce, Raw: raw, RawSize: payload.RawSize, Signature: signature,
 	})
@@ -1513,7 +1513,7 @@ func (s *Server) handleReleaseWithToken(w http.ResponseWriter, r *http.Request) 
 		writeError(w, r, errUnauthorized("release token is required"))
 		return
 	}
-	var req CreateReleaseRequest
+	var req apitypes.CreateReleaseRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
@@ -1539,7 +1539,7 @@ func (s *Server) handleGetPushMirror(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleConfigurePushMirror(w http.ResponseWriter, r *http.Request) {
 	id := domain.ID(chi.URLParam(r, "id"))
-	var req ConfigureMirrorRequest
+	var req apitypes.ConfigureMirrorRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
@@ -1594,7 +1594,7 @@ func (s *Server) handleValidateWorkspaceCapability(w http.ResponseWriter, r *htt
 // --- knowledge assistant tools ---
 
 func (s *Server) handleKnowledgeSearch(w http.ResponseWriter, r *http.Request) {
-	var req KnowledgeSearchRequest
+	var req apitypes.KnowledgeSearchRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
@@ -1711,7 +1711,7 @@ func (s *Server) handleKnowledgeUpload(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusCreated, map[string]any{"id": id})
 		return
 	}
-	var req KnowledgeUploadRequest
+	var req apitypes.KnowledgeUploadRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
@@ -1961,7 +1961,7 @@ func (s *Server) handleTriggerSetupReconcile(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) handleSetupWoodpecker(w http.ResponseWriter, r *http.Request) {
-	var req SetupWoodpeckerRequest
+	var req apitypes.SetupWoodpeckerRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
@@ -1981,7 +1981,7 @@ func (s *Server) handleSetupWoodpecker(w http.ResponseWriter, r *http.Request) {
 	}
 	// Strict bounded non-empty inputs already checked; delegate to backend for Woodpecker validation.
 	// Never log token. Pass trimmed values.
-	trimmed := SetupWoodpeckerRequest{Username: username, Token: token}
+	trimmed := apitypes.SetupWoodpeckerRequest{Username: username, Token: token}
 	if err := s.backend.SetupWoodpecker(r.Context(), trimmed); err != nil {
 		writeError(w, r, err)
 		return
@@ -2085,7 +2085,7 @@ func (s *Server) handleListDisks(w http.ResponseWriter, r *http.Request) {
 
 // handleConfigureStorage assigns a filesystem to a volume role.
 func (s *Server) handleConfigureStorage(w http.ResponseWriter, r *http.Request) {
-	var req ConfigureStorageRequest
+	var req apitypes.ConfigureStorageRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
@@ -2108,7 +2108,7 @@ func (s *Server) handleListBackupRepositories(w http.ResponseWriter, r *http.Req
 
 // handleCreateBackupRepository stores credentials + configures the repo.
 func (s *Server) handleCreateBackupRepository(w http.ResponseWriter, r *http.Request) {
-	var req CreateBackupRepositoryRequest
+	var req apitypes.CreateBackupRepositoryRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}

@@ -57,7 +57,6 @@ export interface Project {
   slug: string;
   name: string;
   repository_url: string;
-  bot_profile_id: string;
   exposure: Exposure;
   hostname: string;
   created_at: string;
@@ -111,10 +110,14 @@ export interface Workspace {
   id: ID;
   project_id: ID;
   branch: string;
+  title?: string;
+  instructions?: string;
   agent: string;
   status: string;
+  gateway_key_id?: ID;
+  waiting_line?: string;
   last_active_at: string;
-  expires_at?: string | null;
+  expires_at?: string;
   created_at: string;
 }
 

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/omahab/omahab/internal/apitypes"
 	"github.com/omahab/omahab/internal/domain"
 )
 
@@ -26,7 +27,7 @@ func (s *Server) handleStreamEvents(w http.ResponseWriter, r *http.Request) {
 	// Verify SSE client can flush.
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		writeError(w, r, newAPIError(http.StatusInternalServerError, CodeInternal, "streaming not supported"))
+		writeError(w, r, newAPIError(http.StatusInternalServerError, apitypes.CodeInternal, "streaming not supported"))
 		return
 	}
 
@@ -87,7 +88,7 @@ func (s *Server) handleStreamEvents(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCompanionStreamEvents(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		writeError(w, r, newAPIError(http.StatusInternalServerError, CodeInternal, "streaming not supported"))
+		writeError(w, r, newAPIError(http.StatusInternalServerError, apitypes.CodeInternal, "streaming not supported"))
 		return
 	}
 	since := domain.ID(r.Header.Get("Last-Event-ID"))

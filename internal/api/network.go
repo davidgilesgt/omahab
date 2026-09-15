@@ -2,6 +2,8 @@ package api
 
 import (
 	"net/http"
+
+	"github.com/omahab/omahab/internal/apitypes"
 )
 
 // Network handlers: home-LAN placement and explicit close-LAN state.
@@ -23,7 +25,7 @@ func (s *Server) handleNetworkStatus(w http.ResponseWriter, r *http.Request) {
 // close-LAN sentinel (sticky across reboots until reopened).
 func (s *Server) handleCloseLAN(w http.ResponseWriter, r *http.Request) {
 	if err := s.backend.CloseLAN(); err != nil {
-		writeError(w, r, newAPIError(http.StatusBadGateway, CodeInternal, err.Error()))
+		writeError(w, r, newAPIError(http.StatusBadGateway, apitypes.CodeInternal, err.Error()))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"closed": true})
@@ -33,7 +35,7 @@ func (s *Server) handleCloseLAN(w http.ResponseWriter, r *http.Request) {
 // restore the module table (including the LAN rules).
 func (s *Server) handleOpenLAN(w http.ResponseWriter, r *http.Request) {
 	if err := s.backend.OpenLAN(); err != nil {
-		writeError(w, r, newAPIError(http.StatusBadGateway, CodeInternal, err.Error()))
+		writeError(w, r, newAPIError(http.StatusBadGateway, apitypes.CodeInternal, err.Error()))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"closed": false})

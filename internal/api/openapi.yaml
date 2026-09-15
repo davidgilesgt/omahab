@@ -1356,6 +1356,17 @@ paths:
         '200': { description: Projects, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/Project' } } } } } } }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      summary: Create project (device only)
+      description: Device-only. Creates the project listing and autocreates the Forgejo repository. Proxied by clientd `project.create`. Admin bearer rejected.
+      operationId: createCompanionProject
+      security: [{ deviceAuth: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CreateProjectRequest' } } } }
+      responses:
+        '201': { description: Project, content: { application/json: { schema: { $ref: '#/components/schemas/Project' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
   /api/v1/companion/workspaces:
     get:
       summary: List workspaces (device only)
@@ -2118,10 +2129,14 @@ components:
         id: { type: string }
         project_id: { type: string }
         branch: { type: string }
+        title: { type: string }
+        instructions: { type: string }
         agent: { type: string }
         status: { type: string }
+        gateway_key_id: { type: string }
+        waiting_line: { type: string }
         last_active_at: { type: string, format: date-time }
-        expires_at: { type: string, format: date-time, nullable: true }
+        expires_at: { type: string, format: date-time }
         created_at: { type: string, format: date-time }
 
     User:
@@ -2375,6 +2390,7 @@ components:
         repository_url: { type: string, format: uri }
         exposure: { $ref: '#/components/schemas/Exposure' }
         hostname: { type: string }
+        kind: { type: string, enum: [code, docs], description: 'code (default, deployable) or docs (versioned only, no CI)' }
       additionalProperties: false
 
     UpdateProjectRequest:
@@ -2474,8 +2490,11 @@ components:
       required: [project_id]
       properties:
         project_id: { type: string }
-        branch: { type: string }
+        title: { type: string }
+        instructions: { type: string }
         agent: { type: string }
+        devcontainer_source: { type: string }
+        branch: { type: string, description: 'Deprecated: use title. Accepted for compatibility.' }
       additionalProperties: false
 
     CreateUserRequest:

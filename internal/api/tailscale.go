@@ -2,6 +2,8 @@ package api
 
 import (
 	"net/http"
+
+	"github.com/omahab/omahab/internal/apitypes"
 )
 
 // handleTailscaleUp starts Tailscale enrollment on the authenticated API.
@@ -10,7 +12,7 @@ import (
 func (s *Server) handleTailscaleUp(w http.ResponseWriter, r *http.Request) {
 	url, err := s.backend.TailscaleUp()
 	if err != nil {
-		writeError(w, r, newAPIError(http.StatusBadGateway, CodeInternal, err.Error()))
+		writeError(w, r, newAPIError(http.StatusBadGateway, apitypes.CodeInternal, err.Error()))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"auth_url": url})
@@ -21,7 +23,7 @@ func (s *Server) handleTailscaleUp(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleTailscaleStatus(w http.ResponseWriter, r *http.Request) {
 	running, ip, state, err := s.backend.TailscaleStatus()
 	if err != nil {
-		writeError(w, r, newAPIError(http.StatusBadGateway, CodeInternal, err.Error()))
+		writeError(w, r, newAPIError(http.StatusBadGateway, apitypes.CodeInternal, err.Error()))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
