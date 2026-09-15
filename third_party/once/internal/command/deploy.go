@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -53,7 +55,16 @@ func newDeployCommand() *deployCommand {
 	return d
 }
 
-// Private
+// deployResult is the single JSON record emitted by --json.
+type deployResult struct {
+	Status  string `json:"status"`
+	Version string `json:"version,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+func emitJSON(cmd *cobra.Command, v any) error {
+	return json.NewEncoder(cmd.OutOrStdout()).Encode(v)
+}
 
 func (d *deployCommand) run(ctx context.Context, ns *docker.Namespace, cmd *cobra.Command, args []string) error {
 	imageRef := d.image
@@ -72,28 +83,16 @@ func (d *deployCommand) run(ctx context.Context, ns *docker.Namespace, cmd *cobr
 		host = docker.NameFromImageRef(imageRef) + ".localhost"
 	}
 
-	// Handle --proxy-bind for loopback proxy: store for proxy Boot.
-	// The proxy Boot will use this to publish 127.0.0.1:<port>:80 only.
-	if d.proxyBind != "" {
-		// Parse host:port, extract port for proxy settings.
-		// We stash the bind in the namespace via a label or direct proxy settings.
-		// For now, we set an env to signal proxy to use loopback.
-		// The proxy.Boot will check for this via context or flag.
-		// Simplest: set env var for this process that proxy will read?
-		// Instead, we directly configure proxy settings before Setup.
-		if err := applyProxyBind(ns, d.proxyBind); err != nil {
-			return err
-		}
+	// Proxy-bind configuration applies before ns.Setup in both deploy and
+	// update: the proxy reads it when it boots.
+	if err := applyProxyBind(d.proxyBind); err != nil {
+		return err
 	}
 
 	// Merge --secrets-file into env vars before building settings.
 	if d.secretsFile != "" {
-		envFromFile, err := parseSecretsFile(d.secretsFile)
-		if err != nil {
-			return fmt.Errorf("read secrets file: %w", err)
-		}
-		for k, v := range envFromFile {
-			d.flags.env = append(d.flags.env, fmt.Sprintf("%s=%s", k, v))
+		if err := mergeSecretsFile(&d.flags, d.secretsFile); err != nil {
+			return err
 		}
 	}
 
@@ -131,44 +130,59 @@ func (d *deployCommand) run(ctx context.Context, ns *docker.Namespace, cmd *cobr
 			existing.Settings = settings
 			existing.Settings.Name = name
 			existing.Settings.Host = host
-			app := existing
-			return d.deployApp(ctx, app, host, name)
+			return d.finishDeploy(ctx, cmd, existing, host, name, imageRef)
 		}
 	}
 	settings.Name = name
 	settings.Host = host
 
 	app := docker.NewApplication(ns, settings)
+	return d.finishDeploy(ctx, cmd, app, host, name, imageRef)
+}
 
-	err = d.deployApp(ctx, app, host, name)
+// finishDeploy runs the deploy operation and emits exactly one JSON record
+// in --json mode (no progress text on stdout). Fresh and existing-app
+// deploys share this path.
+func (d *deployCommand) finishDeploy(ctx context.Context, cmd *cobra.Command, app *docker.Application, host, name, imageRef string) error {
+	var err error
 	if d.jsonOutput {
+		// No interactive progress wrapper: one JSON record on stdout.
+		err = d.runDeployOperation(ctx, app, name, func(docker.DeployProgress) {})
+	} else {
+		err = d.deployApp(ctx, app, host, name)
+	}
+	if d.jsonOutput {
+		out := deployResult{Status: "ok", Version: imageRef}
 		if err != nil {
-			out, _ := json.Marshal(map[string]string{"error": err.Error(), "status": "error"})
-			fmt.Println(string(out))
-			return err
+			out = deployResult{Status: "error", Error: err.Error()}
 		}
-		out, _ := json.Marshal(map[string]string{"version": imageRef, "status": "ok"})
-		fmt.Println(string(out))
-		return nil
+		if encErr := emitJSON(cmd, out); encErr != nil {
+			return encErr
+		}
+		return err
 	}
 	return err
 }
 
 func (d *deployCommand) deployApp(ctx context.Context, app *docker.Application, host, name string) error {
 	return runWithProgress("Deploying "+host, func(progress docker.DeployProgressCallback) error {
-		if err := app.Deploy(ctx, progress); err != nil {
-			if cleanupErr := app.Destroy(context.Background(), true); cleanupErr != nil {
-				slog.Error("Failed to clean up after deploy failure", "app", name, "error", cleanupErr)
-			}
-			return fmt.Errorf("%w: %w", docker.ErrDeployFailed, err)
-		}
-
-		if err := app.VerifyHTTPOrRemove(ctx); err != nil {
-			return err
-		}
-
-		return nil
+		return d.runDeployOperation(ctx, app, name, progress)
 	})
+}
+
+func (d *deployCommand) runDeployOperation(ctx context.Context, app *docker.Application, name string, progress docker.DeployProgressCallback) error {
+	if err := app.Deploy(ctx, progress); err != nil {
+		if cleanupErr := app.Destroy(context.Background(), true); cleanupErr != nil {
+			slog.Error("Failed to clean up after deploy failure", "app", name, "error", cleanupErr)
+		}
+		return fmt.Errorf("%w: %w", docker.ErrDeployFailed, err)
+	}
+
+	if err := app.VerifyHTTPOrRemove(ctx); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func parseSecretsFile(path string) (map[string]string, error) {
@@ -179,21 +193,18 @@ func parseSecretsFile(path string) (map[string]string, error) {
 	defer f.Close()
 	out := make(map[string]string)
 	scanner := bufio.NewScanner(f)
+	lineno := 0
 	for scanner.Scan() {
+		lineno++
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 		k, v, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
+		if !ok || strings.TrimSpace(k) == "" {
+			return nil, fmt.Errorf("invalid line %d in %s: want KEY=VALUE", lineno, path)
 		}
-		k = strings.TrimSpace(k)
-		v = strings.TrimSpace(v)
-		if k == "" {
-			continue
-		}
-		out[k] = v
+		out[strings.TrimSpace(k)] = strings.TrimSpace(v)
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
@@ -201,23 +212,41 @@ func parseSecretsFile(path string) (map[string]string, error) {
 	return out, nil
 }
 
-func applyProxyBind(ns *docker.Namespace, bind string) error {
+// mergeSecretsFile merges a KEY=VAL secrets file into the settings flags env.
+// File/env precedence applies; invalid lines fail with path and line only,
+// never secret values.
+func mergeSecretsFile(f *settingsFlags, path string) error {
+	envFromFile, err := parseSecretsFile(path)
+	if err != nil {
+		return fmt.Errorf("read secrets file: %w", err)
+	}
+	for k, v := range envFromFile {
+		f.env = append(f.env, fmt.Sprintf("%s=%s", k, v))
+	}
+	return nil
+}
+
+// applyProxyBind validates a loopback bind and publishes it for proxy.Boot
+// via OMAHAB_PROXY_BIND. Empty keeps the default mode. Malformed binds fail
+// instead of silently falling back to port 80.
+func applyProxyBind(bind string) error {
+	bind = strings.TrimSpace(bind)
 	if bind == "" {
 		return nil
 	}
-	// Validate and store for proxy.Boot to read via env.
-	// Expected format 127.0.0.1:8080 or :8080
-	if strings.Contains(bind, ":") {
-		parts := strings.Split(bind, ":")
-		port := parts[len(parts)-1]
-		if port == "" {
-			return fmt.Errorf("invalid --proxy-bind %q: missing port", bind)
-		}
-		os.Setenv("OMAHAB_PROXY_BIND", bind)
-		_ = port
-	} else {
-		os.Setenv("OMAHAB_PROXY_BIND", bind)
+	host, portStr, err := net.SplitHostPort(bind)
+	if err != nil {
+		return fmt.Errorf("invalid --proxy-bind %q: want 127.0.0.1:<port> or :<port>", bind)
 	}
-	_ = ns
+	if host != "" && host != "127.0.0.1" {
+		return fmt.Errorf("invalid --proxy-bind %q: only loopback binds allowed", bind)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port <= 0 || port > 65535 {
+		return fmt.Errorf("invalid --proxy-bind %q: port must be 1..65535", bind)
+	}
+	if err := os.Setenv("OMAHAB_PROXY_BIND", bind); err != nil {
+		return fmt.Errorf("set proxy bind: %w", err)
+	}
 	return nil
 }

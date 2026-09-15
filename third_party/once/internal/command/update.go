@@ -2,7 +2,6 @@ package command
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -54,30 +53,28 @@ func (u *updateCommand) run(ctx context.Context, ns *docker.Namespace, cmd *cobr
 		image = u.image
 	}
 
+	// Mirror deploy: proxy-bind configuration applies before ns.Setup, and
+	// secrets-file/TLS settings apply even without explicit --env/--disable-tls.
+	if err := applyProxyBind(u.proxyBind); err != nil {
+		return err
+	}
+	secretsMerged := false
+	if u.secretsFile != "" {
+		if err := mergeSecretsFile(&u.flags, u.secretsFile); err != nil {
+			return err
+		}
+		secretsMerged = true
+	}
+	tlsExternal := u.tlsMode == "external"
+	if tlsExternal {
+		u.flags.disableTLS = true
+	}
+
 	if err := ns.Setup(ctx); err != nil {
 		return fmt.Errorf("%w: %w", docker.ErrSetupFailed, err)
 	}
 
-	// Mirror deploy: loopback proxy bind, secrets file merged into env, external TLS.
-	if u.proxyBind != "" {
-		if err := applyProxyBind(ns, u.proxyBind); err != nil {
-			return err
-		}
-	}
-	if u.secretsFile != "" {
-		envFromFile, err := parseSecretsFile(u.secretsFile)
-		if err != nil {
-			return fmt.Errorf("read secrets file: %w", err)
-		}
-		for k, v := range envFromFile {
-			u.flags.env = append(u.flags.env, fmt.Sprintf("%s=%s", k, v))
-		}
-	}
-	if u.tlsMode == "external" {
-		u.flags.disableTLS = true
-	}
-
-	settings, err := u.flags.applyChanges(cmd, app.Settings, image)
+	settings, err := u.flags.applyChanges(cmd, app.Settings, image, secretsMerged, tlsExternal)
 	if err != nil {
 		return err
 	}
@@ -85,8 +82,9 @@ func (u *updateCommand) run(ctx context.Context, ns *docker.Namespace, cmd *cobr
 	if settings.Host != app.Settings.Host {
 		if ns.HostInUseByAnother(settings.Host, app.Settings.Name) {
 			if u.jsonOutput {
-				out, _ := json.Marshal(map[string]string{"error": docker.ErrHostnameInUse.Error(), "status": "error"})
-				fmt.Println(string(out))
+				if encErr := emitJSON(cmd, deployResult{Status: "error", Error: docker.ErrHostnameInUse.Error()}); encErr != nil {
+					return encErr
+				}
 			}
 			return docker.ErrHostnameInUse
 		}
@@ -95,22 +93,28 @@ func (u *updateCommand) run(ctx context.Context, ns *docker.Namespace, cmd *cobr
 	oldSettings := app.Settings
 	app.Settings = settings
 
-	err = runWithProgress("Updating "+currentHost, func(progress docker.DeployProgressCallback) error {
+	deploy := func(progress docker.DeployProgressCallback) error {
 		if err := app.Deploy(ctx, progress); err != nil {
 			app.Settings = oldSettings
 			return fmt.Errorf("%w: %w", docker.ErrDeployFailed, err)
 		}
 		return nil
-	})
+	}
 	if u.jsonOutput {
+		// No interactive progress wrapper: one JSON record on stdout.
+		err = deploy(func(docker.DeployProgress) {})
+	} else {
+		err = runWithProgress("Updating "+currentHost, deploy)
+	}
+	if u.jsonOutput {
+		out := deployResult{Status: "ok", Version: settings.Image}
 		if err != nil {
-			out, _ := json.Marshal(map[string]string{"error": err.Error(), "status": "error"})
-			fmt.Println(string(out))
-			return err
+			out = deployResult{Status: "error", Error: err.Error()}
 		}
-		out, _ := json.Marshal(map[string]string{"version": settings.Image, "status": "ok"})
-		fmt.Println(string(out))
-		return nil
+		if encErr := emitJSON(cmd, out); encErr != nil {
+			return encErr
+		}
+		return err
 	}
 	return err
 }

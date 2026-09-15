@@ -11,10 +11,10 @@ import (
 )
 
 type statusCommand struct {
-	cmd       *cobra.Command
-	app       string
-	hostname  string
-	proxyBind string
+	cmd        *cobra.Command
+	app        string
+	hostname   string
+	proxyBind  string
 	jsonOutput bool
 }
 
@@ -30,6 +30,16 @@ func newStatusCommand() *statusCommand {
 	s.cmd.Flags().StringVar(&s.proxyBind, "proxy-bind", "", "proxy bind address (ignored, for API compat)")
 	s.cmd.Flags().BoolVar(&s.jsonOutput, "json", false, "output JSON")
 	return s
+}
+
+// statusResult is the single JSON record for status --json. Health reflects
+// the observed running state, not an HTTP probe.
+type statusResult struct {
+	Healthy bool   `json:"healthy"`
+	Detail  string `json:"detail"`
+	Status  string `json:"status"`
+	App     string `json:"app,omitempty"`
+	Host    string `json:"host,omitempty"`
 }
 
 func (s *statusCommand) run(ctx context.Context, ns *docker.Namespace, cmd *cobra.Command, args []string) error {
@@ -80,18 +90,12 @@ func (s *statusCommand) run(ctx context.Context, ns *docker.Namespace, cmd *cobr
 	}
 
 	if s.jsonOutput {
-		out := map[string]interface{}{
-			"healthy": healthy,
-			"detail":  detail,
-			"status":  status,
-		}
+		out := statusResult{Healthy: healthy, Detail: detail, Status: status}
 		if app != nil {
-			out["app"] = app.Settings.Name
-			out["host"] = app.Settings.Host
+			out.App = app.Settings.Name
+			out.Host = app.Settings.Host
 		}
-		b, _ := json.Marshal(out)
-		fmt.Println(string(b))
-		return nil
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(out)
 	}
 
 	if app == nil {

@@ -2,7 +2,6 @@ package command
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -71,17 +70,22 @@ func (r *removeCommand) run(ctx context.Context, ns *docker.Namespace, cmd *cobr
 	})
 	if err != nil {
 		if r.jsonOutput {
-			out, _ := json.Marshal(map[string]string{"error": err.Error(), "status": "error"})
-			fmt.Println(string(out))
+			if encErr := emitJSON(cmd, removeResult{Status: "error", Error: err.Error()}); encErr != nil {
+				return encErr
+			}
 		}
 		return err
 	}
 
 	if r.jsonOutput {
-		out, _ := json.Marshal(map[string]string{"status": "ok"})
-		fmt.Println(string(out))
-		return nil
+		return emitJSON(cmd, removeResult{Status: "ok"})
 	}
 	fmt.Printf("Removed %s\n", host)
 	return nil
+}
+
+// removeResult is the single JSON record for remove --json.
+type removeResult struct {
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
 }

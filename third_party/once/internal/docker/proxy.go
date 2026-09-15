@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/netip"
 	"os"
 	"strconv"
@@ -81,18 +82,15 @@ func (p *Proxy) Boot(ctx context.Context, settings ProxySettings) error {
 	if settings.MetricsPort == 0 {
 		settings.MetricsPort = DefaultMetricsPort
 	}
-	// Omahab patch: handle --proxy-bind loopback (e.g. 127.0.0.1:8080)
-	loopbackBind := ""
-	if v := os.Getenv("OMAHAB_PROXY_BIND"); v != "" {
-		loopbackBind = v
-		portStr := v
-		if strings.Contains(v, ":") {
-			parts := strings.Split(v, ":")
-			portStr = parts[len(parts)-1]
-		}
-		if p, err := strconv.Atoi(portStr); err == nil {
-			settings.HTTPPort = p
-		}
+	// Omahab patch: handle --proxy-bind loopback (e.g. 127.0.0.1:8080).
+	// Only the documented loopback contract is accepted; malformed input
+	// fails instead of silently binding something else.
+	loopbackPort, err := proxyLoopbackPort()
+	if err != nil {
+		return err
+	}
+	if loopbackPort != 0 {
+		settings.HTTPPort = loopbackPort
 	}
 
 	info, err := p.namespace.client.ContainerInspect(ctx, p.containerName(), client.ContainerInspectOptions{})
@@ -116,7 +114,7 @@ func (p *Proxy) Boot(ctx context.Context, settings ProxySettings) error {
 	metricsPortTCP := network.MustParsePort(fmt.Sprintf("%d/tcp", settings.MetricsPort))
 
 	// Omahab loopback: when OMAHAB_PROXY_BIND is set, publish 127.0.0.1:<port>:80 only, no 443
-	isLoopback := loopbackBind != ""
+	isLoopback := loopbackPort != 0
 	exposed := network.PortSet{
 		httpPortTCP:    struct{}{},
 		metricsPortTCP: struct{}{},
@@ -143,7 +141,7 @@ func (p *Proxy) Boot(ctx context.Context, settings ProxySettings) error {
 			ExposedPorts: exposed,
 		},
 		HostConfig: &container.HostConfig{
-			PortBindings: portBindings,
+			PortBindings:  portBindings,
 			RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyAlways},
 			LogConfig:     ContainerLogConfig(),
 			Mounts: []mount.Mount{
@@ -213,6 +211,29 @@ func (p *Proxy) Deploy(ctx context.Context, opts DeployOptions) error {
 
 func (p *Proxy) containerName() string {
 	return p.namespace.name + "-proxy"
+}
+
+// proxyLoopbackPort parses OMAHAB_PROXY_BIND under the documented loopback
+// contract (127.0.0.1:<port> or :<port>). Empty means no loopback bind.
+// Anything else fails: arbitrary host input is never reinterpreted as a
+// different bind address.
+func proxyLoopbackPort() (int, error) {
+	v := strings.TrimSpace(os.Getenv("OMAHAB_PROXY_BIND"))
+	if v == "" {
+		return 0, nil
+	}
+	host, portStr, err := net.SplitHostPort(v)
+	if err != nil {
+		return 0, fmt.Errorf("invalid OMAHAB_PROXY_BIND %q: want 127.0.0.1:<port> or :<port>", v)
+	}
+	if host != "" && host != "127.0.0.1" {
+		return 0, fmt.Errorf("invalid OMAHAB_PROXY_BIND %q: only loopback binds allowed", v)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port <= 0 || port > 65535 {
+		return 0, fmt.Errorf("invalid OMAHAB_PROXY_BIND %q: port must be 1..65535", v)
+	}
+	return port, nil
 }
 
 // Private

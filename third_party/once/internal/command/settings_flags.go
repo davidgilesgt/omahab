@@ -82,7 +82,7 @@ func (f *settingsFlags) buildSettings(image, host string) (docker.ApplicationSet
 	return s, nil
 }
 
-func (f *settingsFlags) applyChanges(cmd *cobra.Command, existing docker.ApplicationSettings, image string) (docker.ApplicationSettings, error) {
+func (f *settingsFlags) applyChanges(cmd *cobra.Command, existing docker.ApplicationSettings, image string, secretsMerged, tlsExternal bool) (docker.ApplicationSettings, error) {
 	s := existing
 
 	s.Image = image
@@ -90,10 +90,10 @@ func (f *settingsFlags) applyChanges(cmd *cobra.Command, existing docker.Applica
 	if cmd.Flags().Changed("host") {
 		s.Host = f.host
 	}
-	if cmd.Flags().Changed("disable-tls") {
+	if cmd.Flags().Changed("disable-tls") || tlsExternal {
 		s.DisableTLS = f.disableTLS
 	}
-	if cmd.Flags().Changed("env") {
+	if cmd.Flags().Changed("env") || secretsMerged {
 		envVars, err := f.parseEnvVars()
 		if err != nil {
 			return s, err

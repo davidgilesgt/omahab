@@ -22,11 +22,11 @@ Applied patches (suitable for upstreaming):
 
 4. **`--secrets-file <path>` — KEY=VAL env injection** (`internal/command/deploy.go`, `internal/command/settings_flags.go`)
    - `deploy` accepts `--secrets-file <path>`.
-   - File is read as `KEY=VAL` lines (trim whitespace, ignore blank/`#` comments, last wins on duplicate), merged into `ApplicationSettings.EnvVars` alongside `--env` (also last wins). File contents are never logged; only the path appears in errors.
+   - File is read as `KEY=VAL` lines (trim whitespace, ignore blank/`#` comments, last wins on duplicate); malformed non-comment lines fail with path and line number. Merged into `ApplicationSettings.EnvVars` alongside `--env` (also last wins). File contents are never logged; only the path appears in errors.
 
 5. **`status --app <name> --json` — machine-readable health** (`internal/command/status.go` (new), `internal/command/root.go`)
    - New `status` command: `once status --app <name> [--proxy-bind <addr>] [--json]`.
-   - Looks up application by `Name` (Omahab slug) or `Host`, then probes via `application.verifyHTTP` or returns `{"healthy":false}` if not found. JSON shape matches `internal/controlplane/once.go` expectation: `{"healthy":bool,"detail":string,"status":string}`.
+   - Looks up application by `Name` (Omahab slug) or `Host`, then reports the observed running state (`healthy` mirrors `Running`; no HTTP probe) or returns `{"healthy":false}` if not found. JSON shape matches `internal/controlplane/once.go` expectation: `{"healthy":bool,"detail":string,"status":string}`.
 
 6. **`undeploy --app <name> --hostname <host> --json` — app removal** (`internal/command/remove.go`, `internal/command/undeploy.go` (alias), `internal/command/root.go`)
    - `remove` (aliased as `undeploy` for Omahab) accepts `--app` and `--hostname` plus `--json`.
