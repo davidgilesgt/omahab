@@ -31,7 +31,6 @@ func ValidateHostname(s string) error {
 // This list is conservative; the installer also validates against evaluated target system users before erasure.
 var reservedUsernames = map[string]bool{
 	"root":              true,
-	"admin":             true,
 	"administrator":     true,
 	"nobody":            true,
 	"daemon":            true,
