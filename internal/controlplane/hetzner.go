@@ -17,7 +17,6 @@ import (
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 // backupSSHPort is the Hetzner Storage Box SSH/SFTP port. The current SFTP
@@ -26,9 +25,16 @@ const backupSSHPort = "23"
 
 // knownHostPatterns lists every known_hosts first-field form that refers to
 // host: the legacy bare form, the JoinHostPort form, and the bracketed
-// OpenSSH form that knownhosts.Line writes for hosts with a port.
+// OpenSSH form written for hosts with a port.
 func knownHostPatterns(host string) []string {
 	return []string{host, net.JoinHostPort(host, backupSSHPort), "[" + host + "]:" + backupSSHPort}
+}
+
+// knownHostLine formats one known_hosts line in OpenSSH form:
+// [host]:port <keytype> <base64>. Brackets disambiguate the port separator
+// for hostnames, IPv4, and IPv6 alike.
+func knownHostLine(host string, key ssh.PublicKey) string {
+	return "[" + host + "]:" + backupSSHPort + " " + strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key)))
 }
 
 func matchesBackupHost(pattern, host string) bool {
@@ -323,7 +329,6 @@ func pinHostKey(path, host string, key ssh.PublicKey) error {
 	if key == nil {
 		return errors.New("no backup host key presented")
 	}
-	qualified := net.JoinHostPort(host, backupSSHPort)
 	var keep []string
 	if data, err := os.ReadFile(path); err == nil {
 		for _, line := range strings.Split(string(data), "\n") {
@@ -346,7 +351,7 @@ func pinHostKey(path, host string, key ssh.PublicKey) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("read known_hosts: %w", err)
 	}
-	keep = append(keep, strings.TrimSpace(knownhosts.Line([]string{qualified}, key)))
+	keep = append(keep, knownHostLine(host, key))
 	if err := os.WriteFile(path, []byte(strings.Join(keep, "\n")+"\n"), 0o600); err != nil {
 		return fmt.Errorf("write known_hosts: %w", err)
 	}
