@@ -1002,6 +1002,12 @@ func translateError(err error) error {
 	if errors.Is(err, workspaces.ErrRunnerUnavailable) {
 		return fmt.Errorf("%w: %v", apitypes.ErrServiceUnavailable, err)
 	}
+	if errors.Is(err, integrations.ErrNotFound) {
+		return fmt.Errorf("%w: %v", apitypes.ErrNotFound, err)
+	}
+	if errors.Is(err, integrations.ErrValidation) || errors.Is(err, integrations.ErrHAInvalid) {
+		return fmt.Errorf("%w: %v", apitypes.ErrValidation, err)
+	}
 	msg := strings.ToLower(err.Error())
 	if strings.Contains(msg, "not found") {
 		return fmt.Errorf("%w: %v", apitypes.ErrNotFound, err)

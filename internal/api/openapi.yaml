@@ -1763,6 +1763,39 @@ paths:
         '200': { description: Removed, content: { application/json: { schema: { type: object, required: [removed], properties: { removed: { type: boolean } } } } } }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/integrations/home-assistant:
+    get:
+      summary: Show Home Assistant connection state
+      description: Admin only. Returns server URL and validation state; the token never appears in responses.
+      operationId: getHomeAssistant
+      responses:
+        '200': { description: Connection state, content: { application/json: { schema: { $ref: '#/components/schemas/HomeAssistant' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    put:
+      summary: Connect Home Assistant
+      description: |
+        Admin only. Validates the server live via hass-cli, stores the long-lived token
+        for the default assistant scope only, and installs the hass-cli Hermes skill
+        (DESIGN §17). The token travels in the request body and never persists elsewhere.
+        Hermes invokes hass-cli directly; AI tools never receive the token.
+      operationId: configureHomeAssistant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConfigureHomeAssistantRequest' }
+      responses:
+        '200': { description: Connected, content: { application/json: { schema: { $ref: '#/components/schemas/HomeAssistant' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    delete:
+      summary: Disconnect Home Assistant
+      description: Admin only. Drops the projected credentials; the installed skill file stays.
+      operationId: removeHomeAssistant
+      responses:
+        '200': { description: Removed, content: { application/json: { schema: { type: object, required: [removed], properties: { removed: { type: boolean } } } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
   /api/v1/projects/{id}/release-token:
     post:
       summary: Issue per-project release token (admin only, never to Forgejo)
@@ -2414,6 +2447,23 @@ components:
         expires_at: { type: string, format: date-time }
         login_url: { type: string, nullable: true }
         code: { type: string, nullable: true }
+
+    HomeAssistant:
+      type: object
+      description: Home Assistant connection state; the token never appears here.
+      required: [status]
+      properties:
+        server_url: { type: string, format: uri }
+        status: { type: string, enum: [not_connected, connected] }
+        last_validated_at: { type: string, format: date-time, nullable: true }
+        updated_at: { type: string, format: date-time, nullable: true }
+
+    ConfigureHomeAssistantRequest:
+      type: object
+      required: [server_url, token]
+      properties:
+        server_url: { type: string, format: uri }
+        token: { type: string, description: Long-lived access token; validated live, then stored in the secret store only }
 
     EmailMessage:
       type: object

@@ -2152,6 +2152,42 @@ func (s *Server) handleRemoveEmailSender(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]any{"removed": true})
 }
 
+// --- home assistant (DESIGN §17) ---
+
+// handleGetHomeAssistant returns the connection state without the token.
+func (s *Server) handleGetHomeAssistant(w http.ResponseWriter, r *http.Request) {
+	ha, err := s.backend.GetHomeAssistant(r.Context())
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, ha)
+}
+
+// handleConfigureHomeAssistant validates live via hass-cli, stores the token
+// in the secret store, and installs the hass-cli Hermes skill. Admin only.
+func (s *Server) handleConfigureHomeAssistant(w http.ResponseWriter, r *http.Request) {
+	var req apitypes.ConfigureHomeAssistantRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	ha, err := s.backend.ConfigureHomeAssistant(r.Context(), req.ServerURL, req.Token)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, ha)
+}
+
+// handleRemoveHomeAssistant disconnects and drops projected credentials.
+func (s *Server) handleRemoveHomeAssistant(w http.ResponseWriter, r *http.Request) {
+	if err := s.backend.RemoveHomeAssistant(r.Context()); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"removed": true})
+}
+
 // handleVerifyCloudflareToken runs the live token check server-side.
 func (s *Server) handleVerifyCloudflareToken(w http.ResponseWriter, r *http.Request) {
 	var req struct {

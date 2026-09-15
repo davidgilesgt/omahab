@@ -284,6 +284,23 @@ type EnrollEmailSenderRequest struct {
 	Email string `json:"email"`
 }
 
+// HomeAssistant is the Home Assistant connection state. The access token
+// never appears here: it lives in the secret store for the default
+// assistant scope only (DESIGN §17).
+type HomeAssistant struct {
+	ServerURL string `json:"server_url,omitempty"`
+	Status string `json:"status"`
+	LastValidatedAt *time.Time `json:"last_validated_at,omitempty"`
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
+}
+
+// ConfigureHomeAssistantRequest connects Home Assistant. The token travels
+// in the body and is validated live via hass-cli before storage.
+type ConfigureHomeAssistantRequest struct {
+	ServerURL string `json:"server_url"`
+	Token string `json:"token"`
+}
+
 // StoragePlacement assigns a filesystem to one volume. volume identifies
 // <bundle-id>:<DataVolume.Name>, "postgresql", or "server-data";
 // fs_uuid:null means the system disk.

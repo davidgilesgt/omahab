@@ -251,6 +251,10 @@ The key never travels in argv: use --api-key-file, --api-key-env, or the prompt.
 }
 
 func readProviderKey(keyFile, keyEnv string) (string, error) {
+	return readSecretKey(keyFile, keyEnv, "api key", "Z.ai API key: ")
+}
+
+func readSecretKey(keyFile, keyEnv, kind, prompt string) (string, error) {
 	if strings.TrimSpace(keyFile) != "" {
 		raw, err := os.ReadFile(strings.TrimSpace(keyFile))
 		if err != nil {
@@ -268,15 +272,15 @@ func readProviderKey(keyFile, keyEnv string) (string, error) {
 		return "", fmt.Errorf("env %s is empty", strings.TrimSpace(keyEnv))
 	}
 	if isNonInteractive() {
-		return "", fmt.Errorf("api key required: use --api-key-file or --api-key-env")
+		return "", fmt.Errorf("%s required: provide it via the file or env flag", kind)
 	}
-	fmt.Print("Z.ai API key: ")
+	fmt.Print(prompt)
 	var key string
 	if _, err := fmt.Scanln(&key); err != nil {
 		return "", err
 	}
 	if strings.TrimSpace(key) == "" {
-		return "", fmt.Errorf("api key is required")
+		return "", fmt.Errorf("%s is required", kind)
 	}
 	return strings.TrimSpace(key), nil
 }

@@ -368,6 +368,10 @@ func (s *Server) buildRouter() chi.Router {
 		r.Post("/api/v1/email/senders", s.withBodyLimit(defaultBodyLimit, s.handleEnrollEmailSender))
 		r.Get("/api/v1/email/senders", s.handleListEmailSenders)
 		r.Delete("/api/v1/email/senders", s.handleRemoveEmailSender)
+		// Home Assistant (DESIGN §17; token never in responses)
+		r.Get("/api/v1/integrations/home-assistant", s.handleGetHomeAssistant)
+		r.Put("/api/v1/integrations/home-assistant", s.withBodyLimit(defaultBodyLimit, s.handleConfigureHomeAssistant))
+		r.Delete("/api/v1/integrations/home-assistant", s.handleRemoveHomeAssistant)
 	})
 
 	// Device-authenticated group — companion + callback relay.

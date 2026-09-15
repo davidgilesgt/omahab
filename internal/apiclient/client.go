@@ -550,6 +550,27 @@ func (c *Client) DisconnectProvider(ctx context.Context, provider string) error 
 	return c.post(ctx, "/providers/"+url.PathEscape(provider)+"/disconnect", map[string]any{}, &out)
 }
 
+func (c *Client) GetHomeAssistant(ctx context.Context) (*apitypes.HomeAssistant, error) {
+	var out apitypes.HomeAssistant
+	if err := c.get(ctx, "/integrations/home-assistant", &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) ConfigureHomeAssistant(ctx context.Context, serverURL, token string) (*apitypes.HomeAssistant, error) {
+	var out apitypes.HomeAssistant
+	if err := c.put(ctx, "/integrations/home-assistant", apitypes.ConfigureHomeAssistantRequest{ServerURL: serverURL, Token: token}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) RemoveHomeAssistant(ctx context.Context) error {
+	var out map[string]any
+	return c.del(ctx, "/integrations/home-assistant", &out)
+}
+
 func (c *Client) VerifyBackup(ctx context.Context, id string) (*domain.Backup, error) {
 	var out domain.Backup
 	if err := c.post(ctx, "/backups/"+url.PathEscape(id)+"/verify", map[string]any{}, &out); err != nil {
