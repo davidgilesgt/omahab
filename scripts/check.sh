@@ -68,7 +68,12 @@ grep -q '"!${stateDir}/maintenance/server"' nix/apps.nix && pass "maintenance se
 # CLI-only /etc paths are out of scope: `omahab install` looks up the live
 # backend on the ISO, and `omahab system upgrade` promotes the machine-local
 # flake source as root — both mandated, neither is daemon runtime state.
-! grep -rn '"/etc/omahab' internal/ cmd/omahabd/ --include='*.go' | grep -v _test | grep -v "config.go:.*DefaultEtcDir" | grep -v "system.go:.*releaseFile" && pass "daemon never writes /etc" || fail_check "daemon /etc write"
+# Narrow exemption (2026-09-16): internal/controlplane/restore_live.go reads
+# /etc/omahab-release (world-readable release pin) to refuse version
+# downgrades during restore validation — a read, not a runtime write, and the
+# database under restore cannot vouch for its own version. Zero tolerance
+# stays for every other /etc reference.
+! grep -rn '"/etc/omahab' internal/ cmd/omahabd/ --include='*.go' | grep -v _test | grep -v "config.go:.*DefaultEtcDir" | grep -v "system.go:.*releaseFile" | grep -v 'restore_live.go:.*ReadFile("/etc/omahab-release")' && pass "daemon never writes /etc" || fail_check "daemon /etc write"
 # Catalog: single-source runtime, no legacy references.
 pat="apps-catalog"; pat+=".json"
 ! grep -rn "$pat" --include="*.go" --include="*.nix" --include="*.sh" --include="*.md" --include="*.json" . 2>/dev/null | grep -q . && pass "no apps-catalog ref" || fail_check "apps-catalog ref present"
