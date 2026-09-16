@@ -104,12 +104,12 @@ in
     databases = [ ];
     quiesce_units = [ "jellyfin.service" ];
   };
-  adguard-home = {
+  technitium = {
     data = [
-      { name = "state"; path = "/var/lib/AdGuardHome"; }
+      { name = "state"; path = "/var/lib/technitium-dns-server"; }
     ];
     databases = [ ];
-    quiesce_units = [ "adguardhome.service" ];
+    quiesce_units = [ "technitium-dns-server.service" ];
   };
   restic-server = {
     data = [

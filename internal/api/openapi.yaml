@@ -427,23 +427,23 @@ paths:
                 properties:
                   imported: { type: integer }
         '404': { $ref: '#/components/responses/NotFound' }
-  /api/v1/adguard/setup:
+  /api/v1/technitium/setup:
     get:
-      summary: AdGuard Home one-time DNS setup
+      summary: Technitium DNS one-time DNS setup
       description: |
         Admin only. Returns LAN addresses, DNS port, the configured upstream
-        (Quad9 by default; the privacy choice stays visible), and DNS query
-        readiness. The initial admin password is returned exactly once, then
-        deleted. Household clients must choose the server LAN address as DNS
+        (Quad9 by default; the privacy choice stays visible), SSO state, and DNS
+        query readiness. The initial admin password is returned exactly once,
+        then deleted. Household clients must choose the server LAN address as DNS
         (usually through their router); the system resolver and DHCP are
         never changed automatically.
-      operationId: getAdGuardSetup
+      operationId: getTechnitiumSetup
       responses:
         '200':
           description: Setup view
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/AdGuardSetup' }
+              schema: { $ref: '#/components/schemas/TechnitiumSetup' }
         '401': { $ref: '#/components/responses/Unauthorized' }
 
   /up:
@@ -2790,7 +2790,7 @@ components:
             hostname being made public (case-insensitive). Requests without a
             matching confirmation are rejected with 400 code confirmation_required.
             Optional and ignored for private/shared targets.
-    AdGuardSetup:
+    TechnitiumSetup:
       type: object
       properties:
         initial_admin_password: { type: string, description: 'Returned exactly once, then deleted' }
@@ -2800,6 +2800,7 @@ components:
         upstream: { type: string }
         dns_ready: { type: boolean }
         dns_detail: { type: string }
+        sso_enabled: { type: boolean }
       additionalProperties: false
 
     CreateSecretRequest:

@@ -1,7 +1,7 @@
 import type {
   AddSSHKeysRequest,
   AddSSHKeysResponse,
-  AdGuardSetup,
+  TechnitiumSetup,
   ApiErrorEnvelope,
   Application,
   Backup,
@@ -177,7 +177,7 @@ export class ApiClient {
       method: "POST",
       body: JSON.stringify({ action, confirm: true }),
     });
-  adguardSetup = () => this.request<AdGuardSetup>("/adguard/setup");
+  technitiumSetup = () => this.request<TechnitiumSetup>("/technitium/setup");
   backups = () => this.list<Backup>("/backups");
   createBackup = (input?: { repository?: string; scopes?: string[] }) =>
     this.request<Backup>("/backups", { method: "POST", body: JSON.stringify(input ?? {}) });

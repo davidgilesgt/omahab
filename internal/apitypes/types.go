@@ -272,10 +272,10 @@ type VerifyCloudflareTokenResult struct {
 // state. Pending senders promote to verified on the first DKIM-passing
 // ingest; only enrolled senders are accepted at the ingestion edge.
 type EmailSender struct {
-	ID string `json:"id"`
-	Email string `json:"email"`
-	Status string `json:"status"`
-	CreatedAt time.Time `json:"created_at"`
+	ID         string     `json:"id"`
+	Email      string     `json:"email"`
+	Status     string     `json:"status"`
+	CreatedAt  time.Time  `json:"created_at"`
 	VerifiedAt *time.Time `json:"verified_at,omitempty"`
 }
 
@@ -288,17 +288,17 @@ type EnrollEmailSenderRequest struct {
 // never appears here: it lives in the secret store for the default
 // assistant scope only (DESIGN §17).
 type HomeAssistant struct {
-	ServerURL string `json:"server_url,omitempty"`
-	Status string `json:"status"`
+	ServerURL       string     `json:"server_url,omitempty"`
+	Status          string     `json:"status"`
 	LastValidatedAt *time.Time `json:"last_validated_at,omitempty"`
-	UpdatedAt time.Time `json:"updated_at,omitempty"`
+	UpdatedAt       time.Time  `json:"updated_at,omitempty"`
 }
 
 // ConfigureHomeAssistantRequest connects Home Assistant. The token travels
 // in the body and is validated live via hass-cli before storage.
 type ConfigureHomeAssistantRequest struct {
 	ServerURL string `json:"server_url"`
-	Token string `json:"token"`
+	Token     string `json:"token"`
 }
 
 // StoragePlacement assigns a filesystem to one volume. volume identifies
@@ -334,10 +334,11 @@ type Operation struct {
 	// Preview describes affected apps/dependents and downtime before confirm.
 	Preview string `json:"preview,omitempty"`
 }
-// AdGuardSetup is the one-time DNS setup view. The initial admin password is
+
+// TechnitiumSetup is the one-time DNS setup view. The initial admin password is
 // returned exactly once, then deleted. LAN/upstream state shows the privacy
 // choice; household clients must choose the server LAN address as DNS.
-type AdGuardSetup struct {
+type TechnitiumSetup struct {
 	InitialAdminPassword string   `json:"initial_admin_password,omitempty"`
 	PasswordShown        bool     `json:"password_shown"`
 	LANAddresses         []string `json:"lan_addresses"`
@@ -345,6 +346,7 @@ type AdGuardSetup struct {
 	Upstream             string   `json:"upstream"`
 	DNSReady             bool     `json:"dns_ready"`
 	DNSDetail            string   `json:"dns_detail,omitempty"`
+	SSOEnabled           bool     `json:"sso_enabled,omitempty"`
 }
 
 // ConnectZAIRequest connects a scoped Z.ai key. Coding Plan use requires
@@ -368,6 +370,7 @@ type ZAIConnection struct {
 	Model        string    `json:"model"`
 	Deployment   string    `json:"deployment"`
 }
+
 // OperationActionRequest drives resume|rollback|dismiss from journal stage.
 type OperationActionRequest struct {
 	Action  string `json:"action"`

@@ -747,7 +747,7 @@ in
           ip6 saddr fc00::/7 tcp dport 8484 accept comment "omahab dashboard ULA"
           ip6 saddr fe80::/10 tcp dport 8484 accept comment "omahab dashboard link-local"
           ''}
-          # Household DNS (AdGuard Home): LAN-only TCP+UDP 53, never a public
+          # Household DNS (Technitium): LAN-only TCP+UDP 53, never a public
           # resolver. Tailnet and container interfaces are refused first;
           # LAN and ULA/link-local sources are admitted; everything else
           # (WAN, guests) falls through to the drop policy. System resolver

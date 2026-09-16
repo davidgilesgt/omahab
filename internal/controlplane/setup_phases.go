@@ -1146,15 +1146,16 @@ func (b *Backend) setupPhaseCoreApps(ctx context.Context) error {
 	// service has started so the syncer client can authenticate.
 	// Best-effort: never fails setup.
 	b.importSyncthingAPIKey(ctx)
-	// AdGuard Home: refuse port-53 conflicts with an actionable message,
-	// then seed/refresh the mutable YAML (LAN binds, Quad9 default for
-	// fresh installs, DHCP off, bcrypt admin shown once via API).
-	if adguardInstalled(ctx, b) {
-		if err := checkAdGuardPortConflict(); err != nil {
+	// Technitium DNS: refuse port-53 conflicts with an actionable message,
+	// then converge via API (Quad9 DoH forwarders, blocklists, loopback web
+	// 127.0.0.1:5380, LAN :53 binds, private-only recursion, default admin
+	// rotation shown once via API).
+	if technitiumInstalled(ctx, b) {
+		if err := checkTechnitiumPortConflict(); err != nil {
 			return err
 		}
-		if err := b.ensureAdGuardHome(ctx); err != nil {
-			return fmt.Errorf("adguard setup: %w", err)
+		if err := b.ensureTechnitium(ctx); err != nil {
+			return fmt.Errorf("technitium setup: %w", err)
 		}
 	}
 	// Default sync folders: obsidian vault (AI-shared notes source) and

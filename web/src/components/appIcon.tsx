@@ -13,7 +13,7 @@ const ICONS: Record<string, LucideIcon> = {
   ntfy: Bell,
   hermes: Sparkles,
   jellyfin: Clapperboard,
-  "adguard-home": ShieldCheck,
+  technitium: ShieldCheck,
 };
 
 // Decorative bundle icon; adjacent app names supply the accessible label.

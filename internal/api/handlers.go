@@ -589,11 +589,10 @@ func (s *Server) handleImportRepoSnapshots(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, map[string]int{"imported": n})
 }
 
-
-// handleGetAdGuardSetup serves the admin one-time DNS setup view. Admin
+// handleGetTechnitiumSetup serves the admin one-time DNS setup view. Admin
 // API/CLI only, never device/Hermes privileges (mounted in the admin group).
-func (s *Server) handleGetAdGuardSetup(w http.ResponseWriter, r *http.Request) {
-	view, err := s.backend.GetAdGuardSetup(r.Context())
+func (s *Server) handleGetTechnitiumSetup(w http.ResponseWriter, r *http.Request) {
+	view, err := s.backend.GetTechnitiumSetup(r.Context())
 	if err != nil {
 		writeError(w, r, err)
 		return

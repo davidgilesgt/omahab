@@ -120,7 +120,7 @@ export interface Operation {
   can_rollback: boolean;
 }
 
-export interface AdGuardSetup {
+export interface TechnitiumSetup {
   initial_admin_password?: string;
   password_shown: boolean;
   lan_addresses: string[];
@@ -128,6 +128,7 @@ export interface AdGuardSetup {
   upstream: string;
   dns_ready: boolean;
   dns_detail?: string;
+  sso_enabled?: boolean;
 }
 
 export interface ControlEvent {

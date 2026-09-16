@@ -433,20 +433,17 @@ in
     systemd.services.jellyfin = gate "jellyfin";
 
     # ----------------------------------------------------------------
-    # AdGuard Home — household DNS filtering on LAN :53. Web UI on 127.0.0.1:3002.
-    # LAN addresses live in generated mutable YAML, not Nix secrets. nftables
-    # admits LAN-only TCP+UDP 53; never a public resolver. Web liveness at `/`
-    # (not /control/status which needs auth); DNS readiness is a separate query.
+    # Technitium DNS — household DNS filtering on LAN :53. Web UI on 127.0.0.1:5380.
+    # DNS forwarders, blocklists, and Pocket ID SSO live in managed state via
+    # omahabd API seeding, not Nix secrets. nftables admits LAN-only TCP+UDP 53;
+    # never a public resolver. Web liveness at `/` on 5380; DNS readiness is a
+    # separate :53 query.
     # ----------------------------------------------------------------
-    services.adguardhome = {
+    services.technitium-dns-server = {
       enable = true;
-      host = "127.0.0.1";
-      port = 3002;
-      mutableSettings = true;
-      allowDHCP = false;
       openFirewall = false;
     };
-    systemd.services.adguardhome = gate "adguard-home";
+    systemd.services.technitium-dns-server = gate "technitium";
 
     # ----------------------------------------------------------------
     # LiteLLM — model gateway. Config rendered by omahabd; its env file
@@ -667,7 +664,7 @@ in
       config.services.forgejo.package
       config.services.syncthing.package
       config.services.jellyfin.package
-      config.services.adguardhome.package
+      config.services.technitium-dns-server.package
       pkgs.devpod
       # Backup / data path: postgres+plugins wrapper (exact service value),
       # restic CLI + rest server, cloudflared tunnel. Small statics.

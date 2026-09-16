@@ -99,10 +99,19 @@ func (b *Backend) setupPhaseOIDC(ctx context.Context) error {
 	}
 	needPaperless := bundleRunning("paperless-ngx")
 	needKarakeep := bundleRunning("karakeep")
+	needTechnitium := bundleRunning("technitium")
+	if !needTechnitium && b.apps != nil {
+		for _, bd := range b.apps.CatalogBundles() {
+			if bd.ID == "technitium" && bd.Default {
+				needTechnitium = true
+				break
+			}
+		}
+	}
 	// LiteLLM is a core bundle installed before this phase, so running
 	// implies installed (same strict check as karakeep/immich/paperless).
 	needLitellm := bundleRunning("litellm")
-	if !needImmich && !needHermes && !needForgejo && !needPaperless && !needKarakeep && !needLitellm {
+	if !needImmich && !needHermes && !needForgejo && !needPaperless && !needKarakeep && !needLitellm && !needTechnitium {
 		return nil
 	}
 
@@ -136,6 +145,35 @@ func (b *Backend) setupPhaseOIDC(ctx context.Context) error {
 		}
 		if err := b.ensureLitellmOIDC(ctx, domainName); err != nil {
 			return err
+		}
+	}
+	if needTechnitium {
+		technitiumCallback := fmt.Sprintf("https://dns.%s/sso/callback", domainName)
+		tClientID, tClientSecret, err := b.pocketClient.EnsureOIDCClient(ctx, "technitium", []string{technitiumCallback})
+		if err != nil {
+			return fmt.Errorf("ensure oidc client technitium: %w", err)
+		}
+		if strings.TrimSpace(tClientID) == "" {
+			return fmt.Errorf("oidc client technitium returned empty clientID")
+		}
+		tClientSecret, err = reuseStoredOIDCSecret(ctx, b.secrets, "technitium_oidc_client_secret", tClientSecret)
+		if err != nil {
+			tClientSecret, err = b.pocketClient.CreateOIDCClientSecret(ctx, tClientID)
+			if err != nil {
+				return fmt.Errorf("technitium oidc client secret: %w", err)
+			}
+		}
+		if err := upsertSecret(ctx, b.secrets, "platform-app", "technitium_oidc_client_id", tClientID); err != nil {
+			return fmt.Errorf("store technitium_oidc_client_id: %w", err)
+		}
+		if err := upsertSecret(ctx, b.secrets, "platform-app", "technitium_oidc_client_secret", tClientSecret); err != nil {
+			return fmt.Errorf("store technitium_oidc_client_secret: %w", err)
+		}
+		if err := b.pocketClient.EnsureOIDCClientGroupAccess(ctx, tClientID, []string{"admins", "members"}); err != nil {
+			return fmt.Errorf("ensure technitium group access: %w", err)
+		}
+		if err := b.ensureTechnitiumSSO(ctx, domainName, tClientID, tClientSecret); err != nil {
+			return fmt.Errorf("ensure technitium sso: %w", err)
 		}
 	}
 	if needHermes {
