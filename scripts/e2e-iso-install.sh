@@ -286,7 +286,7 @@ QEMU_PID="$(cat "$WORKDIR/qemu-test.pid")"
 log "waiting for guest sshd banner"
 ok=0
 for _ in $(seq 1 "$BOOT_TIMEOUT"); do
-  banner="$(timeout 8 bash -c 'exec 3<>/dev/tcp/127.0.0.1/'"$SSH_PORT"' && IFS= read -r -t 5 -u 3 line && printf %s "$line"' 2>/dev/null)"
+  banner="$(timeout 8 bash -c 'exec 3<>/dev/tcp/127.0.0.1/'"$SSH_PORT"' && IFS= read -r -t 5 -u 3 line && printf %s "$line"' 2>/dev/null)" || true
   if [[ "$banner" == SSH-* ]]; then ok=1; break; fi
   sleep 2
 done
@@ -342,7 +342,7 @@ check "panel serves SPA" "$BASE/" -- '<div id="root">'
 # --- Recovery scenario: generate a phrase, confirm it survived the
 # install (kit written), and watch the setup checklist flip recovery_key.
 # LAN placement allows these pre-auth; the phrase itself never hits the log.
-RECOVERY_FP="$(curl -sf -m 15 -X POST "$BASE/api/v1/recovery/generate" | python3 -c 'import json,sys; print(json.load(sys.stdin)["fingerprint"])')"
+RECOVERY_FP="$(curl -sf -m 15 -X POST "$BASE/api/v1/recovery/generate" | python3 -c 'import json,sys; print(json.load(sys.stdin)["fingerprint"])')" || true
 [[ -n "$RECOVERY_FP" ]] || die "FAILED: recovery generate (empty fingerprint)"
 log "ok: recovery generate (fingerprint received)"
 check "recovery confirm (saved_ack)" -X POST -H 'Content-Type: application/json' -d "{\"fingerprint\":\"$RECOVERY_FP\",\"saved_ack\":true}" "$BASE/api/v1/recovery/confirm" -- '"confirmed":true'
