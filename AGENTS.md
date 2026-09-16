@@ -1,5 +1,13 @@
 # Omahab agent notes
 
+## Language — ASD-STE100 only
+- Write all replies to the user only in ASD-STE100 Simplified Technical English.
+- Keep each sentence short (maximum 20 words).
+- Give only one instruction in each sentence.
+- Use only approved words with approved meanings.
+- Do not use idioms, slang, or complex grammar.
+- If a technical word is not in the dictionary, use it only as a proper name or defined technical noun.
+
 ## Build artifacts — dist/ only
 - Every local build artifact lives under `dist/` (gitignored). One spot, no exceptions.
 - ISO: `nix build .#image-iso -o dist/iso` (CI builds `-o result-iso` then stages into `dist/` for release).
