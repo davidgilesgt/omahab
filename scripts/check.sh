@@ -46,6 +46,14 @@ grep -q 'd ${dataDir} 0755 root root' nix/module.nix && pass "data directory exi
 a="omahab"; b="omahabd"; c="omahab-"; c+="cataloggen"
 test ! -f "$ROOT/$a" && test ! -f "$ROOT/$b" && test ! -f "$ROOT/$c" && pass "no root binaries" || fail_check "root binaries present (must not exist at repo root; use nix build)"
 
+# Stray nix result symlinks pin store closures (GBs `nix store gc` can
+# never free). Builds must use `-o dist/...` per AGENTS.md.
+if compgen -G "$ROOT/result*" > /dev/null || test -e "$ROOT/iso-result"; then
+  fail_check "stray nix result symlink at root (use -o dist/...; rm result*)"
+else
+  pass "no root result symlinks"
+fi
+
 # Dockerfile deleted (NixOS closure only).
 test ! -f "$ROOT/Dockerfile" && pass "Dockerfile deleted" || fail_check "Dockerfile present"
 test ! -f "$ROOT/.dockerignore" && pass ".dockerignore deleted" || fail_check ".dockerignore present"

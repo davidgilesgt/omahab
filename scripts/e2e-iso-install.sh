@@ -11,6 +11,9 @@
 # the ISO is rebuilt whenever HEAD moved since the last run (marker file in
 # the workdir). A stale VM or stale ISO across commits is a wrong result.
 #
+# Default-clean: without --keep the guest disk and ephemeral secrets are
+# removed on success AND failure (EXIT trap); only logs stay behind.
+#
 # Usage: scripts/e2e-iso-install.sh [--skip-build] [--keep] [--workdir DIR]
 #   --skip-build   reuse dist/iso when its marker matches HEAD (else rebuild)
 #   --keep         keep the workdir (disk image, logs) after the run
@@ -81,6 +84,11 @@ cleanup() {
   if [[ -n "$TUNNEL_PID" ]] && kill -0 "$TUNNEL_PID" 2>/dev/null; then
     kill "$TUNNEL_PID" 2>/dev/null || true
   fi
+  # Default-clean covers failure too: without --keep, never leave the
+  # multi-GB guest disk or the ephemeral secrets behind. Logs stay.
+  if [[ "$KEEP" -eq 0 ]]; then
+    rm -f "$DISK" "$WORKDIR"/qemu-*.pid "$WORKDIR"/cache.sec "$WORKDIR"/e2e-ssh-key "$WORKDIR"/e2e-ssh-key.pub
+  fi
 }
 trap cleanup EXIT
 
@@ -111,6 +119,19 @@ log "qemu: $QEMU"
 
 HEAD="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 mkdir -p "$WORKDIR"
+
+# --- Host preflight: fail fast instead of dying mid-install with ENOSPC
+# and leaving a half-written multi-GB disk behind.
+avail_mb="$(df -m --output=avail "$WORKDIR" 2>/dev/null | tail -1 | tr -d ' ')"
+if [[ "$avail_mb" =~ ^[0-9]+$ ]] && (( avail_mb < DISK_GB * 1024 )); then
+  die "only ${avail_mb}MiB free under $WORKDIR, want ${DISK_GB}G for the guest disk (free space or lower E2E_DISK_GB)"
+fi
+if command -v free >/dev/null 2>&1; then
+  free_mb="$(free -m | awk '/^Mem:/ {print $7}')"
+  if [[ "$free_mb" =~ ^[0-9]+$ ]] && (( free_mb < MEM_MB )); then
+    log "WARNING: only ${free_mb}MiB RAM available, guest wants ${MEM_MB}MiB; close apps or lower E2E_MEM_MB"
+  fi
+fi
 
 # --- ISO (rebuild on new commits; reuse only when the marker matches HEAD).
 ISO="dist/iso"
@@ -355,7 +376,6 @@ log "phase 2: all probes passed"
 if [[ $KEEP -eq 0 ]]; then
   cleanup
   QEMU_PID=""
-  rm -f "$DISK" "$WORKDIR"/qemu-*.pid "$WORKDIR"/cache.sec "$WORKDIR"/e2e-ssh-key "$WORKDIR"/e2e-ssh-key.pub
   log "workdir cleaned (disk removed); logs kept in $WORKDIR"
 else
   log "kept: $WORKDIR (disk + logs)"
