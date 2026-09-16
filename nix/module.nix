@@ -646,7 +646,7 @@ in
       home = "/home/${cfg.adminUser}";
       shell = pkgs.bash;
       createHome = true;
-      extraGroups = [ "wheel" ];
+      extraGroups = [ "wheel" "systemd-journal" ];
       openssh.authorizedKeys.keys = [ ];
     };
     users.users.root.hashedPassword = "!";
@@ -660,6 +660,15 @@ in
           }
           {
             command = "${cfg.package}/bin/omahab workspace attach *";
+            options = [ "NOPASSWD" ];
+          }
+          # Read-only firewall introspection for SSH diagnostics.
+          {
+            command = "${pkgs.nftables}/bin/nft list *";
+            options = [ "NOPASSWD" ];
+          }
+          {
+            command = "${pkgs.nftables}/bin/nft --handle list *";
             options = [ "NOPASSWD" ];
           }
         ];
