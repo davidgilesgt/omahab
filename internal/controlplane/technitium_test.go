@@ -44,3 +44,33 @@ func TestTechnitiumBlocklistsDefault(t *testing.T) {
 		t.Fatalf("blocklists = %v, want StevenBlack + oisd defaults", lists)
 	}
 }
+
+func TestTechnitiumSSOParamsOpenSignupWithRoleSync(t *testing.T) {
+	p := technitiumSSOParams("omahab.com", "cid", "csecret")
+	if p.Get("ssoAuthority") != "https://id.omahab.com" {
+		t.Fatalf("authority = %q", p.Get("ssoAuthority"))
+	}
+	if p.Get("ssoAllowSignup") != "true" {
+		t.Fatalf("ssoAllowSignup = %q, want true", p.Get("ssoAllowSignup"))
+	}
+	if p.Get("ssoAllowSignupOnlyForMappedUsers") != "false" {
+		t.Fatalf("ssoAllowSignupOnlyForMappedUsers = %q, want false (no mapped-only dead-end)", p.Get("ssoAllowSignupOnlyForMappedUsers"))
+	}
+	got := p.Get("ssoGroupMap")
+	if !strings.Contains(got, "admins:Administrators") || !strings.Contains(got, "members:DNS Administrators") {
+		t.Fatalf("ssoGroupMap = %q, want admins+members role sync", got)
+	}
+	scopes := strings.Split(p.Get("ssoScopes"), "|")
+	for _, want := range []string{"openid", "profile", "email", "groups"} {
+		found := false
+		for _, s := range scopes {
+			if s == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("ssoScopes = %q, missing %q", p.Get("ssoScopes"), want)
+		}
+	}
+}

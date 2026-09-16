@@ -296,6 +296,26 @@ func (b *Backend) ensureTechnitium(ctx context.Context) error {
 	return nil
 }
 
+// technitiumSSOParams renders the Pocket ID OIDC settings for the Technitium
+// console. Signup stays open to every Pocket ID-authenticated user: Pocket ID
+// accounts are enrollment-gated, so an authenticated user is already trusted,
+// while a mapped-only restriction turns IdP group-claim gaps (missing groups
+// scope delivery, unmapped membership) into a dead-end login error. The group
+// map still syncs admins/members to local roles on every login.
+func technitiumSSOParams(domain, clientID, clientSecret string) url.Values {
+	authority := "https://id." + strings.TrimSpace(domain)
+	return url.Values{
+		"ssoEnabled":                       {"true"},
+		"ssoAuthority":                     {authority},
+		"ssoClientId":                      {strings.TrimSpace(clientID)},
+		"ssoClientSecret":                  {strings.TrimSpace(clientSecret)},
+		"ssoScopes":                        {"openid|profile|email|groups"},
+		"ssoAllowSignup":                   {"true"},
+		"ssoAllowSignupOnlyForMappedUsers": {"false"},
+		"ssoGroupMap":                      {"admins:Administrators|members:DNS Administrators"},
+	}
+}
+
 // ensureTechnitiumSSO configures Pocket ID OIDC for the Technitium console.
 // Group map syncs Pocket ID groups to local roles on every login.
 func (b *Backend) ensureTechnitiumSSO(ctx context.Context, domain, clientID, clientSecret string) error {
@@ -307,17 +327,7 @@ func (b *Backend) ensureTechnitiumSSO(ctx context.Context, domain, clientID, cli
 	if err != nil {
 		return err
 	}
-	authority := "https://id." + domain
-	params := url.Values{
-		"ssoEnabled":                       {"true"},
-		"ssoAuthority":                     {authority},
-		"ssoClientId":                      {strings.TrimSpace(clientID)},
-		"ssoClientSecret":                  {strings.TrimSpace(clientSecret)},
-		"ssoScopes":                        {"openid|profile|email|groups"},
-		"ssoAllowSignup":                   {"true"},
-		"ssoAllowSignupOnlyForMappedUsers": {"true"},
-		"ssoGroupMap":                      {"admins:Administrators|members:DNS Administrators"},
-	}
+	params := technitiumSSOParams(domain, clientID, clientSecret)
 	body, err := technitiumCall(ctx, "/api/admin/sso/set", params, token)
 	if err != nil {
 		return err
@@ -329,7 +339,7 @@ func (b *Backend) ensureTechnitiumSSO(ctx context.Context, domain, clientID, cli
 	if v.Status != "ok" {
 		return fmt.Errorf("technitium sso: %s", firstNonEmpty(v.ErrorMessage, v.Status))
 	}
-	log.Printf("technitium: SSO enabled via %s", authority)
+	log.Printf("technitium: SSO enabled via %s", params.Get("ssoAuthority"))
 	return nil
 }
 
