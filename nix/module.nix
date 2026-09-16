@@ -733,6 +733,11 @@ in
           iifname "tailscale0" tcp dport 8484 accept comment "omahab dashboard via tailscale"
           iifname "br-*" ip saddr 172.30.0.2 tcp dport 8484 accept comment "caddy dashboard upstream"
           iifname "tailscale0" tcp dport { 80, 443 } accept comment "caddy https via tailscale"
+          ${lib.optionalString (cfg.placement == "lan") ''
+          tcp dport 8484 ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } accept comment "omahab dashboard LAN"
+          ip6 saddr fc00::/7 tcp dport 8484 accept comment "omahab dashboard ULA"
+          ip6 saddr fe80::/10 tcp dport 8484 accept comment "omahab dashboard link-local"
+          ''}
           # Household DNS (AdGuard Home): LAN-only TCP+UDP 53, never a public
           # resolver. Tailnet and container interfaces are refused first;
           # LAN and ULA/link-local sources are admitted; everything else
@@ -758,6 +763,7 @@ in
           # is the admission boundary.
           tcp dport 8096 drop comment "no direct jellyfin"
           udp dport 8096 drop comment "no direct jellyfin"
+          icmp type { destination-unreachable, time-exceeded, parameter-problem, echo-request } limit rate 10/second accept
           ip6 nexthdr ipv6-icmp icmpv6 type { destination-unreachable, time-exceeded, parameter-problem, echo-request, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } limit rate 20/second accept
         }
       '';
