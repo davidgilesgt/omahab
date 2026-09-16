@@ -304,6 +304,9 @@ in
         # B2: distribution bundle for /dl/* and /install.sh (public on LAN, no auth).
         # Only set if dlPackage is available (flake provides omahab-dl; fallback for standalone use).
         OMAHAB_DL_DIR = let dl = flakePkgs.omahab-dl or null; in if dl != null then "${dl}/share/omahab/dl" else "";
+        # Setup wizard + panel static assets (omahabd SPA fallback). Without
+        # this the daemon is API-only and first-run WebUI setup is unreachable.
+        OMAHAB_WEB_DIR = "${cfg.webPackage}";
         OMAHAB_ADMIN_USER = cfg.adminUser;
         DEVPOD_HOME = "${stateDir}/devpod";
         HOME = "${stateDir}/devpod";

@@ -281,6 +281,10 @@ EOF
             services.omahab.enable = true;
             networking.networkmanager.enable = true;
             networking.wireless.enable = lib.mkForce false;
+            # Serial console: the E2E harness (and headless machines)
+            # only see ttyS0. Without this, phase-2 boot failures are
+            # silent and /up hangs are undiagnosable.
+            boot.kernelParams = [ "console=ttyS0,115200n8" ];
           })
         ];
       };

@@ -61,6 +61,10 @@ CACHE_PORT="${E2E_CACHE_PORT:-8490}"
 MARKER="$WORKDIR/iso-commit"
 QEMU_PID=""
 CACHE_PID=""
+TUNNEL_PID=""
+# Install-time admin password for the test user (also used for the phase-2
+# SSH tunnel; test-only, appears in the serial log like all install I/O).
+E2E_ADMIN_PASS="${E2E_ADMIN_PASS:-e2e-test-pass-01}"
 
 log() { printf '[e2e] %s\n' "$*"; }
 die() { printf '[e2e] FATAL: %s\n' "$*" >&2; exit 1; }
@@ -73,6 +77,9 @@ cleanup() {
   fi
   if [[ -n "$CACHE_PID" ]] && kill -0 "$CACHE_PID" 2>/dev/null; then
     kill "$CACHE_PID" 2>/dev/null || true
+  fi
+  if [[ -n "$TUNNEL_PID" ]] && kill -0 "$TUNNEL_PID" 2>/dev/null; then
+    kill "$TUNNEL_PID" 2>/dev/null || true
   fi
 }
 trap cleanup EXIT
@@ -137,6 +144,16 @@ done
 curl -sf "http://127.0.0.1:$CACHE_PORT/nix-cache-info" >/dev/null || die "binary cache failed to start on $CACHE_PORT"
 log "binary cache serving at http://10.0.2.2:$CACHE_PORT ($CACHE_PUB)"
 
+# --- Ephemeral SSH key for the phase-2 tunnel (guest disables password
+# auth by design). The public half is written into the guest over serial
+# during install; the private half never leaves the workdir.
+SSH_KEY="$WORKDIR/e2e-ssh-key"
+rm -f "$SSH_KEY" "$SSH_KEY.pub"
+ssh-keygen -t ed25519 -N '' -C e2e -f "$SSH_KEY" -q || die "ssh-keygen failed"
+chmod 600 "$SSH_KEY"
+E2E_SSH_PUB="$(cat "$SSH_KEY.pub")"
+[[ -n "$E2E_SSH_PUB" ]] || die "empty ephemeral ssh key"
+
 # --- Fresh VM disk, always (never reuse installed state across runs).
 rm -f "$DISK"
 "$QEMU_IMG" create -f qcow2 "$DISK" "${DISK_GB}G" >/dev/null
@@ -155,12 +172,13 @@ QEMU_PID="$(cat "$WORKDIR/qemu-install.pid")"
 
 SERIAL_LOG="$WORKDIR/serial-install.log"
 INSTALL_EXIT=0
-python3 - "$SERIAL_PORT" "$SERIAL_LOG" "$INSTALL_TIMEOUT" "http://10.0.2.2:$CACHE_PORT" "$CACHE_PUB" <<'PYEOF' || INSTALL_EXIT=$?
+python3 - "$SERIAL_PORT" "$SERIAL_LOG" "$INSTALL_TIMEOUT" "http://10.0.2.2:$CACHE_PORT" "$CACHE_PUB" "$E2E_ADMIN_PASS" "$E2E_SSH_PUB" <<'PYEOF' || INSTALL_EXIT=$?
 import re, socket, sys, time
 
 port, logpath, timeout = int(sys.argv[1]), sys.argv[2], int(sys.argv[3])
-cache_url, cache_pub = sys.argv[4], sys.argv[5]
+cache_url, cache_pub, admin_pass, ssh_pub = sys.argv[4], sys.argv[5], sys.argv[6], sys.argv[7]
 deadline = time.time() + timeout
+
 log = open(logpath, "w", buffering=1)
 
 def connect():
@@ -226,11 +244,12 @@ def run(cmd, timeout_s, expect_exit=None):
 
 read_until(PROMPT, 600)  # autologin root on ttyS0, no password
 run("lsblk -dn -o NAME,TYPE | grep -q vda", 30, expect_exit=0)
-run("umask 077; mkpasswd --method=yescrypt 'e2e-test-pass-01' > /run/pwhash && chmod 600 /run/pwhash", 30, expect_exit=0)
+run(f"umask 077; mkpasswd --method=yescrypt '{admin_pass}' > /run/pwhash && chmod 600 /run/pwhash", 30, expect_exit=0)
+run(f"umask 077; printf '%s\\n' '{ssh_pub}' > /run/e2e-authorized-keys && chmod 600 /run/e2e-authorized-keys", 30, expect_exit=0)
 install_cmd = (
     f"OMAHAB_EXTRA_SUBSTITUTERS={cache_url} "
     f"OMAHAB_EXTRA_TRUSTED_KEYS='{cache_pub}' "
-    "${OMAHAB_INSTALL_DISK:-omahab-install-disk} --disk /dev/vda --hostname e2e --username admin --password-hash-file /run/pwhash --yes"
+    "${OMAHAB_INSTALL_DISK:-omahab-install-disk} --disk /dev/vda --hostname e2e --username admin --password-hash-file /run/pwhash --authorized-keys-file /run/e2e-authorized-keys --yes"
 )
 run(install_cmd, timeout, expect_exit=0)
 s.sendall(b"poweroff\n")
@@ -249,18 +268,48 @@ pkill -F "$WORKDIR/qemu-install.pid" 2>/dev/null && die "guest did not power off
 log "phase 1: installed"
 
 # --- Phase 2: boot the installed system (no ISO), probe the setup flow.
+# Probes travel through an SSH local forward, not the raw SLIRP forward:
+# the guest firewall drops non-tailscale input to 8484 by design, and the
+# tunnel lands on guest loopback exactly like real dashboard access.
+# Password auth uses the install-time test password (serial log only).
 log "phase 2: booting installed system"
 "$QEMU" -enable-kvm -cpu host -m "$MEM_MB" -smp 4 \
   -drive "file=$DISK,format=qcow2,if=virtio" \
   -boot order=c -display none -daemonize \
   -pidfile "$WORKDIR/qemu-test.pid" \
   -serial "file:$WORKDIR/serial-boot.log" \
-  -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$HTTP_PORT-:8484,hostfwd=tcp:127.0.0.1:$SSH_PORT-:22" \
+  -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$SSH_PORT-:22" \
   -device virtio-net-pci,netdev=n0 \
   || die "qemu failed to start (test phase)"
 QEMU_PID="$(cat "$WORKDIR/qemu-test.pid")"
 
+log "waiting for guest sshd banner"
+ok=0
+for _ in $(seq 1 "$BOOT_TIMEOUT"); do
+  banner="$(timeout 8 bash -c 'exec 3<>/dev/tcp/127.0.0.1/'"$SSH_PORT"' && IFS= read -r -t 5 -u 3 line && printf %s "$line"' 2>/dev/null)"
+  if [[ "$banner" == SSH-* ]]; then ok=1; break; fi
+  sleep 2
+done
+# Key-auth tunnel: the guest disables password auth by design, so the
+# ephemeral install-time key is the only way in. The forward lands on
+# guest loopback, which the firewall accepts like real dashboard access.
+# sshd can be sluggish under first-boot load, so retry the handshake.
+ok=0
+for attempt in 1 2 3 4 5; do
+  if [[ -n "$TUNNEL_PID" ]] && kill -0 "$TUNNEL_PID" 2>/dev/null; then kill "$TUNNEL_PID" 2>/dev/null || true; fi
+  setsid ssh -N -i "$SSH_KEY" \
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    -o ExitOnForwardFailure=yes -o ServerAliveInterval=10 -o ConnectTimeout=15 \
+    -L "127.0.0.1:$HTTP_PORT:127.0.0.1:8484" -p "$SSH_PORT" admin@127.0.0.1 &
+  TUNNEL_PID=$!
+  sleep 8
+  if (echo > /dev/tcp/127.0.0.1/$HTTP_PORT) 2>/dev/null && kill -0 "$TUNNEL_PID" 2>/dev/null; then ok=1; break; fi
+  log "tunnel attempt $attempt failed; retrying"
+done
+[[ $ok -eq 1 ]] || die "SSH tunnel never established (see $WORKDIR/serial-boot.log)"
+
 BASE="http://127.0.0.1:$HTTP_PORT"
+log "tunnel up: $BASE via guest loopback"
 log "waiting for $BASE/up"
 ok=0
 for _ in $(seq 1 "$BOOT_TIMEOUT"); do
@@ -290,11 +339,23 @@ check "storage candidates (lsblk on daemon PATH)" "$BASE/api/v1/system/disks" --
 check "control-plane status" "$BASE/api/v1/status" -- 'instance_id'
 check "panel serves SPA" "$BASE/" -- '<div id="root">'
 
+# --- Recovery scenario: generate a phrase, confirm it survived the
+# install (kit written), and watch the setup checklist flip recovery_key.
+# LAN placement allows these pre-auth; the phrase itself never hits the log.
+RECOVERY_FP="$(curl -sf -m 15 -X POST "$BASE/api/v1/recovery/generate" | python3 -c 'import json,sys; print(json.load(sys.stdin)["fingerprint"])')"
+[[ -n "$RECOVERY_FP" ]] || die "FAILED: recovery generate (empty fingerprint)"
+log "ok: recovery generate (fingerprint received)"
+check "recovery confirm (saved_ack)" -X POST -H 'Content-Type: application/json' -d "{\"fingerprint\":\"$RECOVERY_FP\",\"saved_ack\":true}" "$BASE/api/v1/recovery/confirm" -- '"confirmed":true'
+if curl -sf -m 15 "$BASE/api/v1/setup" | python3 -c 'import json,sys; checks = json.load(sys.stdin)["checks"]; sys.exit(0 if any(c["id"] == "recovery_key" and c["status"] == "ok" for c in checks) else 1)'; then
+  log "ok: setup checklist flips recovery_key"
+else
+  die "FAILED: setup checklist flips recovery_key (recovery_key not ok after confirm)"
+fi
 log "phase 2: all probes passed"
 if [[ $KEEP -eq 0 ]]; then
   cleanup
   QEMU_PID=""
-  rm -f "$DISK" "$WORKDIR"/qemu-*.pid "$WORKDIR"/cache.sec
+  rm -f "$DISK" "$WORKDIR"/qemu-*.pid "$WORKDIR"/cache.sec "$WORKDIR"/e2e-ssh-key "$WORKDIR"/e2e-ssh-key.pub
   log "workdir cleaned (disk removed); logs kept in $WORKDIR"
 else
   log "kept: $WORKDIR (disk + logs)"
