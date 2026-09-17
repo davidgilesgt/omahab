@@ -30,11 +30,10 @@ var technitiumBaseURL = "http://127.0.0.1:5380"
 func technitiumBlocklists() []string {
 	return []string{
 		"https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
-		"https://big.oisd.nl/",
+		"https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists-legacy@latest/hosts/pro.txt",
 	}
 }
 
-// lanAddresses returns non-loopback LAN addresses: RFC1918 IPv4 and ULA
 // IPv6. Tailnet, container, link-local and loopback interfaces are excluded.
 // No LAN address means DNS stays awaiting LAN configuration (the web UI
 // keeps running); never fall back to 0.0.0.0.

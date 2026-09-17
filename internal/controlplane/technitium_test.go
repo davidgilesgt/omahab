@@ -40,8 +40,8 @@ func TestTechnitiumBlocklistsDefault(t *testing.T) {
 		t.Fatal("blocklists empty")
 	}
 	joined := strings.Join(lists, ",")
-	if !strings.Contains(joined, "StevenBlack") || !strings.Contains(joined, "oisd") {
-		t.Fatalf("blocklists = %v, want StevenBlack + oisd defaults", lists)
+	if !strings.Contains(joined, "StevenBlack") || !strings.Contains(joined, "hagezi") {
+		t.Fatalf("blocklists = %v, want StevenBlack + HaGeZi Pro hosts", lists)
 	}
 }
 

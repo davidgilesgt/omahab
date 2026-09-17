@@ -173,16 +173,12 @@ function ExposureReview({ resource, item, onClose }: ExposureReviewProps) {
 const INFRASTRUCTURE_BUNDLES: Record<string, true> = { caddy: true, "embedding-worker": true, "restic-server": true };
 
 // First-run guidance shown under matching app rows. Jellyfin keeps admin
-// creation in its private UI (no automatic SSO claim); Technitium points at
-// household DNS onboarding without touching DHCP or the system resolver.
+// creation in its private UI (no automatic SSO claim). Technitium needs none:
+// omahabd pre-completes DNS, blocking, and Pocket ID SSO.
 const BUNDLE_FIRST_RUN: Record<string, { title: string; body: string }> = {
   jellyfin: {
     title: "Finish Jellyfin setup",
     body: "Create the admin account in Jellyfin, then add a media library at /srv/omahab/apps/jellyfin/library. Routed drop files land there automatically.",
-  },
-  technitium: {
-    title: "Household DNS filtering",
-    body: "Point household clients at this server's LAN address as their DNS (usually through the router). Upstream: Quad9. Login via Pocket ID SSO. The system resolver and DHCP are unchanged.",
   },
 };
 
