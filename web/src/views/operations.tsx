@@ -172,13 +172,14 @@ function ExposureReview({ resource, item, onClose }: ExposureReviewProps) {
 // (e.g. Caddy's hostname points at the dashboard, not a Caddy UI).
 const INFRASTRUCTURE_BUNDLES: Record<string, true> = { caddy: true, "embedding-worker": true, "restic-server": true };
 
-// First-run guidance shown under matching app rows. Jellyfin keeps admin
-// creation in its private UI (no automatic SSO claim). Technitium needs none:
-// omahabd pre-completes DNS, blocking, and Pocket ID SSO.
+// First-run guidance shown under matching app rows. Jellyfin signs in
+// through Pocket ID (Flowfin SSO plugin, converged by omahabd); the Media
+// library is created automatically. Technitium needs none: omahabd
+// pre-completes DNS, blocking, and Pocket ID SSO.
 const BUNDLE_FIRST_RUN: Record<string, { title: string; body: string }> = {
   jellyfin: {
-    title: "Finish Jellyfin setup",
-    body: "Create the admin account in Jellyfin, then add a media library at /srv/omahab/apps/jellyfin/library. Routed drop files land there automatically.",
+    title: "Jellyfin signs in with your household account",
+    body: "Use your Pocket ID login; the admins group maps to Jellyfin administrator. The Media library at /srv/omahab/apps/jellyfin/library is created automatically, and routed drop files land there.",
   },
 };
 

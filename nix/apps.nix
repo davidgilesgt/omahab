@@ -62,6 +62,15 @@ let
       num_retries: 0
       fallbacks: []
   '';
+  # Flowfin Community SSO for Jellyfin, stable 4.3.0 (Jellyfin 10.11 ABI).
+  # Flat zip (meta.json + DLLs at top level), symlinked read-only into the
+  # plugins dir below. Provider config is omahabd-rendered config-as-code,
+  # never Nix secrets.
+  jellyfinSSOPlugin = pkgs.fetchzip {
+    url = "https://github.com/Flowfin/jellyfin-plugin-sso/releases/download/4.3.0-stable/community-sso-for-jellyfin_4.3.0.0.zip";
+    hash = "sha256-9ydbm+6qlRnrKlOv7H+ontjBAT3u7EdUujtUPST5b50=";
+    stripRoot = false;
+  };
 
   # Gate a service on omahabd having rendered its env file, and on the
   # absence of maintenance markers. Markers are the boot-time authority;
@@ -141,6 +150,11 @@ in
       "z ${dataDir}/apps/immich/immich.json 0600 immich immich - -"
       "d ${dataDir}/apps/jellyfin 0750 jellyfin jellyfin - -"
       "d ${dataDir}/apps/jellyfin/library 0750 jellyfin jellyfin - -"
+      # Flowfin SSO plugin: read-only store symlink; provider config arrives
+      # via JELLYFIN_SSO_CONFIG_FILE rendered by omahabd (config-as-code).
+      "d ${dataDir}/apps/jellyfin/plugins 0750 jellyfin jellyfin - -"
+      "L+ ${dataDir}/apps/jellyfin/plugins/SSO-Auth - - - - ${jellyfinSSOPlugin}"
+      "d ${dataDir}/apps/jellyfin/sso 0750 jellyfin jellyfin - -"
       # LiteLLM live config (rendered by omahabd, read by the service
       # through the static litellm-cfg group). `d` owns the dir; `C` seeds
       # the empty table once (only if missing, at boot, outside the unit
@@ -430,7 +444,14 @@ in
       dataDir = "${dataDir}/apps/jellyfin";
       openFirewall = false;
     };
-    systemd.services.jellyfin = gate "jellyfin";
+    systemd.services.jellyfin = gate "jellyfin" // {
+      # Flowfin SSO reads its provider document once at server start.
+      # omahabd renders the file (Pocket ID client + secret reference);
+      # an absent file means "not configured", never a failure.
+      serviceConfig.Environment = [
+        "JELLYFIN_SSO_CONFIG_FILE=${dataDir}/apps/jellyfin/sso/providers.json"
+      ];
+    };
 
     # ----------------------------------------------------------------
     # Technitium DNS — household DNS filtering on LAN :53. Web UI on 127.0.0.1:5380.

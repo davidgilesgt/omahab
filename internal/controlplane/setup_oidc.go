@@ -108,10 +108,19 @@ func (b *Backend) setupPhaseOIDC(ctx context.Context) error {
 			}
 		}
 	}
+	needJellyfin := bundleRunning("jellyfin")
+	if !needJellyfin && b.apps != nil {
+		for _, bd := range b.apps.CatalogBundles() {
+			if bd.ID == "jellyfin" && bd.Default {
+				needJellyfin = true
+				break
+			}
+		}
+	}
 	// LiteLLM is a core bundle installed before this phase, so running
 	// implies installed (same strict check as karakeep/immich/paperless).
 	needLitellm := bundleRunning("litellm")
-	if !needImmich && !needHermes && !needForgejo && !needPaperless && !needKarakeep && !needLitellm && !needTechnitium {
+	if !needImmich && !needHermes && !needForgejo && !needPaperless && !needKarakeep && !needLitellm && !needTechnitium && !needJellyfin {
 		return nil
 	}
 
@@ -174,6 +183,14 @@ func (b *Backend) setupPhaseOIDC(ctx context.Context) error {
 		}
 		if err := b.ensureTechnitiumSSO(ctx, domainName, tClientID, tClientSecret); err != nil {
 			return fmt.Errorf("ensure technitium sso: %w", err)
+		}
+	}
+	if needJellyfin {
+		if err := b.ensureJellyfinOIDC(ctx, domainName); err != nil {
+			return err
+		}
+		if err := b.ensureJellyfinSetup(ctx); err != nil {
+			return fmt.Errorf("jellyfin setup: %w", err)
 		}
 	}
 	if needHermes {
