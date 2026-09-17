@@ -23,6 +23,7 @@ const (
 	NativePortNtfy            = 2586
 	NativePortLiteLLM         = 4000
 	NativePortHermes          = 8085 // hermes dashboard on loopback (host-network container)
+	NativePortHindsight       = 8888 // hindsight API on loopback (host-network container)
 )
 
 // NativePort returns the loopback port for a bundle ID, if the bundle is
@@ -52,6 +53,8 @@ func NativePort(bundleID string) (int, bool) {
 		return NativePortLiteLLM, true
 	case "hermes":
 		return NativePortHermes, true
+	case "hindsight":
+		return NativePortHindsight, true
 	default:
 		return 0, false
 	}

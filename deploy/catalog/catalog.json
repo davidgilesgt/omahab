@@ -429,13 +429,52 @@
       "app_path": "/",
       "dependencies": [
         "litellm",
-        "pocket-id"
+        "pocket-id",
+        "hindsight"
       ],
       "units": [
         "docker-hermes.service"
       ],
       "groups": [
         "members",
+        "admins"
+      ]
+    },
+    {
+      "id": "hindsight",
+      "name": "Hindsight",
+      "port": 8888,
+      "default_exposure": "private",
+      "max_exposure": "private",
+      "health_check": {
+        "kind": "http",
+        "path": "/health",
+        "port": 8888
+      },
+      "startup_grace_seconds": 300,
+      "oidc": {
+        "supported": false
+      },
+      "resources": {
+        "memory_mb": 1024
+      },
+      "default": true,
+      "route": "",
+      "app_path": "",
+      "dependencies": [
+        "litellm",
+        "embedding-worker"
+      ],
+      "secret_sources": [
+        "hindsight_db_password",
+        "hindsight_api_key",
+        "hindsight_embedding_key",
+        "hindsight_litellm_key"
+      ],
+      "units": [
+        "docker-hindsight.service"
+      ],
+      "groups": [
         "admins"
       ]
     },

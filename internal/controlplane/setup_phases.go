@@ -689,6 +689,11 @@ func (b *Backend) setupPhaseSecrets(ctx context.Context) error {
 	if len(defaultBundles) == 0 {
 		return nil
 	}
+	if hindsightBundlePresent(defaultBundles) {
+		if err := b.ensureHindsightSecrets(ctx); err != nil {
+			return err
+		}
+	}
 	sourcesSet := map[string]bool{}
 	for _, bd := range defaultBundles {
 		for _, src := range bd.SecretSources {
@@ -789,6 +794,10 @@ func (b *Backend) setupPhaseSecrets(ctx context.Context) error {
 		if src == "hermes_api_server_key" || src == "hermes_mcp_token" {
 			continue
 		}
+		if src == "hindsight_db_password" || src == "hindsight_api_key" || src == "hindsight_embedding_key" || src == "hindsight_litellm_key" {
+			continue
+		}
+		// (hindsight file secrets skipped above; broker holds them)
 		path := filepath.Join(dir, src)
 		if _, err := os.Stat(path); err == nil {
 			// Docker bind-mounts these into the container; PUID 1000 must read them.
@@ -1102,12 +1111,13 @@ func (b *Backend) setupPhaseCoreApps(ctx context.Context) error {
 		}
 		return nil
 	}
-	// Defer woodpecker and hermes to dependent_apps phase after OIDC:
+	// Defer woodpecker, hermes, and hindsight to dependent_apps phase after OIDC:
 	// woodpecker needs the Forgejo OAuth app, hermes needs the OIDC
-	// client_id plus the LiteLLM virtual key in its env.
+	// client_id plus the LiteLLM virtual key in its env, hindsight needs
+	// LiteLLM models and the shared embedding worker before Hermes activates it.
 	coreBundles := make([]apps.Bundle, 0, len(defaultBundles))
 	for _, bd := range defaultBundles {
-		if bd.ID == "woodpecker" || bd.ID == "hermes" {
+		if bd.ID == "woodpecker" || bd.ID == "hermes" || bd.ID == "hindsight" {
 			continue
 		}
 		coreBundles = append(coreBundles, bd)
@@ -1505,6 +1515,9 @@ func (b *Backend) ensureHermesDependentApp(ctx context.Context) error {
 		log.Printf("setup dependent_apps: hermes bundle not found, skipping")
 		return nil
 	}
+	if err := b.ensureHindsightDependentApp(ctx); err != nil {
+		return err
+	}
 	if err := b.ensureHermesLiteLLMKey(ctx); err != nil {
 		return fmt.Errorf("hermes litellm key: %w", err)
 	}
@@ -1520,9 +1533,9 @@ func (b *Backend) ensureHermesDependentApp(ctx context.Context) error {
 		return nil
 	}
 	// Re-render config after install so the running unit picks up the OIDC
-	// client_id (renderHermesConfig restarts docker-hermes).
+	// client_id and Hindsight memory provider (renderHermesConfig restarts docker-hermes).
 	if err := b.renderHermesConfig(ctx, domainName); err != nil {
-		log.Printf("setup dependent_apps: hermes config warn: %s", health.RedactDetail(err.Error()))
+		return err
 	}
 	log.Printf("setup dependent_apps: hermes installed")
 	return nil

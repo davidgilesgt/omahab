@@ -104,8 +104,11 @@ type Backend struct {
 	forgejoExec               func(context.Context, ...string) (string, error)
 	forgejoBaseURLOverride    string
 	forgejoHTTPClientOverride *http.Client
+	// Shared Nomic embedding worker connection (Hindsight).
+	// embeddingSocketPath overrides the default Unix socket path (test seam via Options).
+	embeddingSocketPath string
+	embeddingHTTPClient *http.Client
 }
-
 // Options for New
 type Options struct {
 	Config    config.Config
@@ -115,6 +118,9 @@ type Options struct {
 	// production SystemdRunner (real systemctl + appenv writes). Tests
 	// inject a fake so installs never touch the host service manager.
 	AppsRunner apps.Runner
+	// EmbeddingSocketPath overrides the shared Nomic worker Unix socket.
+	// Empty selects /run/omahab-embedding/embedding.sock. Tests supply a temporary socket.
+	EmbeddingSocketPath string
 }
 
 // New creates backend, ensures migrations, instance, tokens, services.
@@ -152,15 +158,17 @@ func New(ctx context.Context, st *store.Store, opts Options) (*Backend, error) {
 		log.Printf("backend: ensure backup.env: %v", err)
 	}
 	b := &Backend{
-		cfg:        opts.Config,
-		store:      st,
-		db:         st.DB(),
-		version:    opts.Version,
-		startedAt:  opts.StartedAt,
-		masterKey:  mk,
-		apiToken:   tok,
-		appsRunner: opts.AppsRunner,
+		cfg:                 opts.Config,
+		store:               st,
+		db:                  st.DB(),
+		version:             opts.Version,
+		startedAt:           opts.StartedAt,
+		masterKey:           mk,
+		apiToken:            tok,
+		appsRunner:          opts.AppsRunner,
+		embeddingSocketPath: strings.TrimSpace(opts.EmbeddingSocketPath),
 	}
+	b.embeddingHTTPClient = newHindsightEmbeddingClient(b.embeddingSocketPathOrDefault())
 	if b.startedAt.IsZero() {
 		b.startedAt = time.Now().UTC()
 	}

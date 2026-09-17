@@ -180,7 +180,7 @@ export interface User {
   pocket_user_id?: string | null;
 }
 
-export type ModelAliasName = "omahab/fast" | "omahab/balanced" | "omahab/reasoning" | "omahab/summarization" | "omahab/embedding" | "omahab/karakeep";
+export type ModelAliasName = "omahab/fast" | "omahab/balanced" | "omahab/reasoning" | "omahab/summarization" | "omahab/embedding" | "omahab/karakeep" | "omahab/memory";
 
 export interface ModelSetupDeployment {
   id: string;

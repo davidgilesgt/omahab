@@ -597,6 +597,22 @@ in
     };
     systemd.services.docker-hermes = gate "hermes";
     # ----------------------------------------------------------------
+    # Hindsight — local memory API (slim image, PostgreSQL-backed).
+    # Pulls at first start; env rendered by omahabd; host loopback only.
+    # ----------------------------------------------------------------
+    virtualisation.oci-containers.containers.hindsight = {
+      image = "ghcr.io/vectorize-io/hindsight-api@sha256:bc3082ccb514fee1a7f7d66da308ba2c2018e2ea2c739d2341c993e3a3bd91b9";
+      environmentFiles = [ "${appEnv}/hindsight.env" ];
+      extraOptions = [ "--network=host" "--memory=1024m" "--memory-swap=1024m" "--cpus=1" "--stop-timeout=60" ];
+    };
+    systemd.services.docker-hindsight = mkMerge [
+      (gate "hindsight")
+      {
+        after = [ "postgresql.service" "litellm.service" "omahab-embedding-worker.service" ];
+        requires = [ "postgresql.service" ];
+      }
+    ];
+    # ----------------------------------------------------------------
     # Embedding worker — in-repo Python, own hardened unit.
     # ----------------------------------------------------------------
     systemd.services.omahab-embedding-worker = {
@@ -713,7 +729,7 @@ in
     # ----------------------------------------------------------------
     services.postgresql = {
       enable = true;
-      ensureDatabases = [ "litellm" "woodpecker-server" ];
+      ensureDatabases = [ "litellm" "woodpecker-server" "hindsight" ];
       ensureUsers = [
         {
           name = "litellm";
@@ -724,6 +740,10 @@ in
         # password omahabd syncs from the materialized secret at install.
         {
           name = "woodpecker-server";
+          ensureDBOwnership = true;
+        }
+        {
+          name = "hindsight";
           ensureDBOwnership = true;
         }
       ];

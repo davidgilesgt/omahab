@@ -856,7 +856,6 @@ in
       cfg.package
       omahabOncePkg
       restic
-      postgresql
       git
       tailscale
       util-linux
@@ -864,6 +863,6 @@ in
       tmux
     ];
     # home-assistant-cli: omahabd validates Home Assistant live via `hass-cli state list` during connect (DESIGN §17).
-    systemd.services.omahabd.path = [ omahabOncePkg pkgs.tailscale pkgs.docker pkgs.systemd pkgs.restic pkgs.postgresql pkgs.nftables pkgs.util-linux pkgs.rsync pkgs.jq pkgs.home-assistant-cli ];
+    systemd.services.omahabd.path = [ omahabOncePkg pkgs.tailscale pkgs.docker pkgs.systemd pkgs.restic config.services.postgresql.finalPackage pkgs.nftables pkgs.util-linux pkgs.rsync pkgs.jq pkgs.home-assistant-cli ];
   };
 }

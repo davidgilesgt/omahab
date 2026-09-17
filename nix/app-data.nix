@@ -85,6 +85,11 @@ in
     databases = [ ];
     quiesce_units = [ "docker-hermes.service" ];
   };
+  hindsight = {
+    data = [ ];
+    databases = [ "hindsight" ];
+    quiesce_units = [ "docker-hindsight.service" ];
+  };
   ntfy = {
     data = [
       { name = "state"; path = "/var/lib/ntfy-sh"; }
@@ -122,7 +127,7 @@ in
     data = [
       { name = "state"; path = get config.services.postgresql.dataDir "/var/lib/postgresql"; }
     ];
-    databases = [ "forgejo" "woodpecker-server" "immich" "paperless" "litellm" ];
+    databases = [ "forgejo" "woodpecker-server" "immich" "paperless" "litellm" "hindsight" ];
     quiesce_units = [ ];
   };
   server-data = {

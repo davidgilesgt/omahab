@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 import time
 
 import numpy as np
@@ -25,6 +26,7 @@ class EmbeddingWorker:
         self.config = config
         self.models: dict[str, EmbeddingModel] = {}
         self._started_at = time.monotonic()
+        self._infer_lock = threading.Lock()
         # Load models eagerly (fail fast handled by config gate, but double-check)
         for alias, pin in config.models.items():
             model = self._load_model(pin)
@@ -174,7 +176,8 @@ class EmbeddingWorker:
             all_vectors: list[list[float]] = []
             for i in range(0, len(texts), sub_batch):
                 chunk = texts[i : i + sub_batch]
-                vecs = model.embed_texts(chunk)
+                with self._infer_lock:
+                    vecs = model.embed_texts(chunk)
                 # Enforce dimensions and normalization (defensive even if adapter already normalized)
                 for v in vecs:
                     _enforce_vector(v, expected_dims=dims)

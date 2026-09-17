@@ -63,6 +63,9 @@ const (
 	// AliasSummarization is the dedicated remote-summarization alias with
 	// independent provider consent (never borrows omahab/balanced).
 	AliasSummarization = "omahab/summarization"
+	// AliasMemory is the dedicated Hermes memory-processing alias.
+	// Admins map it to an inexpensive external chat model; Luna is recommended.
+	AliasMemory = "omahab/memory"
 )
 
 // ManagedBy values for provider_credentials.managed_by.
@@ -136,6 +139,7 @@ var allowedAliases = map[string]bool{
 	AliasEmbedding:     true,
 	AliasKarakeep:      true,
 	AliasSummarization: true,
+	AliasMemory:        true,
 }
 
 // Rejected substrings for cookie/session exfiltration.
@@ -174,7 +178,7 @@ func SupportedProviders() []string {
 
 // SupportedAliases returns the routed alias list.
 func SupportedAliases() []string {
-	return []string{AliasFast, AliasBalanced, AliasReasoning, AliasEmbedding, AliasKarakeep, AliasSummarization}
+	return []string{AliasFast, AliasBalanced, AliasReasoning, AliasEmbedding, AliasKarakeep, AliasSummarization, AliasMemory}
 }
 
 // IsEntitlementError reports whether err is an entitlement (403) failure distinct from token corruption.

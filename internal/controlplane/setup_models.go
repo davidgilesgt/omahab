@@ -48,6 +48,7 @@ var modelSetupAliases = []string{
 	providers.AliasSummarization,
 	providers.AliasEmbedding,
 	providers.AliasKarakeep,
+	providers.AliasMemory,
 }
 
 func sha256Hex(s string) string {
@@ -841,11 +842,11 @@ func (b *Backend) handoffImport(ctx context.Context) error {
 	b.handoffSetError(ctx, "")
 	return nil
 }
-
 func isHandoffAlias(name string) bool {
 	switch name {
 	case providers.AliasFast, providers.AliasBalanced, providers.AliasReasoning,
-		providers.AliasEmbedding, providers.AliasKarakeep, providers.AliasSummarization:
+		providers.AliasEmbedding, providers.AliasKarakeep, providers.AliasSummarization,
+		providers.AliasMemory:
 		return true
 	}
 	return false

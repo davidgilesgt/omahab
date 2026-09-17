@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -38,7 +39,9 @@ func (b *Backend) ensureHermesLiteLLMKey(ctx context.Context) error {
 			}
 			if inst, err := b.store.Instance(ctx); err == nil {
 				if d := strings.TrimSpace(inst.Domain); d != "" && d != "example.com" && d != "not-configured.invalid" {
-					_ = b.renderHermesConfig(ctx, d)
+					if err := b.renderHermesConfig(ctx, d); err != nil {
+						return err
+					}
 				}
 			}
 			return nil
@@ -67,7 +70,7 @@ func (b *Backend) ensureHermesLiteLLMKey(ctx context.Context) error {
 	if inst, err := b.store.Instance(ctx); err == nil {
 		if d := strings.TrimSpace(inst.Domain); d != "" && d != "example.com" && d != "not-configured.invalid" {
 			if err := b.renderHermesConfig(ctx, d); err != nil {
-				log.Printf("render hermes config: %v", err)
+				return err
 			}
 		}
 	}
@@ -87,6 +90,7 @@ func (b *Backend) renderHermesKeyEnv(ctx context.Context, token string) error {
 	var apiServerKey string
 	var mcpToken string
 	var oidcClientID string
+	var hindsightAPIKey string
 	if b.secrets != nil {
 		if v, err := b.secrets.RevealByName(ctx, "platform-app", "hermes_api_server_key"); err == nil {
 			apiServerKey = strings.TrimSpace(v)
@@ -105,6 +109,12 @@ func (b *Backend) renderHermesKeyEnv(ctx context.Context, token string) error {
 		if v, err := b.secrets.RevealByName(ctx, "platform-app", "hermes_oidc_client_id"); err == nil {
 			oidcClientID = strings.TrimSpace(v)
 		}
+		if v, err := b.secrets.RevealByName(ctx, "platform-app", "hindsight_api_key"); err == nil {
+			hindsightAPIKey = strings.TrimSpace(v)
+		}
+	}
+	if hindsightAPIKey == "" {
+		return fmt.Errorf("hindsight_api_key missing; run Hindsight setup before Hermes memory activation")
 	}
 	kv := map[string]string{
 		"HERMES_UID":            "10000",
@@ -126,6 +136,7 @@ func (b *Backend) renderHermesKeyEnv(ctx context.Context, token string) error {
 		"ANTHROPIC_BASE_URL":    "http://127.0.0.1:4000",
 		"ANTHROPIC_API_KEY":     token,
 		"OMAHAB_MCP_TOKEN":      mcpToken,
+		"HINDSIGHT_API_KEY":     hindsightAPIKey,
 	}
 	if domainName != "" && domainName != "example.com" && domainName != "not-configured.invalid" {
 		kv["HERMES_DASHBOARD_PUBLIC_URL"] = "https://ai." + domainName
@@ -219,6 +230,24 @@ func (b *Backend) renderHermesConfig(ctx context.Context, domainName string) err
 		return fmt.Errorf("mkdir hermes: %w", err)
 	}
 	configPath := filepath.Join(hermesDir, "config.yaml")
+	// Validate existing YAML and Hindsight JSON before replacing either file.
+	if data, err := os.ReadFile(configPath); err == nil && len(data) > 0 {
+		var check map[string]any
+		if err := yaml.Unmarshal(data, &check); err != nil {
+			return fmt.Errorf("invalid existing hermes config: %w", err)
+		}
+	}
+	hindsightDir := filepath.Join(hermesDir, "hindsight")
+	hindsightPath := filepath.Join(hindsightDir, "config.json")
+	if data, err := os.ReadFile(hindsightPath); err == nil && len(data) > 0 {
+		var check map[string]any
+		if err := json.Unmarshal(data, &check); err != nil {
+			return fmt.Errorf("invalid existing hindsight config: %w", err)
+		}
+	}
+	if err := b.renderHindsightProviderJSON(hermesDir); err != nil {
+		return err
+	}
 	desired := map[string]any{
 		"model": map[string]any{
 			"provider": "custom",
@@ -247,6 +276,9 @@ func (b *Backend) renderHermesConfig(ctx context.Context, domainName string) err
 					"Authorization": "Bearer ${OMAHAB_MCP_TOKEN}",
 				},
 			},
+		},
+		"memory": map[string]any{
+			"provider": "hindsight",
 		},
 	}
 	merged := desired
@@ -307,6 +339,74 @@ func (b *Backend) renderHermesConfig(ctx context.Context, domainName string) err
 	defer cancel()
 	cmd := exec.CommandContext(ctx2, "systemctl", "restart", "docker-hermes.service")
 	_ = cmd.Run()
+	return nil
+}
+
+func hindsightManagedJSON() map[string]any {
+	return map[string]any{
+		"mode":                 "local_external",
+		"api_url":              "http://127.0.0.1:8888",
+		"bank_id":              "hermes",
+		"bank_id_template":     "",
+		"memory_mode":          "hybrid",
+		"recall_prefetch_method": "recall",
+		"auto_recall":          true,
+		"recall_sync":          true,
+		"recall_budget":        "low",
+		"recall_max_tokens":    1024,
+		"recall_types":         []any{"world", "experience", "observation"},
+		"auto_retain":          true,
+		"retain_every_n_turns":  1,
+		"retain_async":         true,
+	}
+}
+
+func (b *Backend) renderHindsightProviderJSON(hermesDir string) error {
+	_ = b
+	dir := filepath.Join(hermesDir, "hindsight")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("mkdir hindsight: %w", err)
+	}
+	_ = os.Chown(dir, 10000, 10000)
+	_ = os.Chmod(dir, 0o700)
+	path := filepath.Join(dir, "config.json")
+	merged := hindsightManagedJSON()
+	if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
+		var existing map[string]any
+		if err := json.Unmarshal(data, &existing); err != nil {
+			return fmt.Errorf("invalid existing hindsight config: %w", err)
+		}
+		if existing != nil {
+			delete(existing, "api_key")
+			delete(existing, "apiKey")
+			for k, v := range merged {
+				existing[k] = v
+			}
+			merged = existing
+		}
+	} else {
+		// No existing file: ensure managed map has no token fields.
+		delete(merged, "api_key")
+		delete(merged, "apiKey")
+	}
+	// Ensure token never lands in JSON even if a caller merged it.
+	delete(merged, "api_key")
+	delete(merged, "apiKey")
+	out, err := json.MarshalIndent(merged, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal hindsight config: %w", err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(out, '\n'), 0o600); err != nil {
+		return fmt.Errorf("write hindsight config tmp: %w", err)
+	}
+	_ = os.Chown(tmp, 10000, 10000)
+	_ = os.Chmod(tmp, 0o600)
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("replace hindsight config: %w", err)
+	}
+	_ = os.Chmod(path, 0o600)
 	return nil
 }
 

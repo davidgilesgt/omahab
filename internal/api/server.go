@@ -189,6 +189,13 @@ func (s *Server) buildRouter() chi.Router {
 			r.Handle("/mcp/", s.mcpHandler)
 		})
 	}
+	// Hindsight embeddings adapter (outside bearerAuth, behind dedicated token).
+	// Machine endpoint: dedicated token required even from localhost/LAN.
+	r.Group(func(r chi.Router) {
+		r.Use(s.hindsightEmbeddingAuth)
+		r.Use(requireJSONContentType)
+		r.Post("/api/v1/hindsight/embeddings", s.withBodyLimit(1_000_000, s.handleHindsightEmbeddings))
+	})
 
 	// Authenticated API group (lan placement: LAN + tailnet sources bypass the token).
 	r.Group(func(r chi.Router) {

@@ -2126,7 +2126,7 @@ paths:
       operationId: getUserGroups
       parameters: [{ $ref: '#/components/parameters/IdPath' }]
       responses:
-        '200': { description: Groups, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/Group' } } } } } } }
+        '200': { description: Access, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/Group' } } } } } } }
         '401': { $ref: '#/components/responses/Unauthorized' }
     put:
       summary: Set user groups
@@ -2137,7 +2137,30 @@ paths:
         '204': { description: Updated }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
-
+  /api/v1/hindsight/embeddings:
+    post:
+      summary: Hindsight embeddings adapter (machine endpoint)
+      description: OpenAI-compatible embeddings over the shared local Nomic worker. Machine endpoint with dedicated bearer token; admin and device tokens are rejected. Not for browser use.
+      operationId: createHindsightEmbeddings
+      security:
+        - HindsightEmbeddingAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/HindsightEmbeddingsRequest' }
+      responses:
+        '200':
+          description: Embeddings in input order
+          headers:
+            Cache-Control: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HindsightEmbeddingsResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '503': { $ref: '#/components/responses/Error' }
 components:
   securitySchemes:
     bearerAuth:
@@ -2155,6 +2178,11 @@ components:
       in: header
       name: X-Omahab-Signature
       description: Worker v1 canonical HMAC-SHA256, optionally prefixed with sha256=. Metadata mirror headers are also required.
+    HindsightEmbeddingAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: Dedicated Hindsight embedding token (platform-app/hindsight_embedding_key). Required even from localhost/LAN; admin and device tokens are rejected with 403.
 
   parameters:
     IdPath:
@@ -2233,8 +2261,37 @@ components:
           properties:
             code: { type: string, example: not_found }
             message: { type: string }
-
-    ID: { type: string, description: Opaque stable identifier }
+    HindsightEmbeddingsRequest:
+      type: object
+      required: [model, input]
+      additionalProperties: false
+      properties:
+        model: { type: string, enum: [omahab-embed-english] }
+        input:
+          oneOf:
+            - { type: string, minLength: 1 }
+            - { type: array, minItems: 1, maxItems: 16, items: { type: string, minLength: 1 } }
+        dimensions: { type: [integer, "null"], enum: [768, null] }
+        encoding_format: { type: [string, "null"], enum: [float, base64, null] }
+        user: { type: [string, "null"] }
+    HindsightEmbeddingsResponse:
+      type: object
+      required: [object, model, data]
+      properties:
+        object: { type: string, enum: [list] }
+        model: { type: string, enum: [omahab-embed-english] }
+        data:
+          type: array
+          items:
+            type: object
+            required: [object, index, embedding]
+            properties:
+              object: { type: string, enum: [embedding] }
+              index: { type: integer, minimum: 0 }
+              embedding:
+                oneOf:
+                  - { type: array, items: { type: number } }
+                  - { type: string }
 
     Health: { type: string, enum: [unknown, healthy, degraded, unhealthy] }
     Exposure: { type: string, enum: [private, shared, public] }
@@ -2420,7 +2477,7 @@ components:
       description: Supported omahab alias summary from native metadata, even when missing.
       required: [name, configured, providers]
       properties:
-        name: { type: string, enum: [omahab/fast, omahab/balanced, omahab/reasoning, omahab/summarization, omahab/embedding, omahab/karakeep] }
+        name: { type: string, enum: [omahab/fast, omahab/balanced, omahab/reasoning, omahab/summarization, omahab/embedding, omahab/karakeep, omahab/memory] }
         configured: { type: boolean }
         providers: { type: array, items: { type: string } }
     ModelSetupStatus:
@@ -2919,7 +2976,7 @@ components:
         name: { type: string, minLength: 1, maxLength: 128 }
         owner_kind: { type: string, enum: [hermes, device, harness] }
         owner_id: { type: string, minLength: 1 }
-        scopes: { type: array, items: { type: string, enum: [omahab/fast, omahab/balanced, omahab/reasoning, omahab/summarization, omahab/embedding, omahab/karakeep] } }
+        scopes: { type: array, items: { type: string, enum: [omahab/fast, omahab/balanced, omahab/reasoning, omahab/summarization, omahab/embedding, omahab/karakeep, omahab/memory] } }
         rpm: { type: integer, minimum: 1 }
         tpm: { type: integer, minimum: 1 }
         concurrency: { type: integer, minimum: 1 }

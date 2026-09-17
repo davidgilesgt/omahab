@@ -122,7 +122,8 @@ type BoxId = "ssh" | "tailscale" | "domain" | "cloudflare" | "lan" | "admin" | "
 const BLOCKING: BoxId[] = ["ssh", "tailscale", "domain", "cloudflare", "lan", "admin", "knowledge", "recovery", "backups"];
 
 const REQUIRED_CHAT_ALIASES = ["omahab/fast", "omahab/balanced", "omahab/reasoning"];
-const VISIBLE_SETUP_ALIASES = ["omahab/fast", "omahab/balanced", "omahab/reasoning", "omahab/summarization", "omahab/embedding", "omahab/karakeep"];
+const REQUIRED_MEMORY_ALIAS = "omahab/memory";
+const VISIBLE_SETUP_ALIASES = ["omahab/fast", "omahab/balanced", "omahab/reasoning", "omahab/summarization", "omahab/embedding", "omahab/karakeep", "omahab/memory"];
 
 function ProvidersSetupBox({ status, isLoading, isError, error, onRetry }: { status: ModelSetupStatus | undefined; isLoading: boolean; isError: boolean; error: unknown; onRetry: () => void }) {
   const { client } = useAuth();
@@ -144,6 +145,10 @@ function ProvidersSetupBox({ status, isLoading, isError, error, onRetry }: { sta
   return (
     <div className="form-stack">
       <p>Add a provider and model in LiteLLM, then refresh. Defaults share a credential; edit models and credentials in LiteLLM.</p>
+      <p>Hindsight is the default Hermes memory provider. Configure omahab/memory in LiteLLM, with Luna as the recommended model.</p>
+      <p>Reuse the configured Nomic worker; no external embedding credential is needed. Stored memories stay on this server. External model providers receive conversation content for processing.</p>
+      <p>Users with access to this shared Hermes environment can access its memories. Do not change the embedding model after memories exist without a data migration.</p>
+      <p>Use Refresh models, then Retry automatic setup. This indicator checks model routes; successful automatic setup also requires the ready Nomic worker.</p>
       <div className="setup-actions">
         {status?.management_url ? (
           <a className="button secondary" href={status.management_url} target="_blank" rel="noreferrer">Open LiteLLM</a>
@@ -726,7 +731,7 @@ export function SetupPage() {
   const tailscaleIp = tailscaleQuery.data?.ip ?? "";
   const lanClosed = networkQuery.data?.lan_closed === true;
   const modelAliases = modelsQuery.data?.aliases ?? [];
-  const providersDone = REQUIRED_CHAT_ALIASES.every((name) => modelAliases.some((a) => a.name === name && a.configured));
+  const providersDone = REQUIRED_CHAT_ALIASES.every((name) => modelAliases.some((a) => a.name === name && a.configured)) && modelAliases.some((a) => a.name === REQUIRED_MEMORY_ALIAS && a.configured);
   const doneMap: Record<BoxId, boolean> = {
     ssh: isOk("ssh_keys"),
     tailscale: tailscaleRunning || isOk("tailscale"),
@@ -1025,7 +1030,7 @@ export function SetupPage() {
             </button>
           </div>
         </Box>
-        <Box title="AI providers (optional)" done={doneMap.providers} open={openId === "providers"} onToggle={() => toggle("providers")}>
+        <Box title="AI providers and Hermes memory" done={doneMap.providers} open={openId === "providers"} onToggle={() => toggle("providers")}>
           <ProvidersSetupBox status={modelsQuery.data} isLoading={modelsQuery.isLoading} isError={modelsQuery.isError} error={modelsQuery.error} onRetry={() => void modelsQuery.refetch()} />
         </Box>
         <Box title="Document search" done={doneMap.knowledge} open={openId === "knowledge"} onToggle={() => toggle("knowledge")}>
