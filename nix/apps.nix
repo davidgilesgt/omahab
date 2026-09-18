@@ -68,7 +68,7 @@ let
   # never Nix secrets.
   jellyfinSSOPlugin = pkgs.fetchzip {
     url = "https://github.com/Flowfin/jellyfin-plugin-sso/releases/download/4.3.0-stable/community-sso-for-jellyfin_4.3.0.0.zip";
-    hash = "sha256-9ydbm+6qlRnrKlOv7H+ontjBAT3u7EdUujtUPST5b50=";
+    hash = "sha256-MA4A1+TCMOBErdF5prsI0EaaiQvsB3Y8PYOEoHQt8LI=";
     stripRoot = false;
   };
 
