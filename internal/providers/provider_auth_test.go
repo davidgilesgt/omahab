@@ -2,6 +2,7 @@ package providers
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,7 +38,12 @@ func testAuthDirs(t *testing.T) map[string]string {
 
 // Real device challenge flows to the session; no fake is synthesized.
 func TestAdapterChallengeThenComplete(t *testing.T) {
-	helper := stubHelper(t, `echo '{"event":"challenge","provider":"chatgpt","verification_url":"https://auth.openai.com/codex/device","user_code":"AAAA-1111","expires_at":9999999999}'; sleep 0.2; echo '{"event":"complete","provider":"chatgpt"}'; sleep 30`)
+	// Shell builtins only: the adapter runs helpers with PATH=/usr/bin:/bin,
+	// which is empty in the Nix sandbox, so external sleep is unavailable.
+	// The stub blocks on a sentinel file, so complete can never overtake
+	// the connecting assertion below.
+	release := filepath.Join(t.TempDir(), "release")
+	helper := stubHelper(t, fmt.Sprintf(`echo '{"event":"challenge","provider":"chatgpt","verification_url":"https://auth.openai.com/codex/device","user_code":"AAAA-1111","expires_at":9999999999}'; while [ ! -e %q ]; do :; done; echo '{"event":"complete","provider":"chatgpt"}'`, release))
 	a := NewProviderAuthAdapter(ProviderAuthOptions{HelperPath: helper, AuthDirs: testAuthDirs(t)})
 	defer a.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -54,6 +60,9 @@ func TestAdapterChallengeThenComplete(t *testing.T) {
 	}
 	if sess.Status != OAuthStatusConnecting {
 		t.Fatalf("status = %q", sess.Status)
+	}
+	if err := os.WriteFile(release, []byte("go"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 	// Poll converges to connected once the helper completes.
 	deadline := time.Now().Add(5 * time.Second)
@@ -137,7 +146,9 @@ func TestAdapterMissingHelperFailsClosed(t *testing.T) {
 
 // One subprocess per provider: concurrent starts conflict.
 func TestAdapterOneProcPerProvider(t *testing.T) {
-	helper := stubHelper(t, `echo '{"event":"challenge","provider":"chatgpt","verification_url":"https://auth.openai.com/codex/device","user_code":"X"}'; sleep 30`)
+	// Builtins only (see above): the stub spins until Close reaps it, so the
+	// provider slot stays busy and the conflict below is deterministic.
+	helper := stubHelper(t, `echo '{"event":"challenge","provider":"chatgpt","verification_url":"https://auth.openai.com/codex/device","user_code":"X"}'; while :; do :; done`)
 	a := NewProviderAuthAdapter(ProviderAuthOptions{HelperPath: helper, AuthDirs: testAuthDirs(t)})
 	defer a.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
