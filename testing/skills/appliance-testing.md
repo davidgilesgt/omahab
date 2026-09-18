@@ -1,0 +1,101 @@
+# Appliance testing skill
+
+Use for ISO lifecycle, installed-system testing, enrollment, fixtures,
+exclusive operations, backup, restore, and recovery.
+
+## ISO lifecycle
+
+- Run tests from the repository root with `scripts/e2e-iso-install.sh`.
+- Never substitute `nix run .#vm` or NixOS unit tests for ISO installation.
+- The harness defaults to 6144 MiB RAM, four virtual CPUs, 40 GiB disk.
+- Default ports are HTTP 8485, SSH 2229, serial 4445, binary cache 8490.
+- Each new commit requires a fresh ISO test. The harness recreates the VM
+  disk and rebuilds the ISO when HEAD moved.
+- Never touch the root-level `nixos.qcow2` dev-VM state.
+- All generated test files and build results belong under `dist/`.
+
+## Capacity gate
+
+- Recheck KVM access, free storage, available RAM, required commands
+  (Nix, Python 3, curl, SSH, ssh-keygen, QEMU, qemu-img), and ports.
+- Full application runs use `E2E_MEM_MB=10240` and require at least
+  12288 MiB available host RAM.
+- Use the 6144 MiB floor only for installation checks without the full
+  workload.
+- If capacity is insufficient, stop VM execution until memory is available
+  or a suitable machine is supplied. Continue source accounting and
+  isolated checks meanwhile. Never disable installed applications to hide
+  capacity problems.
+- Run one appliance VM at a time. Agents share it only through separate
+  test objects.
+
+## Interactive harness
+
+- Interactive runs use:
+  `bash scripts/e2e-iso-install.sh --interactive --keep --workdir dist/deep-test/<run-id>/vm`
+  with `E2E_MEM_MB=10240` in the process environment.
+- Wait for `E2E INTERACTIVE READY` and HTTP port 8485.
+- Open `http://127.0.0.1:8485/setup` and confirm recovery is not completed.
+- In interactive mode browser cases own recovery generation and
+  confirmation. The automatic recovery block runs only in standard mode.
+- After the coordinator sends Enter, the harness ends with
+  `E2E INTERACTIVE SESSION ENDED`, not `E2E PASS`.
+- EOF, SIGINT, and SIGTERM trigger process cleanup. No option abandons
+  running processes.
+- `--keep` preserves files for investigation but never orphans processes.
+- Full installer variants extend the same harness with
+  `--interactive-installer`, `--firmware bios|uefi`, `--data-disks 0|1|2`.
+  Defaults remain automatic installation, BIOS, zero data disks.
+
+## Secret-safe enrollment
+
+- Never print credential values during validation or enrollment.
+- Transfer the Tailscale key into guest
+  `/run/omahab-test/tailscale.key` through protected standard input with
+  directory mode `0700` and file mode `0600`.
+- Run `sudo tailscale up --auth-key=file:/run/omahab-test/tailscale.key --timeout=110s`
+  inside the disposable guest. Remove the guest file after enrollment.
+- Generate test identities, passkeys, SSH keys, recovery material,
+  application passwords, and internal tokens through normal setup flows.
+- Keep generated credentials and recovery material in the run `private/`
+  directory (`0700`, files `0600`).
+- Revoke test-generated credentials after the run, including after
+  failures. Never revoke supplied keys or remove the user credential file.
+
+## Fixtures
+
+- Create synthetic fixtures with recorded SHA-256 hashes under the run
+  directory: two images, a short video, a text PDF, a scanned document, a
+  bookmark page, a Markdown note, a small Git project, two releases, a
+  synchronized directory, and a test email attachment.
+- Use unique searchable text containing the run identifier.
+- For upgrades, create healthy and unhealthy release fixtures under
+  `dist/deep-test/<run-id>/upgrade/` and copy them into the guest at
+  `/var/lib/omahab/test-releases/`. Use a distinct test `version` per
+  fixture. Keep application source unchanged.
+
+## Exclusive operations
+
+- Treat application restart, revocation, migration, restore, and network
+  changes as exclusive operations.
+- Stop dependent cases before an exclusive operation begins.
+- Do not run heavy indexing, CI builds, restores, and upgrades together.
+- Use a fresh harness disk for each installation variant.
+- Never run disk-erasure commands on host block devices. Record each
+  scratch-disk identity before permitting a destructive command.
+- Resolve launch URLs from the application API. Do not invent loopback
+  browser links.
+
+## Backup and recovery
+
+- Place the disposable generic restic repository outside backed-up paths
+  at `/var/tmp/omahab-test-backup`.
+- Export the completed encrypted repository into the host run directory
+  before destructive recovery tests.
+- Restore from that copy onto a fresh installed guest for offline recovery
+  proof. This proves generic restic recovery, not Hetzner provisioning.
+- Use supported operation APIs and CLI for storage and restore control.
+- Read current command help and OpenAPI schema before each request. Do not
+  invent request fields or bypass the state machine with database edits.
+- Keep server-configuration recovery offline where `restore_live.go`
+  requires it.

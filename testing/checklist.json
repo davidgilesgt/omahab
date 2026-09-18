@@ -1,0 +1,6598 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "setup.startup.unavailable",
+      "area": "setup",
+      "title": "Show server unavailable state",
+      "covers": [
+        "manual:startup-unavailable"
+      ],
+      "sources": [
+        "web/src/App.tsx",
+        "web/src/components/shell.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Stop the appliance service.",
+        "Open the dashboard URL.",
+        "Observe the status screen."
+      ],
+      "expected": [
+        "The screen shows the server is unreachable.",
+        "A retry control is visible."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "SOURCE_REVIEW"
+      ]
+    },
+    {
+      "id": "setup.startup.retry",
+      "area": "setup",
+      "title": "Retry after server unavailable",
+      "covers": [
+        "manual:startup-retry"
+      ],
+      "sources": [
+        "web/src/App.tsx",
+        "web/src/components/shell.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Stop the service and open the dashboard.",
+        "Press Retry while stopped.",
+        "Start the service and press Retry again."
+      ],
+      "expected": [
+        "Retry while stopped keeps the error state.",
+        "Retry after start loads the dashboard."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "setup.startup.lan-entry",
+      "area": "setup",
+      "title": "Enter through LAN address",
+      "covers": [
+        "manual:startup-lan"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open the dashboard through the LAN URL.",
+        "Confirm no token prompt blocks LAN entry where allowed."
+      ],
+      "expected": [
+        "The dashboard loads on LAN placement.",
+        "VPS placement still requires a token."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "setup.startup.vps-token",
+      "area": "setup",
+      "title": "Enter VPS with panel token",
+      "covers": [
+        "manual:startup-vps"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open the dashboard on VPS placement.",
+        "Enter the panel token when requested."
+      ],
+      "expected": [
+        "A valid token grants access.",
+        "The token is never shown in logs."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "setup.startup.invalid-token",
+      "area": "setup",
+      "title": "Reject invalid panel token",
+      "covers": [
+        "manual:startup-invalid"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open the VPS dashboard.",
+        "Enter an invalid token.",
+        "Retry with the valid token."
+      ],
+      "expected": [
+        "The invalid token is rejected with a clear error.",
+        "The valid token succeeds."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "setup.startup.expired-token",
+      "area": "setup",
+      "title": "Reject expired panel token",
+      "covers": [
+        "manual:startup-expired"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Use an expired token on the login screen.",
+        "Observe the rejection.",
+        "Enter a current token."
+      ],
+      "expected": [
+        "The expired token is rejected.",
+        "The error names expiration, not a generic failure."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "setup.startup.token-fragment",
+      "area": "setup",
+      "title": "Remove token fragment from URL",
+      "covers": [
+        "manual:startup-fragment"
+      ],
+      "sources": [
+        "web/src/api/client.ts",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Complete a token login.",
+        "Check the address bar and history for token remnants."
+      ],
+      "expected": [
+        "No token fragment remains in the URL.",
+        "Reload keeps the session without the token."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "SOURCE_REVIEW"
+      ]
+    },
+    {
+      "id": "setup.seq.ssh",
+      "area": "setup",
+      "title": "Complete setup SSH keys step",
+      "covers": [
+        "manual:setup-seq-ssh"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open the setup flow at /setup.",
+        "Complete the SSH keys step with generated test values.",
+        "Confirm the checklist marks it done."
+      ],
+      "expected": [
+        "The SSH keys step completes without errors.",
+        "The setup state persists after reload."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "setup.seq.tailscale",
+      "area": "setup",
+      "title": "Complete setup Tailscale step",
+      "covers": [
+        "manual:setup-seq-tailscale"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open the setup flow at /setup.",
+        "Complete the Tailscale step with generated test values.",
+        "Confirm the checklist marks it done."
+      ],
+      "expected": [
+        "The Tailscale step completes without errors.",
+        "The setup state persists after reload."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "setup.seq.domain",
+      "area": "setup",
+      "title": "Complete setup Domain step",
+      "covers": [
+        "manual:setup-seq-domain"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open the setup flow at /setup.",
+        "Complete the Domain step with generated test values.",
+        "Confirm the checklist marks it done."
+      ],
+      "expected": [
+        "The Domain step completes without errors.",
+        "The setup state persists after reload."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "setup.seq.cloudflare",
+      "area": "setup",
+      "title": "Complete setup Cloudflare step",
+      "covers": [
+        "manual:setup-seq-cloudflare"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open the setup flow at /setup.",
+        "Complete the Cloudflare step with generated test values.",
+        "Confirm the checklist marks it done."
+      ],
+      "expected": [
+        "The Cloudflare step completes without errors.",
+        "The setup state persists after reload."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "setup.seq.lan-closure",
+      "area": "setup",
+      "title": "Complete setup LAN closure step",
+      "covers": [
+        "manual:setup-seq-lan-closure"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open the setup flow at /setup.",
+        "Complete the LAN closure step with generated test values.",
+        "Confirm the checklist marks it done."
+      ],
+      "expected": [
+        "The LAN closure step completes without errors.",
+        "The setup state persists after reload."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "setup.seq.identity",
+      "area": "setup",
+      "title": "Complete setup Identity step",
+      "covers": [
+        "manual:setup-seq-identity"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open the setup flow at /setup.",
+        "Complete the Identity step with generated test values.",
+        "Confirm the checklist marks it done."
+      ],
+      "expected": [
+        "The Identity step completes without errors.",
+        "The setup state persists after reload."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "setup.seq.providers",
+      "area": "setup",
+      "title": "Complete setup Providers step",
+      "covers": [
+        "manual:setup-seq-providers"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open the setup flow at /setup.",
+        "Complete the Providers step with generated test values.",
+        "Confirm the checklist marks it done."
+      ],
+      "expected": [
+        "The Providers step completes without errors.",
+        "The setup state persists after reload."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "setup.seq.index",
+      "area": "setup",
+      "title": "Complete setup Index step",
+      "covers": [
+        "manual:setup-seq-index"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open the setup flow at /setup.",
+        "Complete the Index step with generated test values.",
+        "Confirm the checklist marks it done."
+      ],
+      "expected": [
+        "The Index step completes without errors.",
+        "The setup state persists after reload."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "setup.seq.recovery",
+      "area": "setup",
+      "title": "Complete setup Recovery step",
+      "covers": [
+        "manual:setup-seq-recovery"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open the setup flow at /setup.",
+        "Complete the Recovery step with generated test values.",
+        "Confirm the checklist marks it done."
+      ],
+      "expected": [
+        "The Recovery step completes without errors.",
+        "The setup state persists after reload."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "setup.seq.backups",
+      "area": "setup",
+      "title": "Complete setup Backups step",
+      "covers": [
+        "manual:setup-seq-backups"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open the setup flow at /setup.",
+        "Complete the Backups step with generated test values.",
+        "Confirm the checklist marks it done."
+      ],
+      "expected": [
+        "The Backups step completes without errors.",
+        "The setup state persists after reload."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "setup.seq.storage",
+      "area": "setup",
+      "title": "Complete setup Storage step",
+      "covers": [
+        "manual:setup-seq-storage"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open the setup flow at /setup.",
+        "Complete the Storage step with generated test values.",
+        "Confirm the checklist marks it done."
+      ],
+      "expected": [
+        "The Storage step completes without errors.",
+        "The setup state persists after reload."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "setup.seq.woodpecker",
+      "area": "setup",
+      "title": "Complete setup Woodpecker step",
+      "covers": [
+        "manual:setup-seq-woodpecker"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open the setup flow at /setup.",
+        "Complete the Woodpecker step with generated test values.",
+        "Confirm the checklist marks it done."
+      ],
+      "expected": [
+        "The Woodpecker step completes without errors.",
+        "The setup state persists after reload."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "setup.recovery.reload",
+      "area": "setup",
+      "title": "Preserve setup across reload",
+      "covers": [
+        "manual:setup-reload"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Complete two setup steps.",
+        "Reload the browser between steps.",
+        "Continue the flow."
+      ],
+      "expected": [
+        "Completed steps stay completed.",
+        "No duplicate resources are created."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "setup.recovery.reconcile",
+      "area": "setup",
+      "title": "Repeat reconciliation safely",
+      "covers": [
+        "manual:setup-reconcile"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Trigger setup reconciliation twice.",
+        "Inspect created DNS, tunnel, and secret resources."
+      ],
+      "expected": [
+        "The second run changes nothing.",
+        "No duplicate tunnels or records appear."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "setup.recovery.daemon-restart",
+      "area": "setup",
+      "title": "Preserve setup across daemon restart",
+      "covers": [
+        "manual:setup-restart"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Complete part of setup.",
+        "Restart the daemon service.",
+        "Reopen setup."
+      ],
+      "expected": [
+        "Completed work is preserved.",
+        "Pending steps resume correctly."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "setup.recovery.no-duplicates",
+      "area": "setup",
+      "title": "Avoid duplicate resources on retry",
+      "covers": [
+        "manual:setup-nodup"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Interrupt a setup action mid-flight.",
+        "Retry the same action.",
+        "List affected resources."
+      ],
+      "expected": [
+        "Exactly one resource exists.",
+        "The UI shows the single current state."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "ssh.paste",
+      "area": "setup",
+      "title": "Paste a test SSH key",
+      "covers": [
+        "manual:ssh-paste"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Paste a generated test public key.",
+        "Save and reopen the key list."
+      ],
+      "expected": [
+        "The key is stored.",
+        "The list shows the key fingerprint."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "ssh.repeat",
+      "area": "setup",
+      "title": "Reject duplicate SSH key",
+      "covers": [
+        "manual:ssh-repeat"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Add a test key.",
+        "Add the same key again."
+      ],
+      "expected": [
+        "The duplicate is rejected or idempotent.",
+        "No second entry appears."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "ssh.github-import",
+      "area": "setup",
+      "title": "Import a test GitHub key",
+      "covers": [
+        "manual:ssh-github"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Import a key from a test GitHub handle.",
+        "Verify it appears in the list."
+      ],
+      "expected": [
+        "The imported key is stored.",
+        "Its source is recorded."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "ssh.invalid",
+      "area": "setup",
+      "title": "Reject invalid SSH key",
+      "covers": [
+        "manual:ssh-invalid"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Submit empty, truncated, and malformed keys.",
+        "Observe each error."
+      ],
+      "expected": [
+        "Each invalid key is rejected.",
+        "Errors name the key problem."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "ssh.protect",
+      "area": "setup",
+      "title": "Protect the final SSH key",
+      "covers": [
+        "manual:ssh-protect"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Complete SSH setup.",
+        "Check file permissions and API responses for private material."
+      ],
+      "expected": [
+        "Private keys never leave the client.",
+        "The API never returns private key values."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API",
+        "SOURCE_REVIEW"
+      ]
+    },
+    {
+      "id": "tailscale.enroll",
+      "area": "setup",
+      "title": "Enroll with supplied auth key",
+      "covers": [
+        "manual:tailscale-enroll"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "tailscale-key"
+      ],
+      "steps": [
+        "Transfer the key to /run/omahab-test/tailscale.key with mode 0600.",
+        "Run tailscale up with file input and 110s timeout.",
+        "Remove the guest key file."
+      ],
+      "expected": [
+        "Enrollment succeeds on a disposable guest.",
+        "The raw key never appears in process arguments."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "tailscale.refresh",
+      "area": "setup",
+      "title": "Refresh browser Tailscale status",
+      "covers": [
+        "manual:tailscale-refresh"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Enroll the guest node.",
+        "Press refresh in the setup UI.",
+        "Compare with the status API."
+      ],
+      "expected": [
+        "The UI shows the enrolled state.",
+        "The API tailnet address matches."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "tailscale.access",
+      "area": "setup",
+      "title": "Prove tailnet access",
+      "covers": [
+        "manual:tailscale-access"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Enroll an isolated test client.",
+        "Open a private route over the tailnet."
+      ],
+      "expected": [
+        "The private route loads on the tailnet.",
+        "Off-tailnet access is denied."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "tailscale.lan-reopen",
+      "area": "setup",
+      "title": "Close and reopen LAN safely",
+      "covers": [
+        "manual:tailscale-lan"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Close LAN access after tailnet enrollment.",
+        "Confirm LAN denial.",
+        "Reopen LAN and confirm access."
+      ],
+      "expected": [
+        "Closure denies LAN while tailnet stays up.",
+        "Reopen restores LAN without new enrollment."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "identity.admin",
+      "area": "identity",
+      "title": "Create admin test user",
+      "covers": [
+        "manual:identity-admin"
+      ],
+      "sources": [
+        "web/src/views/administration.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Create an admin user through People.",
+        "Complete enrollment and passkey setup."
+      ],
+      "expected": [
+        "The admin can open the dashboard.",
+        "The audit shows the creation."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "identity.member",
+      "area": "identity",
+      "title": "Create member test user",
+      "covers": [
+        "manual:identity-member"
+      ],
+      "sources": [
+        "web/src/views/administration.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Create a member user.",
+        "Enroll a passkey and open a permitted app."
+      ],
+      "expected": [
+        "The member reaches permitted resources.",
+        "Restricted admin paths stay denied."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "identity.guest",
+      "area": "identity",
+      "title": "Create guest test user",
+      "covers": [
+        "manual:identity-guest"
+      ],
+      "sources": [
+        "web/src/views/administration.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Create a guest user.",
+        "Verify limited access."
+      ],
+      "expected": [
+        "The guest sees only allowed tiles.",
+        "Other users data stays hidden."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "identity.passkey",
+      "area": "identity",
+      "title": "Enroll passkeys",
+      "covers": [
+        "manual:identity-passkey"
+      ],
+      "sources": [
+        "web/src/views/administration.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Enroll a passkey for each test user.",
+        "Log out and log in with each passkey."
+      ],
+      "expected": [
+        "Each passkey authenticates its owner.",
+        "A passkey never unlocks another account."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "identity.reissue",
+      "area": "identity",
+      "title": "Reissue invitations",
+      "covers": [
+        "manual:identity-reissue"
+      ],
+      "sources": [
+        "web/src/views/administration.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Issue an invitation.",
+        "Reissue before use and test both links."
+      ],
+      "expected": [
+        "Only the current invitation works.",
+        "The older link is invalid."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "identity.disable-enable",
+      "area": "identity",
+      "title": "Disable and enable account",
+      "covers": [
+        "manual:identity-disable"
+      ],
+      "sources": [
+        "web/src/views/administration.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Disable a test member.",
+        "Attempt login, then enable and retry."
+      ],
+      "expected": [
+        "Disabled login fails.",
+        "Enabled login succeeds."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "identity.recover",
+      "area": "identity",
+      "title": "Recover a test account",
+      "covers": [
+        "manual:identity-recover"
+      ],
+      "sources": [
+        "web/src/views/administration.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "recovery-material"
+      ],
+      "steps": [
+        "Start recovery for a locked test account.",
+        "Complete the recovery flow."
+      ],
+      "expected": [
+        "Recovery restores access.",
+        "The recovery event is recorded."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "identity.expiry",
+      "area": "identity",
+      "title": "Expire invitations",
+      "covers": [
+        "manual:identity-expiry"
+      ],
+      "sources": [
+        "web/src/views/administration.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Create an invitation and let it expire.",
+        "Attempt to use the expired link."
+      ],
+      "expected": [
+        "The expired link is rejected.",
+        "The error names expiration."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "recovery.generate",
+      "area": "setup",
+      "title": "Generate recovery phrase in UI",
+      "covers": [
+        "manual:recovery-generate"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Generate a recovery phrase through the UI.",
+        "Observe confirmation requirements."
+      ],
+      "expected": [
+        "The phrase appears once for confirmation.",
+        "The fingerprint is recorded without the phrase in logs."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "recovery.confirm",
+      "area": "setup",
+      "title": "Require saved confirmation",
+      "covers": [
+        "manual:recovery-confirm"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Generate a phrase.",
+        "Attempt confirm without saved acknowledgement, then with it."
+      ],
+      "expected": [
+        "Confirmation without ack fails.",
+        "Confirmation with ack succeeds."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "recovery.retain",
+      "area": "setup",
+      "title": "Retain recovery material safely",
+      "covers": [
+        "manual:recovery-retain"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Store generated material in the run private directory.",
+        "Verify permissions are 0600."
+      ],
+      "expected": [
+        "Material is retained offline.",
+        "No copy sits in shared evidence."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "recovery.reload",
+      "area": "setup",
+      "title": "Reload after recovery setup",
+      "covers": [
+        "manual:recovery-reload"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Confirm recovery.",
+        "Reload setup and check the recovery checklist."
+      ],
+      "expected": [
+        "Recovery shows confirmed.",
+        "No second phrase is required."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "recovery.later",
+      "area": "setup",
+      "title": "Verify later recovery use",
+      "covers": [
+        "manual:recovery-later"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "recovery-material"
+      ],
+      "steps": [
+        "Use retained material on a fresh installed disk.",
+        "Restore server configuration."
+      ],
+      "expected": [
+        "The restored server accepts the material.",
+        "Applications become usable."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "overview.empty",
+      "area": "dashboard",
+      "title": "Show empty overview",
+      "covers": [
+        "manual:overview-empty"
+      ],
+      "sources": [
+        "web/src/views/operations.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open overview on a fresh appliance.",
+        "Observe empty-state guidance."
+      ],
+      "expected": [
+        "Empty states explain the next action.",
+        "No broken links appear."
+      ],
+      "evidence_types": [
+        "BROWSER"
+      ]
+    },
+    {
+      "id": "overview.configured",
+      "area": "dashboard",
+      "title": "Show configured overview",
+      "covers": [
+        "manual:overview-configured"
+      ],
+      "sources": [
+        "web/src/views/operations.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Configure apps and backups.",
+        "Reopen overview."
+      ],
+      "expected": [
+        "Health reflects real service states.",
+        "Backup versus restore status is accurate."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "overview.links",
+      "area": "dashboard",
+      "title": "Open launch links",
+      "covers": [
+        "manual:overview-links"
+      ],
+      "sources": [
+        "web/src/views/operations.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Click each launch link on overview.",
+        "Verify each destination loads."
+      ],
+      "expected": [
+        "Every link reaches its target.",
+        "No link 404s."
+      ],
+      "evidence_types": [
+        "BROWSER"
+      ]
+    },
+    {
+      "id": "overview.health",
+      "area": "dashboard",
+      "title": "Reflect health changes",
+      "covers": [
+        "manual:overview-health"
+      ],
+      "sources": [
+        "web/src/views/operations.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Stop one app dependency exclusively.",
+        "Observe overview health, then restart."
+      ],
+      "expected": [
+        "Health shows the failure with remediation.",
+        "Recovery restores healthy status."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "projects.nodomain",
+      "area": "development",
+      "title": "Show missing-domain guidance",
+      "covers": [
+        "manual:projects-nodomain"
+      ],
+      "sources": [
+        "web/src/views/operations.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open projects without a configured domain.",
+        "Attempt creation."
+      ],
+      "expected": [
+        "Guidance names the missing domain.",
+        "No project is created."
+      ],
+      "evidence_types": [
+        "BROWSER"
+      ]
+    },
+    {
+      "id": "projects.create-valid",
+      "area": "development",
+      "title": "Create valid projects",
+      "covers": [
+        "manual:projects-valid"
+      ],
+      "sources": [
+        "web/src/views/operations.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Create one code and one docs project with valid names.",
+        "Open each project."
+      ],
+      "expected": [
+        "Both projects are created.",
+        "Their kinds are recorded correctly."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "projects.create-invalid",
+      "area": "development",
+      "title": "Reject invalid project creation",
+      "covers": [
+        "manual:projects-invalid"
+      ],
+      "sources": [
+        "web/src/views/operations.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Submit empty, oversized, and illegal names.",
+        "Observe errors and retry valid."
+      ],
+      "expected": [
+        "Invalid names are rejected.",
+        "Valid retry succeeds."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "projects.code-docs",
+      "area": "development",
+      "title": "Distinguish code and docs projects",
+      "covers": [
+        "manual:projects-kinds"
+      ],
+      "sources": [
+        "web/src/views/operations.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Inspect CI and deployment options for each kind.",
+        "Push to the code project."
+      ],
+      "expected": [
+        "Code projects offer CI and releases.",
+        "Docs projects are versioned only."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "projects.releases",
+      "area": "development",
+      "title": "Cut releases",
+      "covers": [
+        "manual:projects-releases"
+      ],
+      "sources": [
+        "web/src/views/operations.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Create two releases for a code project.",
+        "Deploy the second release."
+      ],
+      "expected": [
+        "Both releases are listed.",
+        "The deployed release serves traffic."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "projects.rollback",
+      "area": "development",
+      "title": "Confirm rollback",
+      "covers": [
+        "manual:projects-rollback"
+      ],
+      "sources": [
+        "web/src/views/operations.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Deploy release B over A.",
+        "Roll back to A with confirmation."
+      ],
+      "expected": [
+        "Rollback requires confirmation.",
+        "Traffic returns to A with data intact."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "workspaces.empty",
+      "area": "development",
+      "title": "Show no-project workspace state",
+      "covers": [
+        "manual:workspaces-empty"
+      ],
+      "sources": [
+        "web/src/views/operations.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open workspaces with no projects.",
+        "Observe guidance."
+      ],
+      "expected": [
+        "Guidance names the missing project.",
+        "No workspace is created."
+      ],
+      "evidence_types": [
+        "BROWSER"
+      ]
+    },
+    {
+      "id": "workspaces.create",
+      "area": "development",
+      "title": "Create workspaces",
+      "covers": [
+        "manual:workspaces-create"
+      ],
+      "sources": [
+        "web/src/views/operations.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Create a workspace for a test project.",
+        "Verify it appears in the list."
+      ],
+      "expected": [
+        "The workspace is created.",
+        "Its state is visible."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "workspaces.agents",
+      "area": "development",
+      "title": "Offer both workspace agents",
+      "covers": [
+        "manual:workspaces-agents"
+      ],
+      "sources": [
+        "web/src/views/operations.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Start creation and list offered agents.",
+        "Create one workspace per agent type."
+      ],
+      "expected": [
+        "Both agents are offered.",
+        "Each workspace runs."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "workspaces.attach",
+      "area": "development",
+      "title": "Attach through CLI",
+      "covers": [
+        "manual:workspaces-attach"
+      ],
+      "sources": [
+        "web/src/views/operations.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Create a workspace in the UI.",
+        "Attach through the CLI and run a command."
+      ],
+      "expected": [
+        "Attachment succeeds.",
+        "The command runs in the workspace."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "workspaces.send",
+      "area": "development",
+      "title": "Send bounded input",
+      "covers": [
+        "manual:workspaces-send"
+      ],
+      "sources": [
+        "web/src/views/operations.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Send one synthetic task to a workspace.",
+        "Observe output with turn and time bounds."
+      ],
+      "expected": [
+        "The task executes within bounds.",
+        "Output is visible."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "workspaces.stop",
+      "area": "development",
+      "title": "Confirm workspace stop",
+      "covers": [
+        "manual:workspaces-stop"
+      ],
+      "sources": [
+        "web/src/views/operations.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Request stop and test Cancel, then confirm.",
+        "Verify access is revoked."
+      ],
+      "expected": [
+        "Cancel keeps it running.",
+        "Confirm stops it."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "workspaces.expire",
+      "area": "development",
+      "title": "Expire workspaces",
+      "covers": [
+        "manual:workspaces-expire"
+      ],
+      "sources": [
+        "web/src/views/operations.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Let a test workspace expire or force expiry.",
+        "Attempt to use it."
+      ],
+      "expected": [
+        "Expired workspaces refuse new work.",
+        "The list shows the expired state."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "backups.guidance",
+      "area": "lifecycle",
+      "title": "Show no-repository guidance",
+      "covers": [
+        "manual:backups-guidance"
+      ],
+      "sources": [
+        "web/src/views/operations.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open backups with no repository.",
+        "Observe guidance."
+      ],
+      "expected": [
+        "Guidance names the missing repository.",
+        "No backup starts."
+      ],
+      "evidence_types": [
+        "BROWSER"
+      ]
+    },
+    {
+      "id": "backups.create",
+      "area": "lifecycle",
+      "title": "Create backups",
+      "covers": [
+        "manual:backups-create"
+      ],
+      "sources": [
+        "web/src/views/operations.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Create a backup of known app data.",
+        "Wait for completion."
+      ],
+      "expected": [
+        "The backup completes.",
+        "The snapshot is listed."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "backups.progress",
+      "area": "lifecycle",
+      "title": "Show backup progress",
+      "covers": [
+        "manual:backups-progress"
+      ],
+      "sources": [
+        "web/src/views/operations.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Start a backup and watch progress.",
+        "Reload mid-run."
+      ],
+      "expected": [
+        "Progress is visible.",
+        "Reload preserves the running state."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "backups.failure",
+      "area": "lifecycle",
+      "title": "Report backup failure",
+      "covers": [
+        "manual:backups-failure"
+      ],
+      "sources": [
+        "web/src/views/operations.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Break a disposable repository target exclusively.",
+        "Run a backup."
+      ],
+      "expected": [
+        "The failure is reported with remediation.",
+        "No partial snapshot is marked good."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "backups.verify",
+      "area": "lifecycle",
+      "title": "Verify snapshots",
+      "covers": [
+        "manual:backups-verify"
+      ],
+      "sources": [
+        "web/src/views/operations.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Verify a real snapshot.",
+        "Damage a disposable copy and verify again."
+      ],
+      "expected": [
+        "The good snapshot verifies.",
+        "The damaged copy fails without harming the source."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "backups.status",
+      "area": "lifecycle",
+      "title": "Show recovery status",
+      "covers": [
+        "manual:backups-status"
+      ],
+      "sources": [
+        "web/src/views/operations.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Create and verify a backup.",
+        "Check overview recovery status."
+      ],
+      "expected": [
+        "Status distinguishes backup-created from restore-verified.",
+        "The timestamp is accurate."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "inbox.unread",
+      "area": "dashboard",
+      "title": "Show unread count",
+      "covers": [
+        "manual:inbox-unread"
+      ],
+      "sources": [
+        "web/src/views/operations.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Generate two test events.",
+        "Open the inbox."
+      ],
+      "expected": [
+        "The unread count matches.",
+        "New events appear first."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "inbox.read",
+      "area": "dashboard",
+      "title": "Read events singly and in bulk",
+      "covers": [
+        "manual:inbox-read"
+      ],
+      "sources": [
+        "web/src/views/operations.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Mark one event read.",
+        "Mark all read in bulk."
+      ],
+      "expected": [
+        "Single read clears one item.",
+        "Bulk read clears the remainder."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "inbox.stream",
+      "area": "dashboard",
+      "title": "Reconnect event stream",
+      "covers": [
+        "manual:inbox-stream"
+      ],
+      "sources": [
+        "web/src/views/operations.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open the event stream.",
+        "Interrupt the connection and observe reconnect."
+      ],
+      "expected": [
+        "Reconnection resumes without duplicates.",
+        "No user action repeats."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "inbox.ntfy",
+      "area": "dashboard",
+      "title": "Configure ntfy topics",
+      "covers": [
+        "manual:inbox-ntfy"
+      ],
+      "sources": [
+        "web/src/views/operations.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Configure ntfy for a test topic.",
+        "Deliver a real Omahab event."
+      ],
+      "expected": [
+        "The message arrives with expected content.",
+        "Other topics receive nothing."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "people.groups",
+      "area": "identity",
+      "title": "Change people groups",
+      "covers": [
+        "manual:people-groups"
+      ],
+      "sources": [
+        "web/src/views/administration.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Change a member group.",
+        "Verify effective app access, not just labels."
+      ],
+      "expected": [
+        "Group changes apply to sharing rules.",
+        "Dashboard roles are unaffected as documented."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "people.links",
+      "area": "identity",
+      "title": "Use enrollment links",
+      "covers": [
+        "manual:people-links"
+      ],
+      "sources": [
+        "web/src/views/administration.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Create an enrollment link.",
+        "Open it as a new user."
+      ],
+      "expected": [
+        "The link opens the welcome flow.",
+        "Expired links are rejected."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "people.welcome",
+      "area": "identity",
+      "title": "Show welcome page",
+      "covers": [
+        "manual:people-welcome"
+      ],
+      "sources": [
+        "web/src/views/welcome.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open a valid welcome link.",
+        "Complete passkey enrollment."
+      ],
+      "expected": [
+        "The welcome page loads.",
+        "The new user reaches permitted tiles."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "people.invites",
+      "area": "identity",
+      "title": "Reject invalid invitations",
+      "covers": [
+        "manual:people-invites"
+      ],
+      "sources": [
+        "web/src/views/administration.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Try invalid and expired invitation tokens.",
+        "Observe errors."
+      ],
+      "expected": [
+        "Both are rejected with clear reasons.",
+        "No account is created."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "people.ssh",
+      "area": "identity",
+      "title": "Control SSH keys per user",
+      "covers": [
+        "manual:people-ssh"
+      ],
+      "sources": [
+        "web/src/views/administration.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Add and remove a user SSH key.",
+        "Verify login effects."
+      ],
+      "expected": [
+        "Added keys work.",
+        "Removed keys stop working."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "toolenv.create",
+      "area": "dashboard",
+      "title": "Create tool variables",
+      "covers": [
+        "manual:toolenv-create"
+      ],
+      "sources": [
+        "web/src/views/tool-environment.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Create a test variable.",
+        "Verify a real test client receives it."
+      ],
+      "expected": [
+        "Creation succeeds.",
+        "The client sees the new value."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "toolenv.rotate",
+      "area": "dashboard",
+      "title": "Rotate tool variables",
+      "covers": [
+        "manual:toolenv-rotate"
+      ],
+      "sources": [
+        "web/src/views/tool-environment.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Rotate a variable value.",
+        "Reconnect a test client."
+      ],
+      "expected": [
+        "Rotation applies on reconnect.",
+        "Diagnostics show names only."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "toolenv.delete",
+      "area": "dashboard",
+      "title": "Delete tool variables",
+      "covers": [
+        "manual:toolenv-delete"
+      ],
+      "sources": [
+        "web/src/views/tool-environment.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Delete a test variable.",
+        "Reconnect the client."
+      ],
+      "expected": [
+        "Deletion removes it from clients.",
+        "No stale value remains."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "toolenv.reject",
+      "area": "dashboard",
+      "title": "Reject reserved names",
+      "covers": [
+        "manual:toolenv-reject"
+      ],
+      "sources": [
+        "web/src/views/tool-environment.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Submit reserved and malformed names.",
+        "Observe errors."
+      ],
+      "expected": [
+        "Reserved names are rejected.",
+        "Malformed names are rejected."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "toolenv.effects",
+      "area": "dashboard",
+      "title": "Verify effects without revealing values",
+      "covers": [
+        "manual:toolenv-effects"
+      ],
+      "sources": [
+        "web/src/views/tool-environment.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "List variables through the API.",
+        "Inspect responses and diagnostics."
+      ],
+      "expected": [
+        "Metadata never includes values.",
+        "Effects are observable in clients."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "devices.enroll",
+      "area": "companion",
+      "title": "Enroll companion devices",
+      "covers": [
+        "manual:devices-enroll"
+      ],
+      "sources": [
+        "web/src/views/devices.tsx",
+        "companion/PROTOCOL.md"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Create an enrollment code.",
+        "Claim it from an isolated client."
+      ],
+      "expected": [
+        "The device appears in the list.",
+        "The code cannot be reused."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "devices.status",
+      "area": "companion",
+      "title": "Show device status",
+      "covers": [
+        "manual:devices-status"
+      ],
+      "sources": [
+        "web/src/views/devices.tsx",
+        "companion/PROTOCOL.md"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Enroll a device.",
+        "Check status, version, and backup age."
+      ],
+      "expected": [
+        "Status is accurate.",
+        "Version mismatch is flagged."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "devices.oauth",
+      "area": "companion",
+      "title": "Gate device OAuth permission",
+      "covers": [
+        "manual:devices-oauth"
+      ],
+      "sources": [
+        "web/src/views/devices.tsx",
+        "companion/PROTOCOL.md"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Deny OAuth for a device and attempt login.",
+        "Allow and retry."
+      ],
+      "expected": [
+        "Denied login fails.",
+        "Allowed login succeeds."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "devices.revoke",
+      "area": "companion",
+      "title": "Revoke devices",
+      "covers": [
+        "manual:devices-revoke"
+      ],
+      "sources": [
+        "web/src/views/devices.tsx",
+        "companion/PROTOCOL.md"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Revoke one device specifically.",
+        "Verify other devices keep access."
+      ],
+      "expected": [
+        "Revocation is device-specific.",
+        "Revoked tokens stop working."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "devices.invalid",
+      "area": "companion",
+      "title": "Reject bad enrollment codes",
+      "covers": [
+        "manual:devices-invalid"
+      ],
+      "sources": [
+        "web/src/views/devices.tsx",
+        "companion/PROTOCOL.md"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Try invalid, expired, and repeated codes.",
+        "Observe errors."
+      ],
+      "expected": [
+        "Each bad code is rejected.",
+        "No device is created."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "devices.isolation",
+      "area": "companion",
+      "title": "Isolate device tokens",
+      "covers": [
+        "manual:devices-isolation"
+      ],
+      "sources": [
+        "web/src/views/devices.tsx",
+        "companion/PROTOCOL.md"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Use a device token on an admin route.",
+        "Use one device credential for another device workspace."
+      ],
+      "expected": [
+        "Admin routes reject device tokens.",
+        "Cross-device access is denied."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "sync.empty",
+      "area": "companion",
+      "title": "Show empty sync list",
+      "covers": [
+        "manual:sync-empty"
+      ],
+      "sources": [
+        "web/src/views/administration.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open sync with no folders.",
+        "Observe guidance."
+      ],
+      "expected": [
+        "Empty guidance is shown.",
+        "Creation is offered."
+      ],
+      "evidence_types": [
+        "BROWSER"
+      ]
+    },
+    {
+      "id": "sync.create",
+      "area": "companion",
+      "title": "Create sync folders",
+      "covers": [
+        "manual:sync-create"
+      ],
+      "sources": [
+        "web/src/views/administration.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Create a folder with a valid path.",
+        "Verify it appears."
+      ],
+      "expected": [
+        "Creation succeeds.",
+        "The path is recorded."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "sync.invalid",
+      "area": "companion",
+      "title": "Reject bad sync paths",
+      "covers": [
+        "manual:sync-invalid"
+      ],
+      "sources": [
+        "web/src/views/administration.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Submit duplicate, Git, traversal, and invalid paths.",
+        "Observe errors."
+      ],
+      "expected": [
+        "Each bad path is rejected.",
+        "Valid folders are unchanged."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "sync.sharing",
+      "area": "companion",
+      "title": "Change AI sharing",
+      "covers": [
+        "manual:sync-sharing"
+      ],
+      "sources": [
+        "web/src/views/administration.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Toggle AI sharing on a folder.",
+        "Verify retrieval effects."
+      ],
+      "expected": [
+        "Sharing changes apply.",
+        "Unshared data stays out of retrieval."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "sync.observed",
+      "area": "companion",
+      "title": "Observe real synchronization",
+      "covers": [
+        "manual:sync-observed"
+      ],
+      "sources": [
+        "web/src/views/administration.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Write a fixture on one enrolled client.",
+        "Read it on a second client and compare hashes."
+      ],
+      "expected": [
+        "Content synchronizes.",
+        "Hashes match."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "ai.link",
+      "area": "ai",
+      "title": "Open assistant link",
+      "covers": [
+        "manual:ai-link"
+      ],
+      "sources": [
+        "web/src/views/knowledge.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open the assistant from the dashboard.",
+        "Verify the Hermes route loads."
+      ],
+      "expected": [
+        "The link reaches the assistant.",
+        "Login is required where configured."
+      ],
+      "evidence_types": [
+        "BROWSER"
+      ]
+    },
+    {
+      "id": "ai.index",
+      "area": "ai",
+      "title": "Choose index options",
+      "covers": [
+        "manual:ai-index"
+      ],
+      "sources": [
+        "web/src/views/knowledge.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Change index choices and save.",
+        "Reload and verify persistence."
+      ],
+      "expected": [
+        "Save feedback confirms the change.",
+        "Reload preserves the choice."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "ai.consent",
+      "area": "ai",
+      "title": "Grant and revoke consent",
+      "covers": [
+        "manual:ai-consent"
+      ],
+      "sources": [
+        "web/src/views/knowledge.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Grant consent and retrieve permitted data.",
+        "Revoke and repeat retrieval."
+      ],
+      "expected": [
+        "Granted retrieval includes allowed data.",
+        "Revoked retrieval excludes it."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "ai.mcp-rotate",
+      "area": "ai",
+      "title": "Rotate MCP token",
+      "covers": [
+        "manual:ai-mcp"
+      ],
+      "sources": [
+        "web/src/views/knowledge.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Rotate the Hermes MCP token.",
+        "Verify old token rejection and new token use."
+      ],
+      "expected": [
+        "Old tokens stop working.",
+        "New tokens work."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "doctor.healthy",
+      "area": "dashboard",
+      "title": "Show healthy doctor",
+      "covers": [
+        "manual:doctor-healthy"
+      ],
+      "sources": [
+        "web/src/views/doctor.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open doctor on a healthy appliance.",
+        "Run the checks."
+      ],
+      "expected": [
+        "All checks pass.",
+        "The report copies without secrets."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "doctor.failure",
+      "area": "dashboard",
+      "title": "Detect injected failure",
+      "covers": [
+        "manual:doctor-failure"
+      ],
+      "sources": [
+        "web/src/views/doctor.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Stop one dependency exclusively.",
+        "Run doctor and observe remediation."
+      ],
+      "expected": [
+        "The failure is identified.",
+        "Remediation names a usable next action."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "doctor.rerun",
+      "area": "dashboard",
+      "title": "Rerun after repair",
+      "covers": [
+        "manual:doctor-rerun"
+      ],
+      "sources": [
+        "web/src/views/doctor.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Repair the dependency.",
+        "Rerun doctor."
+      ],
+      "expected": [
+        "Checks return to healthy.",
+        "The copied report stays sanitized."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "nav.sidebar",
+      "area": "dashboard",
+      "title": "Use every sidebar item",
+      "covers": [
+        "manual:nav-sidebar"
+      ],
+      "sources": [
+        "web/src/App.tsx",
+        "web/src/components/shell.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Click every sidebar item.",
+        "Verify each destination loads."
+      ],
+      "expected": [
+        "All items load.",
+        "No item 404s."
+      ],
+      "evidence_types": [
+        "BROWSER"
+      ]
+    },
+    {
+      "id": "nav.quick",
+      "area": "dashboard",
+      "title": "Use quick navigation",
+      "covers": [
+        "manual:nav-quick"
+      ],
+      "sources": [
+        "web/src/App.tsx",
+        "web/src/components/shell.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Use quick navigation to each section.",
+        "Verify focus and URL."
+      ],
+      "expected": [
+        "Destinations match the selection.",
+        "Focus moves sensibly."
+      ],
+      "evidence_types": [
+        "BROWSER"
+      ]
+    },
+    {
+      "id": "nav.deep",
+      "area": "dashboard",
+      "title": "Open deep links",
+      "covers": [
+        "manual:nav-deep"
+      ],
+      "sources": [
+        "web/src/App.tsx",
+        "web/src/components/shell.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open deep links to each section directly.",
+        "Reload each."
+      ],
+      "expected": [
+        "Deep links load.",
+        "Reload preserves state."
+      ],
+      "evidence_types": [
+        "BROWSER"
+      ]
+    },
+    {
+      "id": "nav.back",
+      "area": "dashboard",
+      "title": "Use Back correctly",
+      "covers": [
+        "manual:nav-back"
+      ],
+      "sources": [
+        "web/src/App.tsx",
+        "web/src/components/shell.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Navigate across sections.",
+        "Use Back and forward."
+      ],
+      "expected": [
+        "History restores each view.",
+        "No state is lost."
+      ],
+      "evidence_types": [
+        "BROWSER"
+      ]
+    },
+    {
+      "id": "nav.missing",
+      "area": "dashboard",
+      "title": "Show missing route",
+      "covers": [
+        "manual:nav-missing"
+      ],
+      "sources": [
+        "web/src/App.tsx",
+        "web/src/components/shell.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open an unknown dashboard path.",
+        "Observe the fallback."
+      ],
+      "expected": [
+        "A not-found state appears.",
+        "Navigation back works."
+      ],
+      "evidence_types": [
+        "BROWSER"
+      ]
+    },
+    {
+      "id": "nav.setup-link",
+      "area": "dashboard",
+      "title": "Remove setup link when done",
+      "covers": [
+        "manual:nav-setup"
+      ],
+      "sources": [
+        "web/src/App.tsx",
+        "web/src/components/shell.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Complete setup.",
+        "Verify the setup link is removed for normal use."
+      ],
+      "expected": [
+        "Setup is hidden after completion.",
+        "Direct /setup still shows status for admins."
+      ],
+      "evidence_types": [
+        "BROWSER"
+      ]
+    },
+    {
+      "id": "host.plain",
+      "area": "dashboard",
+      "title": "Serve plain-host dashboard",
+      "covers": [
+        "manual:host-plain"
+      ],
+      "sources": [
+        "web/src/views/home.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open the plain host dashboard.",
+        "Verify admin sections load."
+      ],
+      "expected": [
+        "The dashboard loads.",
+        "No home redirect occurs."
+      ],
+      "evidence_types": [
+        "BROWSER"
+      ]
+    },
+    {
+      "id": "host.home",
+      "area": "dashboard",
+      "title": "Serve home subdomain",
+      "covers": [
+        "manual:host-home"
+      ],
+      "sources": [
+        "web/src/views/home.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open home.<domain>.",
+        "Verify tiles and welcome links."
+      ],
+      "expected": [
+        "Home tiles load.",
+        "Welcome links work."
+      ],
+      "evidence_types": [
+        "BROWSER"
+      ]
+    },
+    {
+      "id": "host.admin",
+      "area": "dashboard",
+      "title": "Serve admin counterparts",
+      "covers": [
+        "manual:host-admin"
+      ],
+      "sources": [
+        "web/src/App.tsx",
+        "web/src/components/shell.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open each /admin counterpart.",
+        "Compare with non-admin routes."
+      ],
+      "expected": [
+        "Counterparts load the same views.",
+        "Deep links redirect correctly."
+      ],
+      "evidence_types": [
+        "BROWSER"
+      ]
+    },
+    {
+      "id": "host.bootstrap",
+      "area": "dashboard",
+      "title": "Handle bootstrap redirect",
+      "covers": [
+        "manual:host-bootstrap"
+      ],
+      "sources": [
+        "web/src/App.tsx",
+        "web/src/components/shell.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open /bootstrap.",
+        "Observe the redirect."
+      ],
+      "expected": [
+        "The redirect lands on the dashboard.",
+        "No error appears."
+      ],
+      "evidence_types": [
+        "BROWSER"
+      ]
+    },
+    {
+      "id": "host.welcome",
+      "area": "dashboard",
+      "title": "Serve welcome links",
+      "covers": [
+        "manual:host-welcome"
+      ],
+      "sources": [
+        "web/src/views/welcome.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open a valid /welcome/:token link.",
+        "Complete the flow."
+      ],
+      "expected": [
+        "The welcome flow completes.",
+        "Invalid tokens are rejected."
+      ],
+      "evidence_types": [
+        "BROWSER"
+      ]
+    },
+    {
+      "id": "apps.rows",
+      "area": "dashboard",
+      "title": "Visit every application row",
+      "covers": [
+        "manual:apps-rows"
+      ],
+      "sources": [
+        "web/src/views/operations.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Visit every row on Applications.",
+        "Open every web interface link."
+      ],
+      "expected": [
+        "Every row loads.",
+        "Every interface opens or shows its configured restriction."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "x.dev.chain",
+      "area": "crossapp",
+      "title": "Prove development chain",
+      "covers": [
+        "manual:dev-chain"
+      ],
+      "sources": [
+        "web/src/views/operations.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Create a project in the browser.",
+        "Push, run CI, cut an ONCE release, and open the URL."
+      ],
+      "expected": [
+        "CI builds succeed.",
+        "The release URL serves the new digest."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "x.deploy.persist",
+      "area": "crossapp",
+      "title": "Prove deployment persistence",
+      "covers": [
+        "manual:deploy-persist"
+      ],
+      "sources": [
+        "nix/app-data.nix",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Write a fixture under /storage.",
+        "Deploy release B, then roll back to A."
+      ],
+      "expected": [
+        "Responses match each release.",
+        "Persistent data survives both moves."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "x.deploy.failure",
+      "area": "crossapp",
+      "title": "Preserve release on failure",
+      "covers": [
+        "manual:deploy-failure"
+      ],
+      "sources": [
+        "internal/api/server.go",
+        "web/src/views/operations.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Deploy a failing release candidate.",
+        "Observe the served release and error."
+      ],
+      "expected": [
+        "The prior usable release keeps serving.",
+        "The actual error is exposed."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "x.workspace.chain",
+      "area": "crossapp",
+      "title": "Prove workspace chain",
+      "covers": [
+        "manual:workspace-chain"
+      ],
+      "sources": [
+        "web/src/views/operations.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Create through UI, attach through CLI, send one bounded task, commit on its branch, stop and revoke."
+      ],
+      "expected": [
+        "The branch contains the commit.",
+        "Stopped workspaces refuse access."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "x.household.onboard",
+      "area": "crossapp",
+      "title": "Onboard household member",
+      "covers": [
+        "manual:household-onboard"
+      ],
+      "sources": [
+        "web/src/views/welcome.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Invite, open welcome, enroll passkey, open home tile and permitted app."
+      ],
+      "expected": [
+        "Each step succeeds.",
+        "The member reaches only permitted data."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "x.household.deny",
+      "area": "crossapp",
+      "title": "Deny private household data",
+      "covers": [
+        "manual:household-deny"
+      ],
+      "sources": [
+        "web/src/views/operations.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Attempt to open another user private data as a member.",
+        "Observe denial."
+      ],
+      "expected": [
+        "Access is denied.",
+        "No private content leaks."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "x.knowledge.chain",
+      "area": "crossapp",
+      "title": "Prove knowledge chain",
+      "covers": [
+        "manual:knowledge-chain"
+      ],
+      "sources": [
+        "web/src/views/knowledge.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Upload a document and bookmark with the run identifier.",
+        "Index, search the exact fixture, and retrieve through Hermes."
+      ],
+      "expected": [
+        "Exact search finds the fixture.",
+        "Hermes retrieval is permitted."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "x.knowledge.privacy",
+      "area": "crossapp",
+      "title": "Enforce knowledge privacy",
+      "covers": [
+        "manual:knowledge-privacy"
+      ],
+      "sources": [
+        "web/src/views/knowledge.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Remove sharing or consent.",
+        "Repeat retrieval."
+      ],
+      "expected": [
+        "Prohibited data is absent.",
+        "No remote call occurs."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "x.model.openai",
+      "area": "ai",
+      "title": "Exercise openai provider state",
+      "covers": [
+        "manual:model-openai"
+      ],
+      "sources": [
+        "internal/providers/service.go",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "openrouter-key"
+      ],
+      "steps": [
+        "Configure openai through the supported flow.",
+        "Run one bounded synthetic request or record the blocked state."
+      ],
+      "expected": [
+        "Success or blocked state is recorded with evidence.",
+        "Costs stay within the key cap."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "x.model.anthropic",
+      "area": "ai",
+      "title": "Exercise anthropic provider state",
+      "covers": [
+        "manual:model-anthropic"
+      ],
+      "sources": [
+        "internal/providers/service.go",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "openrouter-key"
+      ],
+      "steps": [
+        "Configure anthropic through the supported flow.",
+        "Run one bounded synthetic request or record the blocked state."
+      ],
+      "expected": [
+        "Success or blocked state is recorded with evidence.",
+        "Costs stay within the key cap."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "x.model.openrouter",
+      "area": "ai",
+      "title": "Exercise openrouter provider state",
+      "covers": [
+        "manual:model-openrouter"
+      ],
+      "sources": [
+        "internal/providers/service.go",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "openrouter-key"
+      ],
+      "steps": [
+        "Configure openrouter through the supported flow.",
+        "Run one bounded synthetic request or record the blocked state."
+      ],
+      "expected": [
+        "Success or blocked state is recorded with evidence.",
+        "Costs stay within the key cap."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "x.model.chatgpt",
+      "area": "ai",
+      "title": "Exercise chatgpt provider state",
+      "covers": [
+        "manual:model-chatgpt"
+      ],
+      "sources": [
+        "internal/providers/service.go",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "openrouter-key"
+      ],
+      "steps": [
+        "Configure chatgpt through the supported flow.",
+        "Run one bounded synthetic request or record the blocked state."
+      ],
+      "expected": [
+        "Success or blocked state is recorded with evidence.",
+        "Costs stay within the key cap."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "x.model.xai",
+      "area": "ai",
+      "title": "Exercise xai provider state",
+      "covers": [
+        "manual:model-xai"
+      ],
+      "sources": [
+        "internal/providers/service.go",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "openrouter-key"
+      ],
+      "steps": [
+        "Configure xai through the supported flow.",
+        "Run one bounded synthetic request or record the blocked state."
+      ],
+      "expected": [
+        "Success or blocked state is recorded with evidence.",
+        "Costs stay within the key cap."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "x.model.zai",
+      "area": "ai",
+      "title": "Exercise zai provider state",
+      "covers": [
+        "manual:model-zai"
+      ],
+      "sources": [
+        "internal/providers/service.go",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "openrouter-key"
+      ],
+      "steps": [
+        "Configure zai through the supported flow.",
+        "Run one bounded synthetic request or record the blocked state."
+      ],
+      "expected": [
+        "Success or blocked state is recorded with evidence.",
+        "Costs stay within the key cap."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "x.alias.matrix",
+      "area": "ai",
+      "title": "Exercise model alias matrix",
+      "covers": [
+        "manual:alias-matrix"
+      ],
+      "sources": [
+        "internal/providers/service.go",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Configure omahab/fast, balanced, reasoning, embedding, karakeep, summarization, and memory.",
+        "Run one bounded request per alias where applicable."
+      ],
+      "expected": [
+        "Compatible aliases respond.",
+        "Embedding aliases never use chat models."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "x.oauth.failures",
+      "area": "ai",
+      "title": "Exercise OAuth failures",
+      "covers": [
+        "manual:oauth-failures"
+      ],
+      "sources": [
+        "internal/providers/service.go",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Trigger denial, timeout, expired state, repeated callback, disconnection, absent entitlement, and device denial."
+      ],
+      "expected": [
+        "Each failure shows a clear error.",
+        "No partial credential is stored."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "x.vkey.matrix",
+      "area": "ai",
+      "title": "Exercise virtual keys",
+      "covers": [
+        "manual:vkey-matrix"
+      ],
+      "sources": [
+        "internal/providers/service.go",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Test valid use, wrong owner, forbidden model, expiration, revocation, and post-rotation rejection."
+      ],
+      "expected": [
+        "Valid use succeeds.",
+        "Every invalid case is rejected."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "x.mcp.enumerate",
+      "area": "ai",
+      "title": "Enumerate MCP tools",
+      "covers": [
+        "manual:mcp-enumerate"
+      ],
+      "sources": [
+        "internal/mcp/server.go",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "List tools through the live MCP endpoint.",
+        "Compare with registration calls."
+      ],
+      "expected": [
+        "Actual tools are enumerated.",
+        "The list matches the server registration."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "x.mcp.invoke",
+      "area": "ai",
+      "title": "Invoke MCP tools",
+      "covers": [
+        "manual:mcp-invoke"
+      ],
+      "sources": [
+        "internal/mcp/server.go",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Invoke each tool against synthetic objects.",
+        "Verify output and app state."
+      ],
+      "expected": [
+        "Outputs are correct.",
+        "App state changes as expected."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "x.mcp.restrict",
+      "area": "ai",
+      "title": "Enforce MCP restrictions",
+      "covers": [
+        "manual:mcp-restrict"
+      ],
+      "sources": [
+        "internal/mcp/server.go",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Attempt wrong token classes and forbidden deletion, merge, force-push, and branch deletion."
+      ],
+      "expected": [
+        "Each forbidden action is rejected.",
+        "No state changes."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "x.device.enroll",
+      "area": "companion",
+      "title": "Exercise device enrollment",
+      "covers": [
+        "manual:device-enroll"
+      ],
+      "sources": [
+        "web/src/views/devices.tsx",
+        "companion/PROTOCOL.md"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Test valid, invalid, expired, and repeated codes.",
+        "Verify keyring persistence and revocation."
+      ],
+      "expected": [
+        "Valid codes enroll.",
+        "Invalid codes fail without side effects."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "x.device.isolation",
+      "area": "companion",
+      "title": "Isolate devices",
+      "covers": [
+        "manual:device-isolation"
+      ],
+      "sources": [
+        "web/src/views/devices.tsx",
+        "companion/PROTOCOL.md"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Deny device tokens on admin APIs.",
+        "Attempt cross-device workspace use."
+      ],
+      "expected": [
+        "Admin APIs reject device tokens.",
+        "Devices cannot use each other workspaces."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "x.env.distribution",
+      "area": "companion",
+      "title": "Distribute environment",
+      "covers": [
+        "manual:env-distribution"
+      ],
+      "sources": [
+        "cmd/omahab/main.go",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Rotate and delete variables.",
+        "Reconnect a real test client and run diagnostics."
+      ],
+      "expected": [
+        "Reconnect applies current values.",
+        "Diagnostics reveal names only."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "x.socket.methods",
+      "area": "companion",
+      "title": "Exercise companion socket",
+      "covers": [
+        "manual:socket-methods"
+      ],
+      "sources": [
+        "companion/PROTOCOL.md",
+        "internal/client/daemon.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Exercise every registered method, event subscription, invalid request, size limit, and unknown method."
+      ],
+      "expected": [
+        "Valid methods succeed.",
+        "Invalid and oversized requests fail cleanly."
+      ],
+      "evidence_types": [
+        "LIVE_CLI",
+        "INTEGRATION"
+      ]
+    },
+    {
+      "id": "x.client.install",
+      "area": "companion",
+      "title": "Install companion client",
+      "covers": [
+        "manual:client-install"
+      ],
+      "sources": [
+        "companion/PROTOCOL.md",
+        "internal/client/daemon.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Download the matching client package.",
+        "Verify checksum, install, enroll, and update."
+      ],
+      "expected": [
+        "Checksums match published values.",
+        "Enrolled clients sync correctly."
+      ],
+      "evidence_types": [
+        "LIVE_CLI",
+        "INTEGRATION"
+      ]
+    },
+    {
+      "id": "x.sync.drops",
+      "area": "companion",
+      "title": "Route Sync and Drops",
+      "covers": [
+        "manual:sync-drops"
+      ],
+      "sources": [
+        "web/src/views/administration.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Synchronize fixtures and route document, photo, and media Drops.",
+        "Test duplicate and unsupported input."
+      ],
+      "expected": [
+        "Fixtures synchronize.",
+        "Drops route correctly or reject clearly."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "x.email.deliver",
+      "area": "messaging",
+      "title": "Deliver real email",
+      "covers": [
+        "manual:email-deliver"
+      ],
+      "sources": [
+        "internal/emailing/service.go",
+        "workers/email/scripts/generate-vars.mjs"
+      ],
+      "requires": [
+        "domain"
+      ],
+      "steps": [
+        "Send from an allowed sender through the Cloudflare worker.",
+        "Verify signed ingestion and stored message."
+      ],
+      "expected": [
+        "The message is stored.",
+        "The expected document or message appears."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "x.email.reject",
+      "area": "messaging",
+      "title": "Reject bad email",
+      "covers": [
+        "manual:email-reject"
+      ],
+      "sources": [
+        "internal/emailing/service.go",
+        "workers/email/scripts/generate-vars.mjs"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Send bad signature, replay, skew, oversized, DKIM failure, unapproved sender, wrong recipient, and quarantine cases."
+      ],
+      "expected": [
+        "Each case is rejected or quarantined.",
+        "No message is stored."
+      ],
+      "evidence_types": [
+        "LIVE_API",
+        "INTEGRATION"
+      ]
+    },
+    {
+      "id": "x.hass.config",
+      "area": "messaging",
+      "title": "Configure Home Assistant",
+      "covers": [
+        "manual:hass-config"
+      ],
+      "sources": [
+        "cmd/omahab/main.go",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Configure against a disposable authorized instance.",
+        "Execute a supported call, then test unavailable-instance failure."
+      ],
+      "expected": [
+        "Authorized calls succeed.",
+        "Unavailable instances fail visibly."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "x.secrets.api",
+      "area": "setup",
+      "title": "Exercise secrets API",
+      "covers": [
+        "manual:secrets-api"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Create, rotate, and delete secrets for assigned consumers.",
+        "List metadata and verify effects."
+      ],
+      "expected": [
+        "Metadata never returns values.",
+        "Changes affect only assigned consumers."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "x.exposure.transitions",
+      "area": "setup",
+      "title": "Transition exposure safely",
+      "covers": [
+        "manual:exposure-transitions"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Move private, shared, and public states with group restrictions.",
+        "Attempt excessive exposure and partial external failure."
+      ],
+      "expected": [
+        "Transitions require exact confirmation.",
+        "Excessive exposure is denied."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "x.events.sse",
+      "area": "dashboard",
+      "title": "Prove event delivery",
+      "covers": [
+        "manual:events-sse"
+      ],
+      "sources": [
+        "web/src/views/operations.tsx",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Perform operations and check events, unread state, SSE reconnect and resume."
+      ],
+      "expected": [
+        "Correct events appear.",
+        "Reconnect resumes without duplicates."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "cli.app",
+      "area": "cli",
+      "title": "Exercise CLI app",
+      "covers": [
+        "manual:cli-app"
+      ],
+      "sources": [
+        "cmd/omahab/main.go",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Run app list show restart pause resume leaves with --help first.",
+        "Exercise supported results, errors, JSON mode, timeout, and non-interactive use."
+      ],
+      "expected": [
+        "Supported leaves succeed.",
+        "Errors exit nonzero with clear messages."
+      ],
+      "evidence_types": [
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "cli.project",
+      "area": "cli",
+      "title": "Exercise CLI project",
+      "covers": [
+        "manual:cli-project"
+      ],
+      "sources": [
+        "cmd/omahab/main.go",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Run project list create show rm update releases deploy rollback clone open leaves with --help first.",
+        "Exercise supported results, errors, JSON mode, timeout, and non-interactive use."
+      ],
+      "expected": [
+        "Supported leaves succeed.",
+        "Errors exit nonzero with clear messages."
+      ],
+      "evidence_types": [
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "cli.backup",
+      "area": "cli",
+      "title": "Exercise CLI backup",
+      "covers": [
+        "manual:cli-backup"
+      ],
+      "sources": [
+        "cmd/omahab/main.go",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Run backup list show create restore verify leaves with --help first.",
+        "Exercise supported results, errors, JSON mode, timeout, and non-interactive use."
+      ],
+      "expected": [
+        "Supported leaves succeed.",
+        "Errors exit nonzero with clear messages."
+      ],
+      "evidence_types": [
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "cli.event",
+      "area": "cli",
+      "title": "Exercise CLI event",
+      "covers": [
+        "manual:cli-event"
+      ],
+      "sources": [
+        "cmd/omahab/main.go",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Run event list show watch ack leaves with --help first.",
+        "Exercise supported results, errors, JSON mode, timeout, and non-interactive use."
+      ],
+      "expected": [
+        "Supported leaves succeed.",
+        "Errors exit nonzero with clear messages."
+      ],
+      "evidence_types": [
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "cli.sync",
+      "area": "cli",
+      "title": "Exercise CLI sync",
+      "covers": [
+        "manual:cli-sync"
+      ],
+      "sources": [
+        "cmd/omahab/main.go",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Run sync list show add rm leaves with --help first.",
+        "Exercise supported results, errors, JSON mode, timeout, and non-interactive use."
+      ],
+      "expected": [
+        "Supported leaves succeed.",
+        "Errors exit nonzero with clear messages."
+      ],
+      "evidence_types": [
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "cli.workspace",
+      "area": "cli",
+      "title": "Exercise CLI workspace",
+      "covers": [
+        "manual:cli-workspace"
+      ],
+      "sources": [
+        "cmd/omahab/main.go",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Run workspace list show create attach send stop open leaves with --help first.",
+        "Exercise supported results, errors, JSON mode, timeout, and non-interactive use."
+      ],
+      "expected": [
+        "Supported leaves succeed.",
+        "Errors exit nonzero with clear messages."
+      ],
+      "evidence_types": [
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "cli.identity",
+      "area": "cli",
+      "title": "Exercise CLI identity",
+      "covers": [
+        "manual:cli-identity"
+      ],
+      "sources": [
+        "cmd/omahab/main.go",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Run identity recover users leaves with --help first.",
+        "Exercise supported results, errors, JSON mode, timeout, and non-interactive use."
+      ],
+      "expected": [
+        "Supported leaves succeed.",
+        "Errors exit nonzero with clear messages."
+      ],
+      "evidence_types": [
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "cli.secrets",
+      "area": "cli",
+      "title": "Exercise CLI secrets",
+      "covers": [
+        "manual:cli-secrets"
+      ],
+      "sources": [
+        "cmd/omahab/main.go",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Run secrets list leaves with --help first.",
+        "Exercise supported results, errors, JSON mode, timeout, and non-interactive use."
+      ],
+      "expected": [
+        "Supported leaves succeed.",
+        "Errors exit nonzero with clear messages."
+      ],
+      "evidence_types": [
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "cli.system",
+      "area": "cli",
+      "title": "Exercise CLI system",
+      "covers": [
+        "manual:cli-system"
+      ],
+      "sources": [
+        "cmd/omahab/main.go",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Run system upgrade check-update leaves with --help first.",
+        "Exercise supported results, errors, JSON mode, timeout, and non-interactive use."
+      ],
+      "expected": [
+        "Supported leaves succeed.",
+        "Errors exit nonzero with clear messages."
+      ],
+      "evidence_types": [
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "cli.provider",
+      "area": "cli",
+      "title": "Exercise CLI provider",
+      "covers": [
+        "manual:cli-provider"
+      ],
+      "sources": [
+        "cmd/omahab/main.go",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Run provider login connect-zai disconnect status leaves with --help first.",
+        "Exercise supported results, errors, JSON mode, timeout, and non-interactive use."
+      ],
+      "expected": [
+        "Supported leaves succeed.",
+        "Errors exit nonzero with clear messages."
+      ],
+      "evidence_types": [
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "cli.env",
+      "area": "cli",
+      "title": "Exercise CLI env",
+      "covers": [
+        "manual:cli-env"
+      ],
+      "sources": [
+        "cmd/omahab/main.go",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Run env status sync clear leaves with --help first.",
+        "Exercise supported results, errors, JSON mode, timeout, and non-interactive use."
+      ],
+      "expected": [
+        "Supported leaves succeed.",
+        "Errors exit nonzero with clear messages."
+      ],
+      "evidence_types": [
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "cli.email",
+      "area": "cli",
+      "title": "Exercise CLI email",
+      "covers": [
+        "manual:cli-email"
+      ],
+      "sources": [
+        "cmd/omahab/main.go",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Run email senders enroll list remove route ensure leaves with --help first.",
+        "Exercise supported results, errors, JSON mode, timeout, and non-interactive use."
+      ],
+      "expected": [
+        "Supported leaves succeed.",
+        "Errors exit nonzero with clear messages."
+      ],
+      "evidence_types": [
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "cli.hass",
+      "area": "cli",
+      "title": "Exercise CLI hass",
+      "covers": [
+        "manual:cli-hass"
+      ],
+      "sources": [
+        "cmd/omahab/main.go",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Run hass status connect remove leaves with --help first.",
+        "Exercise supported results, errors, JSON mode, timeout, and non-interactive use."
+      ],
+      "expected": [
+        "Supported leaves succeed.",
+        "Errors exit nonzero with clear messages."
+      ],
+      "evidence_types": [
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "cli.drops",
+      "area": "cli",
+      "title": "Exercise CLI drops",
+      "covers": [
+        "manual:cli-drops"
+      ],
+      "sources": [
+        "cmd/omahab/main.go",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Run drops route leaves with --help first.",
+        "Exercise supported results, errors, JSON mode, timeout, and non-interactive use."
+      ],
+      "expected": [
+        "Supported leaves succeed.",
+        "Errors exit nonzero with clear messages."
+      ],
+      "evidence_types": [
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "cli.recovery",
+      "area": "cli",
+      "title": "Exercise CLI recovery",
+      "covers": [
+        "manual:cli-recovery"
+      ],
+      "sources": [
+        "cmd/omahab/main.go",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Run recovery show-fingerprint unlock rotate leaves with --help first.",
+        "Exercise supported results, errors, JSON mode, timeout, and non-interactive use."
+      ],
+      "expected": [
+        "Supported leaves succeed.",
+        "Errors exit nonzero with clear messages."
+      ],
+      "evidence_types": [
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "cli.setup",
+      "area": "cli",
+      "title": "Exercise CLI setup",
+      "covers": [
+        "manual:cli-setup"
+      ],
+      "sources": [
+        "cmd/omahab/main.go",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Run setup leaves with --help first.",
+        "Exercise supported results, errors, JSON mode, timeout, and non-interactive use."
+      ],
+      "expected": [
+        "Supported leaves succeed.",
+        "Errors exit nonzero with clear messages."
+      ],
+      "evidence_types": [
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "cli.catalog",
+      "area": "cli",
+      "title": "Exercise CLI catalog",
+      "covers": [
+        "manual:cli-catalog"
+      ],
+      "sources": [
+        "cmd/omahab/main.go",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Run catalog validate leaves with --help first.",
+        "Exercise supported results, errors, JSON mode, timeout, and non-interactive use."
+      ],
+      "expected": [
+        "Supported leaves succeed.",
+        "Errors exit nonzero with clear messages."
+      ],
+      "evidence_types": [
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "cli.console",
+      "area": "cli",
+      "title": "Exercise CLI console",
+      "covers": [
+        "manual:cli-console"
+      ],
+      "sources": [
+        "cmd/omahab/main.go",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Run console leaves with --help first.",
+        "Exercise supported results, errors, JSON mode, timeout, and non-interactive use."
+      ],
+      "expected": [
+        "Supported leaves succeed.",
+        "Errors exit nonzero with clear messages."
+      ],
+      "evidence_types": [
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "cli.mcp",
+      "area": "cli",
+      "title": "Exercise CLI mcp",
+      "covers": [
+        "manual:cli-mcp"
+      ],
+      "sources": [
+        "cmd/omahab/main.go",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Run mcp leaves with --help first.",
+        "Exercise supported results, errors, JSON mode, timeout, and non-interactive use."
+      ],
+      "expected": [
+        "Supported leaves succeed.",
+        "Errors exit nonzero with clear messages."
+      ],
+      "evidence_types": [
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "life.bios-uefi",
+      "area": "lifecycle",
+      "title": "Prove BIOS and UEFI install",
+      "covers": [
+        "manual:life-bios-uefi"
+      ],
+      "sources": [
+        "scripts/install-disk.sh",
+        "internal/diskinstall/disks.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Prepare the BIOS and UEFI install scenario on a disposable guest.",
+        "Execute the supported operation and verify the observable result."
+      ],
+      "expected": [
+        "The BIOS and UEFI install behaves as specified.",
+        "Failures are reported with recovery steps."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "life.lan-vps",
+      "area": "lifecycle",
+      "title": "Prove LAN and VPS placement",
+      "covers": [
+        "manual:life-lan-vps"
+      ],
+      "sources": [
+        "scripts/install-disk.sh",
+        "internal/diskinstall/disks.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Prepare the LAN and VPS placement scenario on a disposable guest.",
+        "Execute the supported operation and verify the observable result."
+      ],
+      "expected": [
+        "The LAN and VPS placement behaves as specified.",
+        "Failures are reported with recovery steps."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "life.wizard",
+      "area": "lifecycle",
+      "title": "Prove Wizard validation",
+      "covers": [
+        "manual:life-wizard"
+      ],
+      "sources": [
+        "scripts/install-disk.sh",
+        "internal/diskinstall/disks.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Prepare the Wizard validation scenario on a disposable guest.",
+        "Execute the supported operation and verify the observable result."
+      ],
+      "expected": [
+        "The Wizard validation behaves as specified.",
+        "Failures are reported with recovery steps."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "life.disks",
+      "area": "lifecycle",
+      "title": "Prove Disk selection",
+      "covers": [
+        "manual:life-disks"
+      ],
+      "sources": [
+        "scripts/install-disk.sh",
+        "internal/diskinstall/disks.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Prepare the Disk selection scenario on a disposable guest.",
+        "Execute the supported operation and verify the observable result."
+      ],
+      "expected": [
+        "The Disk selection behaves as specified.",
+        "Failures are reported with recovery steps."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "life.interrupt",
+      "area": "lifecycle",
+      "title": "Prove Install interruption",
+      "covers": [
+        "manual:life-interrupt"
+      ],
+      "sources": [
+        "scripts/install-disk.sh",
+        "internal/diskinstall/disks.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Prepare the Install interruption scenario on a disposable guest.",
+        "Execute the supported operation and verify the observable result."
+      ],
+      "expected": [
+        "The Install interruption behaves as specified.",
+        "Failures are reported with recovery steps."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "life.network",
+      "area": "lifecycle",
+      "title": "Prove Network failure",
+      "covers": [
+        "manual:life-network"
+      ],
+      "sources": [
+        "scripts/install-disk.sh",
+        "internal/diskinstall/disks.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Prepare the Network failure scenario on a disposable guest.",
+        "Execute the supported operation and verify the observable result."
+      ],
+      "expected": [
+        "The Network failure behaves as specified.",
+        "Failures are reported with recovery steps."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "life.service",
+      "area": "lifecycle",
+      "title": "Prove Service failure",
+      "covers": [
+        "manual:life-service"
+      ],
+      "sources": [
+        "scripts/install-disk.sh",
+        "internal/diskinstall/disks.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Prepare the Service failure scenario on a disposable guest.",
+        "Execute the supported operation and verify the observable result."
+      ],
+      "expected": [
+        "The Service failure behaves as specified.",
+        "Failures are reported with recovery steps."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "life.reboot",
+      "area": "lifecycle",
+      "title": "Prove Reboot persistence",
+      "covers": [
+        "manual:life-reboot"
+      ],
+      "sources": [
+        "scripts/install-disk.sh",
+        "internal/diskinstall/disks.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Prepare the Reboot persistence scenario on a disposable guest.",
+        "Execute the supported operation and verify the observable result."
+      ],
+      "expected": [
+        "The Reboot persistence behaves as specified.",
+        "Failures are reported with recovery steps."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "life.maintenance",
+      "area": "lifecycle",
+      "title": "Prove Maintenance pause",
+      "covers": [
+        "manual:life-maintenance"
+      ],
+      "sources": [
+        "scripts/install-disk.sh",
+        "internal/diskinstall/disks.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Prepare the Maintenance pause scenario on a disposable guest.",
+        "Execute the supported operation and verify the observable result."
+      ],
+      "expected": [
+        "The Maintenance pause behaves as specified.",
+        "Failures are reported with recovery steps."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "life.storage-move",
+      "area": "lifecycle",
+      "title": "Prove Storage movement",
+      "covers": [
+        "manual:life-storage-move"
+      ],
+      "sources": [
+        "scripts/install-disk.sh",
+        "internal/diskinstall/disks.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Prepare the Storage movement scenario on a disposable guest.",
+        "Execute the supported operation and verify the observable result."
+      ],
+      "expected": [
+        "The Storage movement behaves as specified.",
+        "Failures are reported with recovery steps."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "life.missing-disk",
+      "area": "lifecycle",
+      "title": "Prove Missing storage",
+      "covers": [
+        "manual:life-missing-disk"
+      ],
+      "sources": [
+        "scripts/install-disk.sh",
+        "internal/diskinstall/disks.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Prepare the Missing storage scenario on a disposable guest.",
+        "Execute the supported operation and verify the observable result."
+      ],
+      "expected": [
+        "The Missing storage behaves as specified.",
+        "Failures are reported with recovery steps."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "life.full-disk",
+      "area": "lifecycle",
+      "title": "Prove Full storage",
+      "covers": [
+        "manual:life-full-disk"
+      ],
+      "sources": [
+        "scripts/install-disk.sh",
+        "internal/diskinstall/disks.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Prepare the Full storage scenario on a disposable guest.",
+        "Execute the supported operation and verify the observable result."
+      ],
+      "expected": [
+        "The Full storage behaves as specified.",
+        "Failures are reported with recovery steps."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "life.backup",
+      "area": "lifecycle",
+      "title": "Prove Backup inclusion",
+      "covers": [
+        "manual:life-backup"
+      ],
+      "sources": [
+        "scripts/install-disk.sh",
+        "internal/diskinstall/disks.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Prepare the Backup inclusion scenario on a disposable guest.",
+        "Execute the supported operation and verify the observable result."
+      ],
+      "expected": [
+        "The Backup inclusion behaves as specified.",
+        "Failures are reported with recovery steps."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "life.verify",
+      "area": "lifecycle",
+      "title": "Prove Snapshot verification",
+      "covers": [
+        "manual:life-verify"
+      ],
+      "sources": [
+        "scripts/install-disk.sh",
+        "internal/diskinstall/disks.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Prepare the Snapshot verification scenario on a disposable guest.",
+        "Execute the supported operation and verify the observable result."
+      ],
+      "expected": [
+        "The Snapshot verification behaves as specified.",
+        "Failures are reported with recovery steps."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "life.app-restore",
+      "area": "lifecycle",
+      "title": "Prove Application restore",
+      "covers": [
+        "manual:life-app-restore"
+      ],
+      "sources": [
+        "scripts/install-disk.sh",
+        "internal/diskinstall/disks.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Prepare the Application restore scenario on a disposable guest.",
+        "Execute the supported operation and verify the observable result."
+      ],
+      "expected": [
+        "The Application restore behaves as specified.",
+        "Failures are reported with recovery steps."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "life.restore-safety",
+      "area": "lifecycle",
+      "title": "Prove Restore safety",
+      "covers": [
+        "manual:life-restore-safety"
+      ],
+      "sources": [
+        "scripts/install-disk.sh",
+        "internal/diskinstall/disks.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Prepare the Restore safety scenario on a disposable guest.",
+        "Execute the supported operation and verify the observable result."
+      ],
+      "expected": [
+        "The Restore safety behaves as specified.",
+        "Failures are reported with recovery steps."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "life.identity-restore",
+      "area": "lifecycle",
+      "title": "Prove Identity restore",
+      "covers": [
+        "manual:life-identity-restore"
+      ],
+      "sources": [
+        "scripts/install-disk.sh",
+        "internal/diskinstall/disks.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Prepare the Identity restore scenario on a disposable guest.",
+        "Execute the supported operation and verify the observable result."
+      ],
+      "expected": [
+        "The Identity restore behaves as specified.",
+        "Failures are reported with recovery steps."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "life.offline",
+      "area": "lifecycle",
+      "title": "Prove Offline recovery",
+      "covers": [
+        "manual:life-offline"
+      ],
+      "sources": [
+        "scripts/install-disk.sh",
+        "internal/diskinstall/disks.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Prepare the Offline recovery scenario on a disposable guest.",
+        "Execute the supported operation and verify the observable result."
+      ],
+      "expected": [
+        "The Offline recovery behaves as specified.",
+        "Failures are reported with recovery steps."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "life.restore-reject",
+      "area": "lifecycle",
+      "title": "Prove Restore rejection",
+      "covers": [
+        "manual:life-restore-reject"
+      ],
+      "sources": [
+        "scripts/install-disk.sh",
+        "internal/diskinstall/disks.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Prepare the Restore rejection scenario on a disposable guest.",
+        "Execute the supported operation and verify the observable result."
+      ],
+      "expected": [
+        "The Restore rejection behaves as specified.",
+        "Failures are reported with recovery steps."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "life.upgrade",
+      "area": "lifecycle",
+      "title": "Prove Upgrade",
+      "covers": [
+        "manual:life-upgrade"
+      ],
+      "sources": [
+        "scripts/install-disk.sh",
+        "internal/diskinstall/disks.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Prepare the Upgrade scenario on a disposable guest.",
+        "Execute the supported operation and verify the observable result."
+      ],
+      "expected": [
+        "The Upgrade behaves as specified.",
+        "Failures are reported with recovery steps."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "life.rollback",
+      "area": "lifecycle",
+      "title": "Prove Upgrade rollback",
+      "covers": [
+        "manual:life-rollback"
+      ],
+      "sources": [
+        "scripts/install-disk.sh",
+        "internal/diskinstall/disks.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Prepare the Upgrade rollback scenario on a disposable guest.",
+        "Execute the supported operation and verify the observable result."
+      ],
+      "expected": [
+        "The Upgrade rollback behaves as specified.",
+        "Failures are reported with recovery steps."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "clarity.setup",
+      "area": "clarity",
+      "title": "Measure first-run setup",
+      "covers": [
+        "manual:clarity-setup"
+      ],
+      "sources": [
+        "web/src/App.tsx",
+        "web/src/components/shell.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Perform first-run setup using only visible UI information.",
+        "Record active time, waiting time, clicks, repeats, errors, and shell commands."
+      ],
+      "expected": [
+        "The task completes with measured evidence.",
+        "Workarounds are recorded separately."
+      ],
+      "evidence_types": [
+        "BROWSER"
+      ]
+    },
+    {
+      "id": "clarity.member",
+      "area": "clarity",
+      "title": "Measure add household member",
+      "covers": [
+        "manual:clarity-member"
+      ],
+      "sources": [
+        "web/src/App.tsx",
+        "web/src/components/shell.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Perform add household member using only visible UI information.",
+        "Record active time, waiting time, clicks, repeats, errors, and shell commands."
+      ],
+      "expected": [
+        "The task completes with measured evidence.",
+        "Workarounds are recorded separately."
+      ],
+      "evidence_types": [
+        "BROWSER"
+      ]
+    },
+    {
+      "id": "clarity.open-apps",
+      "area": "clarity",
+      "title": "Measure open each application",
+      "covers": [
+        "manual:clarity-open-apps"
+      ],
+      "sources": [
+        "web/src/App.tsx",
+        "web/src/components/shell.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Perform open each application using only visible UI information.",
+        "Record active time, waiting time, clicks, repeats, errors, and shell commands."
+      ],
+      "expected": [
+        "The task completes with measured evidence.",
+        "Workarounds are recorded separately."
+      ],
+      "evidence_types": [
+        "BROWSER"
+      ]
+    },
+    {
+      "id": "clarity.find",
+      "area": "clarity",
+      "title": "Measure import and find fixtures",
+      "covers": [
+        "manual:clarity-find"
+      ],
+      "sources": [
+        "web/src/App.tsx",
+        "web/src/components/shell.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Perform import and find fixtures using only visible UI information.",
+        "Record active time, waiting time, clicks, repeats, errors, and shell commands."
+      ],
+      "expected": [
+        "The task completes with measured evidence.",
+        "Workarounds are recorded separately."
+      ],
+      "evidence_types": [
+        "BROWSER"
+      ]
+    },
+    {
+      "id": "clarity.deploy",
+      "area": "clarity",
+      "title": "Measure create and deploy project",
+      "covers": [
+        "manual:clarity-deploy"
+      ],
+      "sources": [
+        "web/src/App.tsx",
+        "web/src/components/shell.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Perform create and deploy project using only visible UI information.",
+        "Record active time, waiting time, clicks, repeats, errors, and shell commands."
+      ],
+      "expected": [
+        "The task completes with measured evidence.",
+        "Workarounds are recorded separately."
+      ],
+      "evidence_types": [
+        "BROWSER"
+      ]
+    },
+    {
+      "id": "clarity.workspace",
+      "area": "clarity",
+      "title": "Measure start and stop workspace",
+      "covers": [
+        "manual:clarity-workspace"
+      ],
+      "sources": [
+        "web/src/App.tsx",
+        "web/src/components/shell.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Perform start and stop workspace using only visible UI information.",
+        "Record active time, waiting time, clicks, repeats, errors, and shell commands."
+      ],
+      "expected": [
+        "The task completes with measured evidence.",
+        "Workarounds are recorded separately."
+      ],
+      "evidence_types": [
+        "BROWSER"
+      ]
+    },
+    {
+      "id": "clarity.device",
+      "area": "clarity",
+      "title": "Measure connect and revoke device",
+      "covers": [
+        "manual:clarity-device"
+      ],
+      "sources": [
+        "web/src/App.tsx",
+        "web/src/components/shell.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Perform connect and revoke device using only visible UI information.",
+        "Record active time, waiting time, clicks, repeats, errors, and shell commands."
+      ],
+      "expected": [
+        "The task completes with measured evidence.",
+        "Workarounds are recorded separately."
+      ],
+      "evidence_types": [
+        "BROWSER"
+      ]
+    },
+    {
+      "id": "clarity.provider",
+      "area": "clarity",
+      "title": "Measure configure and rotate credential",
+      "covers": [
+        "manual:clarity-provider"
+      ],
+      "sources": [
+        "web/src/App.tsx",
+        "web/src/components/shell.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Perform configure and rotate credential using only visible UI information.",
+        "Record active time, waiting time, clicks, repeats, errors, and shell commands."
+      ],
+      "expected": [
+        "The task completes with measured evidence.",
+        "Workarounds are recorded separately."
+      ],
+      "evidence_types": [
+        "BROWSER"
+      ]
+    },
+    {
+      "id": "clarity.backup-file",
+      "area": "clarity",
+      "title": "Measure back up and restore one file",
+      "covers": [
+        "manual:clarity-backup-file"
+      ],
+      "sources": [
+        "web/src/App.tsx",
+        "web/src/components/shell.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Perform back up and restore one file using only visible UI information.",
+        "Record active time, waiting time, clicks, repeats, errors, and shell commands."
+      ],
+      "expected": [
+        "The task completes with measured evidence.",
+        "Workarounds are recorded separately."
+      ],
+      "evidence_types": [
+        "BROWSER"
+      ]
+    },
+    {
+      "id": "clarity.failed-app",
+      "area": "clarity",
+      "title": "Measure recover failed application",
+      "covers": [
+        "manual:clarity-failed-app"
+      ],
+      "sources": [
+        "web/src/App.tsx",
+        "web/src/components/shell.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Perform recover failed application using only visible UI information.",
+        "Record active time, waiting time, clicks, repeats, errors, and shell commands."
+      ],
+      "expected": [
+        "The task completes with measured evidence.",
+        "Workarounds are recorded separately."
+      ],
+      "evidence_types": [
+        "BROWSER"
+      ]
+    },
+    {
+      "id": "clarity.upgrade",
+      "area": "clarity",
+      "title": "Measure upgrade and confirm",
+      "covers": [
+        "manual:clarity-upgrade"
+      ],
+      "sources": [
+        "web/src/App.tsx",
+        "web/src/components/shell.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Perform upgrade and confirm using only visible UI information.",
+        "Record active time, waiting time, clicks, repeats, errors, and shell commands."
+      ],
+      "expected": [
+        "The task completes with measured evidence.",
+        "Workarounds are recorded separately."
+      ],
+      "evidence_types": [
+        "BROWSER"
+      ]
+    },
+    {
+      "id": "app.caddy.functional",
+      "area": "household",
+      "title": "Exercise Caddy routing, certificates, and restart",
+      "covers": [
+        "app:caddy"
+      ],
+      "sources": [
+        "deploy/catalog/catalog.json",
+        "nix/apps.nix",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open the caddy interface through its resolved URL.",
+        "Exercise its required proof with synthetic fixtures.",
+        "Verify persistence after logout, restart, and reboot."
+      ],
+      "expected": [
+        "The fixture remains usable after restart.",
+        "Hashes match the recorded values."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "app.pocket-id.functional",
+      "area": "household",
+      "title": "Exercise Pocket ID passkeys and OIDC",
+      "covers": [
+        "app:pocket-id"
+      ],
+      "sources": [
+        "deploy/catalog/catalog.json",
+        "nix/apps.nix",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open the pocket-id interface through its resolved URL.",
+        "Exercise its required proof with synthetic fixtures.",
+        "Verify persistence after logout, restart, and reboot."
+      ],
+      "expected": [
+        "The fixture remains usable after restart.",
+        "Hashes match the recorded values."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "app.forgejo.functional",
+      "area": "household",
+      "title": "Exercise Forgejo repositories and reviews",
+      "covers": [
+        "app:forgejo"
+      ],
+      "sources": [
+        "deploy/catalog/catalog.json",
+        "nix/apps.nix",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open the forgejo interface through its resolved URL.",
+        "Exercise its required proof with synthetic fixtures.",
+        "Verify persistence after logout, restart, and reboot."
+      ],
+      "expected": [
+        "The fixture remains usable after restart.",
+        "Hashes match the recorded values."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "app.woodpecker.functional",
+      "area": "household",
+      "title": "Exercise Woodpecker pipelines",
+      "covers": [
+        "app:woodpecker"
+      ],
+      "sources": [
+        "deploy/catalog/catalog.json",
+        "nix/apps.nix",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open the woodpecker interface through its resolved URL.",
+        "Exercise its required proof with synthetic fixtures.",
+        "Verify persistence after logout, restart, and reboot."
+      ],
+      "expected": [
+        "The fixture remains usable after restart.",
+        "Hashes match the recorded values."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "app.immich.functional",
+      "area": "household",
+      "title": "Exercise Immich photos and video",
+      "covers": [
+        "app:immich"
+      ],
+      "sources": [
+        "deploy/catalog/catalog.json",
+        "nix/apps.nix",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open the immich interface through its resolved URL.",
+        "Exercise its required proof with synthetic fixtures.",
+        "Verify persistence after logout, restart, and reboot."
+      ],
+      "expected": [
+        "The fixture remains usable after restart.",
+        "Hashes match the recorded values."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "app.paperless-ngx.functional",
+      "area": "household",
+      "title": "Exercise Paperless documents and OCR",
+      "covers": [
+        "app:paperless-ngx"
+      ],
+      "sources": [
+        "deploy/catalog/catalog.json",
+        "nix/apps.nix",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open the paperless-ngx interface through its resolved URL.",
+        "Exercise its required proof with synthetic fixtures.",
+        "Verify persistence after logout, restart, and reboot."
+      ],
+      "expected": [
+        "The fixture remains usable after restart.",
+        "Hashes match the recorded values."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "app.karakeep.functional",
+      "area": "household",
+      "title": "Exercise Karakeep bookmarks and notes",
+      "covers": [
+        "app:karakeep"
+      ],
+      "sources": [
+        "deploy/catalog/catalog.json",
+        "nix/apps.nix",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open the karakeep interface through its resolved URL.",
+        "Exercise its required proof with synthetic fixtures.",
+        "Verify persistence after logout, restart, and reboot."
+      ],
+      "expected": [
+        "The fixture remains usable after restart.",
+        "Hashes match the recorded values."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "app.syncthing.functional",
+      "area": "household",
+      "title": "Exercise Syncthing two-client sync",
+      "covers": [
+        "app:syncthing"
+      ],
+      "sources": [
+        "deploy/catalog/catalog.json",
+        "nix/apps.nix",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open the syncthing interface through its resolved URL.",
+        "Exercise its required proof with synthetic fixtures.",
+        "Verify persistence after logout, restart, and reboot."
+      ],
+      "expected": [
+        "The fixture remains usable after restart.",
+        "Hashes match the recorded values."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "app.litellm.functional",
+      "area": "household",
+      "title": "Exercise LiteLLM gateway and keys",
+      "covers": [
+        "app:litellm"
+      ],
+      "sources": [
+        "deploy/catalog/catalog.json",
+        "nix/apps.nix",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open the litellm interface through its resolved URL.",
+        "Exercise its required proof with synthetic fixtures.",
+        "Verify persistence after logout, restart, and reboot."
+      ],
+      "expected": [
+        "The fixture remains usable after restart.",
+        "Hashes match the recorded values."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "app.embedding-worker.functional",
+      "area": "household",
+      "title": "Exercise Embedding worker inference",
+      "covers": [
+        "app:embedding-worker"
+      ],
+      "sources": [
+        "deploy/catalog/catalog.json",
+        "nix/apps.nix",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open the embedding-worker interface through its resolved URL.",
+        "Exercise its required proof with synthetic fixtures.",
+        "Verify persistence after logout, restart, and reboot."
+      ],
+      "expected": [
+        "The fixture remains usable after restart.",
+        "Hashes match the recorded values."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "app.ntfy.functional",
+      "area": "household",
+      "title": "Exercise ntfy delivery",
+      "covers": [
+        "app:ntfy"
+      ],
+      "sources": [
+        "deploy/catalog/catalog.json",
+        "nix/apps.nix",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open the ntfy interface through its resolved URL.",
+        "Exercise its required proof with synthetic fixtures.",
+        "Verify persistence after logout, restart, and reboot."
+      ],
+      "expected": [
+        "The fixture remains usable after restart.",
+        "Hashes match the recorded values."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "app.hermes.functional",
+      "area": "household",
+      "title": "Exercise Hermes conversations",
+      "covers": [
+        "app:hermes"
+      ],
+      "sources": [
+        "deploy/catalog/catalog.json",
+        "nix/apps.nix",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open the hermes interface through its resolved URL.",
+        "Exercise its required proof with synthetic fixtures.",
+        "Verify persistence after logout, restart, and reboot."
+      ],
+      "expected": [
+        "The fixture remains usable after restart.",
+        "Hashes match the recorded values."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "app.hindsight.functional",
+      "area": "household",
+      "title": "Exercise Hindsight memory",
+      "covers": [
+        "app:hindsight"
+      ],
+      "sources": [
+        "deploy/catalog/catalog.json",
+        "nix/apps.nix",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open the hindsight interface through its resolved URL.",
+        "Exercise its required proof with synthetic fixtures.",
+        "Verify persistence after logout, restart, and reboot."
+      ],
+      "expected": [
+        "The fixture remains usable after restart.",
+        "Hashes match the recorded values."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "app.restic-server.functional",
+      "area": "household",
+      "title": "Exercise Restic backups",
+      "covers": [
+        "app:restic-server"
+      ],
+      "sources": [
+        "deploy/catalog/catalog.json",
+        "nix/apps.nix",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open the restic-server interface through its resolved URL.",
+        "Exercise its required proof with synthetic fixtures.",
+        "Verify persistence after logout, restart, and reboot."
+      ],
+      "expected": [
+        "The fixture remains usable after restart.",
+        "Hashes match the recorded values."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "app.jellyfin.functional",
+      "area": "household",
+      "title": "Exercise Jellyfin media",
+      "covers": [
+        "app:jellyfin"
+      ],
+      "sources": [
+        "deploy/catalog/catalog.json",
+        "nix/apps.nix",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open the jellyfin interface through its resolved URL.",
+        "Exercise its required proof with synthetic fixtures.",
+        "Verify persistence after logout, restart, and reboot."
+      ],
+      "expected": [
+        "The fixture remains usable after restart.",
+        "Hashes match the recorded values."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "app.technitium.functional",
+      "area": "household",
+      "title": "Exercise Technitium DNS",
+      "covers": [
+        "app:technitium"
+      ],
+      "sources": [
+        "deploy/catalog/catalog.json",
+        "nix/apps.nix",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open the technitium interface through its resolved URL.",
+        "Exercise its required proof with synthetic fixtures.",
+        "Verify persistence after logout, restart, and reboot."
+      ],
+      "expected": [
+        "The fixture remains usable after restart.",
+        "Hashes match the recorded values."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "svc.data.deps",
+      "area": "household",
+      "title": "Verify data dependencies",
+      "covers": [
+        "manual:svc-data"
+      ],
+      "sources": [
+        "deploy/catalog/catalog.json",
+        "nix/apps.nix"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Exercise PostgreSQL, Redis, Meilisearch, Tika, Gotenberg, Karakeep workers, and Immich ML through dependent operations.",
+        "Stop one dependency exclusively and observe failure, then restart."
+      ],
+      "expected": [
+        "Dependent operations succeed when healthy.",
+        "Failures are reported accurately and recovery works."
+      ],
+      "evidence_types": [
+        "LIVE_API",
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "svc.platform.deps",
+      "area": "household",
+      "title": "Verify platform services",
+      "covers": [
+        "manual:svc-platform"
+      ],
+      "sources": [
+        "nix/apps.nix",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Verify Docker, rootless Podman, DevPod, ONCE, cloudflared, Tailscale, SSH, and timers through dependent operations."
+      ],
+      "expected": [
+        "Each service supports its dependents.",
+        "Timers run on schedule."
+      ],
+      "evidence_types": [
+        "LIVE_CLI",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "cov.ui.dashboard",
+      "area": "coverage",
+      "title": "Cover dashboard routes",
+      "covers": [
+        "ui:/",
+        "ui:/setup",
+        "ui:/applications",
+        "ui:/projects",
+        "ui:/backups",
+        "ui:/events",
+        "ui:/sync",
+        "ui:/workspaces",
+        "ui:/people",
+        "ui:/tool-environment",
+        "ui:/devices",
+        "ui:/ai",
+        "ui:/doctor",
+        "ui:*"
+      ],
+      "sources": [
+        "web/src/App.tsx",
+        "web/src/components/shell.tsx"
+      ],
+      "requires": [],
+      "steps": [
+        "Open each absolute dashboard route.",
+        "Verify each view loads."
+      ],
+      "expected": [
+        "Every route loads.",
+        "No route 404s unexpectedly."
+      ],
+      "evidence_types": [
+        "BROWSER"
+      ]
+    },
+    {
+      "id": "cov.ui.admin-relative",
+      "area": "coverage",
+      "title": "Cover admin relative routes",
+      "covers": [
+        "ui:setup",
+        "ui:applications",
+        "ui:projects",
+        "ui:backups",
+        "ui:events",
+        "ui:sync",
+        "ui:workspaces",
+        "ui:people",
+        "ui:tool-environment",
+        "ui:devices",
+        "ui:ai",
+        "ui:doctor"
+      ],
+      "sources": [
+        "web/src/App.tsx",
+        "web/src/components/shell.tsx"
+      ],
+      "requires": [],
+      "steps": [
+        "Open each relative admin route under /admin.",
+        "Verify each view loads."
+      ],
+      "expected": [
+        "Every relative route loads.",
+        "Views match their absolute counterparts."
+      ],
+      "evidence_types": [
+        "BROWSER"
+      ]
+    },
+    {
+      "id": "cov.ui.top",
+      "area": "coverage",
+      "title": "Cover top-level routes",
+      "covers": [
+        "ui:/login",
+        "ui:/bootstrap",
+        "ui:/welcome/:token",
+        "ui:/admin/*",
+        "ui:/admin",
+        "ui:/",
+        "ui:/*"
+      ],
+      "sources": [
+        "web/src/App.tsx",
+        "web/src/components/shell.tsx"
+      ],
+      "requires": [],
+      "steps": [
+        "Open login, bootstrap, welcome, admin, home, and fallback routes.",
+        "Verify redirects and guards."
+      ],
+      "expected": [
+        "Auth guards work.",
+        "Redirects land correctly."
+      ],
+      "evidence_types": [
+        "BROWSER"
+      ]
+    },
+    {
+      "id": "cov.api.public",
+      "area": "coverage",
+      "title": "Cover public distribution",
+      "covers": [
+        "api:GET /up",
+        "api:GET /api/v1/public/status",
+        "api:POST /api/v1/projects/{id}/releases/with-token",
+        "api:POST /api/v1/email/ingest",
+        "api:POST /api/v1/scm/webhook",
+        "api:POST /api/v1/companion/enroll",
+        "api:GET /dl/SHA256SUMS",
+        "api:GET /dl/{file}",
+        "api:GET /install.sh",
+        "api:GET /api/openapi.yaml"
+      ],
+      "sources": [
+        "internal/api/server.go",
+        "internal/api/openapi.yaml"
+      ],
+      "requires": [],
+      "steps": [
+        "Exercise Cover public distribution through authenticated API calls.",
+        "Verify success, validation, permission, and missing-state paths."
+      ],
+      "expected": [
+        "Responses match the OpenAPI contract.",
+        "Errors are stable JSON envelopes."
+      ],
+      "evidence_types": [
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "cov.api.edge",
+      "area": "coverage",
+      "title": "Cover edge MCP and embeddings",
+      "covers": [
+        "api:ANY /mcp",
+        "api:ANY /mcp/",
+        "api:POST /api/v1/hindsight/embeddings"
+      ],
+      "sources": [
+        "internal/api/server.go",
+        "internal/api/openapi.yaml"
+      ],
+      "requires": [],
+      "steps": [
+        "Exercise Cover edge MCP and embeddings through authenticated API calls.",
+        "Verify success, validation, permission, and missing-state paths."
+      ],
+      "expected": [
+        "Responses match the OpenAPI contract.",
+        "Errors are stable JSON envelopes."
+      ],
+      "evidence_types": [
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "cov.api.status",
+      "area": "coverage",
+      "title": "Cover status and instance",
+      "covers": [
+        "api:GET /api/v1/status",
+        "api:GET /api/v1/instance",
+        "api:PUT /api/v1/instance",
+        "api:GET /api/v1/doctor"
+      ],
+      "sources": [
+        "internal/api/server.go",
+        "internal/api/openapi.yaml"
+      ],
+      "requires": [],
+      "steps": [
+        "Exercise Cover status and instance through authenticated API calls.",
+        "Verify success, validation, permission, and missing-state paths."
+      ],
+      "expected": [
+        "Responses match the OpenAPI contract.",
+        "Errors are stable JSON envelopes."
+      ],
+      "evidence_types": [
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "cov.api.apps",
+      "area": "coverage",
+      "title": "Cover catalog and applications",
+      "covers": [
+        "api:GET /api/v1/catalog",
+        "api:GET /api/v1/applications",
+        "api:POST /api/v1/applications",
+        "api:GET /api/v1/applications/{id}",
+        "api:PATCH /api/v1/applications/{id}",
+        "api:POST /api/v1/applications/{id}/actions",
+        "api:POST /api/v1/applications/{id}/maintenance",
+        "api:DELETE /api/v1/applications/{id}/maintenance"
+      ],
+      "sources": [
+        "internal/api/server.go",
+        "internal/api/openapi.yaml"
+      ],
+      "requires": [],
+      "steps": [
+        "Exercise Cover catalog and applications through authenticated API calls.",
+        "Verify success, validation, permission, and missing-state paths."
+      ],
+      "expected": [
+        "Responses match the OpenAPI contract.",
+        "Errors are stable JSON envelopes."
+      ],
+      "evidence_types": [
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "cov.api.exposure",
+      "area": "coverage",
+      "title": "Cover exposure",
+      "covers": [
+        "api:GET /api/v1/exposure",
+        "api:GET /api/v1/exposure/{kind}/{id}",
+        "api:PUT /api/v1/exposure/{kind}/{id}",
+        "api:GET /api/v1/applications/{id}/exposure",
+        "api:PUT /api/v1/applications/{id}/exposure",
+        "api:GET /api/v1/projects/{id}/exposure",
+        "api:PUT /api/v1/projects/{id}/exposure"
+      ],
+      "sources": [
+        "internal/api/server.go",
+        "internal/api/openapi.yaml"
+      ],
+      "requires": [],
+      "steps": [
+        "Exercise Cover exposure through authenticated API calls.",
+        "Verify success, validation, permission, and missing-state paths."
+      ],
+      "expected": [
+        "Responses match the OpenAPI contract.",
+        "Errors are stable JSON envelopes."
+      ],
+      "evidence_types": [
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "cov.api.projects",
+      "area": "coverage",
+      "title": "Cover projects",
+      "covers": [
+        "api:GET /api/v1/projects",
+        "api:POST /api/v1/projects",
+        "api:GET /api/v1/projects/{id}",
+        "api:PATCH /api/v1/projects/{id}",
+        "api:DELETE /api/v1/projects/{id}"
+      ],
+      "sources": [
+        "internal/api/server.go",
+        "internal/api/openapi.yaml"
+      ],
+      "requires": [],
+      "steps": [
+        "Exercise Cover projects through authenticated API calls.",
+        "Verify success, validation, permission, and missing-state paths."
+      ],
+      "expected": [
+        "Responses match the OpenAPI contract.",
+        "Errors are stable JSON envelopes."
+      ],
+      "evidence_types": [
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "cov.api.releases",
+      "area": "coverage",
+      "title": "Cover releases",
+      "covers": [
+        "api:GET /api/v1/projects/{id}/releases",
+        "api:POST /api/v1/projects/{id}/releases",
+        "api:GET /api/v1/projects/{id}/releases/{releaseID}",
+        "api:POST /api/v1/projects/{id}/releases/{releaseID}/rollback",
+        "api:POST /api/v1/projects/{id}/release-token",
+        "api:POST /api/v1/projects/{id}/release-token/rotate"
+      ],
+      "sources": [
+        "internal/api/server.go",
+        "internal/api/openapi.yaml"
+      ],
+      "requires": [],
+      "steps": [
+        "Exercise Cover releases through authenticated API calls.",
+        "Verify success, validation, permission, and missing-state paths."
+      ],
+      "expected": [
+        "Responses match the OpenAPI contract.",
+        "Errors are stable JSON envelopes."
+      ],
+      "evidence_types": [
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "cov.api.mirror",
+      "area": "coverage",
+      "title": "Cover push mirrors",
+      "covers": [
+        "api:GET /api/v1/projects/{id}/mirror",
+        "api:PUT /api/v1/projects/{id}/mirror",
+        "api:DELETE /api/v1/projects/{id}/mirror"
+      ],
+      "sources": [
+        "internal/api/server.go",
+        "internal/api/openapi.yaml"
+      ],
+      "requires": [],
+      "steps": [
+        "Exercise Cover push mirrors through authenticated API calls.",
+        "Verify success, validation, permission, and missing-state paths."
+      ],
+      "expected": [
+        "Responses match the OpenAPI contract.",
+        "Errors are stable JSON envelopes."
+      ],
+      "evidence_types": [
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "cov.api.secrets",
+      "area": "coverage",
+      "title": "Cover secrets",
+      "covers": [
+        "api:GET /api/v1/secrets",
+        "api:POST /api/v1/secrets",
+        "api:GET /api/v1/secrets/{id}",
+        "api:PUT /api/v1/secrets/{id}",
+        "api:DELETE /api/v1/secrets/{id}"
+      ],
+      "sources": [
+        "internal/api/server.go",
+        "internal/api/openapi.yaml"
+      ],
+      "requires": [],
+      "steps": [
+        "Exercise Cover secrets through authenticated API calls.",
+        "Verify success, validation, permission, and missing-state paths."
+      ],
+      "expected": [
+        "Responses match the OpenAPI contract.",
+        "Errors are stable JSON envelopes."
+      ],
+      "evidence_types": [
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "cov.api.backups",
+      "area": "coverage",
+      "title": "Cover backups",
+      "covers": [
+        "api:GET /api/v1/backups",
+        "api:POST /api/v1/backups",
+        "api:GET /api/v1/backups/{id}",
+        "api:POST /api/v1/backups/{id}/restore",
+        "api:POST /api/v1/backups/{id}/verify",
+        "api:POST /api/v1/backups/verify"
+      ],
+      "sources": [
+        "internal/api/server.go",
+        "internal/api/openapi.yaml"
+      ],
+      "requires": [],
+      "steps": [
+        "Exercise Cover backups through authenticated API calls.",
+        "Verify success, validation, permission, and missing-state paths."
+      ],
+      "expected": [
+        "Responses match the OpenAPI contract.",
+        "Errors are stable JSON envelopes."
+      ],
+      "evidence_types": [
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "cov.api.events",
+      "area": "coverage",
+      "title": "Cover events",
+      "covers": [
+        "api:GET /api/v1/events",
+        "api:GET /api/v1/events/stream",
+        "api:GET /api/v1/events/{id}",
+        "api:POST /api/v1/events/{id}/read",
+        "api:POST /api/v1/events/read-all"
+      ],
+      "sources": [
+        "internal/api/server.go",
+        "internal/api/openapi.yaml"
+      ],
+      "requires": [],
+      "steps": [
+        "Exercise Cover events through authenticated API calls.",
+        "Verify success, validation, permission, and missing-state paths."
+      ],
+      "expected": [
+        "Responses match the OpenAPI contract.",
+        "Errors are stable JSON envelopes."
+      ],
+      "evidence_types": [
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "cov.api.sync",
+      "area": "coverage",
+      "title": "Cover sync folders",
+      "covers": [
+        "api:GET /api/v1/sync/folders",
+        "api:POST /api/v1/sync/folders",
+        "api:GET /api/v1/sync/folders/{id}",
+        "api:PATCH /api/v1/sync/folders/{id}",
+        "api:DELETE /api/v1/sync/folders/{id}"
+      ],
+      "sources": [
+        "internal/api/server.go",
+        "internal/api/openapi.yaml"
+      ],
+      "requires": [],
+      "steps": [
+        "Exercise Cover sync folders through authenticated API calls.",
+        "Verify success, validation, permission, and missing-state paths."
+      ],
+      "expected": [
+        "Responses match the OpenAPI contract.",
+        "Errors are stable JSON envelopes."
+      ],
+      "evidence_types": [
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "cov.api.workspaces",
+      "area": "coverage",
+      "title": "Cover workspaces",
+      "covers": [
+        "api:GET /api/v1/workspaces",
+        "api:POST /api/v1/workspaces",
+        "api:GET /api/v1/workspaces/{id}",
+        "api:POST /api/v1/workspaces/{id}/stop",
+        "api:DELETE /api/v1/workspaces/{id}",
+        "api:POST /api/v1/workspaces/{id}/send",
+        "api:POST /api/v1/workspaces/{id}/attach",
+        "api:POST /api/v1/workspaces/{id}/capabilities",
+        "api:POST /api/v1/workspaces/{id}/capabilities/validate"
+      ],
+      "sources": [
+        "internal/api/server.go",
+        "internal/api/openapi.yaml"
+      ],
+      "requires": [],
+      "steps": [
+        "Exercise Cover workspaces through authenticated API calls.",
+        "Verify success, validation, permission, and missing-state paths."
+      ],
+      "expected": [
+        "Responses match the OpenAPI contract.",
+        "Errors are stable JSON envelopes."
+      ],
+      "evidence_types": [
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "cov.api.knowledge-read",
+      "area": "coverage",
+      "title": "Cover knowledge reads",
+      "covers": [
+        "api:GET /api/v1/knowledge/documents/{id}",
+        "api:GET /api/v1/knowledge/documents/{id}/text",
+        "api:GET /api/v1/knowledge/correspondents",
+        "api:GET /api/v1/knowledge/document-types",
+        "api:GET /api/v1/knowledge/tags",
+        "api:GET /api/v1/knowledge/sources",
+        "api:GET /api/v1/knowledge/index-setup-options",
+        "api:GET /api/v1/knowledge/pinned-models",
+        "api:GET /api/v1/knowledge/consent",
+        "api:GET /api/v1/knowledge/index-setup"
+      ],
+      "sources": [
+        "internal/api/server.go",
+        "internal/api/openapi.yaml"
+      ],
+      "requires": [],
+      "steps": [
+        "Exercise Cover knowledge reads through authenticated API calls.",
+        "Verify success, validation, permission, and missing-state paths."
+      ],
+      "expected": [
+        "Responses match the OpenAPI contract.",
+        "Errors are stable JSON envelopes."
+      ],
+      "evidence_types": [
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "cov.api.knowledge-write",
+      "area": "coverage",
+      "title": "Cover knowledge writes",
+      "covers": [
+        "api:POST /api/v1/knowledge/search",
+        "api:POST /api/v1/knowledge/upload",
+        "api:POST /api/v1/knowledge/documents/{id}/tags",
+        "api:PUT /api/v1/knowledge/consent",
+        "api:PUT /api/v1/knowledge/index-setup",
+        "api:GET /api/v1/hermes/mcp-token",
+        "api:POST /api/v1/hermes/mcp-token/rotate"
+      ],
+      "sources": [
+        "internal/api/server.go",
+        "internal/api/openapi.yaml"
+      ],
+      "requires": [],
+      "steps": [
+        "Exercise Cover knowledge writes through authenticated API calls.",
+        "Verify success, validation, permission, and missing-state paths."
+      ],
+      "expected": [
+        "Responses match the OpenAPI contract.",
+        "Errors are stable JSON envelopes."
+      ],
+      "evidence_types": [
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "cov.api.setup-net",
+      "area": "coverage",
+      "title": "Cover setup networking",
+      "covers": [
+        "api:GET /api/v1/setup",
+        "api:POST /api/v1/tailscale/up",
+        "api:GET /api/v1/tailscale/status",
+        "api:GET /api/v1/network/status",
+        "api:POST /api/v1/network/close-lan",
+        "api:POST /api/v1/network/open-lan"
+      ],
+      "sources": [
+        "internal/api/server.go",
+        "internal/api/openapi.yaml"
+      ],
+      "requires": [],
+      "steps": [
+        "Exercise Cover setup networking through authenticated API calls.",
+        "Verify success, validation, permission, and missing-state paths."
+      ],
+      "expected": [
+        "Responses match the OpenAPI contract.",
+        "Errors are stable JSON envelopes."
+      ],
+      "evidence_types": [
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "cov.api.recovery-ops",
+      "area": "coverage",
+      "title": "Cover recovery and operations",
+      "covers": [
+        "api:POST /api/v1/recovery/generate",
+        "api:POST /api/v1/recovery/confirm",
+        "api:GET /api/v1/system/disks",
+        "api:PUT /api/v1/system/storage",
+        "api:GET /api/v1/operations/{id}",
+        "api:POST /api/v1/operations/{id}/actions",
+        "api:GET /api/v1/system/ssh-keys",
+        "api:POST /api/v1/system/ssh-keys"
+      ],
+      "sources": [
+        "internal/api/server.go",
+        "internal/api/openapi.yaml"
+      ],
+      "requires": [],
+      "steps": [
+        "Exercise Cover recovery and operations through authenticated API calls.",
+        "Verify success, validation, permission, and missing-state paths."
+      ],
+      "expected": [
+        "Responses match the OpenAPI contract.",
+        "Errors are stable JSON envelopes."
+      ],
+      "evidence_types": [
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "cov.api.repos",
+      "area": "coverage",
+      "title": "Cover repositories and setup",
+      "covers": [
+        "api:GET /api/v1/technitium/setup",
+        "api:POST /api/v1/backup-repositories/{id}/snapshots/import",
+        "api:GET /api/v1/backup-repositories",
+        "api:POST /api/v1/backup-repositories",
+        "api:DELETE /api/v1/backup-repositories/{id}",
+        "api:POST /api/v1/setup/reconcile",
+        "api:POST /api/v1/setup/verify-cloudflare",
+        "api:PUT /api/v1/setup/woodpecker"
+      ],
+      "sources": [
+        "internal/api/server.go",
+        "internal/api/openapi.yaml"
+      ],
+      "requires": [],
+      "steps": [
+        "Exercise Cover repositories and setup through authenticated API calls.",
+        "Verify success, validation, permission, and missing-state paths."
+      ],
+      "expected": [
+        "Responses match the OpenAPI contract.",
+        "Errors are stable JSON envelopes."
+      ],
+      "evidence_types": [
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "cov.api.users",
+      "area": "coverage",
+      "title": "Cover users and identity",
+      "covers": [
+        "api:GET /api/v1/users",
+        "api:POST /api/v1/users",
+        "api:GET /api/v1/users/{id}",
+        "api:PATCH /api/v1/users/{id}",
+        "api:POST /api/v1/users/{id}/recovery",
+        "api:POST /api/v1/users/{id}/enrollment",
+        "api:POST /api/v1/identity/recover",
+        "api:GET /api/v1/users/{id}/enrollment",
+        "api:GET /api/v1/users/{id}/app-access",
+        "api:GET /api/v1/users/{id}/groups",
+        "api:PUT /api/v1/users/{id}/groups"
+      ],
+      "sources": [
+        "internal/api/server.go",
+        "internal/api/openapi.yaml"
+      ],
+      "requires": [],
+      "steps": [
+        "Exercise Cover users and identity through authenticated API calls.",
+        "Verify success, validation, permission, and missing-state paths."
+      ],
+      "expected": [
+        "Responses match the OpenAPI contract.",
+        "Errors are stable JSON envelopes."
+      ],
+      "evidence_types": [
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "cov.api.models",
+      "area": "coverage",
+      "title": "Cover models and providers",
+      "covers": [
+        "api:GET /api/v1/setup/models",
+        "api:POST /api/v1/setup/models/seed",
+        "api:GET /api/v1/model-keys",
+        "api:POST /api/v1/model-keys",
+        "api:DELETE /api/v1/model-keys/{id}",
+        "api:POST /api/v1/provider-oauth/{provider}/start",
+        "api:GET /api/v1/provider-oauth/{provider}/poll/{session_id}",
+        "api:POST /api/v1/providers/zai/connect",
+        "api:POST /api/v1/providers/{provider}/disconnect"
+      ],
+      "sources": [
+        "internal/api/server.go",
+        "internal/api/openapi.yaml"
+      ],
+      "requires": [],
+      "steps": [
+        "Exercise Cover models and providers through authenticated API calls.",
+        "Verify success, validation, permission, and missing-state paths."
+      ],
+      "expected": [
+        "Responses match the OpenAPI contract.",
+        "Errors are stable JSON envelopes."
+      ],
+      "evidence_types": [
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "cov.api.companion-admin",
+      "area": "coverage",
+      "title": "Cover companion admin",
+      "covers": [
+        "api:POST /api/v1/companion-enrollments",
+        "api:GET /api/v1/companion/devices",
+        "api:DELETE /api/v1/companion/devices/{id}",
+        "api:PUT /api/v1/companion/devices/{id}/allow-oauth"
+      ],
+      "sources": [
+        "internal/api/server.go",
+        "internal/api/openapi.yaml"
+      ],
+      "requires": [],
+      "steps": [
+        "Exercise Cover companion admin through authenticated API calls.",
+        "Verify success, validation, permission, and missing-state paths."
+      ],
+      "expected": [
+        "Responses match the OpenAPI contract.",
+        "Errors are stable JSON envelopes."
+      ],
+      "evidence_types": [
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "cov.api.ntfy-tool",
+      "area": "coverage",
+      "title": "Cover notifications and tooling",
+      "covers": [
+        "api:GET /api/v1/ntfy",
+        "api:PUT /api/v1/ntfy",
+        "api:GET /api/v1/tool-environment",
+        "api:PUT /api/v1/tool-environment/{NAME}",
+        "api:DELETE /api/v1/tool-environment/{NAME}"
+      ],
+      "sources": [
+        "internal/api/server.go",
+        "internal/api/openapi.yaml"
+      ],
+      "requires": [],
+      "steps": [
+        "Exercise Cover notifications and tooling through authenticated API calls.",
+        "Verify success, validation, permission, and missing-state paths."
+      ],
+      "expected": [
+        "Responses match the OpenAPI contract.",
+        "Errors are stable JSON envelopes."
+      ],
+      "evidence_types": [
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "cov.api.email-hass",
+      "area": "coverage",
+      "title": "Cover email and assistant",
+      "covers": [
+        "api:GET /api/v1/email/messages",
+        "api:GET /api/v1/email/messages/{id}",
+        "api:POST /api/v1/email/routes",
+        "api:POST /api/v1/email/senders",
+        "api:GET /api/v1/email/senders",
+        "api:DELETE /api/v1/email/senders",
+        "api:GET /api/v1/integrations/home-assistant",
+        "api:PUT /api/v1/integrations/home-assistant",
+        "api:DELETE /api/v1/integrations/home-assistant"
+      ],
+      "sources": [
+        "internal/api/server.go",
+        "internal/api/openapi.yaml"
+      ],
+      "requires": [],
+      "steps": [
+        "Exercise Cover email and assistant through authenticated API calls.",
+        "Verify success, validation, permission, and missing-state paths."
+      ],
+      "expected": [
+        "Responses match the OpenAPI contract.",
+        "Errors are stable JSON envelopes."
+      ],
+      "evidence_types": [
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "cov.api.device-core",
+      "area": "coverage",
+      "title": "Cover companion device core",
+      "covers": [
+        "api:PUT /api/v1/companion/devices/me",
+        "api:GET /api/v1/companion/status",
+        "api:GET /api/v1/companion/events",
+        "api:GET /api/v1/companion/events/stream",
+        "api:GET /api/v1/companion/projects",
+        "api:POST /api/v1/companion/projects",
+        "api:GET /api/v1/companion/environment"
+      ],
+      "sources": [
+        "internal/api/server.go",
+        "internal/api/openapi.yaml"
+      ],
+      "requires": [],
+      "steps": [
+        "Exercise Cover companion device core through authenticated API calls.",
+        "Verify success, validation, permission, and missing-state paths."
+      ],
+      "expected": [
+        "Responses match the OpenAPI contract.",
+        "Errors are stable JSON envelopes."
+      ],
+      "evidence_types": [
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "cov.api.device-work",
+      "area": "coverage",
+      "title": "Cover companion work",
+      "covers": [
+        "api:GET /api/v1/companion/workspaces",
+        "api:POST /api/v1/companion/workspaces",
+        "api:POST /api/v1/companion/workspaces/{id}/stop",
+        "api:POST /api/v1/companion/sync/folders",
+        "api:POST /api/v1/provider-oauth/{provider}/callback/{session_id}",
+        "api:ANY /api/v1/companion/mcp",
+        "api:ANY /api/v1/companion/mcp/"
+      ],
+      "sources": [
+        "internal/api/server.go",
+        "internal/api/openapi.yaml"
+      ],
+      "requires": [],
+      "steps": [
+        "Exercise Cover companion work through authenticated API calls.",
+        "Verify success, validation, permission, and missing-state paths."
+      ],
+      "expected": [
+        "Responses match the OpenAPI contract.",
+        "Errors are stable JSON envelopes."
+      ],
+      "evidence_types": [
+        "LIVE_API"
+      ]
+    }
+  ]
+}

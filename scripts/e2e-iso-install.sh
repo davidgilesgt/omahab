@@ -14,11 +14,14 @@
 # Default-clean: without --keep the guest disk and ephemeral secrets are
 # removed on success AND failure (EXIT trap); only logs stay behind.
 #
-# Usage: scripts/e2e-iso-install.sh [--skip-build] [--keep] [--workdir DIR]
+# Usage: scripts/e2e-iso-install.sh [--skip-build] [--keep] [--workdir DIR] [--interactive] [--interactive-installer] [--firmware bios|uefi] [--data-disks 0|1|2]
 #   --skip-build   reuse dist/iso when its marker matches HEAD (else rebuild)
 #   --keep         keep the workdir (disk image, logs) after the run
 #   --workdir DIR  workdir for disk/logs/markers [dist/e2e]
-#
+#   --interactive  pause after read-only probes for browser testing; browser owns recovery
+#   --interactive-installer  pause before the serial installer for the real wizard
+#   --firmware bios|uefi  guest firmware [bios]
+#   --data-disks 0|1|2  extra 4 GiB scratch data disks in the workdir [0]
 # Requirements: nix, /dev/kvm, python3, curl. QEMU resolves from PATH or the
 # nix store (see resolve_qemu). All local state lives under dist/ (gitignored).
 set -euo pipefail
@@ -29,15 +32,25 @@ cd "$ROOT"
 WORKDIR="dist/e2e"
 SKIP_BUILD=0
 KEEP=0
+INTERACTIVE=0
+INTERACTIVE_INSTALLER=0
+FIRMWARE="bios"
+DATA_DISKS=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --skip-build) SKIP_BUILD=1; shift ;;
     --keep) KEEP=1; shift ;;
     --workdir) WORKDIR="${2:?--workdir needs a directory}"; shift 2 ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    --interactive) INTERACTIVE=1; shift ;;
+    --interactive-installer) INTERACTIVE_INSTALLER=1; shift ;;
+    --firmware) FIRMWARE="${2:?--firmware needs bios|uefi}"; shift 2 ;;
+    --data-disks) DATA_DISKS="${2:?--data-disks needs 0|1|2}"; shift 2 ;;
+    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
     *) echo "unknown flag: $1 (see --help)" >&2; exit 2 ;;
   esac
 done
+case "$FIRMWARE" in bios|uefi) ;; *) echo "unknown --firmware: $FIRMWARE (want bios|uefi)" >&2; exit 2 ;; esac
+case "$DATA_DISKS" in 0|1|2) ;; *) echo "unknown --data-disks: $DATA_DISKS (want 0|1|2)" >&2; exit 2 ;; esac
 
 DISK="$WORKDIR/disk.qcow2"
 # Guest disk: the installed closure (immich ML, paperless/tika, litellm
@@ -91,6 +104,8 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 resolve_qemu() {
   if command -v qemu-system-x86_64 >/dev/null 2>&1; then
@@ -175,6 +190,33 @@ chmod 600 "$SSH_KEY"
 E2E_SSH_PUB="$(cat "$SSH_KEY.pub")"
 [[ -n "$E2E_SSH_PUB" ]] || die "empty ephemeral ssh key"
 
+# --- Firmware (BIOS default; UEFI via pinned OVMF, identical both phases).
+FIRMWARE_ARGS=()
+if [[ "$FIRMWARE" == "uefi" ]]; then
+  OVMF_OUT="$(nix build --no-link --print-out-paths nixpkgs#OVMF.fd 2>/dev/null || true)"
+  OVMF_CODE="$(ls "$OVMF_OUT"/FV/OVMF_CODE.fd 2>/dev/null || true)"
+  OVMF_VARS_SRC="$(ls "$OVMF_OUT"/FV/OVMF_VARS.fd 2>/dev/null || true)"
+  [[ -n "$OVMF_CODE" && -f "$OVMF_CODE" && -n "$OVMF_VARS_SRC" && -f "$OVMF_VARS_SRC" ]] || die "UEFI firmware missing in OVMF package (block UEFI cases; package evidence: ${OVMF_OUT:-none})"
+  cp -f "$OVMF_VARS_SRC" "$WORKDIR/ovmf-vars.fd"
+  chmod 600 "$WORKDIR/ovmf-vars.fd"
+  FIRMWARE_ARGS=(-drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE" -drive "if=pflash,format=raw,file=$WORKDIR/ovmf-vars.fd")
+  log "firmware: uefi ($OVMF_CODE)"
+else
+  log "firmware: bios"
+fi
+
+# --- Scratch data disks (fresh each run, stable serials, same both phases).
+DATA_ARGS=()
+if (( DATA_DISKS >= 1 )); then
+  for i in $(seq 1 "$DATA_DISKS"); do
+    DD="$WORKDIR/data-$i.qcow2"
+    rm -f "$DD"
+    "$QEMU_IMG" create -f qcow2 "$DD" 4G >/dev/null
+    DATA_ARGS+=(-drive "file=$DD,format=qcow2,if=virtio,serial=omahab-data-$i")
+    log "fresh data disk $i: $DD"
+  done
+fi
+
 # --- Fresh VM disk, always (never reuse installed state across runs).
 rm -f "$DISK"
 "$QEMU_IMG" create -f qcow2 "$DISK" "${DISK_GB}G" >/dev/null
@@ -184,16 +226,28 @@ log "fresh disk: $DISK"
 log "phase 1: booting ISO (install)"
 "$QEMU" -enable-kvm -cpu host -m "$MEM_MB" -smp 4 \
   -cdrom "$ISO_FILE" -drive "file=$DISK,format=qcow2,if=virtio" \
+  "${DATA_ARGS[@]}" "${FIRMWARE_ARGS[@]}" \
   -boot order=d -display none -daemonize \
   -pidfile "$WORKDIR/qemu-install.pid" \
   -serial "tcp:127.0.0.1:$SERIAL_PORT,server,nowait" \
   -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
   || die "qemu failed to start (install phase)"
 QEMU_PID="$(cat "$WORKDIR/qemu-install.pid")"
-
 SERIAL_LOG="$WORKDIR/serial-install.log"
-INSTALL_EXIT=0
-python3 - "$SERIAL_PORT" "$SERIAL_LOG" "$INSTALL_TIMEOUT" "http://10.0.2.2:$CACHE_PORT" "$CACHE_PUB" "$E2E_ADMIN_PASS" "$E2E_SSH_PUB" <<'PYEOF' || INSTALL_EXIT=$?
+if [[ "$INTERACTIVE_INSTALLER" -eq 1 ]]; then
+  printf 'E2E INSTALLER INTERACTIVE READY serial 127.0.0.1:%s pubkey %s\n' "$SERIAL_PORT" "$WORKDIR/e2e-ssh-key.pub"
+  IFS= read -r _ || true
+  log "interactive installer session ended; waiting for guest poweroff"
+  for _ in $(seq 1 60); do
+    pgrep -F "$WORKDIR/qemu-install.pid" >/dev/null 2>&1 || break
+    sleep 2
+  done
+  pkill -F "$WORKDIR/qemu-install.pid" 2>/dev/null && die "guest did not power off after interactive install"
+  QEMU_PID=""
+  log "phase 1: installed (interactive wizard)"
+else
+  INSTALL_EXIT=0
+  python3 - "$SERIAL_PORT" "$SERIAL_LOG" "$INSTALL_TIMEOUT" "http://10.0.2.2:$CACHE_PORT" "$CACHE_PUB" "$E2E_ADMIN_PASS" "$E2E_SSH_PUB" <<'PYEOF' || INSTALL_EXIT=$?
 import re, socket, sys, time
 
 port, logpath, timeout = int(sys.argv[1]), sys.argv[2], int(sys.argv[3])
@@ -276,7 +330,9 @@ run(install_cmd, timeout, expect_exit=0)
 s.sendall(b"poweroff\n")
 print("install complete, guest powering off")
 PYEOF
+fi
 
+if [[ "$INTERACTIVE_INSTALLER" -eq 0 ]]; then
 # Guest is powering off; stop tracking the phase-1 PID either way.
 QEMU_PID=""
 for _ in $(seq 1 60); do
@@ -287,6 +343,7 @@ done
 pkill -F "$WORKDIR/qemu-install.pid" 2>/dev/null && die "guest did not power off after install"
 [[ $INSTALL_EXIT -eq 0 ]] || die "install phase failed (see $SERIAL_LOG)"
 log "phase 1: installed"
+fi
 
 # --- Phase 2: boot the installed system (no ISO), probe the setup flow.
 # Probes travel through an SSH local forward, not the raw SLIRP forward:
@@ -296,6 +353,7 @@ log "phase 1: installed"
 log "phase 2: booting installed system"
 "$QEMU" -enable-kvm -cpu host -m "$MEM_MB" -smp 4 \
   -drive "file=$DISK,format=qcow2,if=virtio" \
+  "${DATA_ARGS[@]}" "${FIRMWARE_ARGS[@]}" \
   -boot order=c -display none -daemonize \
   -pidfile "$WORKDIR/qemu-test.pid" \
   -serial "file:$WORKDIR/serial-boot.log" \
@@ -353,12 +411,25 @@ check() {  # check <name> <curl-args...> -- <grep-pattern>
     die "FAILED: $name (pattern '$pattern' not matched)"
   fi
 }
-
 check "liveness" "$BASE/up" -- '"status":"up"'
 check "setup starts at ssh_keys" "$BASE/api/v1/setup" -- 'ssh_keys'
 check "storage candidates (lsblk on daemon PATH)" "$BASE/api/v1/system/disks" -- 'items'
 check "control-plane status" "$BASE/api/v1/status" -- 'instance_id'
 check "panel serves SPA" "$BASE/" -- '<div id="root">'
+
+if [[ "$INTERACTIVE" -eq 1 ]]; then
+  printf 'E2E INTERACTIVE READY\n'
+  IFS= read -r _ || true
+  if [[ $KEEP -eq 0 ]]; then
+    cleanup
+    QEMU_PID=""
+    log "workdir cleaned (disk removed); logs kept in $WORKDIR"
+  else
+    log "kept: $WORKDIR (disk + logs)"
+  fi
+  log "E2E INTERACTIVE SESSION ENDED"
+  exit 0
+fi
 
 # --- Recovery scenario: generate a phrase, confirm it survived the
 # install (kit written), and watch the setup checklist flip recovery_key.

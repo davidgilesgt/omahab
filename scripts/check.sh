@@ -111,6 +111,14 @@ else
   fail_check "go toolchain not found"
 fi
 
+# Deep-test checklist: template coverage and generator regressions.
+if ! command -v node >/dev/null 2>&1; then
+  fail_check "node not found (test-checklist gate requires node)"
+else
+  node scripts/test-checklist.mjs check && pass "test-checklist check" || fail_check "test-checklist check"
+  node --test scripts/test-checklist.test.mjs >/dev/null 2>&1 && pass "test-checklist tests" || fail_check "test-checklist tests"
+fi
+
 # Frontend and email-worker typechecks are required gates, not best-effort:
 # missing toolchains fail loudly and diagnostics are shown, not suppressed.
 if ! command -v npm >/dev/null 2>&1; then

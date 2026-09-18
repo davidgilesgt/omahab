@@ -25,3 +25,13 @@
 - When asked to test in a VM, run `scripts/e2e-iso-install.sh`: builds the ISO, installs it onto a fresh VM disk, boots the installed system, probes the setup flow. Never substitute `nix run .#vm` or the NixOS unit tests — those skip the ISO/install path.
 - Freshness is mandatory: the VM disk is always recreated, and the ISO is rebuilt whenever HEAD moved since the last run (marker in `dist/e2e/`; the script enforces this even with `--skip-build`). When new commits land, re-run the harness from scratch — never reuse a booted VM or a stale ISO across commits, and never ask whether to recreate.
 - Harness state (disk, logs, markers) lives under `dist/e2e/`; `--keep` preserves the disk for debugging, default cleans it.
+
+## Testing checklist
+- Add checklist cases when adding a feature or installed application.
+- Update cases when changing behavior, access rules, failure handling, or recovery requirements.
+- Remove obsolete cases when removing features.
+- Update testing context and skills when their procedures or prerequisites change.
+- Run `node scripts/test-checklist.mjs check` before considering the change complete.
+- Use `node scripts/test-checklist.mjs new` to begin each independent campaign.
+- Never replace the maintained template with a completed run checklist.
+- Never commit supplied credentials, generated secrets, or run results.
