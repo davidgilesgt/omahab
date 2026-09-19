@@ -17,16 +17,6 @@ import (
 
 func (b *Backend) MCPHandler() *mcp.Server { return b.mcpServer }
 
-func (b *Backend) MCPToken(ctx context.Context) string {
-	if b.secrets == nil {
-		return ""
-	}
-	v, err := b.secrets.RevealByName(ctx, "platform-app", "hermes_mcp_token")
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(v)
-}
 
 type mcpWorkspacesAdapter struct{ backend *Backend }
 

@@ -71,6 +71,7 @@ type Backend struct {
 	integrations *integrations.Service
 	exposure     *exposure.Service
 	exposureMu   sync.Mutex
+	hermesTokenMu sync.Mutex
 	mcpServer    *mcp.Server
 
 	masterKey [32]byte

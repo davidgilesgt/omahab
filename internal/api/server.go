@@ -36,7 +36,6 @@ type Server struct {
 	backend          *controlplane.Backend
 	environments     *companion.Service
 	tokenHash        []byte // SHA256 of bearer token, nil means auth disabled (tests only)
-	mcpTokenHash     []byte // SHA256 of hermes_mcp_token, nil means MCP auth disabled
 	emailHMACKey     []byte
 	scmWebhookSecret []byte
 	version          string
@@ -55,7 +54,6 @@ type Config struct {
 	Environments     *companion.Service
 	Version          string
 	BearerToken      string // raw token; hashed with SHA256 and compared constant-time
-	MCPToken         string // raw hermes_mcp_token; hashed and checked by mcpAuth
 	MCPHandler       http.Handler
 	EmailHMACKey     string // raw HMAC key for email webhook; empty disables HMAC check (tests)
 	SCMWebhookSecret string // raw HMAC key for Forgejo webhook (platform-app/forgejo_webhook_secret)
@@ -107,10 +105,6 @@ func New(cfg Config) (*Server, error) {
 	if cfg.BearerToken != "" {
 		h := sha256.Sum256([]byte(cfg.BearerToken))
 		s.tokenHash = h[:]
-	}
-	if cfg.MCPToken != "" {
-		h := sha256.Sum256([]byte(cfg.MCPToken))
-		s.mcpTokenHash = h[:]
 	}
 	s.router = s.buildRouter()
 	s.httpServer = &http.Server{
@@ -751,12 +745,6 @@ func (s *Server) deviceAuth(next http.Handler) http.Handler {
 // token -> 403, admin token and oma_dev_ tokens -> 403 with constant-time compare.
 func (s *Server) mcpAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.mcpTokenHash == nil {
-			// MCP auth disabled (no handler or no token) — in tests where mcpTokenHash is nil but handler exists, allow to surface 500? For hermetic tests, treat as unauthorized.
-			// If no MCP token is configured, reject with 401 to avoid open endpoint in prod.
-			writeError(w, r, errUnauthorized("mcp token not configured"))
-			return
-		}
 		hdr := r.Header.Get("Authorization")
 		if hdr == "" {
 			writeError(w, r, errUnauthorized("missing bearer token"))
@@ -785,8 +773,12 @@ func (s *Server) mcpAuth(next http.Handler) http.Handler {
 				return
 			}
 		}
-		got := sha256.Sum256([]byte(token))
-		if subtle.ConstantTimeCompare(got[:], s.mcpTokenHash) != 1 {
+		ok, err := s.backend.ValidateHermesMCPToken(r.Context(), token)
+		if err != nil {
+			writeError(w, r, errServiceUnavailable("MCP authentication is unavailable"))
+			return
+		}
+		if !ok {
 			writeError(w, r, errForbidden("invalid mcp token"))
 			return
 		}

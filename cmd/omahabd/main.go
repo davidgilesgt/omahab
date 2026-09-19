@@ -84,7 +84,6 @@ func run() error {
 	// Create API server
 	token := backend.APIToken()
 	emailKey := backend.EmailHMACKey()
-	mcpToken := backend.MCPToken(context.Background())
 	webhookSecret, _ := backend.ForgejoWebhookSecret(context.Background())
 	var mcpHandler http.Handler
 	if h := backend.MCPHandler(); h != nil {
@@ -96,7 +95,6 @@ func run() error {
 		Environments:     backend.Environments(),
 		Version:          version,
 		BearerToken:      token,
-		MCPToken:         mcpToken,
 		MCPHandler:       mcpHandler,
 		EmailHMACKey:     string(emailKey),
 		SCMWebhookSecret: webhookSecret,
