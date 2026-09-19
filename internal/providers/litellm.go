@@ -59,26 +59,28 @@ type GatewayAdmin interface {
 // callers can detect conflicts without losing data. It is metadata only;
 // LiteLLM never returns secrets here (no return_keys option).
 type GatewayModelInfo struct {
-	ID              string `json:"id"`
-	DBModel         *bool  `json:"db_model,omitempty"`
-	Mode            string `json:"mode,omitempty"`
-	LitellmProvider string `json:"litellm_provider,omitempty"`
-	TeamID          *string `json:"team_id,omitempty"`
-	Blocked         *bool   `json:"blocked,omitempty"`
+	ID              string         `json:"id"`
+	DBModel         *bool          `json:"db_model,omitempty"`
+	Mode            string         `json:"mode,omitempty"`
+	LitellmProvider string         `json:"litellm_provider,omitempty"`
+	TeamID          *string        `json:"team_id,omitempty"`
+	Blocked         *bool          `json:"blocked,omitempty"`
 	Extra           map[string]any `json:"-"`
 }
 
 // GatewayDeployment is one native LiteLLM router deployment.
 type GatewayDeployment struct {
-	ModelName     string         `json:"model_name"`
-	LitellmParams map[string]any `json:"litellm_params"`
+	ModelName     string           `json:"model_name"`
+	LitellmParams map[string]any   `json:"litellm_params"`
 	ModelInfo     GatewayModelInfo `json:"model_info"`
 }
 
-// GatewayCredentialSummary is a safe named-credential record (masked values only).
+// GatewayCredentialSummary is a safe named-credential record.
+// CredentialInfo preserves LiteLLM's general JSON metadata.
+// Credential values are intentionally absent because they can contain secrets.
 type GatewayCredentialSummary struct {
-	CredentialName string            `json:"credential_name"`
-	CredentialInfo map[string]string `json:"credential_info,omitempty"`
+	CredentialName string         `json:"credential_name"`
+	CredentialInfo map[string]any `json:"credential_info,omitempty"`
 }
 
 // GatewayCredentialInput creates one named credential. CredentialValues and
@@ -90,6 +92,7 @@ type GatewayCredentialInput struct {
 	CredentialValues map[string]string `json:"credential_values,omitempty"`
 	ModelID          string            `json:"model_id,omitempty"`
 }
+
 func (m GatewayModelInfo) MarshalJSON() ([]byte, error) {
 	type plain GatewayModelInfo
 	raw, err := json.Marshal(plain(m))
@@ -144,6 +147,18 @@ func (m GatewayModelInfo) ExtraString(key string) string {
 	return ""
 }
 
+// CredentialInfoString returns one trimmed string metadata value.
+func (c GatewayCredentialSummary) CredentialInfoString(key string) string {
+	if c.CredentialInfo == nil {
+		return ""
+	}
+	value, ok := c.CredentialInfo[key].(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(value)
+}
+
 // OAuthSession is the safe session exposed to clients; never contains device codes, tokens or master key.
 type OAuthSession struct {
 	ID              string    `json:"id"`
@@ -192,10 +207,10 @@ type AuthHelper interface {
 
 // GatewayOptions configures NewLiteLLMGateway.
 type GatewayOptions struct {
-	HTTPClient *http.Client
-	BaseURL    string
-	MasterKey  string
-	ConfigDir  string
+	HTTPClient  *http.Client
+	BaseURL     string
+	MasterKey   string
+	ConfigDir   string
 	Runner      CommandRunner
 	AuthAdapter AuthHelper
 }

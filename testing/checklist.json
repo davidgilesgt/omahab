@@ -5500,19 +5500,26 @@
       "sources": [
         "deploy/catalog/catalog.json",
         "nix/apps.nix",
-        "internal/api/server.go"
+        "internal/providers/litellm.go",
+        "internal/controlplane/setup_models.go",
+        "internal/controlplane/setup_oidc.go"
       ],
       "requires": [
         "enrolled"
       ],
       "steps": [
-        "Create the first administrator through Omahab and complete automatic setup via retry.",
+        "Create the first administrator through Omahab and complete automatic setup through a retry.",
         "Compare the selected user pocket_user_id with PROXY_ADMIN_ID without recording other environment values.",
-        "Log out completely, log in again as that exact user, and verify provider and model management without database edits."
+        "Replace PROXY_ADMIN_ID with a distinct fixture subject, retry setup, and verify the selected active administrator returns.",
+        "Create a named gateway credential with string, boolean, number, and object metadata.",
+        "Restart LiteLLM and list the named credential through the authenticated gateway API.",
+        "Log out completely, log in again as the selected user, and manage providers and models without database edits."
       ],
       "expected": [
+        "Setup replaces stale administrator state with the active local administrator Pocket ID subject.",
         "The selected bootstrap administrator has management access on a fresh SSO callback.",
-        "Other viewers remaining viewers does not violate the single-administrator bootstrap policy."
+        "The named credential remains present after restart, and the API never returns its unmasked value.",
+        "Other viewers remain viewers under the single-administrator bootstrap policy."
       ],
       "evidence_types": [
         "BROWSER",

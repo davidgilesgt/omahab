@@ -163,6 +163,39 @@ func TestGatewayCreateModel_HonorsCallerID(t *testing.T) {
 	}
 }
 
+func TestGatewayListCredentialsAcceptsGeneralMetadata(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/credentials", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("method = %s, want GET", r.Method)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"success": true,
+			"credentials": []map[string]any{{
+				"credential_name": "managed-openai",
+				"credential_info": map[string]any{
+					"omahab_handoff": "1",
+					"enabled":        true,
+					"priority":       3,
+					"provider":       map[string]any{"name": "openai"},
+				},
+				"credential_values": map[string]any{"api_key": "not-returned"},
+			}},
+		})
+	})
+	gw := nativeTestGateway(t, mux)
+	got, err := gw.ListGatewayCredentials(context.Background())
+	if err != nil {
+		t.Fatalf("ListGatewayCredentials: %v", err)
+	}
+	if len(got) != 1 || got[0].CredentialName != "managed-openai" {
+		t.Fatalf("credentials = %+v", got)
+	}
+	if got[0].CredentialInfo["omahab_handoff"] != "1" {
+		t.Fatalf("handoff metadata = %v", got[0].CredentialInfo)
+	}
+}
+
 func TestGatewayCredential_XOR(t *testing.T) {
 	gw, err := NewLiteLLMGateway(struct{}{}, GatewayOptions{BaseURL: "http://127.0.0.1:1", MasterKey: "k", ConfigDir: t.TempDir()})
 	if err != nil {

@@ -662,8 +662,20 @@ func TestSetupPhaseOIDCEnsuresLitellmClient(t *testing.T) {
 	if err := b.ensureDefaultApp(ctx, litellm, "omahab.com"); err != nil {
 		t.Fatalf("install litellm: %v", err)
 	}
-	// Seed platform vars: the SSO render must preserve them.
-	if err := b.writeAppEnv("litellm", map[string]string{"LITELLM_MASTER_KEY": "mk-test"}, "litellm"); err != nil {
+	if err := b.store.Migrate(ctx, AllMigrations()...); err != nil {
+		t.Fatal(err)
+	}
+	now := store.FormatTime(time.Now().UTC())
+	if _, err := b.db.ExecContext(ctx, `INSERT INTO controlplane_users (id, email, name, groups_json, disabled, created_at, updated_at, pocket_user_id) VALUES (?, ?, ?, ?, 0, ?, ?, ?)`,
+		"local-admin", "admin@example.test", "Admin", `["admins"]`, now, now, "pocket-admin-subject"); err != nil {
+		t.Fatal(err)
+	}
+	// Seed platform vars and a stale administrator. Reconciliation must
+	// preserve credentials while selecting the active local administrator.
+	if err := b.writeAppEnv("litellm", map[string]string{
+		"LITELLM_MASTER_KEY": "mk-test",
+		"PROXY_ADMIN_ID":     "stale-pocket-subject",
+	}, "litellm"); err != nil {
 		t.Fatalf("seed litellm env: %v", err)
 	}
 	if _, err := b.secrets.Put(ctx, "platform-app", "pocketid_api_key", "test-key"); err != nil {
@@ -717,6 +729,7 @@ func TestSetupPhaseOIDCEnsuresLitellmClient(t *testing.T) {
 		"PROXY_BASE_URL":                 "https://models.omahab.com",
 		"GENERIC_USER_ID_ATTRIBUTE":      "sub",
 		"AUTO_REDIRECT_UI_LOGIN_TO_SSO":  "true",
+		"PROXY_ADMIN_ID":                 "pocket-admin-subject",
 	} {
 		if env[k] != want {
 			t.Fatalf("litellm env[%s] = %q, want %q (full env: %v)", k, env[k], want, env)

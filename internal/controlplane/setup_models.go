@@ -724,8 +724,8 @@ func (b *Backend) handoffImport(ctx context.Context) error {
 			if strings.TrimSpace(gc.CredentialName) != wantName {
 				continue
 			}
-			if strings.TrimSpace(gc.CredentialInfo["omahab_handoff"]) == "1" &&
-				strings.TrimSpace(gc.CredentialInfo["omahab_source_credential_id"]) == legacyID {
+			if gc.CredentialInfoString("omahab_handoff") == "1" &&
+				gc.CredentialInfoString("omahab_source_credential_id") == legacyID {
 				adopted = true
 				break
 			}
@@ -1104,7 +1104,7 @@ func (b *Backend) SeedModelAliases(ctx context.Context, req apitypes.SeedModelAl
 				continue
 			}
 			found = true
-			if strings.TrimSpace(gc.CredentialInfo["omahab_seed_source_id"]) != modelID {
+			if gc.CredentialInfoString("omahab_seed_source_id") != modelID {
 				return apitypes.ModelSetupStatus{}, translateError(fmt.Errorf("%w: credential %q already exists for a different source model; delete it in LiteLLM or re-seed from the original source", apitypes.ErrConflict, credName))
 			}
 			break

@@ -88,9 +88,13 @@ func (g *handoffFakeGateway) CreateGatewayCredential(_ context.Context, in provi
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.createCreds++
+	info := make(map[string]any, len(in.CredentialInfo))
+	for key, value := range in.CredentialInfo {
+		info[key] = value
+	}
 	g.creds[strings.TrimSpace(in.CredentialName)] = providers.GatewayCredentialSummary{
 		CredentialName: strings.TrimSpace(in.CredentialName),
-		CredentialInfo: in.CredentialInfo,
+		CredentialInfo: info,
 	}
 	return nil
 }

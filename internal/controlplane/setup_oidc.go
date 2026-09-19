@@ -323,14 +323,14 @@ func (b *Backend) setupPhaseOIDC(ctx context.Context) error {
 			}
 			prevWoodpeckerEnv, _ := b.readAppEnv("woodpecker")
 			woodpeckerEnv := map[string]string{
-				"WOODPECKER_HOST":           "https://ci." + domainName,
-				"WOODPECKER_FORGEJO":        "true",
-				"WOODPECKER_FORGEJO_URL":    "https://git." + domainName,
-				"WOODPECKER_FORGEJO_CLIENT": wClientID,
-				"WOODPECKER_FORGEJO_SECRET": wClientSecret,
-				"WOODPECKER_OPEN":           "true",
-				"WOODPECKER_ADMIN":          "omahab-bot",
-				"WOODPECKER_DATABASE_DRIVER": "postgres",
+				"WOODPECKER_HOST":             "https://ci." + domainName,
+				"WOODPECKER_FORGEJO":          "true",
+				"WOODPECKER_FORGEJO_URL":      "https://git." + domainName,
+				"WOODPECKER_FORGEJO_CLIENT":   wClientID,
+				"WOODPECKER_FORGEJO_SECRET":   wClientSecret,
+				"WOODPECKER_OPEN":             "true",
+				"WOODPECKER_ADMIN":            "omahab-bot",
+				"WOODPECKER_DATABASE_DRIVER":  "postgres",
 				"WOODPECKER_HEALTHCHECK_ADDR": fmt.Sprintf("127.0.0.1:%d", apps.NativePortWoodpeckerAgent),
 			}
 			if validPostgresPassword(dbPassword) {
@@ -609,20 +609,26 @@ func (b *Backend) ensureLitellmOIDC(ctx context.Context, domainName string) erro
 	if err != nil {
 		return fmt.Errorf("read litellm appenv: %w", err)
 	}
-	// PROXY_ADMIN_ID bootstrap: keep an explicit value byte-for-byte; when
-	// absent, use the earliest-created active local administrator with a
-	// nonempty PocketUserID (groups admins/admin, stable ID tie-break),
-	// matching the OIDC subject. Do not promote every SSO user. No eligible
-	// administrator leaves the key unset with a prerequisite notice, never a
-	// master-key fallback.
-	if v := strings.TrimSpace(existing["PROXY_ADMIN_ID"]); v != "" {
-		want["PROXY_ADMIN_ID"] = v
-	} else if adminID, aerr := b.litellmProxyAdminID(ctx); aerr == nil && strings.TrimSpace(adminID) != "" {
-		want["PROXY_ADMIN_ID"] = strings.TrimSpace(adminID)
-	} else {
-		log.Printf("setup oidc: litellm admin bootstrap deferred: no eligible Pocket ID administrator yet")
-	}
+	// PROXY_ADMIN_ID is managed from the local identity record. Replace a
+	// stale value after restore, deletion, or role change. Without an eligible
+	// administrator, remove the value so LiteLLM cannot promote an unknown
+	// subject from old state.
 	converged := true
+	adminID, adminErr := b.litellmProxyAdminID(ctx)
+	switch {
+	case adminErr == nil && strings.TrimSpace(adminID) != "":
+		want["PROXY_ADMIN_ID"] = strings.TrimSpace(adminID)
+	case errors.Is(adminErr, sql.ErrNoRows):
+		if _, ok := existing["PROXY_ADMIN_ID"]; ok {
+			delete(existing, "PROXY_ADMIN_ID")
+			converged = false
+		}
+		log.Printf("setup oidc: litellm admin bootstrap deferred: no eligible Pocket ID administrator yet")
+	case adminErr != nil:
+		return fmt.Errorf("select litellm administrator: %w", adminErr)
+	default:
+		return fmt.Errorf("select litellm administrator: empty Pocket ID subject")
+	}
 	for k, v := range want {
 		if existing[k] != v {
 			converged = false
