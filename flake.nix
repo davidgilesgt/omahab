@@ -59,7 +59,7 @@
           pname = "omahab-web";
           inherit version;
           src = ./web;
-          npmDepsHash = "sha256-cDJ0QbUBwZKM79ZlIHPO8ZMR1TEUK3KcLa26QoBT1R0=";
+          npmDepsHash = "sha256-YbE7REIS3nxTUVvgJFKPm/U8KCk77uDi2n6QEJu0+Kg=";
           installPhase = ''
             runHook preInstall
             mkdir -p $out
@@ -217,6 +217,7 @@ EOF
             sqlc
             jq
             shellcheck
+            chromium
           ];
         };
         checks = {
@@ -244,6 +245,7 @@ EOF
           # installCheckPhase) fail here instead of on the installer.
           # nixosConfigurations are x86_64-linux only, hence the guard.
           installed-closure = self.nixosConfigurations.omahab-installed.config.system.build.toplevel;
+          setup-regressions = pkgs.testers.runNixOSTest (import ./nix/tests/setup-regressions.nix { inherit self; });
         };
       };
     in
