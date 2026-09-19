@@ -537,16 +537,14 @@ func (s *Service) reloadResticServer(ctx context.Context) error {
 		return s.reloadFn(ctx)
 	}
 	svc := s.machineBackupServiceName()
-	// Try reload (SIGHUP). If not supported, fallback to restart.
-	if err := exec.CommandContext(ctx, "systemctl", "reload", svc).Run(); err == nil {
-		return nil
-	}
+	// Credentials load via systemd LoadCredential at service start, so
+	// restart (not reload) picks up htpasswd changes.
 	if err := exec.CommandContext(ctx, "systemctl", "restart", svc).Run(); err != nil {
 		// In dev/test where systemd not present, treat as success (best-effort).
 		if strings.Contains(err.Error(), "executable file not found") || strings.Contains(err.Error(), "not found") {
 			return nil
 		}
-		return fmt.Errorf("reload %s: %w", svc, err)
+		return fmt.Errorf("restart %s: %w", svc, err)
 	}
 	return nil
 }

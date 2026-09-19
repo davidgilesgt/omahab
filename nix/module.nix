@@ -861,8 +861,13 @@ in
       util-linux
       devpod
       tmux
+      nixos-rebuild
+      curl
     ];
+    # Installed-system Nix features for `omahab system upgrade` (single
+    # mechanism; no command flags or env overrides in cmd/omahab/system.go).
+    nix.settings.experimental-features = [ "nix-command" "flakes" ];
     # home-assistant-cli: omahabd validates Home Assistant live via `hass-cli state list` during connect (DESIGN §17).
-    systemd.services.omahabd.path = [ omahabOncePkg pkgs.tailscale pkgs.docker pkgs.systemd pkgs.restic config.services.postgresql.finalPackage pkgs.nftables pkgs.util-linux pkgs.rsync pkgs.jq pkgs.home-assistant-cli ];
+    systemd.services.omahabd.path = [ omahabOncePkg pkgs.tailscale pkgs.docker pkgs.systemd pkgs.restic config.services.postgresql.finalPackage pkgs.nftables pkgs.util-linux pkgs.rsync pkgs.jq pkgs.home-assistant-cli pkgs.devpod pkgs.tmux ];
   };
 }
