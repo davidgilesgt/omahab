@@ -63,8 +63,8 @@ export function AppShell({ children, basePath = "" }: { children: ReactNode; bas
   });
   const [query, setQuery] = useState("");
   const [showResults, setShowResults] = useState(false);
-  const eventQuery = useQuery({ queryKey: ["events"], queryFn: client.events, staleTime: Infinity });
-  const unread = eventQuery.data?.filter((event) => !event.read_at).length ?? 0;
+  const unreadQuery = useQuery({ queryKey: ["events", "unread-count"], queryFn: client.unreadEventCount });
+  const unread = unreadQuery.data ?? 0;
   const setupQuery = useQuery({ queryKey: ["setup"], queryFn: client.setup, retry: false, staleTime: 30_000 });
   const visibleNavigation = useMemo(() => {
     const state = setupQuery.data?.state;

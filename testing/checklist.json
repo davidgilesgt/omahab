@@ -577,17 +577,19 @@
       ],
       "sources": [
         "web/src/views/setup.tsx",
+        "web/src/components/useEventStream.ts",
         "internal/api/server.go"
       ],
       "requires": [
         "enrolled"
       ],
       "steps": [
-        "Trigger setup reconciliation twice.",
-        "Inspect created DNS, tunnel, and secret resources."
+        "Cause one automatic reconciliation to fail.",
+        "Observe the failure, retry reconciliation, and inspect created DNS, tunnel, and secret resources."
       ],
       "expected": [
-        "The second run changes nothing.",
+        "The failure detail and action appear without a reload.",
+        "The successful retry replaces the failure detail.",
         "No duplicate tunnels or records appear."
       ],
       "evidence_types": [
@@ -1872,21 +1874,26 @@
       "area": "dashboard",
       "title": "Show unread count",
       "covers": [
-        "manual:inbox-unread"
+        "manual:inbox-unread",
+        "api:GET /api/v1/events/unread-count"
       ],
       "sources": [
-        "web/src/views/operations.tsx",
-        "web/src/App.tsx"
+        "internal/api/handlers.go",
+        "internal/controlplane/backups_ops.go",
+        "web/src/components/shell.tsx",
+        "web/src/components/useEventStream.ts",
+        "web/src/views/operations.tsx"
       ],
       "requires": [
         "enrolled"
       ],
       "steps": [
-        "Generate two test events.",
-        "Open the inbox."
+        "Generate more than one event page of unread events.",
+        "Open the inbox, reload it, and then open the overview."
       ],
       "expected": [
-        "The unread count matches.",
+        "The sidebar, inbox, and overview show the complete unread total.",
+        "Reloads and repeated SSE events do not reduce or duplicate the total.",
         "New events appear first."
       ],
       "evidence_types": [
@@ -2669,7 +2676,8 @@
       ],
       "expected": [
         "All checks pass.",
-        "The report copies without secrets."
+        "Healthy checks do not show remediation.",
+        "The report copies without secrets or remediation for healthy checks."
       ],
       "evidence_types": [
         "BROWSER",

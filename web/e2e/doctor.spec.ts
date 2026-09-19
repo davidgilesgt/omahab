@@ -26,7 +26,6 @@ async function installDoctorAPI(page: Page) {
 }
 
 test("healthy checks omit corrective advice", async ({ page }) => {
-  test.fail(process.env.OMAHAB_REPAIRS_UNDER_TEST !== "1", "The Doctor repair removes this expected failure.");
   await installDoctorAPI(page);
 
   await page.goto("/doctor");

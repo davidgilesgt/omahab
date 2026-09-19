@@ -19,6 +19,7 @@ export function OverviewPage() {
   const applications = useQuery({ queryKey: ["applications"], queryFn: client.applications });
   const backups = useQuery({ queryKey: ["backups"], queryFn: client.backups });
   const events = useQuery({ queryKey: ["events"], queryFn: client.events });
+  const unreadTotal = useQuery({ queryKey: ["events", "unread-count"], queryFn: client.unreadEventCount });
   const setup = useQuery({ queryKey: ["setup"], queryFn: client.setup, retry: false, staleTime: 30_000 });
 
   if (status.isLoading) return <LoadingState label="Checking your server" />;
@@ -67,14 +68,14 @@ export function OverviewPage() {
       <div className="metric-strip">
         <article><span>Control plane</span><strong><StatusPill value={status.data.health} /></strong><small>Version {status.data.version}</small></article>
         <article><span>Applications</span><strong>{applications.data?.length ?? "—"}</strong><small>{unhealthy.length ? `${unhealthy.length} need attention` : "No reported issues"}</small></article>
-        <article><span>Unread events</span><strong>{events.data ? unread.length : "—"}</strong><small>Operational inbox</small></article>
+        <article><span>Unread events</span><strong>{unreadTotal.data ?? "—"}</strong><small>Operational inbox</small></article>
         <article><span>Verified recovery</span><strong>{latestBackup?.verified_at ? "Current" : "Not verified"}</strong><small>{latestBackup?.verified_at ? formatDate(latestBackup.verified_at) : "Run a restore verification"}</small></article>
       </div>
       <div className="split-grid">
         <Section title="Needs attention">
-          {applications.isLoading || events.isLoading ? <LoadingState label="Checking services and events" /> : applications.isError || events.isError ? (
-            <ErrorState error={applications.error ?? events.error} />
-          ) : unhealthy.length === 0 && unread.length === 0 ? (
+          {applications.isLoading || events.isLoading || unreadTotal.isLoading ? <LoadingState label="Checking services and events" /> : applications.isError || events.isError || unreadTotal.isError ? (
+            <ErrorState error={applications.error ?? events.error ?? unreadTotal.error} />
+          ) : unhealthy.length === 0 && unreadTotal.data === 0 ? (
             <EmptyState title="Everything is quiet" description="No services or control-plane events currently need your attention." />
           ) : (
             <ul className="activity-list">
@@ -447,6 +448,7 @@ export function EventsPage() {
   const queryClient = useQueryClient();
   const toast = useToast();
   const query = useQuery({ queryKey: ["events"], queryFn: client.events });
+  const unreadTotal = useQuery({ queryKey: ["events", "unread-count"], queryFn: client.unreadEventCount });
   const ntfyQuery = useQuery({ queryKey: ["ntfy"], queryFn: client.ntfyConfig });
   const read = useMutation({
     mutationFn: client.markEventRead,
@@ -473,13 +475,13 @@ export function EventsPage() {
     onError: (err) => toast.error(err instanceof Error ? err.message : "Could not update ntfy"),
   });
   const grouped = useMemo(() => query.data?.slice().sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at)), [query.data]);
-  const unreadCount = query.data?.filter((event) => !event.read_at).length ?? 0;
+  const unreadCount = unreadTotal.data ?? 0;
   const ntfy = ntfyQuery.data;
   const topic = ntfy?.topic ?? "";
   const ntfyUrl = topic ? `http://${typeof window !== "undefined" ? window.location.hostname : "omahab"}:2586/${topic}` : "";
   return (
     <div className="page">
-      <PageHeader title="Events" actions={<button className="button secondary" type="button" disabled={markAll.isPending || unreadCount === 0} onClick={() => markAll.mutate()}>{markAll.isPending ? "Marking…" : "Mark all read"}</button>} />
+      <PageHeader title="Events" description={`${unreadCount} unread total`} actions={<button className="button secondary" type="button" disabled={markAll.isPending || unreadCount === 0} onClick={() => markAll.mutate()}>{markAll.isPending ? "Marking…" : "Mark all read"}</button>} />
       <Section title="Phone notifications" description="Send warning and error notifications to your phone.">
         {ntfyQuery.isLoading ? <LoadingState label="Loading ntfy" /> : ntfyQuery.isError ? <ErrorState error={ntfyQuery.error} retry={() => void ntfyQuery.refetch()} /> : (
           <div style={{ display: "flex", gap: "1rem", alignItems: "flex-start", flexWrap: "wrap" }}>

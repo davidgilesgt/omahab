@@ -159,6 +159,7 @@ export function useEventStream() {
                 if (old.some((item) => item.id === ev.id)) return old;
                 return [ev, ...old];
               });
+              void queryClient.invalidateQueries({ queryKey: ["events", "unread-count"] });
               if (!tryPatchCache(ev, queryClient)) {
                 const keys = routeEvent(ev.type);
                 for (const key of keys) queryClient.invalidateQueries({ queryKey: [key] });

@@ -643,6 +643,15 @@ func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 	writeList(w, items)
 }
 
+func (s *Server) handleUnreadEventCount(w http.ResponseWriter, r *http.Request) {
+	count, err := s.backend.UnreadEventCount(r.Context())
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"unread_count": count})
+}
+
 func (s *Server) handleGetEvent(w http.ResponseWriter, r *http.Request) {
 	id := domain.ID(chi.URLParam(r, "id"))
 	ev, err := s.backend.GetEvent(r.Context(), id)

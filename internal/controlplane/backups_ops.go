@@ -195,6 +195,14 @@ func (b *Backend) ListEvents(ctx context.Context, p apitypes.Pagination, filter 
 	return list, nil
 }
 
+func (b *Backend) UnreadEventCount(ctx context.Context) (int, error) {
+	count, err := b.events.UnreadCount(ctx, events.ListFilter{})
+	if err != nil {
+		return 0, translateError(err)
+	}
+	return count, nil
+}
+
 func (b *Backend) GetEvent(ctx context.Context, id domain.ID) (domain.Event, error) {
 	ev, err := b.events.Get(ctx, id)
 	if err != nil {

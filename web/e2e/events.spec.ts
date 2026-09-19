@@ -37,7 +37,6 @@ async function installEventsAPI(page: Page) {
 }
 
 test("unread total survives page limits and reload", async ({ page }) => {
-  test.fail(process.env.OMAHAB_REPAIRS_UNDER_TEST !== "1", "The unread-count repair removes this expected failure.");
   await installEventsAPI(page);
 
   await page.goto("/events");

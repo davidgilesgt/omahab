@@ -38,7 +38,7 @@ export function DoctorPage() {
       "|---|---|---|---|---|",
     ];
     for (const c of data.checks) {
-      const rem = remediationFor(c.name);
+      const rem = c.status === "healthy" ? "" : remediationFor(c.name);
       const msg = (c.message ?? "").replaceAll("|", "\\|").replaceAll("\n", " ");
       const det = (c.detail ?? "").replaceAll("|", "\\|").replaceAll("\n", " ");
       lines.push(`| ${c.name} | ${c.status} | ${msg} | ${det} | ${rem} |`);
@@ -103,9 +103,11 @@ export function DoctorPage() {
                   {check.detail}
                 </small>
               ) : null}
-              <small style={{ color: "var(--ink-muted)" }}>
-                <strong>Remediation:</strong> {remediationFor(check.name)}
-              </small>
+              {check.status !== "healthy" ? (
+                <small style={{ color: "var(--ink-muted)" }}>
+                  <strong>Remediation:</strong> {remediationFor(check.name)}
+                </small>
+              ) : null}
             </article>
           ))}
         </div>

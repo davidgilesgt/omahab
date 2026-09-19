@@ -188,6 +188,10 @@ export class ApiClient {
     this.request<{ imported: number }>(`/backup-repositories/${encodeURIComponent(repositoryId)}/snapshots/import`, { method: "POST", body: JSON.stringify({}) });
 
   events = () => this.list<ControlEvent>("/events");
+  unreadEventCount = async () => {
+    const response = await this.request<{ unread_count: number }>("/events/unread-count");
+    return response.unread_count;
+  };
   markEventRead = (id: string) => this.request<ControlEvent>(`/events/${encodeURIComponent(id)}/read`, { method: "POST", body: JSON.stringify({}) });
   markAllEventsRead = () => this.request<void>("/events/read-all", { method: "POST" });
 

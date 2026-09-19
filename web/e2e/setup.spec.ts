@@ -63,7 +63,6 @@ async function installSetupAPI(page: Page) {
 }
 
 test("automatic failure is visible without reload", async ({ page }) => {
-  test.fail(process.env.OMAHAB_REPAIRS_UNDER_TEST !== "1", "The interface repair removes this expected failure.");
   await installSetupAPI(page);
 
   await page.goto("/setup");
@@ -71,4 +70,5 @@ test("automatic failure is visible without reload", async ({ page }) => {
   await expect(page.getByText("CI DNS could not be updated")).toBeVisible();
   await page.getByRole("button", { name: "Retry automatic setup", exact: true }).first().click();
   await expect(page.getByText("Reconciliation complete")).toBeVisible();
+  await page.unrouteAll({ behavior: "ignoreErrors" });
 });

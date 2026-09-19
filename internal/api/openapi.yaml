@@ -968,6 +968,21 @@ paths:
       responses:
         '200': { description: Events, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/Event' } } } } } } }
 
+  /api/v1/events/unread-count:
+    get:
+      summary: Count unread events
+      operationId: unreadEventCount
+      responses:
+        '200':
+          description: Unread event count
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [unread_count]
+                properties:
+                  unread_count: { type: integer, minimum: 0 }
+
   /api/v1/events/stream:
     get:
       summary: Stream events via SSE

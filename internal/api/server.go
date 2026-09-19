@@ -259,6 +259,7 @@ func (s *Server) buildRouter() chi.Router {
 
 		// Events + SSE
 		r.Get("/api/v1/events", s.handleListEvents)
+		r.Get("/api/v1/events/unread-count", s.handleUnreadEventCount)
 		r.Get("/api/v1/events/stream", s.handleStreamEvents)
 		r.Get("/api/v1/events/{id}", s.handleGetEvent)
 		r.Post("/api/v1/events/{id}/read", s.handleMarkEventRead)

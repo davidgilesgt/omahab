@@ -694,6 +694,7 @@ export function SetupPage() {
   const recoveryEmail = usersQuery.data?.[0]?.email ?? inviteEmail ?? "admin@example.com";
 
   const adminCheck = checkById("admin_passkeys");
+  const reconciliationCheck = checkById("automatic_reconciliation");
   const passkeyCount = adminCheck?.passkey_count ?? 0;
   const passkeyTarget = adminCheck?.target ?? 2;
   const coreAppsCheck = checkById("core_apps");
@@ -746,6 +747,13 @@ export function SetupPage() {
           </button>
         </div>
       </header>
+      {reconciliationCheck && (
+        <div className="setup-notice" role={reconciliationCheck.status === "failed" ? "alert" : "status"}>
+          <strong>{reconciliationCheck.label}</strong>
+          {reconciliationCheck.detail ? <p>{reconciliationCheck.detail}</p> : null}
+          {reconciliationCheck.action ? <p>Action: {reconciliationCheck.action}</p> : null}
+        </div>
+      )}
       <hr className="setup-divider" />
       <div className="setup-accordion">
         <Box title="SSH keys" done={doneMap.ssh} open={openId === "ssh"} onToggle={() => toggle("ssh")}>
