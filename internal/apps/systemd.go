@@ -176,23 +176,46 @@ func (r *SystemdRunner) Remove(ctx context.Context, app domain.Application, spec
 	return r.Stop(ctx, app, spec)
 }
 
-// Check observes health for native bundles: HTTP probes hit the native
+// Check observes health for native bundles. Every declared unit must be
+// active before an application can be healthy. HTTP probes hit the native
 // loopback port (internal/apps/native_ports.go is authoritative; the
 // catalog health-check port is the compose default and may lag it, as
 // paperless-ngx :8000 vs the native :28981 listener did). Command checks
-// are unsupported (there is no container to exec inside) and report
-// unknown.
+// are unsupported after the unit-state check and report unknown.
+func (r *SystemdRunner) unitsActive(ctx context.Context, bundleID string) (bool, error) {
+	units := r.units(bundleID)
+	if len(units) == 0 {
+		return false, fmt.Errorf("systemd runner: no units declared for bundle %q", bundleID)
+	}
+	for _, unit := range units {
+		if err := r.invoker.Run(ctx, nil, "", nil, nil, "systemctl", "is-active", "--quiet", unit); err != nil {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 func (r *SystemdRunner) Check(ctx context.Context, app domain.Application, spec DeploySpec) (domain.Health, error) {
+	active, err := r.unitsActive(ctx, app.BundleID)
+	if err != nil {
+		return domain.HealthUnknown, err
+	}
+	if !active {
+		return domain.HealthUnhealthy, nil
+	}
 	switch spec.Health.Kind {
 	case CheckHTTP:
 		hc := spec.Health
 		if p, ok := NativePort(app.BundleID); ok {
 			hc.Port = p
 		}
-		return probeHTTP(ctx, hc, hc.Port)
+		result, err := probeHTTP(ctx, hc, hc.Port)
+		if err != nil || result != domain.HealthHealthy || app.BundleID != "woodpecker" {
+			return result, err
+		}
+		agent := HealthCheck{Kind: CheckHTTP, Path: "/healthz", Port: NativePortWoodpeckerAgent}
+		return probeHTTP(ctx, agent, agent.Port)
 	case CheckCommand:
-		// No container to exec in: native services are probed via HTTP
-		// or not at all. Report unknown rather than failing.
 		return domain.HealthUnknown, nil
 	default:
 		return domain.HealthUnknown, nil

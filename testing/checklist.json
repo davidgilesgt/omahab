@@ -511,7 +511,10 @@
       ],
       "sources": [
         "web/src/views/setup.tsx",
-        "internal/api/server.go"
+        "internal/api/server.go",
+        "internal/apps/systemd.go",
+        "nix/apps.nix",
+        "nix/module.nix"
       ],
       "requires": [
         "enrolled"
@@ -519,11 +522,18 @@
       "steps": [
         "Open the setup flow at /setup.",
         "Complete the Woodpecker step with generated test values.",
-        "Confirm the checklist marks it done."
+        "Confirm the checklist marks it done.",
+        "Stop only woodpecker-agent-docker.service and confirm Woodpecker becomes unhealthy.",
+        "Restart the agent and confirm Woodpecker becomes healthy.",
+        "Confirm the agent can use the builder socket and an unrelated user cannot.",
+        "Restart the agent and confirm its agent.conf hash does not change."
       ],
       "expected": [
         "The Woodpecker step completes without errors.",
-        "The setup state persists after reload."
+        "The setup state persists after reload.",
+        "Health includes both the server and agent.",
+        "Builder access is limited to the agent group.",
+        "The agent identity persists after restart."
       ],
       "evidence_types": [
         "BROWSER",
@@ -5334,19 +5344,27 @@
       "sources": [
         "deploy/catalog/catalog.json",
         "nix/apps.nix",
+        "nix/module.nix",
+        "internal/apps/systemd.go",
         "internal/api/server.go"
       ],
       "requires": [
         "enrolled"
       ],
       "steps": [
-        "Open the woodpecker interface through its resolved URL.",
-        "Exercise its required proof with synthetic fixtures.",
-        "Verify persistence after logout, restart, and reboot."
+        "Open the Woodpecker interface through its resolved URL.",
+        "Run a simple pipeline that builds one container step.",
+        "Confirm the pipeline completes through woodpecker-agent-docker.service.",
+        "Restart the agent and run the pipeline again.",
+        "Stop only the agent and confirm application health becomes unhealthy.",
+        "Restart the agent and confirm application health recovers.",
+        "Reboot and confirm the agent identity remains unchanged."
       ],
       "expected": [
-        "The fixture remains usable after restart.",
-        "Hashes match the recorded values."
+        "Both pipeline runs complete successfully.",
+        "Only the Woodpecker agent can reach the builder socket.",
+        "Application health includes server and agent state.",
+        "The agent identity remains unchanged after restart and reboot."
       ],
       "evidence_types": [
         "BROWSER",

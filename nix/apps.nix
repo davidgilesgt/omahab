@@ -279,6 +279,7 @@ in
       environment = {
         WOODPECKER_BACKEND = "docker";
         DOCKER_HOST = "unix:///run/omahab-builder/podman.sock";
+        WOODPECKER_AGENT_CONFIG_FILE = "/var/lib/woodpecker-agent-docker/agent.conf";
       };
       # environmentFile here does not accept the "-" prefix; the agent
       # tolerates a missing file only via systemd-level config below.
@@ -301,6 +302,9 @@ in
           DynamicUser = mkForce false;
           User = "woodpecker-agent-docker";
           Group = "woodpecker-agent-docker";
+          PrivateUsers = mkForce false;
+          StateDirectory = "woodpecker-agent-docker";
+          StateDirectoryMode = "0700";
         };
       }
     ];

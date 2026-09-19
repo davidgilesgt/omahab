@@ -59,6 +59,27 @@ let
         )
     ' "${cfg.catalogPackage}/catalog.json" > $out
   '';
+  # The builder owns only disposable CI images and containers. Reset an old
+  # Podman database once because Podman stores runtime paths in that database.
+  # This preserves a clean cutover from the former public runtime directory.
+  builderRuntimeMigration = pkgs.writeShellScript "omahab-builder-runtime-migration" ''
+    set -eu
+    marker=/var/lib/omahab-builder/.private-runtime-v1
+    storage=/var/lib/omahab-builder/.local/share/containers/storage
+    if [ ! -e "$marker" ]; then
+      if [ -e "$storage/db.sql" ] || [ -e "$storage/libpod/bolt_state.db" ]; then
+        HOME=/var/lib/omahab-builder \
+          XDG_RUNTIME_DIR=/run/omahab-builder \
+          CONTAINERS_CONF=/etc/omahab-builder/containers.conf \
+          ${config.virtualisation.podman.package}/bin/podman system reset --force
+      fi
+      ${pkgs.coreutils}/bin/touch "$marker"
+    fi
+  '';
+  builderSocketDirectoryPrep = pkgs.writeShellScript "omahab-builder-socket-directory" ''
+    ${pkgs.coreutils}/bin/install -d -m 0750 \
+      -o omahab-builder -g omahab-builder /run/omahab-builder
+  '';
 
   hardenBase = {
     NoNewPrivileges = true;
@@ -210,6 +231,7 @@ in
       "d /var/cache/omahab 0755 root root - -"
       "d /var/lib/cloudflared 0700 cloudflared cloudflared - -"
       "d /var/lib/omahab-builder 0700 omahab-builder omahab-builder - -"
+      "d /run/omahab-builder 0750 omahab-builder omahab-builder - -"
       "d /run/omahab 0700 root root - -"
       "d /home/${cfg.adminUser}/.ssh 0700 ${cfg.adminUser} ${config.users.users.${cfg.adminUser}.group} - -"
       "d /home/${cfg.adminUser}/.config 0700 ${cfg.adminUser} ${config.users.users.${cfg.adminUser}.group} - -"
@@ -434,8 +456,11 @@ in
       description = "Omahab builder Podman API socket";
       documentation = [ "https://github.com/davidgilesgt/omahab" ];
       before = [ "omahab-builder.service" ];
+      requires = [ "systemd-tmpfiles-setup.service" ];
+      after = [ "systemd-tmpfiles-setup.service" ];
       socketConfig = {
         ListenStream = "/run/omahab-builder/podman.sock";
+        DirectoryMode = "0750";
         SocketMode = "0660";
         SocketUser = "omahab-builder";
         SocketGroup = "omahab-builder";
@@ -462,19 +487,23 @@ in
         # Install-time closure: use the podman module's wrapped package
         # (config.virtualisation.podman.package), not raw pkgs.podman, so
         # the closure carries exactly one podman build.
+        ExecStartPre = [
+          "+${builderSocketDirectoryPrep}"
+          builderRuntimeMigration
+        ];
         ExecStart = "${config.virtualisation.podman.package}/bin/podman system service --time=0";
         Restart = "on-failure";
         RestartSec = 3;
         WorkingDirectory = "/var/lib/omahab-builder";
         StateDirectory = "omahab-builder";
         StateDirectoryMode = "0700";
-        # /run/omahab-builder must exist and be owned by the user
-        # (XDG_RUNTIME_DIR target; also holds libpod runtime state).
-        RuntimeDirectory = "omahab-builder";
+        # Rootless Podman runtime state is private. The systemd socket unit
+        # owns the separate public socket directory.
+        RuntimeDirectory = "omahab-builder-private";
         RuntimeDirectoryMode = "0700";
         ReadWritePaths = [
           "/var/lib/omahab-builder"
-          "/run/omahab-builder"
+          "/run/omahab-builder-private"
         ];
         PrivateDevices = false;
         ProtectHome = false;
@@ -510,8 +539,8 @@ in
         # No session bus in a system unit: force cgroupfs manager
         # (podman checks SD_NOTIFY + dbus; empty value falls back).
         DBUS_SESSION_BUS_ADDRESS = "";
-        # Rootless podman wants a private runtime dir.
-        XDG_RUNTIME_DIR = "/run/omahab-builder";
+        # Keep rootless Podman state out of the agent-readable socket path.
+        XDG_RUNTIME_DIR = "/run/omahab-builder-private";
         # No session bus: force the cgroupfs cgroup manager.
         CONTAINERS_CONF = "/etc/omahab-builder/containers.conf";
       };
