@@ -5316,6 +5316,7 @@
       "sources": [
         "deploy/catalog/catalog.json",
         "nix/apps.nix",
+        "internal/controlplane/forgejo_bootstrap.go",
         "internal/api/server.go"
       ],
       "requires": [
@@ -5323,10 +5324,12 @@
       ],
       "steps": [
         "Complete Forgejo provisioning through automatic setup (Pocket ID client, auth source, org teams, Woodpecker OAuth).",
+        "Restart Forgejo, retry automatic setup, and confirm native administrator operations still complete.",
         "Log in to Forgejo through Pocket ID in the browser and authorize Woodpecker; keep local password login disabled."
       ],
       "expected": [
         "Browser SSO succeeds after provisioning; an independent Jellyfin failure does not prevent the auth source from existing.",
+        "A rejected stored automation token is replaced even when its former token name remains in Forgejo.",
         "Woodpecker authorization completes."
       ],
       "evidence_types": [

@@ -31,6 +31,7 @@
     };
 
   testScript = ''
+    import re
     machine.start(allow_reboot=True)
     machine.wait_for_unit("omahabd.service", timeout=300)
     machine.wait_for_open_port(8484, timeout=300)
@@ -50,6 +51,7 @@
         previous_system = f"{base_system}/specialisation/previous"
         machine.succeed("systemctl stop omahab-builder.service omahab-builder.socket; rm -rf /var/lib/omahab-builder /run/omahab-builder /run/omahab-builder-private")
         machine.succeed(f"{previous_system}/bin/switch-to-configuration test")
+        machine.succeed("systemctl stop omahab-builder.service omahab-builder.socket; rm -rf /run/omahab-builder /run/omahab-builder-private; systemctl start omahab-builder.socket")
         machine.wait_for_unit("omahab-builder.socket")
         machine.succeed("stat -c '%a' /run/omahab-builder | grep -qx 700")
         machine.succeed(f"{base_system}/bin/switch-to-configuration test")
@@ -100,5 +102,28 @@
         machine.wait_until_succeeds("curl -sf http://127.0.0.1:3900/healthz", timeout=120)
         identity_after = machine.succeed("sha256sum /var/lib/woodpecker-agent-docker/agent.conf | cut -d' ' -f1").strip()
         assert identity_after == identity_before, f"agent identity changed: {identity_before} -> {identity_after}"
+
+    with subtest("native_forgejo_admin_command"):
+        machine.succeed(
+            """cat > /var/lib/omahab/appenv/forgejo.env <<'EOF'
+    FORGEJO__SERVER__ROOT_URL=http://127.0.0.1:3000/
+    FORGEJO__SERVER__DOMAIN=127.0.0.1
+    FORGEJO__SERVER__HTTP_ADDR=127.0.0.1
+    EOF
+    chmod 0600 /var/lib/omahab/appenv/forgejo.env
+    systemctl restart forgejo.service"""
+        )
+        machine.wait_for_unit("forgejo.service", timeout=120)
+        machine.wait_for_open_port(3000, timeout=120)
+        exec_start = machine.succeed("systemctl show forgejo.service -p ExecStart --value").strip()
+        binary_match = re.search(r"path=([^ ;]+/(?:gitea|forgejo))", exec_start)
+        assert binary_match, f"could not resolve Forgejo binary from {exec_start}"
+        forgejo_bin = binary_match.group(1)
+        forgejo_admin = f"systemd-run --pipe --wait --quiet --collect --service-type=exec --uid=forgejo --gid=forgejo -p WorkingDirectory=/var/lib/forgejo --setenv=FORGEJO_WORK_DIR=/var/lib/forgejo --setenv=FORGEJO_CUSTOM=/var/lib/forgejo/custom --setenv=HOME=/var/lib/forgejo -- {forgejo_bin} admin"
+        machine.succeed(f"{forgejo_admin} user list")
+        machine.succeed(f"{forgejo_admin} user create --admin --restricted --username regression-bot --email regression-bot@example.test --password FixtureOnly123 --must-change-password=false")
+        token = machine.succeed(f"{forgejo_admin} user generate-access-token --username regression-bot --token-name omahab --raw").strip()
+        assert token, "native Forgejo token command returned empty output"
+        machine.succeed(f"curl -sf -H 'Authorization: token {token}' http://127.0.0.1:3000/api/v1/user")
   '';
 }

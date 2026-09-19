@@ -20,6 +20,9 @@ import (
 	"github.com/omahab/omahab/internal/health"
 )
 
+var errNativeForgejoUnavailable = errors.New("native forgejo unavailable")
+var errForgejoTokenNameConflict = errors.New("forgejo token name already exists")
+
 // forgejoBaseURL returns the Forgejo base URL for API calls.
 // It prefers an explicit secret/env override for testability, falling back to https://git.<domain>.
 func (b *Backend) forgejoBaseURL(ctx context.Context, domain string) string {
@@ -67,27 +70,30 @@ func redactForgejoError(err error) error {
 	return errors.New(redacted)
 }
 
-// runForgejoAdminCommand executes `forgejo admin <args>`, preferring the
-// native NixOS path (runuser as the forgejo service user) and falling back
-// to docker exec for legacy compose-placed deployments.
+// runForgejoAdminCommand executes `forgejo admin <args>`. It uses the
+// native NixOS service when present and falls back to Docker only when the
+// native binary or account is absent.
 // It uses b.forgejoExec if set (for tests).
 func (b *Backend) runForgejoAdminCommand(ctx context.Context, args ...string) (string, error) {
 	if b.forgejoExec != nil {
 		return b.forgejoExec(ctx, args...)
 	}
-	// Native (NixOS) path first: forgejo is a systemd service running as
-	// its own user; exec the admin CLI directly, no container involved.
 	nativeOut, nativeErr := b.runNativeForgejoAdmin(ctx, args...)
 	if nativeErr == nil {
 		return nativeOut, nil
 	}
-	// Compose fallback (legacy Debian installs / hermes-style containers).
-	// Keep the native failure in the message: it is the real cause on
-	// native systems, where the container lookup below can only fail.
+	if forgejoTokenNameConflict(nativeErr) {
+		return "", errForgejoTokenNameConflict
+	}
+	if !errors.Is(nativeErr, errNativeForgejoUnavailable) {
+		return "", fmt.Errorf("forgejo admin native: %w", redactForgejoError(nativeErr))
+	}
+	// Compose fallback for legacy deployments without a native Forgejo
+	// binary or service account.
 	containerID, cerr := b.findForgejoContainerID(ctx)
 	if cerr != nil {
 		return "", fmt.Errorf("forgejo admin unavailable (native: %s; container lookup: %s)",
-			health.RedactDetail(strings.TrimSpace(nativeErr.Error())), strings.TrimSpace(redactForgejoError(cerr).Error()))
+			strings.TrimSpace(redactForgejoError(nativeErr).Error()), strings.TrimSpace(redactForgejoError(cerr).Error()))
 	}
 	fullArgs := append([]string{"exec", containerID, "forgejo", "admin"}, args...)
 	cmd := exec.CommandContext(ctx, "docker", fullArgs...)
@@ -102,6 +108,9 @@ func (b *Backend) runForgejoAdminCommand(ctx context.Context, args ...string) (s
 		if combined == "" {
 			combined = err.Error()
 		}
+		if forgejoTokenNameConflict(errors.New(combined)) {
+			return "", errForgejoTokenNameConflict
+		}
 		redacted := health.RedactDetail(combined)
 		// Also redact args that contain secrets if they appear in the combined output (some CLIs echo args)
 		if redacted == "[REDACTED]" {
@@ -115,42 +124,37 @@ func (b *Backend) runForgejoAdminCommand(ctx context.Context, args ...string) (s
 	return strings.TrimSpace(out), nil
 }
 
-// runNativeForgejoAdmin runs `gitea admin <args>` as the forgejo service
-// user. The server binary is resolved from
-// `systemctl show forgejo.service -p ExecStart` so the spawn receives an
-// absolute path. An error is returned when no binary or the forgejo user is
-// absent (compose-placed deployments).
+// runNativeForgejoAdmin runs `forgejo admin <args>` as the Forgejo service
+// user. The server binary comes from forgejo.service when possible.
+// Missing native components return errNativeForgejoUnavailable.
 func (b *Backend) runNativeForgejoAdmin(ctx context.Context, args ...string) (string, error) {
 	gitea, err := resolveNativeForgejoBinary(ctx)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("%w: %v", errNativeForgejoUnavailable, err)
 	}
 	usr, uerr := user.Lookup("forgejo")
 	if uerr != nil {
-		return "", fmt.Errorf("native forgejo user not found: %w", uerr)
+		return "", fmt.Errorf("%w: forgejo user not found: %v", errNativeForgejoUnavailable, uerr)
 	}
-	// Mirror the service environment: the forgejo CLI resolves its work dir,
-	// custom path, and HOME from env (the unit sets FORGEJO_WORK_DIR/HOME and
-	// WorkingDirectory=/var/lib/forgejo). A bare spawn inherits omahabd's
-	// CWD (/var/lib/omahab) and root's env, so the CLI cannot find app.ini.
 	workDir := usr.HomeDir
 	if v := systemctlShowProp(ctx, "WorkingDirectory"); v != "" && strings.HasPrefix(v, "/") {
 		workDir = v
 	}
-	// Spawn via systemd-run: the transient unit is created by PID 1 outside
-	// omahabd's seccomp sandbox. runuser cannot work here — omahabd sets
-	// RestrictSUIDSGID, so runuser's setuid dies with SIGSYS (live
-	// 2026-09-12, coredump proves runuser as the crashed exe) — but keep it
-	// as a fallback for hosts without systemd.
-	if out, err := systemdRunForgejoAdmin(ctx, gitea, workDir, usr.HomeDir, args...); err == nil {
+	if _, lookErr := exec.LookPath("systemd-run"); lookErr == nil {
+		out, runErr := systemdRunForgejoAdmin(ctx, gitea, workDir, usr.HomeDir, args...)
+		if runErr != nil {
+			return "", fmt.Errorf("systemd-run: %w", runErr)
+		}
 		return out, nil
-	} else if out, ferr := runuserForgejoAdmin(ctx, gitea, workDir, usr.HomeDir, args...); ferr == nil {
-		return out, nil
-	} else {
-		return "", fmt.Errorf("native forgejo admin: systemd-run: %s; runuser: %s",
-			health.RedactDetail(strings.TrimSpace(err.Error())),
-			health.RedactDetail(strings.TrimSpace(ferr.Error())))
 	}
+	if _, lookErr := exec.LookPath("runuser"); lookErr != nil {
+		return "", fmt.Errorf("%w: systemd-run and runuser not found", errNativeForgejoUnavailable)
+	}
+	out, runErr := runuserForgejoAdmin(ctx, gitea, workDir, usr.HomeDir, args...)
+	if runErr != nil {
+		return "", fmt.Errorf("runuser: %w", runErr)
+	}
+	return out, nil
 }
 
 // systemdRunAsUser executes bin/args as uid:gid in a transient unit spawned
@@ -158,7 +162,7 @@ func (b *Backend) runNativeForgejoAdmin(ctx context.Context, args ...string) (st
 // service exit code propagates via --wait.
 func systemdRunAsUser(ctx context.Context, uid, gid, workDir string, env []string, bin string, args ...string) (string, error) {
 	runArgs := []string{
-		"--pipe", "--wait", "--quiet",
+		"--pipe", "--wait", "--quiet", "--collect", "--service-type=exec",
 		"--uid=" + uid, "--gid=" + gid,
 		"-p", "WorkingDirectory=" + workDir,
 	}
@@ -487,8 +491,13 @@ func (b *Backend) ensureOmahabBot(ctx context.Context, domain string) error {
 			// else rotate
 		}
 	}
-	// Generate new token
+	// Use the stable name on a fresh install. A rejected stored token can
+	// leave that name in Forgejo after state recovery.
 	out, err := b.runForgejoAdminCommand(ctx, "user", "generate-access-token", "--username", "omahab-bot", "--token-name", "omahab", "--raw")
+	if err != nil && forgejoTokenNameConflict(err) {
+		recoveryName := "omahab-recovery-" + generateRandomBase64URL(9)
+		out, err = b.runForgejoAdminCommand(ctx, "user", "generate-access-token", "--username", "omahab-bot", "--token-name", recoveryName, "--raw")
+	}
 	if err != nil {
 		return fmt.Errorf("generate forgejo token: %w", redactForgejoError(err))
 	}
@@ -500,6 +509,20 @@ func (b *Backend) ensureOmahabBot(ctx context.Context, domain string) error {
 		return fmt.Errorf("store forgejo_token: %w", err)
 	}
 	return nil
+}
+
+func forgejoTokenNameConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if errors.Is(err, errForgejoTokenNameConflict) {
+		return true
+	}
+	if !strings.Contains(msg, "token") || !strings.Contains(msg, "name") {
+		return false
+	}
+	return strings.Contains(msg, "already") || strings.Contains(msg, "exists") || strings.Contains(msg, "used")
 }
 
 func (b *Backend) forgejoBotExists(ctx context.Context) (bool, error) {
