@@ -278,22 +278,80 @@ func (b *Backend) ensureJellyfinSetup(ctx context.Context) error {
 
 	var password string
 	if fresh {
-		password, err = randomAdminPassword()
-		if err != nil {
-			return err
+		if b.secrets == nil {
+			return fmt.Errorf("jellyfin breakglass storage not configured")
+		}
+		if pw, err := b.secrets.RevealByName(ctx, "platform-app", "jellyfin_breakglass_password"); err == nil && strings.TrimSpace(pw) != "" {
+			password = strings.TrimSpace(pw)
+		} else {
+			generated, err := randomAdminPassword()
+			if err != nil {
+				return err
+			}
+			password = generated
+			if err := upsertSecret(ctx, b.secrets, "platform-app", "jellyfin_breakglass_password", password); err != nil {
+				return fmt.Errorf("store jellyfin breakglass password: %w", err)
+			}
+		}
+		// Upstream initializes the first user during GET /Startup/User.
+		// POST returns 404 until that initialization succeeds.
+		if _, err := jellyfinCall(ctx, http.MethodGet, "/Startup/User", nil, nil, ""); err != nil {
+			return fmt.Errorf("jellyfin init first user: %w", err)
 		}
 		if _, err := jellyfinCall(ctx, http.MethodPost, "/Startup/User", nil, map[string]string{
 			"Name": "admin", "Password": password,
 		}, ""); err != nil {
 			return fmt.Errorf("jellyfin first user: %w", err)
 		}
+		authBody, err := jellyfinCall(ctx, http.MethodPost, "/Users/AuthenticateByName", nil, map[string]string{
+			"Username": "admin", "Pw": password,
+		}, "")
+		if err != nil {
+			return fmt.Errorf("jellyfin breakglass auth: %w", err)
+		}
+		var freshAuth struct {
+			AccessToken string `json:"AccessToken"`
+		}
+		if err := json.Unmarshal(authBody, &freshAuth); err != nil || strings.TrimSpace(freshAuth.AccessToken) == "" {
+			return fmt.Errorf("jellyfin auth returned no token")
+		}
+		freshToken := strings.TrimSpace(freshAuth.AccessToken)
 		if _, err := jellyfinCall(ctx, http.MethodPost, "/Startup/Complete", nil, map[string]any{}, ""); err != nil {
 			return fmt.Errorf("jellyfin complete wizard: %w", err)
 		}
-		if err := upsertSecret(ctx, b.secrets, "platform-app", "jellyfin_breakglass_password", password); err != nil {
-			return fmt.Errorf("store jellyfin breakglass password: %w", err)
-		}
 		log.Printf("jellyfin: first-run admin created (break-glass, kept in secrets)")
+		token := freshToken
+		foldersBody, err := jellyfinCall(ctx, http.MethodGet, "/Library/VirtualFolders", nil, nil, token)
+		if err != nil {
+			return fmt.Errorf("jellyfin list libraries: %w", err)
+		}
+		var folders []jellyfinVirtualFolder
+		if err := json.Unmarshal(foldersBody, &folders); err != nil {
+			return fmt.Errorf("jellyfin parse libraries: %w", err)
+		}
+		library := jellyfinLibraryPath(b)
+		for _, f := range folders {
+			for _, loc := range f.Locations {
+				if filepath.Clean(loc) == filepath.Clean(library) {
+					log.Printf("jellyfin: library already covers %s", library)
+					return nil
+				}
+			}
+		}
+		q := url.Values{
+			"name":           {"Media"},
+			"collectionType": {"mixed"},
+			"paths":          {library},
+			"refreshLibrary": {"true"},
+		}
+		if _, err := jellyfinCall(ctx, http.MethodPost, "/Library/VirtualFolders", q, nil, token); err != nil {
+			return fmt.Errorf("jellyfin create library: %w", err)
+		}
+		log.Printf("jellyfin: library Media created over %s", library)
+		return nil
+	} else if b.secrets == nil {
+		log.Printf("jellyfin: local admin password unknown, skipping library converge")
+		return nil
 	} else if pw, err := b.secrets.RevealByName(ctx, "platform-app", "jellyfin_breakglass_password"); err == nil && strings.TrimSpace(pw) != "" {
 		password = strings.TrimSpace(pw)
 	}
@@ -309,9 +367,6 @@ func (b *Backend) ensureJellyfinSetup(ctx context.Context) error {
 		"Username": "admin", "Pw": password,
 	}, "")
 	if err != nil {
-		if fresh {
-			return fmt.Errorf("jellyfin breakglass auth: %w", err)
-		}
 		log.Printf("jellyfin: local admin auth failed, skipping library converge")
 		return nil
 	}
@@ -319,9 +374,6 @@ func (b *Backend) ensureJellyfinSetup(ctx context.Context) error {
 		AccessToken string `json:"AccessToken"`
 	}
 	if err := json.Unmarshal(authBody, &auth); err != nil || strings.TrimSpace(auth.AccessToken) == "" {
-		if fresh {
-			return fmt.Errorf("jellyfin auth returned no token")
-		}
 		log.Printf("jellyfin: local admin auth failed, skipping library converge")
 		return nil
 	}

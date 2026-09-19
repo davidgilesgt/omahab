@@ -86,14 +86,22 @@ func TestWriteJellyfinSSOFileIdempotent(t *testing.T) {
 	}
 }
 
-// jellyfinFake is a scripted Jellyfin server for setup tests.
+// jellyfinFake models upstream startup behavior: no first user exists
+// initially, GET /Startup/User initializes it without completing the wizard,
+// POST /Startup/User returns 404 until GET succeeds, only
+// /Startup/Complete flips wizardDone, and authentication checks the
+// configured username and password.
 type jellyfinFake struct {
-	wizardDone    bool
-	libraryExists bool
-	authFails     bool
-	mu            sync.Mutex
-	calls         []string
-	libraryQuery  string
+	wizardDone      bool
+	userInitialized bool
+	adminPassword   string
+	libraryExists   bool
+	authFails       bool
+	getInitFails    bool
+	completeFails   bool
+	mu              sync.Mutex
+	calls           []string
+	libraryQuery    string
 }
 
 func (f *jellyfinFake) handler() http.Handler {
@@ -106,26 +114,56 @@ func (f *jellyfinFake) handler() http.Handler {
 		_ = json.NewEncoder(w).Encode(map[string]any{"StartupWizardCompleted": done})
 	})
 	mux.HandleFunc("/Startup/User", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if r.Method == http.MethodGet {
+			f.calls = append(f.calls, "init-user")
+			if f.getInitFails {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			f.userInitialized = true
+			_ = json.NewEncoder(w).Encode(map[string]any{"Name": "admin"})
+			return
+		}
 		var body map[string]string
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		f.mu.Lock()
 		f.calls = append(f.calls, "user:"+body["Name"])
-		f.wizardDone = true
-		f.mu.Unlock()
+		if !f.userInitialized {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		f.adminPassword = body["Password"]
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("/Startup/Complete", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.calls = append(f.calls, "complete")
+		fail := f.completeFails
+		if !fail {
+			f.wizardDone = true
+		}
 		f.mu.Unlock()
+		if fail {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("/Users/AuthenticateByName", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&body)
 		f.mu.Lock()
 		f.calls = append(f.calls, "auth")
 		fail := f.authFails
+		wantUser := "admin"
+		wantPw := f.adminPassword
 		f.mu.Unlock()
 		if fail {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if strings.TrimSpace(body["Username"]) != wantUser || body["Pw"] != wantPw || strings.TrimSpace(wantPw) == "" {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
@@ -185,7 +223,7 @@ func TestEnsureJellyfinSetupFirstRun(t *testing.T) {
 	if err := b.ensureJellyfinSetup(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if !fake.has("user:admin") || !fake.has("complete") || !fake.has("create-library") {
+	if !fake.has("init-user") || !fake.has("user:admin") || !fake.has("complete") || !fake.has("create-library") {
 		t.Fatalf("missing setup calls: %v", fake.calls)
 	}
 	pw, err := b.secrets.RevealByName(context.Background(), "platform-app", "jellyfin_breakglass_password")
@@ -198,10 +236,25 @@ func TestEnsureJellyfinSetupFirstRun(t *testing.T) {
 	if !strings.Contains(fake.libraryQuery, "paths=") {
 		t.Fatalf("library query missing paths: %q", fake.libraryQuery)
 	}
+	// Second reconciliation must not change the password or duplicate the library.
+	fake.mu.Lock()
+	fake.libraryExists = true
+	fake.calls = nil
+	fake.mu.Unlock()
+	if err := b.ensureJellyfinSetup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	pw2, err := b.secrets.RevealByName(context.Background(), "platform-app", "jellyfin_breakglass_password")
+	if err != nil || pw2 != pw {
+		t.Fatalf("password changed on reconverge: %q vs %q", pw2, pw)
+	}
+	if fake.has("user") || fake.has("complete") || fake.has("create-library") {
+		t.Fatalf("second run must not duplicate writes: %v", fake.calls)
+	}
 }
 
 func TestEnsureJellyfinSetupAlreadyConverged(t *testing.T) {
-	fake := &jellyfinFake{wizardDone: true, libraryExists: true}
+	fake := &jellyfinFake{wizardDone: true, libraryExists: true, adminPassword: "pw", userInitialized: true}
 	b := setupJellyfinTest(t, fake)
 	ctx := context.Background()
 	if err := upsertSecret(ctx, b.secrets, "platform-app", "jellyfin_breakglass_password", "pw"); err != nil {
@@ -212,6 +265,94 @@ func TestEnsureJellyfinSetupAlreadyConverged(t *testing.T) {
 	}
 	if fake.has("user") || fake.has("complete") || fake.has("create-library") {
 		t.Fatalf("unexpected writes: %v", fake.calls)
+	}
+}
+
+func TestEnsureJellyfinSetupInitFailureLeavesIncomplete(t *testing.T) {
+	fake := &jellyfinFake{getInitFails: true}
+	b := setupJellyfinTest(t, fake)
+	if err := b.ensureJellyfinSetup(context.Background()); err == nil {
+		t.Fatal("expected init failure")
+	}
+	if fake.has("complete") || fake.has("create-library") {
+		t.Fatalf("failed init must leave wizard incomplete: %v", fake.calls)
+	}
+	fake.mu.Lock()
+	done := fake.wizardDone
+	fake.mu.Unlock()
+	if done {
+		t.Fatal("wizard must remain incomplete after init failure")
+	}
+}
+
+func TestEnsureJellyfinSetupAuthFailureLeavesIncomplete(t *testing.T) {
+	fake := &jellyfinFake{authFails: true}
+	b := setupJellyfinTest(t, fake)
+	if err := b.ensureJellyfinSetup(context.Background()); err == nil {
+		t.Fatal("expected auth failure")
+	}
+	if fake.has("complete") || fake.has("create-library") {
+		t.Fatalf("failed auth must leave wizard incomplete: %v", fake.calls)
+	}
+	fake.mu.Lock()
+	done := fake.wizardDone
+	fake.mu.Unlock()
+	if done {
+		t.Fatal("wizard must remain incomplete after auth failure")
+	}
+	// Password is stored before auth so a retry can reuse it.
+	pw, err := b.secrets.RevealByName(context.Background(), "platform-app", "jellyfin_breakglass_password")
+	if err != nil || strings.TrimSpace(pw) == "" {
+		t.Fatalf("password must be stored before auth for retry: %v", err)
+	}
+}
+
+func TestEnsureJellyfinSetupSecretStoreFailure(t *testing.T) {
+	fake := &jellyfinFake{}
+	b := setupJellyfinTest(t, fake)
+	b.secrets = nil
+	if err := b.ensureJellyfinSetup(context.Background()); err == nil {
+		t.Fatal("expected secret-store failure")
+	}
+	if fake.has("user") || fake.has("complete") || fake.has("create-library") {
+		t.Fatalf("secret failure must precede remote updates: %v", fake.calls)
+	}
+	fake.mu.Lock()
+	done := fake.wizardDone
+	fake.mu.Unlock()
+	if done {
+		t.Fatal("wizard must remain incomplete after secret failure")
+	}
+}
+
+func TestEnsureJellyfinSetupInterruptionReusesPassword(t *testing.T) {
+	fake := &jellyfinFake{completeFails: true}
+	b := setupJellyfinTest(t, fake)
+	ctx := context.Background()
+	if err := b.ensureJellyfinSetup(ctx); err == nil {
+		t.Fatal("expected complete failure")
+	}
+	pw1, err := b.secrets.RevealByName(ctx, "platform-app", "jellyfin_breakglass_password")
+	if err != nil || strings.TrimSpace(pw1) == "" {
+		t.Fatalf("interrupted run must store password: %v", err)
+	}
+	fake.mu.Lock()
+	if fake.wizardDone {
+		fake.mu.Unlock()
+		t.Fatal("wizard must remain incomplete after complete failure")
+	}
+	fake.completeFails = false
+	fake.calls = nil
+	fake.mu.Unlock()
+	if err := b.ensureJellyfinSetup(ctx); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	pw2, err := b.secrets.RevealByName(ctx, "platform-app", "jellyfin_breakglass_password")
+	if err != nil || pw2 != pw1 {
+		t.Fatalf("retry must reuse stored password: %q vs %q", pw2, pw1)
+	}
+	if !fake.has("complete") || !fake.has("create-library") {
+		t.Fatalf("retry must complete wizard and library: %v", fake.calls)
 	}
 }
 
