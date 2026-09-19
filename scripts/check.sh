@@ -9,14 +9,15 @@ fail=0
 pass() { echo "PASS: $*"; }
 fail_check() { echo "FAIL: $*" >&2; fail=1; }
 
-bash -n scripts/build.sh scripts/check.sh scripts/install-disk.sh scripts/e2e-iso-install.sh scripts/check-secureboot.sh && pass "bash syntax" || fail_check "bash syntax"
+bash -n install.sh scripts/build.sh scripts/check.sh scripts/install-disk.sh scripts/e2e-iso-install.sh scripts/check-secureboot.sh scripts/test-install-server.sh && pass "bash syntax" || fail_check "bash syntax"
 # Shell entrypoints are linted with ShellCheck instead of a homegrown
 # variable detector: real shell diagnostics over source-text heuristics.
 if command -v shellcheck >/dev/null 2>&1; then
-  shellcheck -S warning scripts/build.sh scripts/check.sh scripts/install-disk.sh scripts/e2e-iso-install.sh scripts/check-secureboot.sh && pass "shellcheck" || fail_check "shellcheck"
+  shellcheck -S warning install.sh scripts/build.sh scripts/check.sh scripts/install-disk.sh scripts/e2e-iso-install.sh scripts/check-secureboot.sh scripts/test-install-server.sh && pass "shellcheck" || fail_check "shellcheck"
 else
   fail_check "shellcheck not found (nix develop provides it)"
 fi
+bash scripts/test-install-server.sh && pass "portless installer server" || fail_check "portless installer server"
 
 # Config defaults: loopback standalone (Go behavior test below), wildcard
 # via the NixOS module with nftables as the admission boundary (evaluated).

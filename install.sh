@@ -15,15 +15,24 @@ set -eu
 SERVER="${OMAHAB_SERVER:-${1:-}}"
 
 if [ -z "$SERVER" ]; then
-  printf "Enter Omahab server URL (e.g. http://192.168.1.42:8484): " >&2
+  printf "Enter Omahab server address or URL (e.g. 192.168.1.42 or https://omahab.example.com): " >&2
   read -r SERVER || true
 fi
+# A LAN or Tailscale IP is the common first-run input. Add the panel scheme
+# and port when they are absent. Preserve explicit HTTP and HTTPS URLs.
+SERVER=$(printf "%s" "$SERVER" | sed 's#/*$##')
 if [ -z "$SERVER" ]; then
-  echo "error: server URL is required (set OMAHAB_SERVER or pass as first arg)" >&2
+  echo "error: server address or URL is required (set OMAHAB_SERVER or pass it as the first argument)" >&2
   exit 1
 fi
-# Trim trailing slash.
-SERVER=$(printf "%s" "$SERVER" | sed 's#/*$##')
+case "$SERVER" in
+  http://*|https://*) ;;
+  \[*\]:*) SERVER="http://$SERVER" ;;
+  \[*\]) SERVER="http://$SERVER:8484" ;;
+  *:*:*) SERVER="http://[$SERVER]:8484" ;;
+  *:*) SERVER="http://$SERVER" ;;
+  *) SERVER="http://$SERVER:8484" ;;
+esac
 
 # Detect OS/arch for the binary name omahab-clientd-<os>-<arch>.
 OS=$(uname -s 2>/dev/null | tr '[:upper:]' '[:lower:]' || echo linux)

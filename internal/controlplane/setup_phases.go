@@ -2003,15 +2003,35 @@ func waitForHTTPSRoutes(ctx context.Context, hostnames []string, probe func(cont
 		return nil
 	}
 	deadline := time.Now().Add(timeout)
+	probeCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
 	lastErr := map[string]error{}
+	type probeResult struct {
+		index int
+		err   error
+	}
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		results := make(chan probeResult, len(pending))
+		for i, h := range pending {
+			go func(index int, hostname string) {
+				results <- probeResult{index: index, err: probe(probeCtx, hostname)}
+			}(i, h)
+		}
+		probeErrors := make([]error, len(pending))
+		for range pending {
+			result := <-results
+			probeErrors[result.index] = result.err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		still := pending[:0]
-		for _, h := range pending {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if err := probe(ctx, h); err != nil {
-				lastErr[h] = err
+		for i, h := range pending {
+			if probeErrors[i] != nil {
+				lastErr[h] = probeErrors[i]
 				still = append(still, h)
 				continue
 			}

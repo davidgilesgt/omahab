@@ -85,6 +85,44 @@ func TestWaitForHTTPSRoutesTimeout(t *testing.T) {
 	}
 }
 
+func TestWaitForHTTPSRoutesProbesPendingHostsConcurrently(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	started := make(chan string, 3)
+	done := make(chan error, 1)
+	probe := func(ctx context.Context, host string) error {
+		started <- host
+		select {
+		case <-release:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	go func() {
+		done <- waitForHTTPSRoutes(
+			context.Background(),
+			[]string{"id.example.test", "git.example.test", "ci.example.test"},
+			probe,
+			time.Second,
+			time.Millisecond,
+		)
+	}()
+	for range 3 {
+		select {
+		case <-started:
+		case <-time.After(500 * time.Millisecond):
+			close(release)
+			<-done
+			t.Fatal("HTTPS route probes started serially")
+		}
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestTailscaleEnrollmentStatesSuppressFailure(t *testing.T) {
 	for _, state := range []string{"NeedsLogin", "LoggedOut"} {
 		t.Run(state, func(t *testing.T) {

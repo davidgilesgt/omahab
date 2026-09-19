@@ -3693,6 +3693,8 @@
         "manual:client-install"
       ],
       "sources": [
+        "install.sh",
+        "scripts/test-install-server.sh",
         "companion/PROTOCOL.md",
         "internal/client/daemon.go"
       ],
@@ -3700,10 +3702,12 @@
         "enrolled"
       ],
       "steps": [
+        "Run the installer with the server IP only, without a scheme or port.",
         "Download the matching client package.",
         "Verify checksum, install, enroll, and update."
       ],
       "expected": [
+        "The installer uses HTTP and port 8484 for a portless IP.",
         "Checksums match published values.",
         "Enrolled clients sync correctly."
       ],
@@ -3855,18 +3859,22 @@
       ],
       "sources": [
         "web/src/views/setup.tsx",
-        "internal/api/server.go"
+        "internal/api/server.go",
+        "internal/controlplane/setup_exposure.go",
+        "internal/controlplane/setup_phases.go"
       ],
       "requires": [
         "enrolled"
       ],
       "steps": [
         "Move private, shared, and public states with group restrictions.",
-        "Attempt excessive exposure and partial external failure."
+        "Attempt excessive exposure and partial external failure.",
+        "Make several HTTPS routes temporarily unavailable during automatic setup."
       ],
       "expected": [
         "Transitions require exact confirmation.",
-        "Excessive exposure is denied."
+        "Excessive exposure is denied.",
+        "All pending routes are checked together, and one readiness timeout limits the total wait."
       ],
       "evidence_types": [
         "BROWSER",
