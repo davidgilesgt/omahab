@@ -14,6 +14,22 @@ dashboard journeys, application interfaces, and clarity measurements.
 - If browser tools are unavailable, mark browser-required cases `BLOCKED`
   with reason `browser tools unavailable`. Never mark them passed via API.
 
+## Passkeys
+
+- Use a fresh browser context with cache disabled before enrollment.
+- Bring the Pocket ID page to the foreground before a trusted click.
+- For browser automation enable CDP WebAuthn and create a CTAP2 internal
+  authenticator with `hasResidentKey`, `hasUserVerification`,
+  `isUserVerified`, and `automaticPresenceSimulation` set to true.
+- Record secure-context status and `document.hasFocus()` without
+  secret-bearing page captures.
+- Require creation of a credential followed by logout and passkey login.
+- A browser without the required authenticator remains `BLOCKED`, not
+  `FAIL`.
+- Never change `welcome.tsx` to repair a Pocket ID button. If the silent
+  button also fails in a supported focused browser, retain it as an
+  upstream Pocket ID finding with version, sanitized console output, and
+  failed network or WebAuthn activity before proposing any upstream patch.
 ## Interaction
 
 - Open the target URL with `browser.open` and keep the tab handle.

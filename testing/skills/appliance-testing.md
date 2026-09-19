@@ -69,11 +69,31 @@ exclusive operations, backup, restore, and recovery.
   bookmark page, a Markdown note, a small Git project, two releases, a
   synchronized directory, and a test email attachment.
 - Use unique searchable text containing the run identifier.
+- Generate each run-local text PDF with a valid cross-reference table and a
+  `612x792`-point page. Use Helvetica at 12 points, a 36-point left margin,
+  and separate lines for the run identifier and `TEXTPDF-7XK2`.
+- Store generated fixtures only under the new run `fixtures/` directory.
+- Require `pdftotext -bbox` to show the complete token within the page
+  before upload. Require extraction without PDF syntax warnings.
+- Render the fixture for visual inspection before using it as OCR evidence.
+- For Paperless proof compare four separate outputs: visible
+  original-page text, full detail `content` from `/api/documents/{id}/`,
+  full-text search for the exact fixture token after processing finishes,
+  and the downloaded original hash. Never use title search or an excerpt
+  as proof of full-text indexing. Keep Paperless settings unchanged
+  unless a valid fixture independently demonstrates a new defect.
 - For upgrades, create healthy and unhealthy release fixtures under
   `dist/deep-test/<run-id>/upgrade/` and copy them into the guest at
   `/var/lib/omahab/test-releases/`. Use a distinct test `version` per
   fixture. Keep application source unchanged.
-
+- For the unhealthy fixture add a Nix override that sets omahabd
+  `OMAHAB_LISTEN` to `127.0.0.1:18484` outside the hardware files replaced
+  during staging. This deliberately breaks the `:8484` health probe.
+- Prove upgrades with real switches only: healthy fixtures must change the
+  running generation with working application access; unhealthy fixtures
+  must fail the health gate and automatically restore the previous
+  generation. Never set `NIX_CONFIG` or install missing commands manually
+  during this proof.
 ## Exclusive operations
 
 - Treat application restart, revocation, migration, restore, and network
@@ -85,11 +105,20 @@ exclusive operations, backup, restore, and recovery.
   scratch-disk identity before permitting a destructive command.
 - Resolve launch URLs from the application API. Do not invent loopback
   browser links.
-
 ## Backup and recovery
 
 - Place the disposable generic restic repository outside backed-up paths
   at `/var/tmp/omahab-test-backup`.
+- Prove `backups.create` and `backups.verify` through the Omahab product
+  path only: create the repository through the API, run a product backup,
+  verify it, and restore a known file with hash comparison. No generic
+  restic command replaces this proof.
+- Prove `app.restic-server.functional` in stages: no-device clean skip,
+  first enrollment with successful authenticated backup, and revocation
+  denial via the retained empty htpasswd without deleting backup data.
+- Prove `app.jellyfin.functional` with fresh startup, reconciliation,
+  service restart, guest reboot, and a privately recorded
+  `sso-secret.key` hash that remains unchanged across transitions.
 - Export the completed encrypted repository into the host run directory
   before destructive recovery tests.
 - Restore from that copy onto a fresh installed guest for offline recovery

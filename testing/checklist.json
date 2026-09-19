@@ -984,12 +984,13 @@
         "enrolled"
       ],
       "steps": [
-        "Enroll a passkey for each test user.",
-        "Log out and log in with each passkey."
+        "Use a fresh browser context with cache disabled; bring the Pocket ID page to the foreground before a trusted click.",
+        "Enable CDP WebAuthn with a CTAP2 internal authenticator (hasResidentKey, hasUserVerification, isUserVerified, automaticPresenceSimulation true).",
+        "Record secure-context status and document.hasFocus() without secret captures; create a credential, log out, and log in with the passkey."
       ],
       "expected": [
-        "Each passkey authenticates its owner.",
-        "A passkey never unlocks another account."
+        "Passkey creation followed by logout and passkey login succeeds in the supported focused browser.",
+        "Browsers without the required authenticator stay BLOCKED, not FAIL; welcome.tsx is unchanged."
       ],
       "evidence_types": [
         "BROWSER",
@@ -1146,12 +1147,13 @@
         "enrolled"
       ],
       "steps": [
-        "Generate a phrase.",
-        "Attempt confirm without saved acknowledgement, then with it."
+        "Generate a phrase and acknowledge storage.",
+        "Disable clipboard methods (or simulate copy failure) and enter the fingerprint manually.",
+        "Attempt confirm with an incorrect code, then with the exact normalized fingerprint."
       ],
       "expected": [
-        "Confirmation without ack fails.",
-        "Confirmation with ack succeeds."
+        "Incorrect codes remain rejected; matching manually entered codes permit confirmation after acknowledgement.",
+        "Copy Check code stays optional; copy failure shows manual-entry guidance without hiding the field."
       ],
       "evidence_types": [
         "BROWSER",
@@ -1333,12 +1335,12 @@
         "enrolled"
       ],
       "steps": [
-        "Stop one app dependency exclusively.",
-        "Observe overview health, then restart."
+        "Make one running application unhealthy and wait for automatic convergence without manual health refresh.",
+        "Verify the API and overview converge within two minutes; pause one app and verify it receives no probe."
       ],
       "expected": [
-        "Health shows the failure with remediation.",
-        "Recovery restores healthy status."
+        "Health recovers automatically after the endpoint recovers; no manual health action is needed.",
+        "Paused apps remain paused with no probe and no repeated transition events for unchanged health."
       ],
       "evidence_types": [
         "BROWSER",
@@ -1735,12 +1737,12 @@
         "enrolled"
       ],
       "steps": [
-        "Create a backup of known app data.",
-        "Wait for completion."
+        "Create a generic repository through the Omahab API (not a direct restic run).",
+        "Run a product backup of known app data and wait for completion."
       ],
       "expected": [
-        "The backup completes.",
-        "The snapshot is listed."
+        "The Omahab backup completes and the snapshot is listed.",
+        "Credentials store as backups.Credentials JSON with the exact password bytes."
       ],
       "evidence_types": [
         "BROWSER",
@@ -1816,12 +1818,12 @@
         "enrolled"
       ],
       "steps": [
-        "Verify a real snapshot.",
-        "Damage a disposable copy and verify again."
+        "Verify the product snapshot via the Omahab verify path.",
+        "Restore a known file through the product restore path and compare hashes."
       ],
       "expected": [
-        "The good snapshot verifies.",
-        "The damaged copy fails without harming the source."
+        "The good snapshot verifies; the restored file matches the recorded hash.",
+        "No substitute direct restic run replaces the product proof."
       ],
       "evidence_types": [
         "BROWSER",
@@ -2005,12 +2007,12 @@
         "enrolled"
       ],
       "steps": [
-        "Create an enrollment link.",
-        "Open it as a new user."
+        "Create an enrollment link via the browser panel.",
+        "Open it as a new user and complete the welcome flow."
       ],
       "expected": [
-        "The link opens the welcome flow.",
-        "Expired links are rejected."
+        "The link opens the welcome flow; expired links are rejected.",
+        "Distinct-ID subresource checks live in cov.api.users-distinct-ids, not here."
       ],
       "evidence_types": [
         "BROWSER",
@@ -2463,12 +2465,12 @@
         "enrolled"
       ],
       "steps": [
-        "Submit duplicate, Git, traversal, and invalid paths.",
-        "Observe errors."
+        "Submit relative paths, .git components, raw traversal, and paths outside the sync root via the API.",
+        "Observe HTTP status codes and list existing folders afterward."
       ],
       "expected": [
-        "Each bad path is rejected.",
-        "Valid folders are unchanged."
+        "Each path validation returns HTTP 400 via apitypes.ErrValidation.",
+        "Existing folders remain unchanged; valid folder creation still works."
       ],
       "evidence_types": [
         "BROWSER",
@@ -2624,12 +2626,13 @@
         "enrolled"
       ],
       "steps": [
-        "Rotate the Hermes MCP token.",
-        "Verify old token rejection and new token use."
+        "Rotate the Hermes MCP token twice via POST /api/v1/hermes/mcp-token/rotate without restarting omahabd.",
+        "Call POST/GET /mcp with the first token, the second token, the admin bearer, and a device token.",
+        "Verify missing Authorization returns 401 and stale secrets return 503 only on store failure."
       ],
       "expected": [
-        "Old tokens stop working.",
-        "New tokens work."
+        "Only the latest token returns 200; the first token returns 403 immediately without daemon restart.",
+        "Admin bearer and oma_dev_ tokens return 403; missing bearer returns 401."
       ],
       "evidence_types": [
         "BROWSER",
@@ -4908,12 +4911,13 @@
         "enrolled"
       ],
       "steps": [
-        "Prepare the Upgrade scenario on a disposable guest.",
-        "Execute the supported operation and verify the observable result."
+        "Copy the final committed source as healthy fixture under $RUN/upgrade/ with a distinct version; keep application source unchanged.",
+        "Copy it to /var/lib/omahab/test-releases/healthy in the disposable guest.",
+        "Run sudo omahab system upgrade --flake path:/var/lib/omahab/test-releases/healthy without NIX_CONFIG or manual package installs."
       ],
       "expected": [
-        "The Upgrade behaves as specified.",
-        "Failures are reported with recovery steps."
+        "The healthy switch changes the running generation, preserves working application access and persisted data.",
+        "/up reports the new version afterward."
       ],
       "evidence_types": [
         "BROWSER",
@@ -4935,12 +4939,13 @@
         "enrolled"
       ],
       "steps": [
-        "Prepare the Upgrade rollback scenario on a disposable guest.",
-        "Execute the supported operation and verify the observable result."
+        "Copy the final committed source as unhealthy fixture under $RUN/upgrade/ with a distinct version and a Nix override setting omahabd OM AHAB_LISTEN to 127.0.0.1:18484 (breaks the :8484 health probe).",
+        "Copy it to /var/lib/omahab/test-releases/unhealthy in the disposable guest.",
+        "Run sudo omahab system upgrade --flake path:/var/lib/omahab/test-releases/unhealthy."
       ],
       "expected": [
-        "The Upgrade rollback behaves as specified.",
-        "Failures are reported with recovery steps."
+        "The unhealthy switch fails its health gate and automatically restores the previous generation.",
+        "/up, reported version, and persisted data verify afterward."
       ],
       "evidence_types": [
         "BROWSER",
@@ -5307,13 +5312,12 @@
         "enrolled"
       ],
       "steps": [
-        "Open the forgejo interface through its resolved URL.",
-        "Exercise its required proof with synthetic fixtures.",
-        "Verify persistence after logout, restart, and reboot."
+        "Complete Forgejo provisioning through automatic setup (Pocket ID client, auth source, org teams, Woodpecker OAuth).",
+        "Log in to Forgejo through Pocket ID in the browser and authorize Woodpecker; keep local password login disabled."
       ],
       "expected": [
-        "The fixture remains usable after restart.",
-        "Hashes match the recorded values."
+        "Browser SSO succeeds after provisioning; an independent Jellyfin failure does not prevent the auth source from existing.",
+        "Woodpecker authorization completes."
       ],
       "evidence_types": [
         "BROWSER",
@@ -5394,13 +5398,13 @@
         "enrolled"
       ],
       "steps": [
-        "Open the paperless-ngx interface through its resolved URL.",
-        "Exercise its required proof with synthetic fixtures.",
-        "Verify persistence after logout, restart, and reboot."
+        "Generate a run-local PDF under the new run fixtures/ with valid xref, 612x792pt page, Helvetica 12pt, 36pt left margin, separate lines for run ID and TEXTPDF-7XK2.",
+        "Require pdftotext -bbox to show the complete token within the page with no PDF syntax warnings; render the fixture visually.",
+        "Upload via JSON base64, then compare visible original-page text, full detail content from /api/documents/{id}/, full-text search for the exact token after processing, and downloaded original hash."
       ],
       "expected": [
-        "The fixture remains usable after restart.",
-        "Hashes match the recorded values."
+        "All four outputs agree on the fixture token; title search or excerpts are not used as indexing proof.",
+        "Paperless settings stay unchanged unless a valid fixture shows a new defect."
       ],
       "evidence_types": [
         "BROWSER",
@@ -5481,13 +5485,13 @@
         "enrolled"
       ],
       "steps": [
-        "Open the litellm interface through its resolved URL.",
-        "Exercise its required proof with synthetic fixtures.",
-        "Verify persistence after logout, restart, and reboot."
+        "Create the first administrator through Omahab and complete automatic setup via retry.",
+        "Compare the selected user pocket_user_id with PROXY_ADMIN_ID without recording other environment values.",
+        "Log out completely, log in again as that exact user, and verify provider and model management without database edits."
       ],
       "expected": [
-        "The fixture remains usable after restart.",
-        "Hashes match the recorded values."
+        "The selected bootstrap administrator has management access on a fresh SSO callback.",
+        "Other viewers remaining viewers does not violate the single-administrator bootstrap policy."
       ],
       "evidence_types": [
         "BROWSER",
@@ -5568,13 +5572,11 @@
         "enrolled"
       ],
       "steps": [
-        "Open the hermes interface through its resolved URL.",
-        "Exercise its required proof with synthetic fixtures.",
-        "Verify persistence after logout, restart, and reboot."
+        "Complete Hermes provisioning (public client https://ai.<domain>/auth/callback, group access admins+members, secret hermes_oidc_client_id).",
+        "Log in to Hermes through Pocket ID in the browser."
       ],
       "expected": [
-        "The fixture remains usable after restart.",
-        "Hashes match the recorded values."
+        "Browser SSO succeeds; the public client and group access persist."
       ],
       "evidence_types": [
         "BROWSER",
@@ -5626,13 +5628,13 @@
         "enrolled"
       ],
       "steps": [
-        "Open the restic-server interface through its resolved URL.",
-        "Exercise its required proof with synthetic fixtures.",
-        "Verify persistence after logout, restart, and reboot."
+        "Verify clean skip with no devices (service gated on htpasswd existence).",
+        "Enroll the first device and confirm an authenticated backup through the product path.",
+        "Revoke the last device and confirm denial via the retained empty htpasswd without deleting backup data."
       ],
       "expected": [
-        "The fixture remains usable after restart.",
-        "Hashes match the recorded values."
+        "No-device state skips cleanly; first enrollment enables authenticated backup.",
+        "Revocation denies access; backup data remains."
       ],
       "evidence_types": [
         "BROWSER",
@@ -5655,13 +5657,12 @@
         "enrolled"
       ],
       "steps": [
-        "Open the jellyfin interface through its resolved URL.",
-        "Exercise its required proof with synthetic fixtures.",
-        "Verify persistence after logout, restart, and reboot."
+        "Complete fresh startup via GET /Startup/User (initializes), POST /Startup/User admin, authenticate, POST /Startup/Complete, then library convergence.",
+        "Reconcile, restart jellyfin.service, reboot the guest, and compare the retained sso-secret.key hash privately before and after."
       ],
       "expected": [
-        "The fixture remains usable after restart.",
-        "Hashes match the recorded values."
+        "Fresh startup completes only after stored secret and successful authentication; the secret-key hash is unchanged across restart and reboot.",
+        "The Media library persists; previously configured servers with unknown passwords warn and skip without failing setup."
       ],
       "evidence_types": [
         "BROWSER",
@@ -6279,12 +6280,11 @@
       ],
       "requires": [],
       "steps": [
-        "Exercise Cover knowledge writes through authenticated API calls.",
-        "Verify success, validation, permission, and missing-state paths."
+        "Upload via JSON base64 to the authorized Paperless path.",
+        "Attempt multipart upload and verify the documented contract."
       ],
       "expected": [
-        "Responses match the OpenAPI contract.",
-        "Errors are stable JSON envelopes."
+        "JSON upload returns 201; multipart upload returns 415 matching the OpenAPI JSON-only contract."
       ],
       "evidence_types": [
         "LIVE_API"
@@ -6589,6 +6589,33 @@
       "expected": [
         "Responses match the OpenAPI contract.",
         "Errors are stable JSON envelopes."
+      ],
+      "evidence_types": [
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "cov.api.users-distinct-ids",
+      "area": "coverage",
+      "title": "Cover distinct user identifiers",
+      "covers": [
+        "api:GET /api/v1/users/{id}/enrollment",
+        "api:GET /api/v1/users/{id}/app-access",
+        "api:GET /api/v1/users/{id}/groups",
+        "api:PUT /api/v1/users/{id}/groups"
+      ],
+      "sources": [
+        "internal/controlplane/identity_ops.go",
+        "internal/api/server.go"
+      ],
+      "requires": [],
+      "steps": [
+        "Use a local user ID deliberately different from its linked Pocket ID for enrollment, groups, and application access.",
+        "Call subresources with the Pocket ID as the local URL ID and with a user lacking a link."
+      ],
+      "expected": [
+        "Local IDs work for enrollment, groups, and app access; Pocket IDs as local IDs return not found.",
+        "Missing links return validation failure, not upstream user_not_found."
       ],
       "evidence_types": [
         "LIVE_API"
