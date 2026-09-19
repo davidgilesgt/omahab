@@ -374,6 +374,9 @@ func (b *Backend) initServices(ctx context.Context) error {
 		},
 	})
 	b.backups = backupSvc
+	if err := b.migrateBackupCredentialShapes(ctx); err != nil {
+		return fmt.Errorf("migrate backup credentials: %w", err)
+	}
 
 	b.hermes = hermes.New(b.db, newHermesSink(b.events))
 
@@ -1171,6 +1174,9 @@ func (s backupSecretSource) Resolve(ctx context.Context, ref backups.SecretRef) 
 	var credentials backups.Credentials
 	if err := json.Unmarshal([]byte(value), &credentials); err != nil {
 		return backups.Credentials{}, fmt.Errorf("%w: backup credential secret must be a JSON object", store.ErrValidation)
+	}
+	if strings.TrimSpace(credentials.Password) == "" {
+		return backups.Credentials{}, fmt.Errorf("%w: backup credential secret must contain a password", store.ErrValidation)
 	}
 	return credentials, nil
 }

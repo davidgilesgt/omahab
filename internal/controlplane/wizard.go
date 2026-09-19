@@ -394,14 +394,18 @@ func (b *Backend) CreateBackupRepository(ctx context.Context, req apitypes.Creat
 	}
 	// Each repository gets its own secret record instead of rotating the
 	// shared backup_repo_credentials name. Existing references migrate
-	// without changing their actual passwords (see migrateSharedRepoSecrets).
+	// without changing their actual passwords (see migrateBackupCredentialShapes).
 	// The per-repo name needs the repository ID, so credentials stage under
 	// a provisional name first and move once the repository exists.
 	putRepoSecret := func(value string, key string) (backups.SecretRef, error) {
-		name := "backup_repo_" + sanitizeSecretName(key)
-		sec, err := b.secrets.Put(ctx, "platform-app", name, value)
+		encoded, err := json.Marshal(backups.Credentials{Password: value})
 		if err != nil {
-			if _, err2 := b.secrets.RotateByName(ctx, "platform-app", name, value); err2 != nil {
+			return backups.SecretRef{}, fmt.Errorf("encode credentials: %w", err)
+		}
+		name := "backup_repo_" + sanitizeSecretName(key)
+		sec, err := b.secrets.Put(ctx, "platform-app", name, string(encoded))
+		if err != nil {
+			if _, err2 := b.secrets.RotateByName(ctx, "platform-app", name, string(encoded)); err2 != nil {
 				return backups.SecretRef{}, fmt.Errorf("store credentials: %w", err)
 			}
 			sec, err = b.secrets.GetByName(ctx, "platform-app", name)
@@ -448,7 +452,6 @@ func (b *Backend) CreateBackupRepository(ctx context.Context, req apitypes.Creat
 		return backups.Repository{}, translateError(err)
 	}
 	_ = b.secrets.DeleteByName(ctx, "platform-app", "backup_repo_"+sanitizeSecretName(stageKey))
-	b.migrateSharedRepoSecrets(ctx)
 	b.enableBackupTimers(ctx)
 	// After creation run first backup immediately then verify so recovery_tested passes day one.
 	// Fire in background to not block the API response.
@@ -499,45 +502,115 @@ func sanitizeSecretName(s string) string {
 	return out
 }
 
-// migrateSharedRepoSecrets gives each repository referencing the legacy
-// shared backup_repo_credentials record its own secret record, preserving
-// actual passwords. It runs opportunistically after repository setup.
-func (b *Backend) migrateSharedRepoSecrets(ctx context.Context) {
+// migrateBackupCredentialShapes converts legacy raw-password backup secrets into
+// backups.Credentials JSON objects without changing password bytes. Valid
+// credential objects are left unchanged. Shared backup_repo_credentials
+// references each receive a separate backup_repo_<sanitized-repository-id>
+// record. Per-repository backup_repo_* records rotate in place. Repository
+// references update through Configure without reinitializing restic data.
+// Empty legacy values and credential objects with invalid field types are
+// migration errors. Already converted objects survive a retry.
+func (b *Backend) migrateBackupCredentialShapes(ctx context.Context) error {
 	if b.backups == nil || b.secrets == nil {
-		return
-	}
-	shared, err := b.secrets.RevealByName(ctx, "platform-app", "backup_repo_credentials")
-	if err != nil || strings.TrimSpace(shared) == "" {
-		return
+		return nil
 	}
 	repos, err := b.backups.Repositories(ctx)
 	if err != nil {
-		return
+		return fmt.Errorf("list backup repositories: %w", err)
 	}
 	for _, repo := range repos {
 		meta, err := b.secrets.Get(ctx, domain.ID(repo.SecretRef.ID))
 		if err != nil {
+			return fmt.Errorf("load backup credential metadata for repository %q: %w", repo.ID, err)
+		}
+		if meta.Scope != "platform-app" {
 			continue
 		}
-		if meta.Name != "backup_repo_credentials" {
+		shared := meta.Name == "backup_repo_credentials"
+		if !shared && !strings.HasPrefix(meta.Name, "backup_repo_") {
 			continue
 		}
-		name := "backup_repo_" + sanitizeSecretName(repo.ID)
-		sec, err := b.secrets.Put(ctx, "platform-app", name, shared)
+		value, err := b.secrets.Reveal(ctx, domain.ID(repo.SecretRef.ID))
 		if err != nil {
-			if _, err2 := b.secrets.RotateByName(ctx, "platform-app", name, shared); err2 != nil {
-				continue
-			}
-			sec, err = b.secrets.GetByName(ctx, "platform-app", name)
-			if err != nil {
-				continue
-			}
+			return fmt.Errorf("reveal backup credential for repository %q: %w", repo.ID, err)
 		}
-		_, _ = b.backups.Configure(ctx, backups.ConfigureRequest{
+		if value == "" {
+			return fmt.Errorf("backup credential for repository %q is empty", repo.ID)
+		}
+		var creds backups.Credentials
+		if err := json.Unmarshal([]byte(value), &creds); err == nil && strings.TrimSpace(creds.Password) != "" {
+			if !shared {
+				continue
+			}
+			// Shared valid object still needs a separate per-repository record.
+			name := "backup_repo_" + sanitizeSecretName(repo.ID)
+			sec, err := b.secrets.Put(ctx, "platform-app", name, value)
+			if err != nil {
+				return fmt.Errorf("store backup credential for repository %q: %w", repo.ID, err)
+			}
+			if _, err := b.backups.Configure(ctx, backups.ConfigureRequest{
+				ID: repo.ID, Label: repo.Label, Location: repo.Location,
+				SecretRef: backups.SecretRef{ID: string(sec.ID), Version: sec.Version},
+			}); err != nil {
+				return fmt.Errorf("point repository %q at migrated credential: %w", repo.ID, err)
+			}
+			continue
+		}
+		if looksLikeCredentialObject(value) {
+			return fmt.Errorf("backup credential for repository %q has invalid credential fields", repo.ID)
+		}
+		encoded, err := json.Marshal(backups.Credentials{Password: value})
+		if err != nil {
+			return fmt.Errorf("encode backup credential for repository %q: %w", repo.ID, err)
+		}
+		if shared {
+			name := "backup_repo_" + sanitizeSecretName(repo.ID)
+			sec, err := b.secrets.Put(ctx, "platform-app", name, string(encoded))
+			if err != nil {
+				return fmt.Errorf("store backup credential for repository %q: %w", repo.ID, err)
+			}
+			if _, err := b.backups.Configure(ctx, backups.ConfigureRequest{
+				ID: repo.ID, Label: repo.Label, Location: repo.Location,
+				SecretRef: backups.SecretRef{ID: string(sec.ID), Version: sec.Version},
+			}); err != nil {
+				return fmt.Errorf("point repository %q at migrated credential: %w", repo.ID, err)
+			}
+			continue
+		}
+		sec, err := b.secrets.Rotate(ctx, domain.ID(repo.SecretRef.ID), string(encoded))
+		if err != nil {
+			return fmt.Errorf("rotate backup credential for repository %q: %w", repo.ID, err)
+		}
+		if _, err := b.backups.Configure(ctx, backups.ConfigureRequest{
 			ID: repo.ID, Label: repo.Label, Location: repo.Location,
 			SecretRef: backups.SecretRef{ID: string(sec.ID), Version: sec.Version},
-		})
+		}); err != nil {
+			return fmt.Errorf("point repository %q at migrated credential: %w", repo.ID, err)
+		}
 	}
+	return nil
+}
+
+// looksLikeCredentialObject reports whether value parses as a JSON object
+// containing credential field names. Such values must decode as valid
+// credentials; otherwise migration must fail instead of treating the object
+// text as a raw password.
+func looksLikeCredentialObject(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	if !strings.HasPrefix(trimmed, "{") {
+		return false
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(value), &obj); err != nil {
+		return false
+	}
+	for k := range obj {
+		switch strings.ToLower(strings.TrimSpace(k)) {
+		case "password", "username", "accesskey", "access_key", "access-key":
+			return true
+		}
+	}
+	return false
 }
 
 // enableBackupTimers turns on the daily backup + weekly verify timers.
