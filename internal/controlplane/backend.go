@@ -1020,6 +1020,9 @@ func translateError(err error) error {
 	if errors.Is(err, integrations.ErrValidation) || errors.Is(err, integrations.ErrHAInvalid) {
 		return fmt.Errorf("%w: %v", apitypes.ErrValidation, err)
 	}
+	if errors.Is(err, syncer.ErrValidation) || errors.Is(err, syncer.ErrPathTraversal) || errors.Is(err, syncer.ErrGitRejected) {
+		return fmt.Errorf("%w: %v", apitypes.ErrValidation, err)
+	}
 	msg := strings.ToLower(err.Error())
 	if strings.Contains(msg, "not found") {
 		return fmt.Errorf("%w: %v", apitypes.ErrNotFound, err)

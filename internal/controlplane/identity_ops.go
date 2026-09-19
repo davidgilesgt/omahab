@@ -727,10 +727,17 @@ func (b *Backend) GetEnrollmentState(ctx context.Context, userID string) (identi
 }
 
 func (b *Backend) ListApplicationAccess(ctx context.Context, userID string) ([]identity.AppAccess, error) {
+	u, err := b.GetUser(ctx, domain.ID(strings.TrimSpace(userID)))
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(u.PocketUserID) == "" {
+		return nil, translateError(store.Validation("user has no linked Pocket ID account"))
+	}
 	if b.pocketClient == nil {
 		return nil, translateError(fmt.Errorf("%w: identity not configured", ErrNotConfigured))
 	}
-	list, err := b.pocketClient.ListApplicationAccess(ctx, userID)
+	list, err := b.pocketClient.ListApplicationAccess(ctx, u.PocketUserID)
 	if err != nil {
 		return nil, translateError(err)
 	}
@@ -738,10 +745,17 @@ func (b *Backend) ListApplicationAccess(ctx context.Context, userID string) ([]i
 }
 
 func (b *Backend) GetUserGroups(ctx context.Context, userID string) ([]identity.Group, error) {
+	u, err := b.GetUser(ctx, domain.ID(strings.TrimSpace(userID)))
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(u.PocketUserID) == "" {
+		return nil, translateError(store.Validation("user has no linked Pocket ID account"))
+	}
 	if b.pocketClient == nil {
 		return nil, translateError(fmt.Errorf("%w: identity not configured", ErrNotConfigured))
 	}
-	groups, err := b.pocketClient.GetUserGroups(ctx, userID)
+	groups, err := b.pocketClient.GetUserGroups(ctx, u.PocketUserID)
 	if err != nil {
 		return nil, translateError(err)
 	}
@@ -749,10 +763,17 @@ func (b *Backend) GetUserGroups(ctx context.Context, userID string) ([]identity.
 }
 
 func (b *Backend) SetUserGroups(ctx context.Context, userID string, groupIDs []string) error {
+	u, err := b.GetUser(ctx, domain.ID(strings.TrimSpace(userID)))
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(u.PocketUserID) == "" {
+		return translateError(store.Validation("user has no linked Pocket ID account"))
+	}
 	if b.pocketClient == nil {
 		return translateError(fmt.Errorf("%w: identity not configured", ErrNotConfigured))
 	}
-	if err := b.pocketClient.SetUserGroups(ctx, userID, groupIDs); err != nil {
+	if err := b.pocketClient.SetUserGroups(ctx, u.PocketUserID, groupIDs); err != nil {
 		return translateError(err)
 	}
 	return nil

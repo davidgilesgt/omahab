@@ -1774,34 +1774,6 @@ func (s *Server) handleKnowledgeListTags(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleKnowledgeUpload(w http.ResponseWriter, r *http.Request) {
-	// content type may be multipart or json; for test we accept json with base64
-	if strings.Contains(r.Header.Get("Content-Type"), "multipart/form-data") {
-		if err := r.ParseMultipartForm(10 << 20); err != nil {
-			writeError(w, r, errBadRequest("invalid multipart"))
-			return
-		}
-		filename := r.FormValue("filename")
-		if filename == "" {
-			filename = "upload.bin"
-		}
-		principal := r.FormValue("principal")
-		if principal == "" {
-			principal = r.URL.Query().Get("principal")
-		}
-		var content []byte
-		if fh, _, err := r.FormFile("file"); err == nil {
-			content, _ = io.ReadAll(fh)
-			_ = fh.Close()
-		}
-		tags := r.Form["tags"]
-		id, err := s.backend.KnowledgeUpload(r.Context(), principal, filename, content, tags)
-		if err != nil {
-			writeError(w, r, err)
-			return
-		}
-		writeJSON(w, http.StatusCreated, map[string]any{"id": id})
-		return
-	}
 	var req apitypes.KnowledgeUploadRequest
 	if !decodeJSON(w, r, &req) {
 		return
