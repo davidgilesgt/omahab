@@ -482,6 +482,11 @@ func (s *Service) CheckHealth(ctx context.Context, id domain.ID) (Status, error)
 		return Status{}, err
 	}
 	defer unlock()
+	if _, merr := GetMaintenance(ctx, s.db, rec.BundleID); merr == nil {
+		return Status{}, fmt.Errorf("%w: app %q is paused for maintenance", ErrMaintained, rec.BundleID)
+	} else if !errors.Is(merr, ErrNotFound) {
+		return Status{}, merr
+	}
 	if rec.ObservedState != ObservedRunning {
 		return Status{}, fmt.Errorf("%w: health check requires a running app, %s is %q", ErrConflict, id, rec.ObservedState)
 	}
@@ -509,6 +514,69 @@ func (s *Service) CheckHealth(ctx context.Context, id domain.ID) (Status, error)
 		}
 	}
 	return s.Status(ctx, id)
+}
+
+// RefreshHealth re-probes every running unpaused application and persists
+// transitions through CheckHealth. It never starts, resumes, redeploys, or
+// clears maintenance. Paused, stopped, and absent applications are skipped.
+// Concurrent stop, removal, or maintenance conflicts are skipped observations.
+// Genuine probe errors are collected without blocking other applications.
+// At most four probes run concurrently with a ten-second budget each, so a
+// slow endpoint cannot stall the remaining slots.
+func (s *Service) RefreshHealth(ctx context.Context) error {
+	recs, err := listApps(ctx, s.db)
+	if err != nil {
+		return err
+	}
+	var targets []domain.ID
+	for _, rec := range recs {
+		if rec.ObservedState != ObservedRunning {
+			continue
+		}
+		if _, merr := GetMaintenance(ctx, s.db, rec.BundleID); merr == nil {
+			continue
+		} else if !errors.Is(merr, ErrNotFound) {
+			continue
+		}
+		targets = append(targets, rec.ID)
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+	sem := make(chan struct{}, 4)
+	var mu sync.Mutex
+	var errs []error
+	var wg sync.WaitGroup
+	for _, id := range targets {
+		if err := ctx.Err(); err != nil {
+			mu.Lock()
+			errs = append(errs, err)
+			mu.Unlock()
+			break
+		}
+		wg.Add(1)
+		go func(appID domain.ID) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				return
+			}
+			child, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			if _, err := s.CheckHealth(child, appID); err != nil {
+				if errors.Is(err, ErrMaintained) || errors.Is(err, ErrConflict) || errors.Is(err, ErrNotFound) {
+					return
+				}
+				mu.Lock()
+				errs = append(errs, fmt.Errorf("health refresh %s: %w", appID, err))
+				mu.Unlock()
+			}
+		}(id)
+	}
+	wg.Wait()
+	return errors.Join(errs...)
 }
 
 // Status returns the current view of one application.

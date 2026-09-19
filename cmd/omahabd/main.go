@@ -81,6 +81,23 @@ func run() error {
 			}
 		}
 	}()
+	go func() {
+		if err := backend.RefreshApplicationHealth(sigCtx); err != nil {
+			logger.Error("application health refresh failed", "error", err)
+		}
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-sigCtx.Done():
+				return
+			case <-ticker.C:
+				if err := backend.RefreshApplicationHealth(sigCtx); err != nil {
+					logger.Error("application health refresh failed", "error", err)
+				}
+			}
+		}
+	}()
 	// Create API server
 	token := backend.APIToken()
 	emailKey := backend.EmailHMACKey()

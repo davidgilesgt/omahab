@@ -282,6 +282,15 @@ func (b *Backend) GetApplication(ctx context.Context, id domain.ID) (domain.Appl
 	return b.decorateApplication(st.Application, bundles, domainName), nil
 }
 
+// RefreshApplicationHealth re-probes running unpaused applications through
+// the apps service observer. It never starts, resumes, or clears maintenance.
+func (b *Backend) RefreshApplicationHealth(ctx context.Context) error {
+	if b.apps == nil {
+		return nil
+	}
+	return b.apps.RefreshHealth(ctx)
+}
+
 func (b *Backend) UpdateApplication(ctx context.Context, id domain.ID, req apitypes.UpdateApplicationRequest) (domain.Application, error) {
 	if b.apps == nil {
 		return domain.Application{}, translateError(fmt.Errorf("%w: apps not configured", ErrNotConfigured))
