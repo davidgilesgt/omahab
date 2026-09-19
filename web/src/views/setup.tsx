@@ -4,7 +4,7 @@ import { useAuth } from "../auth";
 import type { ModelSetupStatus, Secret, SetupStatus } from "../api/types";
 import { ErrorState, LoadingState } from "../components/ui";
 import { useToast } from "../components/toast";
-import { CopyButton } from "../components/copyButton";
+import { CopyButton, copyText } from "../components/copyButton";
 import { IndexSetupControl } from "../components/indexSetup";
 
 function authHeaders(): Record<string, string> {
@@ -26,33 +26,6 @@ function withSessionToken(base: string): string {
   return t ? `${base}#token=${encodeURIComponent(t)}` : base;
 }
 
-async function copyText(text: string): Promise<boolean> {
-  try {
-    await navigator.clipboard.writeText(text);
-    return true;
-  } catch {
-    // Fallback for insecure contexts: textarea selection.
-  }
-  try {
-    const area = document.createElement("textarea");
-    area.value = text;
-    area.setAttribute("readonly", "");
-    area.style.position = "fixed";
-    area.style.opacity = "0";
-    document.body.appendChild(area);
-    area.select();
-    let ok = false;
-    try {
-      ok = document.execCommand("copy");
-    } catch {
-      ok = false;
-    }
-    document.body.removeChild(area);
-    return ok;
-  } catch {
-    return false;
-  }
-}
 
 interface TailscaleStatus {
   running: boolean;
@@ -400,15 +373,17 @@ export function SetupPage() {
     }
   }, [cfTries, cfPending]);
 
-  // Recovery redo flow: ack checkbox -> copy short check code (overwrites the
-  // phrase in the clipboard) -> paste it back for a local verify -> confirm kit.
+  // Recovery redo flow: ack checkbox -> optional copy of the short check code
+  // -> manual entry for local verify -> confirm kit. Manual entry is always
+  // available once acknowledged; clipboard failure never hides it.
   const [recovery, setRecovery] = useState<{ phrase: string[]; fingerprint: string } | null>(null);
   const [recoveryAck, setRecoveryAck] = useState(false);
   const [codeCopied, setCodeCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
   const [pasteInput, setPasteInput] = useState("");
   const [confirmedFp, setConfirmedFp] = useState<string | null>(null);
   const pasteOk =
-    recovery !== null && codeCopied && pasteInput.trim().toLowerCase() === recovery.fingerprint.toLowerCase();
+    recovery !== null && recoveryAck && pasteInput.trim().toLowerCase() === recovery.fingerprint.toLowerCase();
 
   const [repoKind, setRepoKind] = useState<"hetzner_storagebox" | "generic">("hetzner_storagebox");
   const [repoLabel, setRepoLabel] = useState("primary");
@@ -612,6 +587,7 @@ export function SetupPage() {
       setRecovery(data);
       setRecoveryAck(false);
       setCodeCopied(false);
+      setCopyFailed(false);
       setPasteInput("");
     },
     onError: (err) => toast.error(err instanceof Error ? err.message : "Generation failed"),
@@ -635,6 +611,7 @@ export function SetupPage() {
       setRecovery(null);
       setRecoveryAck(false);
       setCodeCopied(false);
+      setCopyFailed(false);
       setPasteInput("");
       toast.success("Recovery kit saved to the server");
       advance();
@@ -648,9 +625,12 @@ export function SetupPage() {
     const ok = await copyText(recovery.fingerprint);
     if (ok) {
       setCodeCopied(true);
+      setCopyFailed(false);
       toast.success("Check code copied — paste it below");
     } else {
-      toast.error("Copy failed — type the fingerprint manually");
+      setCodeCopied(false);
+      setCopyFailed(true);
+      toast.error("Copy failed. Enter the fingerprint manually.");
     }
   };
 
@@ -1082,25 +1062,26 @@ export function SetupPage() {
                 <input type="checkbox" checked={recoveryAck} onChange={(e) => setRecoveryAck(e.target.checked)} />
                 I saved this in my password manager
               </label>
-              {recoveryAck && !codeCopied && (
-                <div>
-                  <button className="button secondary" type="button" onClick={() => void copyCheckCode()}>
-                    Copy check code
-                  </button>
-                  <p style={{ opacity: 0.8, fontSize: "0.9em" }}>Copies a short check code (this overwrites the phrase in your clipboard), then paste it back below to verify.</p>
-                </div>
-              )}
-              {codeCopied && (
+              {recoveryAck && (
                 <>
+                  <div>
+                    <button className="button secondary" type="button" onClick={() => void copyCheckCode()}>
+                      Copy check code
+                    </button>
+                    <p style={{ opacity: 0.8, fontSize: "0.9em" }}>Copies a short check code (this overwrites the phrase in your clipboard), then enter it below to verify. Copy is optional.</p>
+                  </div>
+                  {copyFailed && (
+                    <p className="inline-error" role="alert">Copy failed. Enter the fingerprint manually.</p>
+                  )}
                   <label className="field">
-                    <span>Paste the check code back</span>
+                    <span>Enter the check code</span>
                     <input value={pasteInput} onChange={(e) => setPasteInput(e.target.value)} placeholder={recovery.fingerprint} autoComplete="off" />
                   </label>
                   {pasteInput.trim() !== "" && !pasteOk && (
-                    <p className="inline-error" role="alert">Does not match — paste the code you just copied.</p>
+                    <p className="inline-error" role="alert">Does not match — enter the code shown as the fingerprint.</p>
                   )}
                   <div style={{ display: "flex", gap: 8 }}>
-                    <button className="button secondary" type="button" onClick={() => { setCodeCopied(false); setPasteInput(""); }}>
+                    <button className="button secondary" type="button" onClick={() => { setRecoveryAck(false); setPasteInput(""); setCodeCopied(false); setCopyFailed(false); }}>
                       Back
                     </button>
                     <button
