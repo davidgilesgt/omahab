@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -133,221 +134,226 @@ func (b *Backend) setupPhaseOIDC(ctx context.Context) error {
 		return fmt.Errorf("domain not configured for OIDC")
 	}
 
-	if needImmich {
-		if err := b.ensureImmichOIDC(ctx, domainName); err != nil {
-			return err
+	// Independent per-application operations: a failing application must not
+	// prevent later clients from provisioning. Shared prerequisites above
+	// remain fail-fast. Order is unchanged.
+	var oidcErrs []error
+	runOIDCOp := func(name string, fn func() error) {
+		if err := ctx.Err(); err != nil {
+			oidcErrs = append(oidcErrs, fmt.Errorf("%s: %w", name, err))
+			return
 		}
+		if err := fn(); err != nil {
+			oidcErrs = append(oidcErrs, fmt.Errorf("%s: %w", name, err))
+		}
+	}
+	if needImmich {
+		runOIDCOp("immich", func() error {
+			return b.ensureImmichOIDC(ctx, domainName)
+		})
 	}
 	if needPaperless {
-		if err := b.ensurePaperlessOIDC(ctx, domainName); err != nil {
-			return err
-		}
+		runOIDCOp("paperless-ngx", func() error {
+			return b.ensurePaperlessOIDC(ctx, domainName)
+		})
 	}
 	if needKarakeep {
-		if err := b.ensureKarakeepOIDC(ctx, domainName); err != nil {
-			return err
-		}
+		runOIDCOp("karakeep", func() error {
+			return b.ensureKarakeepOIDC(ctx, domainName)
+		})
 	}
 	if needLitellm {
-		if err := b.ensureLitellmPostgresAuth(ctx); err != nil {
-			return err
-		}
-		if err := b.ensureLitellmOIDC(ctx, domainName); err != nil {
-			return err
-		}
+		runOIDCOp("litellm", func() error {
+			if err := b.ensureLitellmPostgresAuth(ctx); err != nil {
+				return err
+			}
+			return b.ensureLitellmOIDC(ctx, domainName)
+		})
 	}
 	if needTechnitium {
-		technitiumCallback := fmt.Sprintf("https://dns.%s/sso/callback", domainName)
-		tClientID, tClientSecret, err := b.pocketClient.EnsureOIDCClient(ctx, "technitium", []string{technitiumCallback})
-		if err != nil {
-			return fmt.Errorf("ensure oidc client technitium: %w", err)
-		}
-		if strings.TrimSpace(tClientID) == "" {
-			return fmt.Errorf("oidc client technitium returned empty clientID")
-		}
-		tClientSecret, err = reuseStoredOIDCSecret(ctx, b.secrets, "technitium_oidc_client_secret", tClientSecret)
-		if err != nil {
-			tClientSecret, err = b.pocketClient.CreateOIDCClientSecret(ctx, tClientID)
+		runOIDCOp("technitium", func() error {
+			technitiumCallback := fmt.Sprintf("https://dns.%s/sso/callback", domainName)
+			tClientID, tClientSecret, err := b.pocketClient.EnsureOIDCClient(ctx, "technitium", []string{technitiumCallback})
 			if err != nil {
-				return fmt.Errorf("technitium oidc client secret: %w", err)
+				return fmt.Errorf("ensure oidc client technitium: %w", err)
 			}
-		}
-		if err := upsertSecret(ctx, b.secrets, "platform-app", "technitium_oidc_client_id", tClientID); err != nil {
-			return fmt.Errorf("store technitium_oidc_client_id: %w", err)
-		}
-		if err := upsertSecret(ctx, b.secrets, "platform-app", "technitium_oidc_client_secret", tClientSecret); err != nil {
-			return fmt.Errorf("store technitium_oidc_client_secret: %w", err)
-		}
-		if err := b.pocketClient.EnsureOIDCClientGroupAccess(ctx, tClientID, []string{"admins", "members"}); err != nil {
-			return fmt.Errorf("ensure technitium group access: %w", err)
-		}
-		if err := b.ensureTechnitiumSSO(ctx, domainName, tClientID, tClientSecret); err != nil {
-			return fmt.Errorf("ensure technitium sso: %w", err)
-		}
+			if strings.TrimSpace(tClientID) == "" {
+				return fmt.Errorf("oidc client technitium returned empty clientID")
+			}
+			tClientSecret, err = reuseStoredOIDCSecret(ctx, b.secrets, "technitium_oidc_client_secret", tClientSecret)
+			if err != nil {
+				tClientSecret, err = b.pocketClient.CreateOIDCClientSecret(ctx, tClientID)
+				if err != nil {
+					return fmt.Errorf("technitium oidc client secret: %w", err)
+				}
+			}
+			if err := upsertSecret(ctx, b.secrets, "platform-app", "technitium_oidc_client_id", tClientID); err != nil {
+				return fmt.Errorf("store technitium_oidc_client_id: %w", err)
+			}
+			if err := upsertSecret(ctx, b.secrets, "platform-app", "technitium_oidc_client_secret", tClientSecret); err != nil {
+				return fmt.Errorf("store technitium_oidc_client_secret: %w", err)
+			}
+			if err := b.pocketClient.EnsureOIDCClientGroupAccess(ctx, tClientID, []string{"admins", "members"}); err != nil {
+				return fmt.Errorf("ensure technitium group access: %w", err)
+			}
+			if err := b.ensureTechnitiumSSO(ctx, domainName, tClientID, tClientSecret); err != nil {
+				return fmt.Errorf("ensure technitium sso: %w", err)
+			}
+			return nil
+		})
 	}
 	if needJellyfin {
-		if err := b.ensureJellyfinOIDC(ctx, domainName); err != nil {
-			return err
-		}
-		if err := b.ensureJellyfinSetup(ctx); err != nil {
-			return fmt.Errorf("jellyfin setup: %w", err)
-		}
+		runOIDCOp("jellyfin", func() error {
+			if err := b.ensureJellyfinOIDC(ctx, domainName); err != nil {
+				return err
+			}
+			if err := b.ensureJellyfinSetup(ctx); err != nil {
+				return fmt.Errorf("jellyfin setup: %w", err)
+			}
+			return nil
+		})
 	}
 	if needHermes {
-		callback := fmt.Sprintf("https://ai.%s/auth/callback", domainName)
-		clientID, err := b.pocketClient.EnsureOIDCPublicClient(ctx, "hermes", []string{callback})
-		if err != nil {
-			return fmt.Errorf("ensure oidc public client hermes: %w", err)
-		}
-		if strings.TrimSpace(clientID) == "" {
-			return fmt.Errorf("oidc client hermes returned empty clientID")
-		}
-		if err := upsertSecret(ctx, b.secrets, "platform-app", "hermes_oidc_client_id", clientID); err != nil {
-			return fmt.Errorf("store hermes_oidc_client_id: %w", err)
-		}
-		log.Printf("setup oidc: hermes public client ensured")
+		runOIDCOp("hermes", func() error {
+			callback := fmt.Sprintf("https://ai.%s/auth/callback", domainName)
+			clientID, err := b.pocketClient.EnsureOIDCPublicClient(ctx, "hermes", []string{callback})
+			if err != nil {
+				return fmt.Errorf("ensure oidc public client hermes: %w", err)
+			}
+			if strings.TrimSpace(clientID) == "" {
+				return fmt.Errorf("oidc client hermes returned empty clientID")
+			}
+			if err := b.pocketClient.EnsureOIDCClientGroupAccess(ctx, clientID, []string{"admins", "members"}); err != nil {
+				return fmt.Errorf("ensure hermes group access: %w", err)
+			}
+			if err := upsertSecret(ctx, b.secrets, "platform-app", "hermes_oidc_client_id", clientID); err != nil {
+				return fmt.Errorf("store hermes_oidc_client_id: %w", err)
+			}
+			log.Printf("setup oidc: hermes public client ensured")
+			return nil
+		})
 	}
 	if needForgejo {
-		// Forgejo OIDC client via PocketID
-		forgejoCallback := fmt.Sprintf("https://git.%s/user/oauth2/PocketID/callback", domainName)
-		fClientID, fClientSecret, err := b.pocketClient.EnsureOIDCClient(ctx, "Forgejo", []string{forgejoCallback})
-		if err != nil {
-			return fmt.Errorf("ensure oidc client forgejo: %w", err)
-		}
-		if strings.TrimSpace(fClientID) == "" {
-			return fmt.Errorf("oidc client forgejo returned empty clientID")
-		}
-		fClientSecret, err = reuseStoredOIDCSecret(ctx, b.secrets, "forgejo_oidc_client_secret", fClientSecret)
-		if err != nil {
-			fClientSecret, err = b.pocketClient.CreateOIDCClientSecret(ctx, fClientID)
+		runOIDCOp("forgejo", func() error {
+			forgejoCallback := fmt.Sprintf("https://git.%s/user/oauth2/PocketID/callback", domainName)
+			fClientID, fClientSecret, err := b.pocketClient.EnsureOIDCClient(ctx, "Forgejo", []string{forgejoCallback})
 			if err != nil {
-				return fmt.Errorf("forgejo oidc client secret: %w", err)
+				return fmt.Errorf("ensure oidc client forgejo: %w", err)
 			}
-		}
-		if err := upsertSecret(ctx, b.secrets, "platform-app", "forgejo_oidc_client_id", fClientID); err != nil {
-			return fmt.Errorf("store forgejo_oidc_client_id: %w", err)
-		}
-		if err := upsertSecret(ctx, b.secrets, "platform-app", "forgejo_oidc_client_secret", fClientSecret); err != nil {
-			return fmt.Errorf("store forgejo_oidc_client_secret: %w", err)
-		}
-		// Project to secret files atomically (for audit and potential file-based consumers)
-		secretsDir := filepath.Join(b.cfg.StateDir, "secrets")
-		if strings.TrimSpace(b.cfg.StateDir) == "" {
-			secretsDir = "/var/lib/omahab/secrets"
-		}
-		_ = os.MkdirAll(secretsDir, 0o700)
-		if err := atomicReplaceSecretFile(secretsDir, "forgejo_oidc_client_id", fClientID); err != nil {
-			log.Printf("setup oidc: warn replace forgejo_oidc_client_id file: %s", health.RedactDetail(err.Error()))
-		}
-		if err := atomicReplaceSecretFile(secretsDir, "forgejo_oidc_client_secret", fClientSecret); err != nil {
-			log.Printf("setup oidc: warn replace forgejo_oidc_client_secret file: %s", health.RedactDetail(err.Error()))
-		}
-		// Enforce group access: only admins and members
-		if err := b.pocketClient.EnsureOIDCClientGroupAccess(ctx, fClientID, []string{"admins", "members"}); err != nil {
-			return fmt.Errorf("ensure forgejo group access: %w", err)
-		}
-		// Bootstrap omahab-bot
-		if err := b.ensureOmahabBot(ctx, domainName); err != nil {
-			return fmt.Errorf("ensure omahab-bot: %w", err)
-		}
-		if err := b.ensureHermesForgejoToken(ctx, domainName); err != nil {
-			log.Printf("setup oidc: warn ensure hermes forgejo token: %s", health.RedactDetail(err.Error()))
-		}
-		// Resolve forgejo token and base
-		forgejoToken, err := b.secrets.RevealByName(ctx, "platform-app", "forgejo_token")
-		if err != nil || strings.TrimSpace(forgejoToken) == "" {
-			return fmt.Errorf("forgejo token not available after bot ensure")
-		}
-		forgejoToken = strings.TrimSpace(forgejoToken)
-		forgejoBase := b.forgejoBaseURL(ctx, domainName)
-		// Ensure org and teams
-		if err := b.ensureForgejoOrgTeams(ctx, forgejoBase, forgejoToken); err != nil {
-			return fmt.Errorf("ensure forgejo org teams: %w", err)
-		}
-		// Ensure auth source PocketID
-		if err := b.ensureForgejoAuthSource(ctx, domainName, fClientID, fClientSecret); err != nil {
-			return fmt.Errorf("ensure forgejo auth source: %w", err)
-		}
-		// Ensure Woodpecker OAuth app
-		wClientID, wClientSecret, err := b.ensureWoodpeckerOAuthApp(ctx, forgejoBase, forgejoToken, domainName)
-		if err != nil {
-			return fmt.Errorf("ensure woodpecker oauth: %w", err)
-		}
-		if err := upsertSecret(ctx, b.secrets, "platform-app", "woodpecker_forgejo_client_id", wClientID); err != nil {
-			return fmt.Errorf("store woodpecker_forgejo_client_id: %w", err)
-		}
-		if err := upsertSecret(ctx, b.secrets, "platform-app", "woodpecker_forgejo_client_secret", wClientSecret); err != nil {
-			return fmt.Errorf("store woodpecker_forgejo_client_secret: %w", err)
-		}
-		if err := atomicReplaceSecretFile(secretsDir, "woodpecker_forgejo_client_id", wClientID); err != nil {
-			return fmt.Errorf("replace woodpecker_forgejo_client_id: %w", err)
-		}
-		if err := atomicReplaceSecretFile(secretsDir, "woodpecker_forgejo_client_secret", wClientSecret); err != nil {
-			return fmt.Errorf("replace woodpecker_forgejo_client_secret: %w", err)
-		}
-		// Also ensure canonical path when StateDir is custom (tests use temp, but compose expects /var/lib/omahab/secrets)
-		if secretsDir != "/var/lib/omahab/secrets" {
-			_ = os.MkdirAll("/var/lib/omahab/secrets", 0o700)
-			_ = atomicReplaceSecretFile("/var/lib/omahab/secrets", "woodpecker_forgejo_client_id", wClientID)
-			_ = atomicReplaceSecretFile("/var/lib/omahab/secrets", "woodpecker_forgejo_client_secret", wClientSecret)
-		}
-		// Native placement: render the woodpecker appenv (server + agent
-		// units consume it; the file's existence gates the units).
-		grpcSecret := ""
-		agentSecret := ""
-		dbPassword := ""
-		if v, verr := b.secrets.RevealByName(ctx, "platform-app", "woodpecker_grpc_secret"); verr == nil {
-			grpcSecret = strings.TrimSpace(v)
-		}
-		if v, verr := b.secrets.RevealByName(ctx, "platform-app", "woodpecker_agent_secret"); verr == nil {
-			agentSecret = strings.TrimSpace(v)
-		}
-		if v, verr := b.secrets.RevealByName(ctx, "platform-app", "woodpecker_db_password"); verr == nil {
-			dbPassword = strings.TrimSpace(v)
-		}
-		// Snapshot before rendering: woodpecker-server reads its Forgejo
-		// OAuth secret once at startup, so a changed file needs a restart
-		// below (live 2026-09-13: rotated secret, stale server, "invalid
-		// client secret" on every login until manual restart).
-		prevWoodpeckerEnv, _ := b.readAppEnv("woodpecker")
-		woodpeckerEnv := map[string]string{
-			"WOODPECKER_HOST":           "https://ci." + domainName,
-			"WOODPECKER_FORGEJO":        "true",
-			"WOODPECKER_FORGEJO_URL":    "https://git." + domainName,
-			"WOODPECKER_FORGEJO_CLIENT": wClientID,
-			"WOODPECKER_FORGEJO_SECRET": wClientSecret,
-			"WOODPECKER_OPEN":           "true",
-			"WOODPECKER_ADMIN":          "omahab-bot",
-			// Native postgres over TCP scram: the server runs under DynamicUser
-			// (socket peer auth impossible) and --db-driver is NOT derived from
-			// the URL scheme — sqlite is the default and eats any datasource as
-			// a file path (live 2026-09-12). The role/DB come from the NixOS
-			// postgres module; the daemon syncs the role password at install.
-			// base64url is URL-safe, so no escaping is needed.
-			"WOODPECKER_DATABASE_DRIVER": "postgres",
-			// The agent's healthcheck defaults to :3000 (forgejo's port);
-			// move it to loopback so the agent unit can start.
-			"WOODPECKER_HEALTHCHECK_ADDR": fmt.Sprintf("127.0.0.1:%d", apps.NativePortWoodpeckerAgent),
-		}
-		if validPostgresPassword(dbPassword) {
-			woodpeckerEnv["WOODPECKER_DATABASE_DATASOURCE"] = "postgresql://woodpecker-server:" + dbPassword + "@127.0.0.1:5432/woodpecker-server?sslmode=disable"
-		}
-		if grpcSecret != "" {
-			woodpeckerEnv["WOODPECKER_GRPC_SECRET"] = grpcSecret
-		}
-		if agentSecret != "" {
-			woodpeckerEnv["WOODPECKER_AGENT_SECRET"] = agentSecret
-		}
-		if err := b.writeAppEnv("woodpecker", woodpeckerEnv, "woodpecker"); err != nil {
-			log.Printf("setup oidc: warn write woodpecker appenv: %s", health.RedactDetail(err.Error()))
-		} else if appEnvChanged(prevWoodpeckerEnv, woodpeckerEnv) {
-			if err := b.redeployBundle(ctx, "woodpecker"); err != nil {
-				log.Printf("setup oidc: warn woodpecker redeploy after credential change: %s", health.RedactDetail(err.Error()))
+			if strings.TrimSpace(fClientID) == "" {
+				return fmt.Errorf("oidc client forgejo returned empty clientID")
 			}
-		}
-		log.Printf("setup oidc: forgejo client ensured")
+			fClientSecret, err = reuseStoredOIDCSecret(ctx, b.secrets, "forgejo_oidc_client_secret", fClientSecret)
+			if err != nil {
+				fClientSecret, err = b.pocketClient.CreateOIDCClientSecret(ctx, fClientID)
+				if err != nil {
+					return fmt.Errorf("forgejo oidc client secret: %w", err)
+				}
+			}
+			if err := upsertSecret(ctx, b.secrets, "platform-app", "forgejo_oidc_client_id", fClientID); err != nil {
+				return fmt.Errorf("store forgejo_oidc_client_id: %w", err)
+			}
+			if err := upsertSecret(ctx, b.secrets, "platform-app", "forgejo_oidc_client_secret", fClientSecret); err != nil {
+				return fmt.Errorf("store forgejo_oidc_client_secret: %w", err)
+			}
+			secretsDir := filepath.Join(b.cfg.StateDir, "secrets")
+			if strings.TrimSpace(b.cfg.StateDir) == "" {
+				secretsDir = "/var/lib/omahab/secrets"
+			}
+			_ = os.MkdirAll(secretsDir, 0o700)
+			if err := atomicReplaceSecretFile(secretsDir, "forgejo_oidc_client_id", fClientID); err != nil {
+				log.Printf("setup oidc: warn replace forgejo_oidc_client_id file: %s", health.RedactDetail(err.Error()))
+			}
+			if err := atomicReplaceSecretFile(secretsDir, "forgejo_oidc_client_secret", fClientSecret); err != nil {
+				log.Printf("setup oidc: warn replace forgejo_oidc_client_secret file: %s", health.RedactDetail(err.Error()))
+			}
+			if err := b.pocketClient.EnsureOIDCClientGroupAccess(ctx, fClientID, []string{"admins", "members"}); err != nil {
+				return fmt.Errorf("ensure forgejo group access: %w", err)
+			}
+			if err := b.ensureOmahabBot(ctx, domainName); err != nil {
+				return fmt.Errorf("ensure omahab-bot: %w", err)
+			}
+			if err := b.ensureHermesForgejoToken(ctx, domainName); err != nil {
+				log.Printf("setup oidc: warn ensure hermes forgejo token: %s", health.RedactDetail(err.Error()))
+			}
+			forgejoToken, err := b.secrets.RevealByName(ctx, "platform-app", "forgejo_token")
+			if err != nil || strings.TrimSpace(forgejoToken) == "" {
+				return fmt.Errorf("forgejo token not available after bot ensure")
+			}
+			forgejoToken = strings.TrimSpace(forgejoToken)
+			forgejoBase := b.forgejoBaseURL(ctx, domainName)
+			if err := b.ensureForgejoOrgTeams(ctx, forgejoBase, forgejoToken); err != nil {
+				return fmt.Errorf("ensure forgejo org teams: %w", err)
+			}
+			if err := b.ensureForgejoAuthSource(ctx, domainName, fClientID, fClientSecret); err != nil {
+				return fmt.Errorf("ensure forgejo auth source: %w", err)
+			}
+			wClientID, wClientSecret, err := b.ensureWoodpeckerOAuthApp(ctx, forgejoBase, forgejoToken, domainName)
+			if err != nil {
+				return fmt.Errorf("ensure woodpecker oauth: %w", err)
+			}
+			if err := upsertSecret(ctx, b.secrets, "platform-app", "woodpecker_forgejo_client_id", wClientID); err != nil {
+				return fmt.Errorf("store woodpecker_forgejo_client_id: %w", err)
+			}
+			if err := upsertSecret(ctx, b.secrets, "platform-app", "woodpecker_forgejo_client_secret", wClientSecret); err != nil {
+				return fmt.Errorf("store woodpecker_forgejo_client_secret: %w", err)
+			}
+			if err := atomicReplaceSecretFile(secretsDir, "woodpecker_forgejo_client_id", wClientID); err != nil {
+				return fmt.Errorf("replace woodpecker_forgejo_client_id: %w", err)
+			}
+			if err := atomicReplaceSecretFile(secretsDir, "woodpecker_forgejo_client_secret", wClientSecret); err != nil {
+				return fmt.Errorf("replace woodpecker_forgejo_client_secret: %w", err)
+			}
+			if secretsDir != "/var/lib/omahab/secrets" {
+				_ = os.MkdirAll("/var/lib/omahab/secrets", 0o700)
+				_ = atomicReplaceSecretFile("/var/lib/omahab/secrets", "woodpecker_forgejo_client_id", wClientID)
+				_ = atomicReplaceSecretFile("/var/lib/omahab/secrets", "woodpecker_forgejo_client_secret", wClientSecret)
+			}
+			grpcSecret := ""
+			agentSecret := ""
+			dbPassword := ""
+			if v, verr := b.secrets.RevealByName(ctx, "platform-app", "woodpecker_grpc_secret"); verr == nil {
+				grpcSecret = strings.TrimSpace(v)
+			}
+			if v, verr := b.secrets.RevealByName(ctx, "platform-app", "woodpecker_agent_secret"); verr == nil {
+				agentSecret = strings.TrimSpace(v)
+			}
+			if v, verr := b.secrets.RevealByName(ctx, "platform-app", "woodpecker_db_password"); verr == nil {
+				dbPassword = strings.TrimSpace(v)
+			}
+			prevWoodpeckerEnv, _ := b.readAppEnv("woodpecker")
+			woodpeckerEnv := map[string]string{
+				"WOODPECKER_HOST":           "https://ci." + domainName,
+				"WOODPECKER_FORGEJO":        "true",
+				"WOODPECKER_FORGEJO_URL":    "https://git." + domainName,
+				"WOODPECKER_FORGEJO_CLIENT": wClientID,
+				"WOODPECKER_FORGEJO_SECRET": wClientSecret,
+				"WOODPECKER_OPEN":           "true",
+				"WOODPECKER_ADMIN":          "omahab-bot",
+				"WOODPECKER_DATABASE_DRIVER": "postgres",
+				"WOODPECKER_HEALTHCHECK_ADDR": fmt.Sprintf("127.0.0.1:%d", apps.NativePortWoodpeckerAgent),
+			}
+			if validPostgresPassword(dbPassword) {
+				woodpeckerEnv["WOODPECKER_DATABASE_DATASOURCE"] = "postgresql://woodpecker-server:" + dbPassword + "@127.0.0.1:5432/woodpecker-server?sslmode=disable"
+			}
+			if grpcSecret != "" {
+				woodpeckerEnv["WOODPECKER_GRPC_SECRET"] = grpcSecret
+			}
+			if agentSecret != "" {
+				woodpeckerEnv["WOODPECKER_AGENT_SECRET"] = agentSecret
+			}
+			if err := b.writeAppEnv("woodpecker", woodpeckerEnv, "woodpecker"); err != nil {
+				log.Printf("setup oidc: warn write woodpecker appenv: %s", health.RedactDetail(err.Error()))
+			} else if appEnvChanged(prevWoodpeckerEnv, woodpeckerEnv) {
+				if err := b.redeployBundle(ctx, "woodpecker"); err != nil {
+					log.Printf("setup oidc: warn woodpecker redeploy after credential change: %s", health.RedactDetail(err.Error()))
+				}
+			}
+			log.Printf("setup oidc: forgejo client ensured")
+			return nil
+		})
 	}
-	return nil
+	return errors.Join(oidcErrs...)
 }
 
 // paperlessOIDCEnv renders PAPERLESS_SOCIALACCOUNT_PROVIDERS JSON for
