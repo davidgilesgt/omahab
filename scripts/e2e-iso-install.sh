@@ -228,7 +228,9 @@ log "fresh disk: $DISK"
 # --- Phase 1: boot the ISO, drive the installer over the serial console.
 log "phase 1: booting ISO (install)"
 "$QEMU" -enable-kvm -cpu host -m "$MEM_MB" -smp 4 \
-  -cdrom "$ISO_FILE" -drive "file=$DISK,format=qcow2,if=virtio" \
+  -cdrom "$ISO_FILE" \
+  -drive "file=$DISK,format=qcow2,if=none,id=system" \
+  -device "virtio-blk-pci,drive=system,serial=omahab-system" \
   "${DATA_ARGS[@]}" "${FIRMWARE_ARGS[@]}" \
   -boot order=d -display none -daemonize \
   -pidfile "$WORKDIR/qemu-install.pid" \
@@ -355,7 +357,8 @@ fi
 # Password auth uses the install-time test password (serial log only).
 log "phase 2: booting installed system"
 "$QEMU" -enable-kvm -cpu host -m "$MEM_MB" -smp 4 \
-  -drive "file=$DISK,format=qcow2,if=virtio" \
+  -drive "file=$DISK,format=qcow2,if=none,id=system" \
+  -device "virtio-blk-pci,drive=system,serial=omahab-system" \
   "${DATA_ARGS[@]}" "${FIRMWARE_ARGS[@]}" \
   -boot order=c -display none -daemonize \
   -pidfile "$WORKDIR/qemu-test.pid" \
