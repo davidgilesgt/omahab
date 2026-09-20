@@ -212,7 +212,10 @@ if (( DATA_DISKS >= 1 )); then
     DD="$WORKDIR/data-$i.qcow2"
     rm -f "$DD"
     "$QEMU_IMG" create -f qcow2 "$DD" 4G >/dev/null
-    DATA_ARGS+=(-drive "file=$DD,format=qcow2,if=virtio,serial=omahab-data-$i")
+    DATA_ARGS+=(
+      -drive "file=$DD,format=qcow2,if=none,id=data$i"
+      -device "virtio-blk-pci,drive=data$i,serial=omahab-data-$i"
+    )
     log "fresh data disk $i: $DD"
   done
 fi
