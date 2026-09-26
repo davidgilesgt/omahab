@@ -2,7 +2,10 @@ package controlplane
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -214,5 +217,178 @@ func TestEnsurePaperlessInitialAdminFallsBackWithoutOwner(t *testing.T) {
 
 	if err := b.ensurePaperlessInitialAdmin(context.Background()); err != nil {
 		t.Fatalf("ensure: %v", err)
+	}
+}
+
+// Regression for F-paperless-sso-user-forbidden: auto-provisioned SSO
+// accounts carry zero Django permissions, so every document/settings API
+// 403s. This exercises the full ensure through the real PocketIDClient over
+// HTTP, the real secret store, and the real appenv render, and asserts the
+// consumer-visible outcome: the paperless env file paperless-ngx actually
+// reads puts new social signups into the members group at creation time.
+// The psql stub only routes statement kinds (count/insert/select); it never
+// asserts SQL text or codenames. The DB-side grant itself is covered by live
+// proof on the appliance (household SSO user lists/uploads/searches/
+// downloads), which needs a real paperless Postgres no unit fixture can
+// provide.
+func TestEnsurePaperlessOIDCRendersMemberBaseline(t *testing.T) {
+	ctx := context.Background()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/api/oidc/clients"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/oidc/clients":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": "oidc-paperless", "name": "paperless",
+				"clientId": "paperless-client", "clientSecret": "paperless-secret",
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/user-groups":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
+				map[string]any{"id": "1", "name": "admins", "friendlyName": "admins"},
+				map[string]any{"id": "2", "name": "members", "friendlyName": "members"},
+				map[string]any{"id": "3", "name": "guests", "friendlyName": "guests"},
+			}})
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/user-groups/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": "2", "name": "members", "friendlyName": "members",
+				"allowedOidcClients": []any{},
+			})
+		case r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/allowed-oidc-clients"):
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	b, _ := newSetupBackend(t, nil)
+	b.cfg.StateDir = t.TempDir()
+	if _, err := b.secrets.Put(ctx, "platform-app", "pocketid_api_key", "test-key"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OMAHAB_POCKETID_URL", srv.URL)
+	if err := b.bindPocketID(ctx); err != nil {
+		t.Fatalf("bind pocket id: %v", err)
+	}
+	oldLookup := paperlessOwnerLookup
+	paperlessOwnerLookup = func(context.Context, *identity.PocketIDClient) (string, string, error) {
+		return "owner1", "owner@example.test", nil
+	}
+	t.Cleanup(func() { paperlessOwnerLookup = oldLookup })
+	var insertHash string
+	oldAlter := runPostgresAlterRole
+	runPostgresAlterRole = func(_ context.Context, db, stmt string) (string, error) {
+		if db != "paperless" {
+			return "", errors.New("unexpected db " + db)
+		}
+		switch {
+		case strings.Contains(stmt, "count(*)"):
+			return " count \n-------\n     0\n(1 row)\n", nil
+		case strings.HasPrefix(stmt, "INSERT INTO auth_user ("):
+			idx := strings.Index(stmt, "pbkdf2_sha256$")
+			rest := stmt[idx+len("pbkdf2_sha256$"):]
+			insertHash = "pbkdf2_sha256$" + rest[:strings.Index(rest, "'")]
+			return "INSERT 0 1\n", nil
+		case strings.Contains(stmt, "SELECT password"):
+			return " password \n----------\n " + insertHash + "\n(1 row)\n", nil
+		default:
+			return "INSERT 0 1\n", nil
+		}
+	}
+	t.Cleanup(func() { runPostgresAlterRole = oldAlter })
+
+	if err := b.ensurePaperlessOIDC(ctx, "omahab.com"); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	env, err := b.readAppEnv("paperless-ngx")
+	if err != nil {
+		t.Fatalf("read appenv: %v", err)
+	}
+	if env["PAPERLESS_SOCIAL_ACCOUNT_DEFAULT_GROUPS"] != paperlessMemberGroup {
+		t.Fatalf("DEFAULT_GROUPS = %q, want %q (new SSO signups must join the converged group or they 403)",
+			env["PAPERLESS_SOCIAL_ACCOUNT_DEFAULT_GROUPS"], paperlessMemberGroup)
+	}
+	if env["PAPERLESS_SOCIAL_AUTO_SIGNUP"] != "true" {
+		t.Fatalf("AUTO_SIGNUP = %q, want true", env["PAPERLESS_SOCIAL_AUTO_SIGNUP"])
+	}
+	var providers map[string]any
+	if err := json.Unmarshal([]byte(env["PAPERLESS_SOCIALACCOUNT_PROVIDERS"]), &providers); err != nil {
+		t.Fatalf("PROVIDERS not JSON: %v", err)
+	}
+}
+
+// The member convergence sits on the ensure path fail-closed: if the
+// group/grant/backfill half goes down, setup reports it instead of leaving
+// the household silently permissionless.
+func TestEnsurePaperlessOIDCFailsClosedOnMemberAccess(t *testing.T) {
+	ctx := context.Background()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/api/oidc/clients"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/oidc/clients":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": "oidc-paperless", "name": "paperless",
+				"clientId": "paperless-client", "clientSecret": "paperless-secret",
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/user-groups":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
+				map[string]any{"id": "1", "name": "admins", "friendlyName": "admins"},
+				map[string]any{"id": "2", "name": "members", "friendlyName": "members"},
+				map[string]any{"id": "3", "name": "guests", "friendlyName": "guests"},
+			}})
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/user-groups/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": "2", "name": "members", "friendlyName": "members",
+				"allowedOidcClients": []any{},
+			})
+		case r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/allowed-oidc-clients"):
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	b, _ := newSetupBackend(t, nil)
+	b.cfg.StateDir = t.TempDir()
+	if _, err := b.secrets.Put(ctx, "platform-app", "pocketid_api_key", "test-key"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OMAHAB_POCKETID_URL", srv.URL)
+	if err := b.bindPocketID(ctx); err != nil {
+		t.Fatalf("bind pocket id: %v", err)
+	}
+	oldLookup := paperlessOwnerLookup
+	paperlessOwnerLookup = func(context.Context, *identity.PocketIDClient) (string, string, error) {
+		return "owner1", "owner@example.test", nil
+	}
+	t.Cleanup(func() { paperlessOwnerLookup = oldLookup })
+	var insertHash string
+	oldAlter := runPostgresAlterRole
+	runPostgresAlterRole = func(_ context.Context, _, stmt string) (string, error) {
+		switch {
+		case strings.Contains(stmt, "count(*)"):
+			return " count \n-------\n     0\n(1 row)\n", nil
+		case strings.HasPrefix(stmt, "INSERT INTO auth_user ("):
+			idx := strings.Index(stmt, "pbkdf2_sha256$")
+			rest := stmt[idx+len("pbkdf2_sha256$"):]
+			insertHash = "pbkdf2_sha256$" + rest[:strings.Index(rest, "'")]
+			return "INSERT 0 1\n", nil
+		case strings.Contains(stmt, "SELECT password"):
+			return " password \n----------\n " + insertHash + "\n(1 row)\n", nil
+		case strings.Contains(stmt, "auth_group") || strings.Contains(stmt, "auth_user_groups"):
+			return "", errors.New("postgres unavailable")
+		default:
+			return "INSERT 0 1\n", nil
+		}
+	}
+	t.Cleanup(func() { runPostgresAlterRole = oldAlter })
+
+	err := b.ensurePaperlessOIDC(ctx, "omahab.com")
+	if err == nil || !strings.Contains(err.Error(), "member access") {
+		t.Fatalf("want member-access failure, got %v", err)
 	}
 }

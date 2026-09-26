@@ -87,5 +87,21 @@ ALTER TABLE companion_devices ADD COLUMN backup_last_snapshot TEXT;
 ALTER TABLE companion_devices ADD COLUMN forgejo_token_name TEXT NOT NULL DEFAULT '';
 `,
 		},
+		{
+			Name: "environments-007-device_revocation_pending",
+			SQL: `
+CREATE TABLE IF NOT EXISTS device_revocation_pending (
+	device_id TEXT NOT NULL,
+	target TEXT NOT NULL,
+	handle TEXT NOT NULL DEFAULT '',
+	alias TEXT NOT NULL DEFAULT '',
+	attempts INTEGER NOT NULL DEFAULT 0,
+	last_error TEXT NOT NULL DEFAULT '',
+	updated_at TEXT NOT NULL,
+	PRIMARY KEY (device_id, target, handle)
+);
+CREATE INDEX IF NOT EXISTS idx_device_revocation_pending_device ON device_revocation_pending(device_id);
+`,
+		},
 	}
 }

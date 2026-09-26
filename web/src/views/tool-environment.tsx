@@ -53,9 +53,26 @@ export function ToolEnvironmentPage() {
   const queryClient = useQueryClient();
   const toast = useToast();
   const varsQuery = useQuery({ queryKey: ["tool-environment"], queryFn: client.toolEnvironment });
+  const devicesQuery = useQuery({ queryKey: ["companion-devices"], queryFn: client.companionDevices });
   const [enrollCode, setEnrollCode] = useState<string | null>(null);
   const [enrollExpires, setEnrollExpires] = useState<string | null>(null);
 
+  const grantEnv = useMutation({
+    mutationFn: client.grantDeviceEnv,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["companion-devices"] });
+      toast.success("Environment shared — device receives current values on next sync");
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Share failed"),
+  });
+  const revokeEnv = useMutation({
+    mutationFn: client.revokeDeviceEnvGrant,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["companion-devices"] });
+      toast.success("Environment unshared — device bundle now empty");
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Unshare failed"),
+  });
   const putVar = useMutation({
     mutationFn: ({ name, value }: { name: string; value: string }) => client.putToolVariable(name, value),
     onSuccess: () => {
@@ -64,7 +81,6 @@ export function ToolEnvironmentPage() {
     },
     onError: (err) => toast.error(err instanceof Error ? err.message : "Save failed"),
   });
-
   const deleteVar = useMutation({
     mutationFn: (name: string) => client.deleteToolVariable(name),
     onSuccess: () => {
@@ -73,7 +89,6 @@ export function ToolEnvironmentPage() {
     },
     onError: (err) => toast.error(err instanceof Error ? err.message : "Delete failed"),
   });
-
   const enroll = useMutation({
     mutationFn: client.createCompanionEnrollment,
     onSuccess: (data) => {
@@ -84,7 +99,6 @@ export function ToolEnvironmentPage() {
     },
     onError: (err) => toast.error(err instanceof Error ? err.message : "Enrollment failed"),
   });
-
   function submitVar(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
@@ -174,6 +188,27 @@ export function ToolEnvironmentPage() {
           </div>
         </Section>
       </div>
+      <Section title="Device access" description="Explicit owner consent per device — names and consent state only. Values are write-only and never shown here. Sharing is never automatic: enrollment alone grants nothing.">
+        {devicesQuery.isLoading ? <LoadingState label="Loading devices" /> : devicesQuery.isError ? <ErrorState error={devicesQuery.error} retry={() => void devicesQuery.refetch()} /> : !(devicesQuery.data ?? []).length ? <EmptyState title="No companion devices" description="Create an enrollment code above, then run the one-liner on the device. After enrollment, share the environment explicitly per device." /> : (
+          <div className="compact-list">
+            {(devicesQuery.data ?? []).map((d) => (
+              <div key={d.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0.5rem 0", borderBottom: "var(--border) solid var(--line)" }}>
+                <div>
+                  <strong>{d.name || d.id}</strong> {d.hostname ? <span className="muted">· {d.hostname}</span> : null}
+                  <div className="muted" style={{ fontSize: "0.8rem" }}>{d.granted ? "shared — receives current values on next sync, rotations included" : "not shared — environment fetch returns empty"}</div>
+                </div>
+                {d.granted ? (
+                  <button className="button secondary" type="button" disabled={revokeEnv.isPending} onClick={() => revokeEnv.mutate(d.id)}>Unshare</button>
+                ) : (
+                  <button className="button secondary" type="button" disabled={grantEnv.isPending} onClick={() => grantEnv.mutate(d.id)}>Share</button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+        {grantEnv.error ? <p className="inline-error" role="alert">{grantEnv.error instanceof Error ? grantEnv.error.message : "Share failed"}</p> : null}
+        {revokeEnv.error ? <p className="inline-error" role="alert">{revokeEnv.error instanceof Error ? revokeEnv.error.message : "Unshare failed"}</p> : null}
+      </Section>
     </div>
   );
 }

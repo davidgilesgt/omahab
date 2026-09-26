@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -72,6 +73,7 @@ var (
 	runNixMetadataFunc           = defaultRunNixMetadata
 	runNixosRebuildSwitchFunc    = defaultRunNixosRebuildSwitch
 	runNixosRebuildRollbackFunc  = defaultRunNixosRebuildRollback
+	currentSystemGenerationFunc  = defaultCurrentSystemGeneration
 	probeUpFunc                  = probeUp
 	httpGetFunc                  = defaultHttpGet
 	exchangeDirsFunc             = exchangeDirs
@@ -80,6 +82,20 @@ var (
 	sleepFunc                    = time.Sleep
 	nowFunc                      = time.Now
 )
+
+// systemProfilePath is the NixOS system profile whose symlink target
+// identifies the active generation (e.g. system-42-link).
+var systemProfilePath = "/nix/var/nix/profiles/system"
+
+// defaultCurrentSystemGeneration returns the raw symlink target of the
+// system profile, identifying the exact active generation.
+func defaultCurrentSystemGeneration() (string, error) {
+	target, err := os.Readlink(systemProfilePath)
+	if err != nil {
+		return "", fmt.Errorf("read system profile %s: %w", systemProfilePath, err)
+	}
+	return target, nil
+}
 
 func defaultHttpGet(url string) (*http.Response, error) {
 	client := &http.Client{Timeout: 15 * time.Second}
@@ -217,6 +233,86 @@ func defaultRunNixosRebuildSwitch(flakeArg string) ([]byte, error) {
 
 func defaultRunNixosRebuildRollback() ([]byte, error) {
 	return exec.Command("nixos-rebuild", "switch", "--rollback").CombinedOutput()
+}
+
+// waitPanelHealthy polls probeUpFunc until the panel answers or the health
+// timeout elapses. It verifies the generation currently running serves /up.
+func waitPanelHealthy() bool {
+	deadline := nowFunc().Add(healthTimeout)
+	for nowFunc().Before(deadline) {
+		if err := probeUpFunc(); err == nil {
+			return true
+		}
+		sleepFunc(healthInterval)
+	}
+	return false
+}
+
+// rollbackToPriorGeneration reactivates the previous generation after a failed
+// switch-to-configuration and verifies the panel is serving again. prevGen is
+// the system profile target captured before the switch; genErr reports
+// whether that capture succeeded. The switch failure detail is preserved in
+// every outcome so the reported result stays accurate: switch_failed when the
+// profile never changed (evaluation/build error — no rollback, downgrading a
+// healthy unchanged generation would be wrong), rolled_back when the captured
+// generation is reactivated and healthy, rolled_back_unhealthy when the panel
+// is still down, and rollback_failed when the rollback itself errors.
+func rollbackToPriorGeneration(ref, switchDetail, prevGen string, genErr error) error {
+	curGen, curErr := currentSystemGenerationFunc()
+	if genErr == nil && curErr == nil && curGen == prevGen {
+		// The failed switch never activated anything: leave the healthy
+		// generation alone and just prove the panel still serves.
+		if waitPanelHealthy() {
+			detail := fmt.Sprintf("%s; generation unchanged (%s), no rollback needed", switchDetail, prevGen)
+			if flagJSON {
+				_ = printJSON(upgradeResult{Ref: ref, Result: "switch_failed", RolledBack: false, Error: detail})
+				return handleFailure(errors.New(detail))
+			}
+			fmt.Println("Switch failed before activation — generation unchanged, no rollback needed.")
+			return errors.New(detail)
+		}
+		detail := fmt.Sprintf("%s; generation unchanged (%s) but panel unhealthy", switchDetail, prevGen)
+		if flagJSON {
+			_ = printJSON(upgradeResult{Ref: ref, Result: "switch_failed_unhealthy", RolledBack: false, Error: detail})
+			return handleFailure(errors.New(detail))
+		}
+		fmt.Println("Switch failed before activation, but the panel is unhealthy.")
+		return errors.New(detail)
+	}
+	rbOut, rbErr := runNixosRebuildRollbackFunc()
+	if rbErr != nil {
+		detail := fmt.Sprintf("%s; rollback failed: %v: %s", switchDetail, rbErr, lastLines(string(rbOut), 5))
+		if flagJSON {
+			_ = printJSON(upgradeResult{Ref: ref, Result: "rollback_failed", RolledBack: false, Error: detail})
+			return handleFailure(errors.New(detail))
+		}
+		return errors.New(detail)
+	}
+	restoredGen, restoreErr := currentSystemGenerationFunc()
+	if restoreErr == nil && genErr == nil && restoredGen != prevGen {
+		detail := fmt.Sprintf("%s; rollback activated %s, want captured %s", switchDetail, restoredGen, prevGen)
+		if flagJSON {
+			_ = printJSON(upgradeResult{Ref: ref, Result: "rollback_mismatch", RolledBack: true, Error: detail})
+			return handleFailure(errors.New(detail))
+		}
+		return errors.New(detail)
+	}
+	if !waitPanelHealthy() {
+		detail := fmt.Sprintf("%s; rolled back to previous generation but panel still unhealthy", switchDetail)
+		if flagJSON {
+			_ = printJSON(upgradeResult{Ref: ref, Result: "rolled_back_unhealthy", RolledBack: true, Error: detail})
+			return handleFailure(errors.New(detail))
+		}
+		fmt.Println("Rolled back to the previous generation, but the panel is still unhealthy.")
+		return errors.New(detail)
+	}
+	detail := fmt.Sprintf("%s; rolled back to previous generation", switchDetail)
+	if flagJSON {
+		_ = printJSON(upgradeResult{Ref: ref, Result: "rolled_back", RolledBack: true, Error: detail})
+		return handleFailure(errors.New(detail))
+	}
+	fmt.Println("Switch failed — rolled back to the previous generation.")
+	return errors.New(detail)
 }
 
 func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
@@ -375,22 +471,17 @@ func runSystemUpgrade() error {
 	if !flagJSON {
 		fmt.Printf("Switching to %s (resolved %s) …\n", cand.FlakeRef, storePath)
 	}
+	// Capture the active generation before switching: a failure during
+	// evaluation/build leaves the profile untouched and must not trigger a
+	// rollback of the healthy unchanged generation.
+	prevGen, genErr := currentSystemGenerationFunc()
 	out, err := runNixosRebuildSwitchFunc(flakeArg)
 	if err != nil {
-		return fmt.Errorf("nixos-rebuild switch: %w: %s", err, lastLines(string(out), 5))
+		return rollbackToPriorGeneration(cand.FlakeRef, fmt.Sprintf("nixos-rebuild switch: %v: %s", err, lastLines(string(out), 5)), prevGen, genErr)
 	}
 
 	// 7. Health gate.
-	deadline := nowFunc().Add(healthTimeout)
-	healthOK := false
-	for nowFunc().Before(deadline) {
-		if err := probeUpFunc(); err == nil {
-			healthOK = true
-			break
-		}
-		sleepFunc(healthInterval)
-	}
-	if !healthOK {
+	if !waitPanelHealthy() {
 		if !flagJSON {
 			fmt.Println("Health check failed — rolling back.")
 		}
@@ -496,20 +587,14 @@ func runSystemUpgradeRef(ref string) error {
 	if !flagJSON {
 		fmt.Printf("Switching to %s (resolved %s) …\n", ref, storePath)
 	}
+	// See the normal path: capture before switching so an evaluation/build
+	// failure never downgrades a healthy unchanged generation.
+	prevGen, genErr := currentSystemGenerationFunc()
 	out, err := runNixosRebuildSwitchFunc(flakeArg)
 	if err != nil {
-		return fmt.Errorf("nixos-rebuild switch: %w: %s", err, lastLines(string(out), 5))
+		return rollbackToPriorGeneration(ref, fmt.Sprintf("nixos-rebuild switch: %v: %s", err, lastLines(string(out), 5)), prevGen, genErr)
 	}
-	deadline := nowFunc().Add(healthTimeout)
-	healthOK := false
-	for nowFunc().Before(deadline) {
-		if err := probeUpFunc(); err == nil {
-			healthOK = true
-			break
-		}
-		sleepFunc(healthInterval)
-	}
-	if !healthOK {
+	if !waitPanelHealthy() {
 		if !flagJSON {
 			fmt.Println("Health check failed — rolling back.")
 		}

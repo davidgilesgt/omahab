@@ -337,7 +337,6 @@ export function validateTemplateObject(obj, opts = {}) {
     for (const id of cov.staleApps) errors.push(`stale application reference: app:${id}`);
     for (const r of cov.missingUi) errors.push(`missing UI coverage: ui:${r}`);
     for (const r of cov.staleUi) errors.push(`stale UI reference: ui:${r}`);
-    if (!cov.uiRefs.has("/admin")) errors.push(`missing UI coverage: ui:/admin (index route navigation)`);
     for (const r of cov.missingApi) errors.push(`missing API coverage: api:${r}`);
     for (const r of cov.staleApi) errors.push(`stale API reference: api:${r}`);
   }

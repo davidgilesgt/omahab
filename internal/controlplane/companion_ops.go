@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -16,7 +18,7 @@ import (
 	"github.com/omahab/omahab/internal/events"
 	"github.com/omahab/omahab/internal/store"
 )
-func companionDeviceToAPI(d *companion.Device) apitypes.CompanionDevice {
+func companionDeviceToAPI(d *companion.Device, granted bool) apitypes.CompanionDevice {
 	return apitypes.CompanionDevice{
 		ID:                 domain.ID(d.ID),
 		Name:               d.Name,
@@ -29,6 +31,7 @@ func companionDeviceToAPI(d *companion.Device) apitypes.CompanionDevice {
 		EnvVariableCount:   d.EnvVariableCount,
 		BackupLastSnapshot: d.BackupLastSnapshot,
 		AllowProviderOAuth: d.AllowProviderOAuth,
+		Granted:            granted,
 		LastSeenAt:         d.LastSeenAt,
 		RevokedAt:          d.RevokedAt,
 		CreatedAt:          d.CreatedAt,
@@ -44,9 +47,13 @@ func (b *Backend) ListCompanionDevices(ctx context.Context, p apitypes.Paginatio
 	if err != nil {
 		return nil, translateError(err)
 	}
+	grants, err := b.environments.GrantedDeviceIDs(ctx)
+	if err != nil {
+		return nil, translateError(err)
+	}
 	out := make([]apitypes.CompanionDevice, 0, len(list))
 	for _, d := range list {
-		out = append(out, companionDeviceToAPI(d))
+		out = append(out, companionDeviceToAPI(d, grants[d.ID]))
 	}
 	return paginate(out, p), nil
 }
@@ -59,7 +66,11 @@ func (b *Backend) GetCompanionDevice(ctx context.Context, id domain.ID) (apitype
 	if err != nil {
 		return apitypes.CompanionDevice{}, translateError(err)
 	}
-	return companionDeviceToAPI(d), nil
+	granted, err := b.environments.IsDeviceGranted(ctx, d.ID)
+	if err != nil {
+		return apitypes.CompanionDevice{}, translateError(err)
+	}
+	return companionDeviceToAPI(d, granted), nil
 }
 
 func (b *Backend) UpdateCompanionDeviceInfo(ctx context.Context, deviceID domain.ID, req apitypes.UpdateCompanionDeviceRequest) (apitypes.CompanionDevice, error) {
@@ -84,7 +95,11 @@ func (b *Backend) UpdateCompanionDeviceInfo(ctx context.Context, deviceID domain
 	if err != nil {
 		return apitypes.CompanionDevice{}, translateError(err)
 	}
-	return companionDeviceToAPI(d), nil
+	granted, err := b.environments.IsDeviceGranted(ctx, d.ID)
+	if err != nil {
+		return apitypes.CompanionDevice{}, translateError(err)
+	}
+	return companionDeviceToAPI(d, granted), nil
 }
 
 
@@ -173,56 +188,15 @@ func (b *Backend) RevokeCompanionDevice(ctx context.Context, id domain.ID) error
 	if trimmed == "" {
 		return translateError(fmt.Errorf("%w: id is required", store.ErrValidation))
 	}
-	// Mark device revoked first.
+	// 1. Local containment first: device auth and environment bundle are
+	// blocked immediately, even if an external revoke below fails.
 	if _, err := b.environments.RevokeDevice(ctx, trimmed); err != nil {
 		return translateError(err)
 	}
-	// Immediately revoke its LiteLLM virtual keys (owner_kind=device, owner_id=deviceID).
-	if b.providers != nil {
-		// Query provider_virtual_keys for this device.
-		rows, err := b.db.QueryContext(ctx, `SELECT id FROM provider_virtual_keys WHERE owner_kind = 'device' AND owner_id = ? AND revoked_at IS NULL`, trimmed)
-		if err == nil {
-			defer rows.Close()
-			var ids []string
-			for rows.Next() {
-				var vkID string
-				if err := rows.Scan(&vkID); err == nil {
-					ids = append(ids, vkID)
-				}
-			}
-			for _, vkID := range ids {
-				_ = b.providers.RevokeVirtualKey(ctx, domain.ID(vkID))
-			}
-		}
-	}
-	// Also revoke cached device-key secret if present.
-	if b.secrets != nil {
-		_ = b.secrets.DeleteByName(ctx, "platform-app", "device-key."+trimmed)
-	}
-	// Revoke per-device Forgejo token if present.
-	if b.scm != nil {
-		if fc := b.scm.ForgejoClient(); fc != nil {
-			// Try stored token name, fallback to device-<id>
-			tokenName := "device-" + trimmed
-			if b.environments != nil {
-				if tn, err := b.environments.GetForgejoTokenName(ctx, trimmed); err == nil && strings.TrimSpace(tn) != "" {
-					tokenName = strings.TrimSpace(tn)
-				}
-			}
-			_ = fc.DeleteToken(ctx, "omahab", tokenName)
-			// Also try DeleteAccessToken path
-			_ = fc.DeleteAccessToken(ctx, "omahab", tokenName)
-			if b.environments != nil {
-				_ = b.environments.SetForgejoTokenName(ctx, trimmed, "")
-			}
-		}
-	}
-	// Remove only this device from managed folder sharing, leaving other
-	// devices and GUI folders untouched.
-	if b.syncer != nil {
-		if affected, err := b.syncer.RemoveCompanionDevice(ctx, trimmed); err == nil && len(affected) > 0 {
-			_, _ = b.ReconcileSyncFolders(ctx)
-		}
+	// 2. External revokes with durable confirmation. Every failure persists
+	// its retry handle; nothing reports success until confirmed.
+	if err := b.revokeDeviceExternals(ctx, trimmed); err != nil {
+		return err
 	}
 	if b.events != nil {
 		_, _ = b.events.Publish(ctx, events.PublishInput{
@@ -233,6 +207,203 @@ func (b *Backend) RevokeCompanionDevice(ctx context.Context, id domain.ID) error
 		})
 	}
 	return nil
+}
+
+// pendingRevokeError reports contained-but-unconfirmed revocation.
+// DELETE surfaces 503 (not 204) so callers never mistake it for full success.
+func pendingRevokeError(deviceID string, pending []companion.RevocationPending) error {
+	first := ""
+	if len(pending) > 0 && strings.TrimSpace(pending[0].LastError) != "" {
+		first = ": " + pending[0].LastError
+	}
+	return fmt.Errorf("%w: device %s contained but %d external revocation(s) unconfirmed, retry in progress%s",
+		apitypes.ErrServiceUnavailable, deviceID, len(pending), first)
+}
+
+// revokeDeviceExternals revokes every external credential for a device,
+// queueing durable pending rows for anything unconfirmed. It also drives
+// pre-existing pending rows for the device, so a repeat call (or the retry
+// driver) converges. Returns nil only when nothing remains unconfirmed.
+func (b *Backend) revokeDeviceExternals(ctx context.Context, deviceID string) error {
+	// LiteLLM virtual keys: local revoke first (marks revoked_at), then
+	// strict gateway confirmation per key. Rows are read regardless of
+	// revoked_at: local state never proves the gateway bearer dead.
+	if b.providers != nil {
+		type keyHandle struct {
+			id, name, gatewayKeyID string
+		}
+		var handles []keyHandle
+		rows, err := b.db.QueryContext(ctx, `SELECT id, name, gateway_key_id FROM provider_virtual_keys WHERE owner_kind = 'device' AND owner_id = ?`, deviceID)
+		if err != nil {
+			return translateError(fmt.Errorf("query device virtual keys: %w", err))
+		}
+		func() {
+			defer rows.Close()
+			for rows.Next() {
+				var h keyHandle
+				var gw sql.NullString
+				if err := rows.Scan(&h.id, &h.name, &gw); err != nil {
+					err = fmt.Errorf("scan device virtual key: %w", err)
+					return
+				}
+				if gw.Valid {
+					h.gatewayKeyID = gw.String
+				}
+				handles = append(handles, h)
+			}
+			err = rows.Err()
+		}()
+		if err != nil {
+			return translateError(err)
+		}
+		for _, h := range handles {
+			if err := b.providers.RevokeVirtualKey(ctx, domain.ID(h.id)); err != nil {
+				// Local revoke failure: return immediately; nothing was
+				// confirmed, handles persist in their rows for retry.
+				return translateError(fmt.Errorf("revoke device virtual key: %w", err))
+			}
+			if strings.TrimSpace(h.gatewayKeyID) == "" {
+				continue // no gateway handle exists: nothing to confirm.
+			}
+			if err := b.providers.GatewayRevokeVirtualKey(ctx, domain.ID(h.id)); err != nil {
+				_ = b.environments.QueueRevocationPending(ctx, deviceID, companion.RevokeTargetGatewayKey, h.gatewayKeyID, h.name, err)
+			}
+		}
+	}
+	// Cached device-key secret: absent counts as confirmed (already gone).
+	if b.secrets != nil {
+		secretName := "device-key." + deviceID
+		if err := b.secrets.DeleteByName(ctx, "platform-app", secretName); err != nil && !errors.Is(err, store.ErrNotFound) {
+			_ = b.environments.QueueRevocationPending(ctx, deviceID, companion.RevokeTargetDeviceSecret, secretName, "", err)
+		}
+	}
+	// Per-device Forgejo token: the stored name is the retry handle and is
+	// cleared only after DeleteToken confirms (already idempotent upstream).
+	if b.scm != nil {
+		if fc := b.scm.ForgejoClient(); fc != nil {
+			tokenName := "device-" + deviceID
+			if tn, err := b.environments.GetForgejoTokenName(ctx, deviceID); err == nil && strings.TrimSpace(tn) != "" {
+				tokenName = strings.TrimSpace(tn)
+			}
+			if err := fc.DeleteToken(ctx, "omahab", tokenName); err != nil {
+				_ = b.environments.QueueRevocationPending(ctx, deviceID, companion.RevokeTargetForgejoToken, tokenName, "", err)
+			} else if err := b.environments.SetForgejoTokenName(ctx, deviceID, ""); err != nil {
+				return translateError(fmt.Errorf("clear device token handle: %w", err))
+			}
+		}
+	}
+	// Machine-backup htpasswd entry + restic reload, surfaced for retry.
+	if err := b.environments.RemoveDeviceBackupCredentials(ctx, deviceID); err != nil {
+		_ = b.environments.QueueRevocationPending(ctx, deviceID, companion.RevokeTargetHtpasswd, "dev-"+deviceID, "", err)
+	}
+	// Managed folder sharing: retry handle is the device itself.
+	if b.syncer != nil {
+		if affected, err := b.syncer.RemoveCompanionDevice(ctx, deviceID); err != nil {
+			_ = b.environments.QueueRevocationPending(ctx, deviceID, "sync_folders", deviceID, "", err)
+		} else if len(affected) > 0 {
+			_, _ = b.ReconcileSyncFolders(ctx)
+		}
+	}
+	// Drive any pre-existing pending rows for this device too.
+	if _, err := b.RetryPendingDeviceRevocations(ctx); err != nil {
+		return err
+	}
+	pending, err := b.environments.ListRevocationPending(ctx)
+	if err != nil {
+		return translateError(fmt.Errorf("list revocation pending: %w", err))
+	}
+	var mine []companion.RevocationPending
+	for _, p := range pending {
+		if p.DeviceID == deviceID {
+			mine = append(mine, p)
+		}
+	}
+	if len(mine) > 0 {
+		return pendingRevokeError(deviceID, mine)
+	}
+	return nil
+}
+
+// RetryPendingDeviceRevocations re-attempts every unconfirmed device external
+// revoke until the external confirms. Pending rows survive restarts (same
+// control DB), so recovery after a gateway/Forgejo/systemd outage needs only
+// this driver plus a live external — no admin action, no new handles.
+// A row is deleted only on confirmed success; failures refresh attempts and
+// last error. Unknown targets are left untouched. Returns completed count.
+func (b *Backend) RetryPendingDeviceRevocations(ctx context.Context) (int, error) {
+	if b.environments == nil {
+		return 0, translateError(fmt.Errorf("%w: environments not configured", ErrNotConfigured))
+	}
+	pending, err := b.environments.ListRevocationPending(ctx)
+	if err != nil {
+		return 0, translateError(fmt.Errorf("list revocation pending: %w", err))
+	}
+	completed := 0
+	for _, p := range pending {
+		var cerr error
+		switch p.Target {
+		case companion.RevokeTargetGatewayKey:
+			cerr = b.retryGatewayKeyRevoke(ctx, p)
+		case companion.RevokeTargetForgejoToken:
+			cerr = b.retryForgejoTokenRevoke(ctx, p)
+		case companion.RevokeTargetHtpasswd:
+			if b.environments != nil {
+				cerr = b.environments.RemoveDeviceBackupCredentials(ctx, p.DeviceID)
+			}
+		case companion.RevokeTargetDeviceSecret:
+			if b.secrets != nil {
+				cerr = b.secrets.DeleteByName(ctx, "platform-app", p.Handle)
+				if cerr != nil && errors.Is(cerr, store.ErrNotFound) {
+					cerr = nil // already gone: confirmed.
+				}
+			}
+		case "sync_folders":
+			if b.syncer != nil {
+				if affected, err := b.syncer.RemoveCompanionDevice(ctx, p.DeviceID); err != nil {
+					cerr = err
+				} else if len(affected) > 0 {
+					_, _ = b.ReconcileSyncFolders(ctx)
+				}
+			}
+		default:
+			continue // unknown target: leave for its owner.
+		}
+		if cerr != nil {
+			_ = b.environments.QueueRevocationPending(ctx, p.DeviceID, p.Target, p.Handle, p.Alias, cerr)
+			continue
+		}
+		if err := b.environments.ClearRevocationPending(ctx, p.DeviceID, p.Target, p.Handle); err != nil {
+			return completed, translateError(fmt.Errorf("clear revocation pending: %w", err))
+		}
+		// Forgejo handle bookkeeping clears only after the pending row is gone.
+		if p.Target == companion.RevokeTargetForgejoToken {
+			_ = b.environments.SetForgejoTokenName(ctx, p.DeviceID, "")
+		}
+		completed++
+	}
+	return completed, nil
+}
+
+// retryGatewayKeyRevoke confirms one gateway bearer dead via the strict path.
+// The pending handle/alias pair is the exact stored gateway handle, so retry
+// needs no local key row (it may be gone) and touches no unrelated keys.
+func (b *Backend) retryGatewayKeyRevoke(ctx context.Context, p companion.RevocationPending) error {
+	if b.gateway == nil {
+		return fmt.Errorf("gateway not configured")
+	}
+	return b.gateway.RevokeVirtualKeyStrict(ctx, p.Handle, p.Alias)
+}
+
+// retryForgejoTokenRevoke confirms one Forgejo token deletion (idempotent upstream).
+func (b *Backend) retryForgejoTokenRevoke(ctx context.Context, p companion.RevocationPending) error {
+	if b.scm == nil {
+		return fmt.Errorf("scm not configured")
+	}
+	fc := b.scm.ForgejoClient()
+	if fc == nil {
+		return fmt.Errorf("forgejo client is required")
+	}
+	return fc.DeleteToken(ctx, "omahab", p.Handle)
 }
 
 // GetNtfyConfig returns the ntfy phone notifications configuration (admin).
@@ -295,7 +466,76 @@ func (b *Backend) SetDeviceAllowOAuth(ctx context.Context, id domain.ID, allow b
 	if err != nil {
 		return apitypes.CompanionDevice{}, translateError(err)
 	}
-	return companionDeviceToAPI(d), nil
+	granted, err := b.environments.IsDeviceGranted(ctx, d.ID)
+	if err != nil {
+		return apitypes.CompanionDevice{}, translateError(err)
+	}
+	return companionDeviceToAPI(d, granted), nil
+}
+
+// DeviceEnvGrantResult is the admin grant/revoke response: consent state plus
+// the current environment revision. Names/booleans/revision only, never values.
+type DeviceEnvGrantResult struct {
+	DeviceID string `json:"device_id"`
+	Granted  bool   `json:"granted"`
+	Revision int    `json:"revision"`
+}
+
+// GrantDeviceEnvironment records explicit owner consent to share tool-environment
+// values with a device. The device receives current values on its next fetch;
+// rotations after the grant are visible without re-granting.
+func (b *Backend) GrantDeviceEnvironment(ctx context.Context, id domain.ID) (DeviceEnvGrantResult, error) {
+	if b.environments == nil {
+		return DeviceEnvGrantResult{}, translateError(fmt.Errorf("%w: environments not configured", ErrNotConfigured))
+	}
+	trimmed := strings.TrimSpace(string(id))
+	if trimmed == "" {
+		return DeviceEnvGrantResult{}, translateError(fmt.Errorf("%w: id is required", store.ErrValidation))
+	}
+	if err := b.environments.GrantDevice(ctx, trimmed); err != nil {
+		return DeviceEnvGrantResult{}, translateError(err)
+	}
+	rev, _, err := b.environments.GetRevision(ctx)
+	if err != nil {
+		return DeviceEnvGrantResult{}, translateError(err)
+	}
+	if b.events != nil {
+		_, _ = b.events.Publish(ctx, events.PublishInput{
+			Type:     "environment.changed",
+			Severity: "info",
+			Message:  fmt.Sprintf("tool environment shared with device %s", trimmed),
+			Data:     map[string]any{"device_id": trimmed, "action": "grant"},
+		})
+	}
+	return DeviceEnvGrantResult{DeviceID: trimmed, Granted: true, Revision: rev}, nil
+}
+
+// RevokeDeviceEnvironment withdraws owner consent. The device's next fetch
+// returns an empty bundle so it clears managed values.
+func (b *Backend) RevokeDeviceEnvironment(ctx context.Context, id domain.ID) (DeviceEnvGrantResult, error) {
+	if b.environments == nil {
+		return DeviceEnvGrantResult{}, translateError(fmt.Errorf("%w: environments not configured", ErrNotConfigured))
+	}
+	trimmed := strings.TrimSpace(string(id))
+	if trimmed == "" {
+		return DeviceEnvGrantResult{}, translateError(fmt.Errorf("%w: id is required", store.ErrValidation))
+	}
+	if err := b.environments.RevokeGrant(ctx, trimmed); err != nil {
+		return DeviceEnvGrantResult{}, translateError(err)
+	}
+	rev, _, err := b.environments.GetRevision(ctx)
+	if err != nil {
+		return DeviceEnvGrantResult{}, translateError(err)
+	}
+	if b.events != nil {
+		_, _ = b.events.Publish(ctx, events.PublishInput{
+			Type:     "environment.changed",
+			Severity: "info",
+			Message:  fmt.Sprintf("tool environment unshared from device %s", trimmed),
+			Data:     map[string]any{"device_id": trimmed, "action": "revoke"},
+		})
+	}
+	return DeviceEnvGrantResult{DeviceID: trimmed, Granted: false, Revision: rev}, nil
 }
 
 func (b *Backend) GetCompanionEnvironment(ctx context.Context, deviceToken string) (map[string]string, string, error) {

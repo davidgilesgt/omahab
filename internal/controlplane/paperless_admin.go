@@ -189,3 +189,95 @@ func (b *Backend) ensurePaperlessInitialAdmin(ctx context.Context) error {
 	log.Printf("setup oidc: paperless initial admin %q created; password in platform-app/paperless_admin_password, usable at /admin/", username)
 	return nil
 }
+
+// paperlessMemberGroup is the Django group carrying the household SSO
+// baseline. PAPERLESS_SOCIAL_ACCOUNT_DEFAULT_GROUPS (rendered by
+// ensurePaperlessOIDC) puts every newly provisioned social user into it at
+// signup; ensurePaperlessMemberAccess converges the group's permissions and
+// backfills users that already exist.
+const paperlessMemberGroup = "members"
+
+// paperlessMemberCodenames is the minimum global permission set a household
+// SSO user needs: list/search/download (view_document), upload
+// (add_document), and a working settings page (view/add/change UI settings).
+// Deliberately not change/delete on documents and never staff/superuser:
+// broader grants stay an explicit /admin/ act.
+//
+// Upstream grounding (paperless-ngx dev, src/documents): UiSettings is
+// defined in the documents app (models.py), so Django mints
+// view/add/change/delete_uisettings under app_label 'documents', and
+// /api/ui_settings/ 403s without view_uisettings (discussion #7032).
+// PostDocumentView.post refuses with "Insufficient permissions" unless the
+// caller holds GLOBAL documents.add_document (views.py) — upload is a
+// collection-level POST, so no object-scoped grant can cover it. Likewise
+// DRF's DjangoObjectPermissions view gate requires GLOBAL view_document for
+// every DocumentViewSet GET (list, retrieve, download, search); a user with
+// only object-level grants 403s at has_permission before any queryset runs.
+//
+// Scope note (verified against upstream, not assumed): the global view gate
+// does NOT let one member open another member's documents. Visibility is
+// enforced independently of global perms on every document path:
+//   - List, retrieve, search, bulk, email, suggestions, and selection all
+//     filter by permitted_document_ids (PermittedObjectsFilter and explicit
+//     id__in predicates in views.py), which returns only own + unowned +
+//     explicitly-granted rows and never consults global perms. Another
+//     member's owned documents are not enumerable, and direct-ID retrieve
+//     404s in get_object's queryset pre-filter before any object check.
+//   - Download/preview/metadata/file serve through
+//     _resolve_request_and_root_doc, which requires has_perms_owner_aware:
+//     owner, unowned, or explicit object perm only. Its guardian
+//     ObjectPermissionChecker reads solely the User/GroupObjectPermission
+//     rows (guardian/core.py get_perms) and never the global grants, so a
+//     global-only member gets 403 there.
+// Ownerless intake (the consume drops dir) stays visible to all by upstream
+// design — the shared household intake. No paperless patch is needed for
+// isolation; the global grants above are purely the endpoint gates, and
+// this set remains the least privilege satisfying
+// list/upload/search/download.
+var paperlessMemberCodenames = []string{
+	"add_document",
+	"view_document",
+	"view_uisettings",
+	"add_uisettings",
+	"change_uisettings",
+}
+
+// ensurePaperlessMemberAccess converges the household SSO baseline: the
+// members group exists, holds exactly (at least) the minimum codenames, and
+// every non-system non-superuser belongs to it. Idempotent (ON CONFLICT DO
+// NOTHING throughout) and safe to run on every OIDC ensure: the seeded
+// initial admin is a superuser and is never touched, and no statement makes
+// anyone staff or superuser.
+//
+// Without this, paperless auto-provisions SSO accounts with zero Django
+// permissions: /api/profile/ links fine, but every document/settings API
+// 403s and POST /api/documents/post_document/ answers Insufficient
+// permissions.
+func (b *Backend) ensurePaperlessMemberAccess(ctx context.Context) error {
+	if _, err := runPostgresAlterRole(ctx, "paperless", "INSERT INTO auth_group (name) VALUES ('"+paperlessMemberGroup+"') ON CONFLICT (name) DO NOTHING"); err != nil {
+		return fmt.Errorf("ensure paperless member group: %s", health.RedactDetail(err.Error()))
+	}
+	quoted := make([]string, 0, len(paperlessMemberCodenames))
+	for _, c := range paperlessMemberCodenames {
+		quoted = append(quoted, "'"+c+"'")
+	}
+	grant := "INSERT INTO auth_group_permissions (group_id, permission_id) " +
+		"SELECT g.id, p.id FROM auth_group g " +
+		"JOIN auth_permission p ON p.codename IN (" + strings.Join(quoted, ", ") + ") " +
+		"JOIN django_content_type ct ON ct.id = p.content_type_id AND ct.app_label = 'documents' " +
+		"WHERE g.name = '" + paperlessMemberGroup + "' " +
+		"ON CONFLICT DO NOTHING"
+	if _, err := runPostgresAlterRole(ctx, "paperless", grant); err != nil {
+		return fmt.Errorf("grant paperless member permissions: %s", health.RedactDetail(err.Error()))
+	}
+	backfill := "INSERT INTO auth_user_groups (user_id, group_id) " +
+		"SELECT u.id, g.id FROM auth_user u, auth_group g " +
+		"WHERE g.name = '" + paperlessMemberGroup + "' " +
+		"AND u.username NOT IN ('consumer','AnonymousUser') AND u.is_superuser = false " +
+		"ON CONFLICT DO NOTHING"
+	if _, err := runPostgresAlterRole(ctx, "paperless", backfill); err != nil {
+		return fmt.Errorf("backfill paperless member access: %s", health.RedactDetail(err.Error()))
+	}
+	log.Printf("setup oidc: paperless member access converged (group %q, %d permissions)", paperlessMemberGroup, len(paperlessMemberCodenames))
+	return nil
+}

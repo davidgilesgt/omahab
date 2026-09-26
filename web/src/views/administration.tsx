@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../auth";
-import type { RecoverySession, SSHKey, User, Workspace } from "../api/types";
+import type { AppAccess, Group, RecoverySession, SSHKey, User, Workspace } from "../api/types";
 import { EmptyState, ErrorState, formatDate, InlineError, LoadingState, PageHeader, Section, StatusPill } from "../components/ui";
 import { DestructiveConfirm } from "../components/destructiveConfirm";
 import { useToast } from "../components/toast";
@@ -209,6 +209,34 @@ export function PeoplePage() {
   const [createGroups, setCreateGroups] = useState<string[]>(["members"]);
   const [editingUser, setEditingUser] = useState<User | null>(null);
   const [editGroups, setEditGroups] = useState<string[]>([]);
+  const [editInitFor, setEditInitFor] = useState<string | null>(null);
+  const editingId = editingUser?.id ?? null;
+  // Effective Pocket ID membership and application access for the user being
+  // edited. The dialog edits these — never the local groups_json snapshot.
+  const effectiveGroups = useQuery({
+    queryKey: ["user-groups", editingId],
+    queryFn: (): Promise<Group[]> => client.userGroups(editingId ?? ""),
+    enabled: editingId !== null,
+  });
+  const effectiveAccess = useQuery({
+    queryKey: ["user-app-access", editingId],
+    queryFn: (): Promise<AppAccess[]> => client.userAppAccess(editingId ?? ""),
+    enabled: editingId !== null,
+  });
+  // Full group directory for name→ID resolution (GET /api/v1/groups).
+  const groupDirectory = useQuery({
+    queryKey: ["groups-directory"],
+    queryFn: (): Promise<Group[]> => client.allGroups(),
+    enabled: editingId !== null,
+    retry: false,
+    staleTime: 60_000,
+  });
+  useEffect(() => {
+    if (editingUser && effectiveGroups.data && editInitFor !== editingUser.id) {
+      setEditGroups(effectiveGroups.data.map((g) => g.name));
+      setEditInitFor(editingUser.id);
+    }
+  }, [editingUser, effectiveGroups.data, editInitFor]);
   const [toggleTarget, setToggleTarget] = useState<User | null>(null);
   const [enrollmentUrl, setEnrollmentUrl] = useState<string | null>(null);
   const [enrollmentExpires, setEnrollmentExpires] = useState<string | null>(null);
@@ -253,12 +281,39 @@ export function PeoplePage() {
     },
     onError: (err) => toast.error(err instanceof Error ? err.message : "Recovery failed"),
   });
+  function resolveGroupIds(names: string[]): { ids: string[]; unknown: string[] } {
+    const byName = new Map<string, string>();
+    for (const g of groupDirectory.data ?? []) byName.set(g.name.toLowerCase(), g.id);
+    for (const g of effectiveGroups.data ?? []) {
+      const key = g.name.toLowerCase();
+      if (!byName.has(key)) byName.set(key, g.id);
+    }
+    const ids: string[] = [];
+    const unknown: string[] = [];
+    for (const name of names) {
+      const id = byName.get(name.toLowerCase());
+      if (id) ids.push(id);
+      else unknown.push(name);
+    }
+    return { ids, unknown };
+  }
   const updateGroups = useMutation({
-    mutationFn: ({ id, groups }: { id: string; groups: string[] }) => client.setUserGroups(id, groups),
-    onSuccess: () => {
+    // Real effective path: PUT /users/{id}/groups with Pocket ID group IDs.
+    mutationFn: async ({ id, groups }: { id: string; groups: string[] }) => {
+      const { ids, unknown } = resolveGroupIds(groups);
+      if (unknown.length > 0) {
+        const why = groupDirectory.isError ? " (group directory unavailable)" : "";
+        throw new Error(`Could not resolve group IDs for: ${unknown.join(", ")}${why}`);
+      }
+      await client.setUserGroups(id, ids);
+    },
+    onSuccess: (_data, vars) => {
       queryClient.invalidateQueries({ queryKey: ["users"] });
-      toast.success("Groups updated");
+      queryClient.invalidateQueries({ queryKey: ["user-groups", vars.id] });
+      queryClient.invalidateQueries({ queryKey: ["user-app-access", vars.id] });
+      toast.success("Groups updated — effective access refreshed");
       setEditingUser(null);
+      setEditInitFor(null);
     },
     onError: (err) => toast.error(err instanceof Error ? err.message : "Could not update groups"),
   });
@@ -313,6 +368,7 @@ export function PeoplePage() {
   function openGroupEditor(user: User) {
     setEditingUser(user);
     setEditGroups([...(user.groups ?? [])]);
+    setEditInitFor(null);
   }
 
   return (
@@ -395,10 +451,17 @@ export function PeoplePage() {
           user={editingUser}
           groups={editGroups}
           onChange={setEditGroups}
-          onClose={() => setEditingUser(null)}
+          onClose={() => { setEditingUser(null); setEditInitFor(null); }}
           onSave={() => updateGroups.mutate({ id: editingUser.id, groups: editGroups })}
           pending={updateGroups.isPending}
           error={updateGroups.error}
+          effectiveNames={effectiveGroups.data?.map((g) => g.name) ?? null}
+          effectivePending={effectiveGroups.isLoading}
+          effectiveError={effectiveGroups.error}
+          onRetryEffective={() => void effectiveGroups.refetch()}
+          accessNames={effectiveAccess.data?.map((a) => a.client_name) ?? null}
+          accessPending={effectiveAccess.isLoading}
+          accessError={effectiveAccess.error}
         />
       )}
       {toggleTarget && (
@@ -437,6 +500,13 @@ function EditGroupsDialog({
   onSave,
   pending,
   error,
+  effectiveNames,
+  effectivePending,
+  effectiveError,
+  onRetryEffective,
+  accessNames,
+  accessPending,
+  accessError,
 }: {
   user: User;
   groups: string[];
@@ -445,6 +515,13 @@ function EditGroupsDialog({
   onSave: () => void;
   pending?: boolean;
   error?: unknown;
+  effectiveNames: string[] | null;
+  effectivePending: boolean;
+  effectiveError: unknown;
+  onRetryEffective: () => void;
+  accessNames: string[] | null;
+  accessPending: boolean;
+  accessError: unknown;
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   useEffect(() => {
@@ -461,11 +538,25 @@ function EditGroupsDialog({
       <header><div><h2 id="groups-title">Groups for {user.name}</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="Close">×</button></header>
       <div className="form-stack">
         <p className="muted">{user.email}</p>
+        {effectivePending ? (
+          <p className="muted">Loading effective Pocket ID membership…</p>
+        ) : effectiveError ? (
+          <p className="inline-error" role="alert">Could not load effective membership: {effectiveError instanceof Error ? effectiveError.message : "request failed"}{" "}<button type="button" className="button ghost" onClick={onRetryEffective}>Retry</button></p>
+        ) : (
+          <p className="muted">Effective Pocket ID groups: <strong>{effectiveNames && effectiveNames.length > 0 ? effectiveNames.join(", ") : "none"}</strong></p>
+        )}
+        {accessPending ? (
+          <p className="muted">Loading application access…</p>
+        ) : accessError ? (
+          <p className="muted">Application access unavailable.</p>
+        ) : (
+          <p className="muted">Application access ({accessNames?.length ?? 0}): <strong>{accessNames && accessNames.length > 0 ? accessNames.join(", ") : "none"}</strong></p>
+        )}
         <GroupMultiSelect values={groups} onChange={onChange} idPrefix={`edit-${user.id}`} />
         {error ? <p className="inline-error" role="alert">{error instanceof Error ? error.message : "Could not update groups."}</p> : null}
         <div className="modal-actions">
           <button type="button" className="button secondary" onClick={onClose}>Cancel</button>
-          <button type="button" className="button primary" disabled={pending} onClick={onSave}>{pending ? "Saving…" : "Save groups"}</button>
+          <button type="button" className="button primary" disabled={pending || effectivePending} onClick={onSave}>{pending ? "Saving…" : "Save groups"}</button>
         </div>
       </div>
     </dialog>

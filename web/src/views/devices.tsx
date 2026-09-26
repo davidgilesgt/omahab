@@ -39,6 +39,7 @@ export function DevicesPage() {
   const devicesQuery = useQuery({ queryKey: ["companion-devices"], queryFn: client.companionDevices });
   const statusQuery = useQuery({ queryKey: ["status"], queryFn: client.status });
   const [revokeId, setRevokeId] = useState<string | null>(null);
+  const [grantId, setGrantId] = useState<string | null>(null);
 
   const revoke = useMutation({
     mutationFn: client.revokeCompanionDevice,
@@ -47,7 +48,12 @@ export function DevicesPage() {
       toast.success("Device revoked");
       setRevokeId(null);
     },
-    onError: (err) => toast.error(err instanceof Error ? err.message : "Revoke failed"),
+    onError: (err) => {
+      // Local containment still applies on external-retry errors: refresh so
+      // the row shows revoked while the message reports pending externals.
+      queryClient.invalidateQueries({ queryKey: ["companion-devices"] });
+      toast.error(err instanceof Error ? err.message : "Revoke failed");
+    },
   });
   const allowOAuth = useMutation({
     mutationFn: ({ id, allow }: { id: string; allow: boolean }) => client.setDeviceAllowOAuth(id, allow),
@@ -56,6 +62,23 @@ export function DevicesPage() {
       toast.success("Device OAuth permission updated");
     },
     onError: (err) => toast.error(err instanceof Error ? err.message : "Update failed"),
+  });
+  const grantEnv = useMutation({
+    mutationFn: client.grantDeviceEnv,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["companion-devices"] });
+      toast.success("Environment shared — device receives current values on next sync");
+      setGrantId(null);
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Share failed"),
+  });
+  const revokeEnv = useMutation({
+    mutationFn: client.revokeDeviceEnvGrant,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["companion-devices"] });
+      toast.success("Environment unshared — device bundle now empty");
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Unshare failed"),
   });
 
   const serverVersion = statusQuery.data?.version ?? null;
@@ -102,7 +125,21 @@ export function DevicesPage() {
                       <span>
                         PC backup: <strong>{backupAge}</strong> {d.backup_last_snapshot ? <span className="muted">({formatDate(d.backup_last_snapshot)})</span> : <span className="muted">— run backup on device</span>}
                       </span>
+                      <span style={{ display: "inline-flex", gap: "0.4rem", alignItems: "center" }}>
+                        Env access: {d.granted ? <StatusPill value="shared" /> : <span className="muted">not shared</span>}
+                        {d.granted ? (
+                          <button className="button secondary" type="button" disabled={revokeEnv.isPending} onClick={() => revokeEnv.mutate(d.id)}>
+                            {revokeEnv.isPending ? "Unsharing…" : "Unshare"}
+                          </button>
+                        ) : (
+                          <button className="button secondary" type="button" disabled={grantEnv.isPending} onClick={() => setGrantId(d.id)}>
+                            Share…
+                          </button>
+                        )}
+                      </span>
                     </div>
+                    {grantEnv.error ? <p className="inline-error" role="alert">{grantEnv.error instanceof Error ? grantEnv.error.message : "Share failed"}</p> : null}
+                    {revokeEnv.error ? <p className="inline-error" role="alert">{revokeEnv.error instanceof Error ? revokeEnv.error.message : "Unshare failed"}</p> : null}
                     <div className="muted" style={{ fontSize: "0.8rem", marginTop: "0.2rem" }}>created {formatDate(d.created_at)} · updated {formatDate(d.updated_at)}</div>
                   </div>
                   <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", minWidth: "140px", alignItems: "flex-end" }}>
@@ -151,6 +188,30 @@ export function DevicesPage() {
               </button>
             </div>
             {revoke.error ? <p className="inline-error" role="alert">{revoke.error instanceof Error ? revoke.error.message : "Revoke failed"}</p> : null}
+          </div>
+        </dialog>
+      )}
+      {grantId && (
+        <dialog className="modal" open aria-labelledby="grant-title">
+          <header>
+            <div>
+              <h2 id="grant-title">Share tool environment</h2>
+            </div>
+            <button type="button" className="icon-button" onClick={() => setGrantId(null)} aria-label="Close">
+              ×
+            </button>
+          </header>
+          <div className="form-stack">
+            <p>Share current tool-environment values with this device? It will receive every variable on its next sync, including future rotations — no re-share needed. Values stay write-only here and are never shown in diagnostics. Unshare anytime to empty its bundle.</p>
+            <div className="modal-actions">
+              <button type="button" className="button secondary" onClick={() => setGrantId(null)}>
+                Cancel
+              </button>
+              <button type="button" className="button primary" disabled={grantEnv.isPending} onClick={() => grantEnv.mutate(grantId)}>
+                {grantEnv.isPending ? "Sharing…" : "Share environment"}
+              </button>
+            </div>
+            {grantEnv.error ? <p className="inline-error" role="alert">{grantEnv.error instanceof Error ? grantEnv.error.message : "Share failed"}</p> : null}
           </div>
         </dialog>
       )}

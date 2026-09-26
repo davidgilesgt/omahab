@@ -28,6 +28,31 @@ func patchUpgradePaths(t *testing.T, canonical, candidate, available string) fun
 	}
 }
 
+// stubGenerations replays profile targets in order for
+// currentSystemGenerationFunc, repeating the last once exhausted.
+func stubGenerations(t *testing.T, gens ...string) {
+	t.Helper()
+	orig := currentSystemGenerationFunc
+	i := 0
+	currentSystemGenerationFunc = func() (string, error) {
+		g := gens[i]
+		if i < len(gens)-1 {
+			i++
+		}
+		return g, nil
+	}
+	t.Cleanup(func() { currentSystemGenerationFunc = orig })
+}
+
+// stubGenerationsErr makes generation capture fail (conservative path:
+// rollback without a captured baseline).
+func stubGenerationsErr(t *testing.T) {
+	t.Helper()
+	orig := currentSystemGenerationFunc
+	currentSystemGenerationFunc = func() (string, error) { return "", fmt.Errorf("no profile") }
+	t.Cleanup(func() { currentSystemGenerationFunc = orig })
+}
+
 func TestRunSystemUpgrade_MissingCanonicalFailsBeforeSwitch(t *testing.T) {
 	tmp := t.TempDir()
 	candidate := filepath.Join(tmp, "candidate.json")
@@ -323,14 +348,33 @@ func TestRunSystemUpgrade_SwitchFailureRetainsCandidateAndOldSource(t *testing.T
 	osChownFunc = func(string, int, int) error { return nil }
 	defer func() { osChownFunc = origChown }()
 
-	// Ensure probe not called etc
+	origRollback := runNixosRebuildRollbackFunc
+	rollbackCalled := false
+	runNixosRebuildRollbackFunc = func() ([]byte, error) {
+		rollbackCalled = true
+		return []byte("rollback ok"), nil
+	}
+	defer func() { runNixosRebuildRollbackFunc = origRollback }()
+
+	// Prior generation must be health-verified after the rollback.
+	stubGenerations(t, "system-42-link", "system-43-link", "system-42-link")
 	origProbe := probeUpFunc
-	probeUpFunc = func() error { t.Fatalf("probe should not be called on switch failure"); return nil }
+	probeCalled := false
+	probeUpFunc = func() error { probeCalled = true; return nil }
 	defer func() { probeUpFunc = origProbe }()
 
 	err := runSystemUpgrade()
 	if err == nil || !strings.Contains(err.Error(), "nixos-rebuild switch") {
 		t.Fatalf("expected switch failure, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "rolled back") {
+		t.Fatalf("expected rollback report, got %v", err)
+	}
+	if !rollbackCalled {
+		t.Fatalf("expected rollback on switch failure")
+	}
+	if !probeCalled {
+		t.Fatalf("expected prior-generation health check after rollback")
 	}
 	// candidate retained
 	if _, err := os.Stat(candidate); err != nil {
@@ -351,6 +395,229 @@ func TestRunSystemUpgrade_SwitchFailureRetainsCandidateAndOldSource(t *testing.T
 		if strings.HasPrefix(e.Name(), ".flake-staging-") {
 			t.Fatalf("staging should be cleaned after switch failure, found %s", e.Name())
 		}
+	}
+}
+
+func TestRunSystemUpgrade_SwitchFailureRollbackFailureReportsAccurately(t *testing.T) {
+	tmp := t.TempDir()
+	canonical := filepath.Join(tmp, "flake")
+	if err := os.MkdirAll(filepath.Join(canonical, "nix"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(canonical, "flake.nix"), []byte("flake"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(canonical, "nix", "installed-hardware.nix"), []byte("hw"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(canonical, "nix", "install-local.nix"), []byte("local"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	candidate := filepath.Join(tmp, "candidate.json")
+	available := filepath.Join(tmp, "available")
+	restore := patchUpgradePaths(t, canonical, candidate, available)
+	defer restore()
+	store := filepath.Join(tmp, "store-source")
+	if err := os.MkdirAll(filepath.Join(store, "nix"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store, "flake.nix"), []byte("new flake"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cand := updateCandidate{Version: "v0.2.0", FlakeRef: "github:example/omahab/v0.2.0"}
+	b, _ := json.Marshal(cand)
+	if err := os.WriteFile(candidate, b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	origMeta := runNixMetadataFunc
+	runNixMetadataFunc = func(ref string) (string, error) { return store, nil }
+	defer func() { runNixMetadataFunc = origMeta }()
+	origSwitch := runNixosRebuildSwitchFunc
+	runNixosRebuildSwitchFunc = func(string) ([]byte, error) {
+		return []byte("switch exploded"), fmt.Errorf("exit status 4")
+	}
+	defer func() { runNixosRebuildSwitchFunc = origSwitch }()
+	origChown := osChownFunc
+	osChownFunc = func(string, int, int) error { return nil }
+	defer func() { osChownFunc = origChown }()
+	origRollback := runNixosRebuildRollbackFunc
+	runNixosRebuildRollbackFunc = func() ([]byte, error) {
+		return []byte("rollback exploded"), fmt.Errorf("exit status 1")
+	}
+	defer func() { runNixosRebuildRollbackFunc = origRollback }()
+	stubGenerations(t, "system-42-link", "system-43-link")
+	origProbe := probeUpFunc
+	probeUpFunc = func() error { t.Fatalf("probe must not run when the rollback itself failed"); return nil }
+	defer func() { probeUpFunc = origProbe }()
+	err := runSystemUpgrade()
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "nixos-rebuild switch") || !strings.Contains(err.Error(), "rollback failed") {
+		t.Fatalf("expected switch detail plus rollback failure, got %v", err)
+	}
+	if _, err := os.Stat(candidate); err != nil {
+		t.Fatalf("candidate should be retained when rollback fails")
+	}
+}
+
+func TestRunSystemUpgrade_SwitchFailureRollbackUnhealthyReportsAccurately(t *testing.T) {
+	tmp := t.TempDir()
+	canonical := filepath.Join(tmp, "flake")
+	if err := os.MkdirAll(filepath.Join(canonical, "nix"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(canonical, "flake.nix"), []byte("flake"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(canonical, "nix", "installed-hardware.nix"), []byte("hw"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(canonical, "nix", "install-local.nix"), []byte("local"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	candidate := filepath.Join(tmp, "candidate.json")
+	available := filepath.Join(tmp, "available")
+	restore := patchUpgradePaths(t, canonical, candidate, available)
+	defer restore()
+	store := filepath.Join(tmp, "store-source")
+	if err := os.MkdirAll(filepath.Join(store, "nix"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store, "flake.nix"), []byte("new flake"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cand := updateCandidate{Version: "v0.2.0", FlakeRef: "github:example/omahab/v0.2.0"}
+	b, _ := json.Marshal(cand)
+	if err := os.WriteFile(candidate, b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	origMeta := runNixMetadataFunc
+	runNixMetadataFunc = func(ref string) (string, error) { return store, nil }
+	defer func() { runNixMetadataFunc = origMeta }()
+	origSwitch := runNixosRebuildSwitchFunc
+	runNixosRebuildSwitchFunc = func(string) ([]byte, error) {
+		return []byte("switch exploded"), fmt.Errorf("exit status 4")
+	}
+	defer func() { runNixosRebuildSwitchFunc = origSwitch }()
+	origChown := osChownFunc
+	osChownFunc = func(string, int, int) error { return nil }
+	defer func() { osChownFunc = origChown }()
+	origRollback := runNixosRebuildRollbackFunc
+	rollbackCalled := false
+	runNixosRebuildRollbackFunc = func() ([]byte, error) {
+		rollbackCalled = true
+		return []byte("rollback ok"), nil
+	}
+	defer func() { runNixosRebuildRollbackFunc = origRollback }()
+	origProbe := probeUpFunc
+	stubGenerations(t, "system-42-link", "system-43-link", "system-42-link")
+	probeUpFunc = func() error { return fmt.Errorf("still down") }
+	defer func() { probeUpFunc = origProbe }()
+	origTimeout := healthTimeout
+	origInterval := healthInterval
+	origSleep := sleepFunc
+	healthTimeout = 20 * time.Millisecond
+	healthInterval = 5 * time.Millisecond
+	sleepFunc = func(time.Duration) {}
+	defer func() {
+		healthTimeout = origTimeout
+		healthInterval = origInterval
+		sleepFunc = origSleep
+	}()
+	err := runSystemUpgrade()
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "nixos-rebuild switch") || !strings.Contains(err.Error(), "still unhealthy") {
+		t.Fatalf("expected switch detail plus unhealthy panel, got %v", err)
+	}
+	if !rollbackCalled {
+		t.Fatalf("expected rollback on switch failure")
+	}
+	if _, err := os.Stat(candidate); err != nil {
+		t.Fatalf("candidate should be retained when panel stays unhealthy")
+	}
+}
+
+func TestRunSystemUpgrade_SwitchFailureJSONReportsRolledBack(t *testing.T) {
+	tmp := t.TempDir()
+	canonical := filepath.Join(tmp, "flake")
+	if err := os.MkdirAll(filepath.Join(canonical, "nix"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(canonical, "flake.nix"), []byte("flake"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(canonical, "nix", "installed-hardware.nix"), []byte("hw"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(canonical, "nix", "install-local.nix"), []byte("local"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	candidate := filepath.Join(tmp, "candidate.json")
+	available := filepath.Join(tmp, "available")
+	restore := patchUpgradePaths(t, canonical, candidate, available)
+	defer restore()
+	store := filepath.Join(tmp, "store-source")
+	if err := os.MkdirAll(filepath.Join(store, "nix"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store, "flake.nix"), []byte("new flake"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cand := updateCandidate{Version: "v0.2.0", FlakeRef: "github:example/omahab/v0.2.0"}
+	b, _ := json.Marshal(cand)
+	if err := os.WriteFile(candidate, b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	origMeta := runNixMetadataFunc
+	runNixMetadataFunc = func(ref string) (string, error) { return store, nil }
+	defer func() { runNixMetadataFunc = origMeta }()
+	origSwitch := runNixosRebuildSwitchFunc
+	runNixosRebuildSwitchFunc = func(string) ([]byte, error) {
+		return []byte("switch exploded"), fmt.Errorf("exit status 4")
+	}
+	defer func() { runNixosRebuildSwitchFunc = origSwitch }()
+	origChown := osChownFunc
+	osChownFunc = func(string, int, int) error { return nil }
+	defer func() { osChownFunc = origChown }()
+	origRollback := runNixosRebuildRollbackFunc
+	runNixosRebuildRollbackFunc = func() ([]byte, error) { return []byte("rollback ok"), nil }
+	defer func() { runNixosRebuildRollbackFunc = origRollback }()
+	stubGenerations(t, "system-42-link", "system-43-link", "system-42-link")
+	origProbe := probeUpFunc
+	probeUpFunc = func() error { return nil }
+	defer func() { probeUpFunc = origProbe }()
+	origJSON := flagJSON
+	flagJSON = true
+	defer func() { flagJSON = origJSON }()
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	runErr := runSystemUpgrade()
+	_ = w.Close()
+	os.Stdout = oldStdout
+	out, _ := io.ReadAll(r)
+	if runErr == nil {
+		t.Fatal("expected error, got nil")
+	}
+	dec := json.NewDecoder(strings.NewReader(string(out)))
+	var res upgradeResult
+	if err := dec.Decode(&res); err != nil {
+		t.Fatalf("first stdout document should be upgradeResult, got %q: %v", string(out), err)
+	}
+	if res.Result != "rolled_back" || !res.RolledBack {
+		t.Fatalf("result = %+v, want rolled_back with rolled_back=true", res)
+	}
+	if !strings.Contains(res.Error, "nixos-rebuild switch") || !strings.Contains(res.Error, "rolled back") {
+		t.Fatalf("result error should carry switch detail and rollback, got %q", res.Error)
+	}
+	if res.Ref != "github:example/omahab/v0.2.0" {
+		t.Fatalf("ref = %q, want candidate flake ref", res.Ref)
 	}
 }
 
@@ -1405,12 +1672,30 @@ func TestRunSystemUpgradeRef_SwitchFailurePreservesMarkersAndCanonical(t *testin
 	origChown := osChownFunc
 	osChownFunc = func(string, int, int) error { return nil }
 	defer func() { osChownFunc = origChown }()
+	origRollback := runNixosRebuildRollbackFunc
+	rollbackCalled := false
+	runNixosRebuildRollbackFunc = func() ([]byte, error) {
+		rollbackCalled = true
+		return []byte("rollback ok"), nil
+	}
+	defer func() { runNixosRebuildRollbackFunc = origRollback }()
+	stubGenerations(t, "system-42-link", "system-43-link", "system-42-link")
 	origProbe := probeUpFunc
-	probeUpFunc = func() error { t.Fatalf("probe should not be called on switch failure"); return nil }
+	probeCalled := false
+	probeUpFunc = func() error { probeCalled = true; return nil }
 	defer func() { probeUpFunc = origProbe }()
 	err := runSystemUpgradeRef("path:/tmp/ref")
 	if err == nil || !strings.Contains(err.Error(), "nixos-rebuild switch") {
 		t.Fatalf("expected switch failure, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "rolled back") {
+		t.Fatalf("expected rollback report, got %v", err)
+	}
+	if !rollbackCalled {
+		t.Fatalf("expected rollback on switch failure")
+	}
+	if !probeCalled {
+		t.Fatalf("expected prior-generation health check after rollback")
 	}
 	if _, err := os.Stat(candidate); err != nil {
 		t.Fatalf("candidate should be preserved on switch failure, got %v", err)
@@ -1427,6 +1712,65 @@ func TestRunSystemUpgradeRef_SwitchFailurePreservesMarkersAndCanonical(t *testin
 		if strings.HasPrefix(e.Name(), ".flake-staging-") {
 			t.Fatalf("staging cleaned after switch failure, found %s", e.Name())
 		}
+	}
+}
+
+func TestRunSystemUpgradeRef_SwitchFailureRollbackFailureReportsAccurately(t *testing.T) {
+	tmp := t.TempDir()
+	canonical := filepath.Join(tmp, "flake")
+	if err := os.MkdirAll(filepath.Join(canonical, "nix"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	hw := "hw original"
+	if err := os.WriteFile(filepath.Join(canonical, "flake.nix"), []byte("flake"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(canonical, "nix", "installed-hardware.nix"), []byte(hw), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(canonical, "nix", "install-local.nix"), []byte("local"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	candidate := filepath.Join(tmp, "candidate.json")
+	available := filepath.Join(tmp, "available")
+	restore := patchUpgradePaths(t, canonical, candidate, available)
+	defer restore()
+	store := filepath.Join(tmp, "store")
+	if err := os.MkdirAll(filepath.Join(store, "nix"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store, "flake.nix"), []byte("new"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	origMeta := runNixMetadataFunc
+	runNixMetadataFunc = func(string) (string, error) { return store, nil }
+	defer func() { runNixMetadataFunc = origMeta }()
+	origSwitch := runNixosRebuildSwitchFunc
+	runNixosRebuildSwitchFunc = func(string) ([]byte, error) {
+		return []byte("switch exploded"), fmt.Errorf("exit status 4")
+	}
+	defer func() { runNixosRebuildSwitchFunc = origSwitch }()
+	origChown := osChownFunc
+	osChownFunc = func(string, int, int) error { return nil }
+	defer func() { osChownFunc = origChown }()
+	origRollback := runNixosRebuildRollbackFunc
+	runNixosRebuildRollbackFunc = func() ([]byte, error) {
+		return []byte("rollback exploded"), fmt.Errorf("exit status 1")
+	}
+	defer func() { runNixosRebuildRollbackFunc = origRollback }()
+	stubGenerations(t, "system-42-link", "system-43-link")
+	origProbe := probeUpFunc
+	probeUpFunc = func() error { t.Fatalf("probe must not run when the rollback itself failed"); return nil }
+	defer func() { probeUpFunc = origProbe }()
+	err := runSystemUpgradeRef("path:/tmp/ref")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "nixos-rebuild switch") || !strings.Contains(err.Error(), "rollback failed") {
+		t.Fatalf("expected switch detail plus rollback failure, got %v", err)
+	}
+	if data, _ := os.ReadFile(filepath.Join(canonical, "nix", "installed-hardware.nix")); string(data) != hw {
+		t.Fatalf("canonical preserved, got %q", string(data))
 	}
 }
 
@@ -1640,3 +1984,218 @@ func TestNewSystemUpgradeCmd_HasFlakeFlag(t *testing.T) {
 	}
 }
 
+
+func TestRunSystemUpgrade_PreSwitchFailureSkipsRollback(t *testing.T) {
+	tmp := t.TempDir()
+	canonical := filepath.Join(tmp, "flake")
+	if err := os.MkdirAll(filepath.Join(canonical, "nix"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(canonical, "flake.nix"), []byte("flake"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(canonical, "nix", "installed-hardware.nix"), []byte("hw"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(canonical, "nix", "install-local.nix"), []byte("local"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	candidate := filepath.Join(tmp, "candidate.json")
+	available := filepath.Join(tmp, "available")
+	restore := patchUpgradePaths(t, canonical, candidate, available)
+	defer restore()
+	store := filepath.Join(tmp, "store-source")
+	if err := os.MkdirAll(filepath.Join(store, "nix"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store, "flake.nix"), []byte("new flake"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cand := updateCandidate{Version: "v0.2.0", FlakeRef: "github:example/omahab/v0.2.0"}
+	b, _ := json.Marshal(cand)
+	if err := os.WriteFile(candidate, b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	origMeta := runNixMetadataFunc
+	runNixMetadataFunc = func(ref string) (string, error) { return store, nil }
+	defer func() { runNixMetadataFunc = origMeta }()
+	origSwitch := runNixosRebuildSwitchFunc
+	runNixosRebuildSwitchFunc = func(string) ([]byte, error) {
+		return []byte("error: evaluation failed"), fmt.Errorf("exit status 1")
+	}
+	defer func() { runNixosRebuildSwitchFunc = origSwitch }()
+	origChown := osChownFunc
+	osChownFunc = func(string, int, int) error { return nil }
+	defer func() { osChownFunc = origChown }()
+	// The profile never changes: evaluation failed before activation.
+	stubGenerations(t, "system-42-link")
+	origRollback := runNixosRebuildRollbackFunc
+	runNixosRebuildRollbackFunc = func() ([]byte, error) {
+		t.Fatalf("rollback must not run when the generation never changed")
+		return nil, nil
+	}
+	defer func() { runNixosRebuildRollbackFunc = origRollback }()
+	origProbe := probeUpFunc
+	probeCalled := false
+	probeUpFunc = func() error { probeCalled = true; return nil }
+	defer func() { probeUpFunc = origProbe }()
+	origJSON := flagJSON
+	flagJSON = true
+	defer func() { flagJSON = origJSON }()
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	runErr := runSystemUpgrade()
+	_ = w.Close()
+	os.Stdout = oldStdout
+	out, _ := io.ReadAll(r)
+	if runErr == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(runErr.Error(), "nixos-rebuild switch") || !strings.Contains(runErr.Error(), "no rollback needed") {
+		t.Fatalf("expected switch detail plus no-rollback report, got %v", runErr)
+	}
+	if !probeCalled {
+		t.Fatal("expected panel health proof on the unchanged generation")
+	}
+	dec := json.NewDecoder(strings.NewReader(string(out)))
+	var res upgradeResult
+	if err := dec.Decode(&res); err != nil {
+		t.Fatalf("first stdout document should be upgradeResult, got %q: %v", string(out), err)
+	}
+	if res.Result != "switch_failed" || res.RolledBack {
+		t.Fatalf("result = %+v, want switch_failed with rolled_back=false", res)
+	}
+	if _, err := os.Stat(candidate); err != nil {
+		t.Fatal("candidate should be retained on pre-switch failure")
+	}
+}
+
+func TestRunSystemUpgradeRef_PreSwitchFailureSkipsRollback(t *testing.T) {
+	tmp := t.TempDir()
+	canonical := filepath.Join(tmp, "flake")
+	if err := os.MkdirAll(filepath.Join(canonical, "nix"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(canonical, "flake.nix"), []byte("flake"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(canonical, "nix", "installed-hardware.nix"), []byte("hw"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(canonical, "nix", "install-local.nix"), []byte("local"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	candidate := filepath.Join(tmp, "candidate.json")
+	available := filepath.Join(tmp, "available")
+	restore := patchUpgradePaths(t, canonical, candidate, available)
+	defer restore()
+	store := filepath.Join(tmp, "store")
+	if err := os.MkdirAll(filepath.Join(store, "nix"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store, "flake.nix"), []byte("new"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	origMeta := runNixMetadataFunc
+	runNixMetadataFunc = func(string) (string, error) { return store, nil }
+	defer func() { runNixMetadataFunc = origMeta }()
+	origSwitch := runNixosRebuildSwitchFunc
+	runNixosRebuildSwitchFunc = func(string) ([]byte, error) {
+		return []byte("error: build failed"), fmt.Errorf("exit status 1")
+	}
+	defer func() { runNixosRebuildSwitchFunc = origSwitch }()
+	origChown := osChownFunc
+	osChownFunc = func(string, int, int) error { return nil }
+	defer func() { osChownFunc = origChown }()
+	stubGenerations(t, "system-42-link")
+	origRollback := runNixosRebuildRollbackFunc
+	runNixosRebuildRollbackFunc = func() ([]byte, error) {
+		t.Fatalf("rollback must not run when the generation never changed")
+		return nil, nil
+	}
+	defer func() { runNixosRebuildRollbackFunc = origRollback }()
+	origProbe := probeUpFunc
+	probeCalled := false
+	probeUpFunc = func() error { probeCalled = true; return nil }
+	defer func() { probeUpFunc = origProbe }()
+	err := runSystemUpgradeRef("path:/tmp/ref")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "nixos-rebuild switch") || !strings.Contains(err.Error(), "no rollback needed") {
+		t.Fatalf("expected switch detail plus no-rollback report, got %v", err)
+	}
+	if !probeCalled {
+		t.Fatal("expected panel health proof on the unchanged generation")
+	}
+}
+
+func TestRunSystemUpgrade_SwitchFailureUncapturedGenerationRollsBack(t *testing.T) {
+	tmp := t.TempDir()
+	canonical := filepath.Join(tmp, "flake")
+	if err := os.MkdirAll(filepath.Join(canonical, "nix"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(canonical, "flake.nix"), []byte("flake"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(canonical, "nix", "installed-hardware.nix"), []byte("hw"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(canonical, "nix", "install-local.nix"), []byte("local"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	candidate := filepath.Join(tmp, "candidate.json")
+	available := filepath.Join(tmp, "available")
+	restore := patchUpgradePaths(t, canonical, candidate, available)
+	defer restore()
+	store := filepath.Join(tmp, "store-source")
+	if err := os.MkdirAll(filepath.Join(store, "nix"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store, "flake.nix"), []byte("new flake"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cand := updateCandidate{Version: "v0.2.0", FlakeRef: "github:example/omahab/v0.2.0"}
+	b, _ := json.Marshal(cand)
+	if err := os.WriteFile(candidate, b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	origMeta := runNixMetadataFunc
+	runNixMetadataFunc = func(ref string) (string, error) { return store, nil }
+	defer func() { runNixMetadataFunc = origMeta }()
+	origSwitch := runNixosRebuildSwitchFunc
+	runNixosRebuildSwitchFunc = func(string) ([]byte, error) {
+		return []byte("switch exploded"), fmt.Errorf("exit status 4")
+	}
+	defer func() { runNixosRebuildSwitchFunc = origSwitch }()
+	origChown := osChownFunc
+	osChownFunc = func(string, int, int) error { return nil }
+	defer func() { osChownFunc = origChown }()
+	// Profile capture unavailable: conservative fallback rolls back anyway.
+	stubGenerationsErr(t)
+	origRollback := runNixosRebuildRollbackFunc
+	rollbackCalled := false
+	runNixosRebuildRollbackFunc = func() ([]byte, error) {
+		rollbackCalled = true
+		return []byte("rollback ok"), nil
+	}
+	defer func() { runNixosRebuildRollbackFunc = origRollback }()
+	origProbe := probeUpFunc
+	probeUpFunc = func() error { return nil }
+	defer func() { probeUpFunc = origProbe }()
+	err := runSystemUpgrade()
+	if err == nil || !strings.Contains(err.Error(), "nixos-rebuild switch") {
+		t.Fatalf("expected switch failure, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "rolled back") {
+		t.Fatalf("expected rollback report, got %v", err)
+	}
+	if !rollbackCalled {
+		t.Fatal("expected conservative rollback when the baseline is unknown")
+	}
+}

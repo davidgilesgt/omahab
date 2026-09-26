@@ -17,7 +17,15 @@ import (
 // maintenanceLockPath serializes backup/restore/storage/pause across CLI and
 // daemon, before per-app locks. The backup DB keeps its single-operation
 // constraint on top.
-func maintenanceLockPath() string { return "/run/omahab/maintenance.lock" }
+//
+// OMAHAB_MAINTENANCE_LOCK overrides the path in tests so lock-protected
+// flows stay hermetic without touching /run.
+func maintenanceLockPath() string {
+	if p := os.Getenv("OMAHAB_MAINTENANCE_LOCK"); p != "" {
+		return p
+	}
+	return "/run/omahab/maintenance.lock"
+}
 
 // withMaintenanceLock holds an exclusive flock on the shared maintenance lock
 // for the duration of fn. Blocking: callers serialize pause/restore/storage.

@@ -20,6 +20,14 @@ import (
 // Callers should use errors.Is to detect it.
 var ErrNotConfigured = errors.New("pocket-id not configured")
 
+// ErrRevocationNotSupported is returned when the deployed Pocket ID build
+// exposes no admin API to revoke the targeted credential. Pocket ID
+// documents no admin session-revocation route and no one-time-access-token
+// deletion route (tokens are single-use and expire); callers must treat the
+// credential as potentially still valid and say so. Callers should use
+// errors.Is to detect it.
+var ErrRevocationNotSupported = errors.New("pocket-id revocation not supported")
+
 // Group is the domain view of a Pocket ID user group.
 type Group struct {
 	ID           string `json:"id"`
@@ -645,6 +653,91 @@ func (c *PocketIDClient) DeleteUser(ctx context.Context, userID string) error {
 		return err
 	}
 	return c.doJSON(ctx, http.MethodDelete, "/api/users/"+url.PathEscape(userID), nil, nil)
+}
+
+// GetUserByEmail returns a domain.User for the Pocket ID user with the given
+// email address. It is the fail-closed disabled check for recovery flows that
+// start from an email rather than a local user record.
+func (c *PocketIDClient) GetUserByEmail(ctx context.Context, email string) (domain.User, error) {
+	email = strings.TrimSpace(strings.ToLower(email))
+	if email == "" {
+		return domain.User{}, store.Validation("email is required")
+	}
+	if err := c.ensureConfigured(); err != nil {
+		return domain.User{}, err
+	}
+	u, err := c.findUserByEmail(ctx, email)
+	if err != nil {
+		return domain.User{}, err
+	}
+	return pocketUserToDomain(*u), nil
+}
+
+// RevokeUserSessions revokes all login sessions for a Pocket ID user.
+// Pocket ID's admin API (verified against the pinned v2.14.0 source) exposes
+// no per-user session-revocation route because sessions are stateless JWTs:
+// middleware/jwt_auth.go Verify re-loads the user on every authenticated
+// request and rejects disabled accounts, so setting disabled IS the session
+// kill. This method therefore returns ErrRevocationNotSupported and callers
+// disable the account plus verify the flag read back instead of claiming a
+// revocation that never happened. It remains the single integration point to
+// implement if upstream ever adds server-side sessions with a revoke route.
+func (c *PocketIDClient) RevokeUserSessions(ctx context.Context, userID string) error {
+	if strings.TrimSpace(userID) == "" {
+		return store.Validation("userID is required")
+	}
+	if err := c.ensureConfigured(); err != nil {
+		return err
+	}
+	return fmt.Errorf("%w: no admin session-revocation route for user %q", ErrRevocationNotSupported, userID)
+}
+
+// ConsumeOneTimeToken redeems (and thereby invalidates) a one-time access
+// token without retaining a session. It burns the previous enrollment link
+// when a new one is issued so only the latest link works. The redeem route
+// POST /api/one-time-access-token/{token} is Pocket ID's public login
+// exchange; the created session is discarded. A 2xx means the token is now
+// consumed; a token-unknown/expired response also yields nil because the old
+// link is already dead. Any other failure (including a missing route, which
+// is indistinguishable from nothing but a generic response) returns an error
+// so the caller records the old link as potentially still valid.
+func (c *PocketIDClient) ConsumeOneTimeToken(ctx context.Context, code string) error {
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return store.Validation("code is required")
+	}
+	if err := c.ensureConfigured(); err != nil {
+		return err
+	}
+	path := "/api/one-time-access-token/" + url.PathEscape(code)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, nil)
+	if err != nil {
+		return fmt.Errorf("create request POST %s: %w", path, err)
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("pocket-id POST %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("read response POST %s: %w", path, err)
+	}
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+	body := strings.ToLower(strings.TrimSpace(string(respBytes)))
+	// Token-unknown/expired/gone: the old link is already dead, which is the
+	// goal. Require the word "token" so a generic route-unknown 404 is not
+	// mistaken for a dead token.
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone ||
+		resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnauthorized {
+		if strings.Contains(body, "token") {
+			return nil
+		}
+	}
+	return c.mapAPIError(http.MethodPost, path, resp.StatusCode, respBytes)
 }
 
 // HealthCheck verifies Pocket ID reachability with an authenticated request.

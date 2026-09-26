@@ -32,6 +32,15 @@ import (
 // It is used by controlplane backend before delegating to the gateway. See validateCallbackPath.
 func ValidateCallbackPath(p string) error { return validateCallbackPath(p) }
 
+// IssuedVirtualKey is the gateway's response to a virtual-key issuance.
+// Token is the LiteLLM-accepted bearer plaintext (sk- prefix) handed to the
+// caller exactly once; KeyID is the LiteLLM-side row identifier used for
+// precise revocation alongside the key alias.
+type IssuedVirtualKey struct {
+	Token string
+	KeyID string
+}
+
 // GatewayAdmin is the single control-plane boundary for the LiteLLM gateway.
 type GatewayAdmin interface {
 	Health(ctx context.Context) error
@@ -40,8 +49,9 @@ type GatewayAdmin interface {
 	CreateModel(ctx context.Context, deployment GatewayDeployment) error
 	ListGatewayCredentials(ctx context.Context) ([]GatewayCredentialSummary, error)
 	CreateGatewayCredential(ctx context.Context, input GatewayCredentialInput) error
-	IssueVirtualKey(ctx context.Context, vk VirtualKey) (string, error)
+	IssueVirtualKey(ctx context.Context, vk VirtualKey) (IssuedVirtualKey, error)
 	RevokeVirtualKey(ctx context.Context, gatewayKeyID, keyAlias string) error
+	RevokeVirtualKeyStrict(ctx context.Context, gatewayKeyID, keyAlias string) error
 	StartOAuth(ctx context.Context, provider, flow string) (OAuthSession, error)
 	PollOAuth(ctx context.Context, sessionID string) (OAuthSession, error)
 	ForwardOAuthCallback(ctx context.Context, sessionID, callbackPath string) error
@@ -757,25 +767,20 @@ func ShareGatewayConfig(path string) {
 	_ = os.Chmod(filepath.Dir(path), 0o750)
 }
 
-func (g *litellmGateway) IssueVirtualKey(ctx context.Context, vk VirtualKey) (string, error) {
+func (g *litellmGateway) IssueVirtualKey(ctx context.Context, vk VirtualKey) (IssuedVirtualKey, error) {
 	if strings.TrimSpace(vk.Name) == "" {
-		return "", fmt.Errorf("%w: virtual key name is required", ErrValidation)
+		return IssuedVirtualKey{}, fmt.Errorf("%w: virtual key name is required", ErrValidation)
 	}
 	if len(vk.Name) > 128 {
-		return "", fmt.Errorf("%w: virtual key name too long", ErrValidation)
+		return IssuedVirtualKey{}, fmt.Errorf("%w: virtual key name too long", ErrValidation)
 	}
 	for _, s := range vk.Scopes {
 		if !allowedAliases[strings.TrimSpace(s)] {
-			return "", fmt.Errorf("%w: unsupported scope %q", ErrValidation, s)
+			return IssuedVirtualKey{}, fmt.Errorf("%w: unsupported scope %q", ErrValidation, s)
 		}
 	}
 	if strings.TrimSpace(g.masterKey) == "" {
-		// Fallback synthesis for tests without master key
-		var b [16]byte
-		if _, err := rand.Read(b[:]); err != nil {
-			return "", err
-		}
-		return "sk-" + hex.EncodeToString(b[:]), nil
+		return IssuedVirtualKey{}, fmt.Errorf("%w: gateway master key not configured", ErrValidation)
 	}
 	ctx2, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -783,36 +788,49 @@ func (g *litellmGateway) IssueVirtualKey(ctx context.Context, vk VirtualKey) (st
 		"key_alias": strings.TrimSpace(vk.Name),
 		"models":    vk.Scopes,
 	}
+	// Forward every caller-supplied limit so the gateway enforces the same
+	// metadata the product stores: a directly presented sk- cannot bypass
+	// RPM/TPM/concurrency/budget because the gateway row carries them.
+	if vk.RPMLimit != nil {
+		payload["rpm_limit"] = *vk.RPMLimit
+	}
+	if vk.TPMLimit != nil {
+		payload["tpm_limit"] = *vk.TPMLimit
+	}
+	if vk.ConcurrencyLimit != nil {
+		payload["max_parallel_requests"] = *vk.ConcurrencyLimit
+	}
+	if vk.BudgetAmount != nil {
+		payload["max_budget"] = *vk.BudgetAmount
+	}
+	if vk.BudgetDuration != nil {
+		payload["budget_duration"] = strings.TrimSpace(*vk.BudgetDuration)
+	}
 	if vk.ExpiresAt != nil {
 		payload["duration"] = vk.ExpiresAt.UTC().Format(time.RFC3339Nano)
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return "", fmt.Errorf("marshal key generate: %w", err)
+		return IssuedVirtualKey{}, fmt.Errorf("marshal key generate: %w", err)
 	}
 	req, err := http.NewRequestWithContext(ctx2, http.MethodPost, g.baseURL+"/key/generate", bytes.NewReader(body))
 	if err != nil {
-		return "", fmt.Errorf("key generate request: %w", err)
+		return IssuedVirtualKey{}, fmt.Errorf("key generate request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-litellm-key", g.masterKey)
 	req.Header.Set("Authorization", "Bearer "+g.masterKey)
 	resp, err := g.httpClient.Do(req)
 	if err != nil {
-		// Fallback to synthesis if LiteLLM not reachable in test
-		var b [16]byte
-		if _, err2 := rand.Read(b[:]); err2 != nil {
-			return "", err
-		}
-		return "sk-" + hex.EncodeToString(b[:]), nil
+		return IssuedVirtualKey{}, fmt.Errorf("key generate failed: %w", err)
 	}
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		if classified := ClassifyHTTPStatus(resp.StatusCode); classified != nil {
-			return "", classified
+			return IssuedVirtualKey{}, classified
 		}
-		return "", fmt.Errorf("key generate unexpected status %d", resp.StatusCode)
+		return IssuedVirtualKey{}, fmt.Errorf("key generate unexpected status %d", resp.StatusCode)
 	}
 	var parsed struct {
 		Key   string `json:"key"`
@@ -820,37 +838,40 @@ func (g *litellmGateway) IssueVirtualKey(ctx context.Context, vk VirtualKey) (st
 		ID    string `json:"id"`
 	}
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
-		var m map[string]any
-		if err2 := json.Unmarshal(respBody, &m); err2 != nil {
-			return "", fmt.Errorf("parse key generate response: %w", err)
-		}
-		if v, ok := m["key_id"].(string); ok && v != "" {
-			parsed.KeyID = v
-		} else if v, ok := m["id"].(string); ok && v != "" {
-			parsed.ID = v
-		} else if v, ok := m["key"].(string); ok && v != "" {
-			parsed.KeyID = "key-" + hex.EncodeToString([]byte(v))[:8]
-			parsed.Key = v
-		}
+		return IssuedVirtualKey{}, fmt.Errorf("parse key generate response: %w", err)
 	}
-	gatewayID := parsed.KeyID
+	token := strings.TrimSpace(parsed.Key)
+	if token == "" {
+		return IssuedVirtualKey{}, fmt.Errorf("key generate: missing key in response")
+	}
+	if !strings.HasPrefix(token, "sk-") {
+		return IssuedVirtualKey{}, fmt.Errorf("key generate: gateway returned non-sk prefix")
+	}
+	gatewayID := strings.TrimSpace(parsed.KeyID)
 	if gatewayID == "" {
-		gatewayID = parsed.ID
-	}
-	if gatewayID == "" && parsed.Key != "" {
-		if len(parsed.Key) >= 12 {
-			gatewayID = "sk-" + parsed.Key[len(parsed.Key)-8:]
-		} else {
-			gatewayID = parsed.Key
-		}
+		gatewayID = strings.TrimSpace(parsed.ID)
 	}
 	if gatewayID == "" {
-		return "", fmt.Errorf("key generate: missing key_id in response")
+		return IssuedVirtualKey{}, fmt.Errorf("key generate: missing key_id in response")
 	}
-	return gatewayID, nil
+	return IssuedVirtualKey{Token: token, KeyID: gatewayID}, nil
 }
 
 func (g *litellmGateway) RevokeVirtualKey(ctx context.Context, gatewayKeyID, keyAlias string) error {
+	return g.revokeVirtualKey(ctx, gatewayKeyID, keyAlias, false)
+}
+
+// RevokeVirtualKeyStrict revokes the exact stored gateway handle (+alias)
+// and reports the real result for durable retry queues (companion device
+// revoke): transport errors and unexpected statuses are returned, never
+// swallowed. 404 still maps to nil — deleting an already-absent key is a
+// confirmed no-op, so retries are idempotent and any error means
+// unconfirmed-retry. Existing best-effort callers keep RevokeVirtualKey.
+func (g *litellmGateway) RevokeVirtualKeyStrict(ctx context.Context, gatewayKeyID, keyAlias string) error {
+	return g.revokeVirtualKey(ctx, gatewayKeyID, keyAlias, true)
+}
+
+func (g *litellmGateway) revokeVirtualKey(ctx context.Context, gatewayKeyID, keyAlias string, strict bool) error {
 	gatewayKeyID = strings.TrimSpace(gatewayKeyID)
 	keyAlias = strings.TrimSpace(keyAlias)
 	if gatewayKeyID == "" && keyAlias == "" {
@@ -894,6 +915,9 @@ func (g *litellmGateway) RevokeVirtualKey(ctx context.Context, gatewayKeyID, key
 	req.Header.Set("Authorization", "Bearer "+g.masterKey)
 	resp, err := g.httpClient.Do(req)
 	if err != nil {
+		if strict {
+			return fmt.Errorf("key delete failed: %w", err)
+		}
 		// Best-effort: if LiteLLM not reachable, consider revoked
 		return nil
 	}
@@ -1106,12 +1130,22 @@ func (NoopGateway) ListGatewayCredentials(ctx context.Context) ([]GatewayCredent
 func (NoopGateway) CreateGatewayCredential(ctx context.Context, input GatewayCredentialInput) error {
 	return fmt.Errorf("%w: gateway not configured", ErrValidation)
 }
-func (NoopGateway) IssueVirtualKey(ctx context.Context, vk VirtualKey) (string, error) {
+func (NoopGateway) IssueVirtualKey(ctx context.Context, vk VirtualKey) (IssuedVirtualKey, error) {
 	var b [16]byte
 	_, _ = rand.Read(b[:])
-	return "sk-" + hex.EncodeToString(b[:]), nil
+	token := "sk-" + hex.EncodeToString(b[:])
+	var id [8]byte
+	_, _ = rand.Read(id[:])
+	return IssuedVirtualKey{Token: token, KeyID: "key-" + hex.EncodeToString(id[:])}, nil
 }
 func (NoopGateway) RevokeVirtualKey(ctx context.Context, gatewayKeyID, keyAlias string) error {
+	return nil
+}
+
+// RevokeVirtualKeyStrict on the test-only NoopGateway reports success: there
+// is no gateway whose bearer could still be live. Production always wires
+// litellmGateway, where strict reports transport errors.
+func (NoopGateway) RevokeVirtualKeyStrict(ctx context.Context, gatewayKeyID, keyAlias string) error {
 	return nil
 }
 func (NoopGateway) StartOAuth(ctx context.Context, provider, flow string) (OAuthSession, error) {

@@ -70,9 +70,6 @@ function consumeFragmentToken(): void {
 
 interface AuthContextValue {
   token: string | null;
-  // True when the server accepts this browser without a token (lan placement
-  // + LAN or tailnet source address). Null while the probe is in flight.
-  lanBypass: boolean | null;
   client: ApiClient;
   authError: string | null;
   clearAuthError: () => void;
@@ -114,46 +111,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }), []);
 
-  // LAN bypass probe: without a token, GET /api/v1/status succeeds only when
-  // the server trusts this source address (lan placement + LAN or tailnet). Raw fetch on
-  // purpose — a 401 here must not fire the global unauthorized handler.
-  const [lanBypass, setLanBypass] = useState<boolean | null>(null);
-  useEffect(() => {
-    if (token) {
-      setLanBypass(null);
-      return;
-    }
-    let cancelled = false;
-    setLanBypass(null);
-    (async () => {
-      try {
-        const res = await fetch("/api/v1/status", { cache: "no-store" });
-        if (!cancelled) setLanBypass(res.ok);
-      } catch {
-        if (!cancelled) setLanBypass(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [token]);
-
-  useEffect(() => {
-    function handleUnauthorized() {
-      let enrolled = false;
-      try {
-        enrolled = sessionStorage.getItem(TOKEN_KEY) !== null;
-      } catch {}
-      setAuthError(enrolled
-        ? "Your session has expired or the token is invalid. Please sign in again."
-        : "Sign in with the 8-character panel token to continue.");
-      signOut();
-    }
-    window.addEventListener("omahab:unauthorized", handleUnauthorized);
-    return () => window.removeEventListener("omahab:unauthorized", handleUnauthorized);
-  }, [signOut]);
-
-  const value = useMemo(() => ({ token, lanBypass, client, authError, clearAuthError, signIn, signOut }), [client, signIn, signOut, token, lanBypass, authError, clearAuthError]);
+  // Every admin route requires the panel bearer token from every network;
+  // there is no address-based bypass. The token stays in this tab's
+  // sessionStorage, plus the cross-origin fragment handoff consumed above.
+  const value = useMemo(() => ({ token, client, authError, clearAuthError, signIn, signOut }), [client, signIn, signOut, token, authError, clearAuthError]);
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
@@ -164,21 +125,14 @@ export function useAuth() {
 }
 
 export function ProtectedRoute({ children }: { children: ReactNode }) {
-  const { token, lanBypass } = useAuth();
+  const { token } = useAuth();
   const location = useLocation();
-  if (token || lanBypass) return <>{children}</>;
-  if (lanBypass === null) {
-    return (
-      <div className="state-message" role="status" style={{ minHeight: "60vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
-        <span className="spinner" aria-hidden="true" /> Checking access…
-      </div>
-    );
-  }
+  if (token) return <>{children}</>;
   return <Navigate to="/login" replace state={{ from: location.pathname }} />;
 }
 
 export function LoginPage() {
-  const { token, lanBypass, signIn, authError, clearAuthError } = useAuth();
+  const { token, signIn, authError, clearAuthError } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const destination = (location.state as { from?: string } | null)?.from ?? "/";
@@ -186,22 +140,7 @@ export function LoginPage() {
   const [validating, setValidating] = useState(false);
   const displayError = submitError ?? authError;
 
-  // LAN bypass: no token needed when the server trusts this address. While the
-  // probe is in flight there is nothing to sign into yet — show waiting state
-  // instead of a token form that LAN mode never needs.
-  if (token || lanBypass) return <Navigate to={destination} replace />;
-  if (lanBypass === null) {
-    return (
-      <main className="login-page">
-        <section className="login-card" aria-labelledby="login-title">
-          <h1 id="login-title">Sign in to Omahab</h1>
-          <div className="state-message" role="status">
-            <span className="spinner" aria-hidden="true" /> Checking access…
-          </div>
-        </section>
-      </main>
-    );
-  }
+  if (token) return <Navigate to={destination} replace />;
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -235,7 +174,7 @@ export function LoginPage() {
     <main className="login-page">
       <section className="login-card" aria-labelledby="login-title">
         <h1 id="login-title">Sign in to Omahab</h1>
-        <p className="muted">Enter the 8-character panel token shown on the server console. It remains in this browser tab only. On a home-LAN install no token is needed, on the LAN or the tailnet.</p>
+        <p className="muted">Enter the 8-character panel token shown on the server console. It remains in this browser tab only.</p>
         {displayError && <p className="inline-error" role="alert">{displayError}</p>}
         <p className="muted">Find it on the host via <code className="mono">sudo cat /var/lib/omahab/api.token</code>, or reuse the token at <code className="mono">~/.config/omahab/token</code>.</p>
         <form onSubmit={submit} className="form-stack">

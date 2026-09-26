@@ -7,6 +7,7 @@ import (
 
 	"github.com/omahab/omahab/internal/apitypes"
 	"github.com/omahab/omahab/internal/domain"
+	"github.com/omahab/omahab/internal/scm"
 )
 
 // The PATCH path the CLI/web update flows use must persist name, hostname,
@@ -14,6 +15,7 @@ import (
 func TestUpdateProject_Persists(t *testing.T) {
 	ctx := context.Background()
 	b := newTestBackend(t, nil)
+	bindProjectTestSCM(t, b, scm.NewFakeForgejo(), scm.NewFakeWoodpecker())
 	p, err := b.CreateProject(ctx, apitypes.CreateProjectRequest{Name: "Site", Kind: "docs"})
 	if err != nil {
 		t.Fatalf("create: %v", err)

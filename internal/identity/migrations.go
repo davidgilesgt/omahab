@@ -35,5 +35,27 @@ CREATE INDEX IF NOT EXISTS idx_identity_security_events_email ON identity_securi
 CREATE INDEX IF NOT EXISTS idx_identity_security_events_created_at ON identity_security_events(created_at);
 `,
 		},
+		{
+			Name: "identity-003-invitations",
+			SQL: `
+-- Single-active enrollment invitations: every IssueUserEnrollment supersedes
+-- prior rows for the user so only the latest link is current. revoked tracks
+-- whether the previous Pocket ID one-time token was confirmed consumed via
+-- ConsumeOneTimeToken; note records why an old link may remain valid.
+CREATE TABLE IF NOT EXISTS identity_invitations (
+	id TEXT PRIMARY KEY,
+	user_id TEXT NOT NULL,
+	pocket_user_id TEXT NOT NULL DEFAULT '',
+	code TEXT NOT NULL,
+	url TEXT NOT NULL DEFAULT '',
+	expires_at TEXT NOT NULL,
+	superseded_at TEXT,
+	revoked INTEGER NOT NULL DEFAULT 0,
+	note TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_identity_invitations_user_id ON identity_invitations(user_id);
+`,
+		},
 	}
 }

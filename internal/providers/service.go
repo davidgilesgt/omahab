@@ -373,13 +373,14 @@ type IssueVirtualKeyInput struct {
 }
 
 // virtualKeyGateway is the narrow gateway contract needed by Service.IssueVirtualKey
-// to store the LiteLLM-side key ID. The full GatewayAdmin (Health, native
-// model/credential management, IssueVirtualKey, RevokeVirtualKey, StartOAuth,
-// PollOAuth, ForwardOAuthCallback, ProbeModel) is defined in litellm.go;
+// to obtain the LiteLLM-accepted bearer plaintext and store the LiteLLM-side
+// key ID. The full GatewayAdmin (Health, native model/credential management,
+// IssueVirtualKey, RevokeVirtualKey, StartOAuth, PollOAuth,
+// ForwardOAuthCallback, ProbeModel) is defined in litellm.go;
 // litellmGateway implements this narrow interface as well so Service can call
 // it without a package-level duplicate.
 type virtualKeyGateway interface {
-	IssueVirtualKey(ctx context.Context, vk VirtualKey) (string, error)
+	IssueVirtualKey(ctx context.Context, vk VirtualKey) (IssuedVirtualKey, error)
 	RevokeVirtualKey(ctx context.Context, gatewayKeyID, keyAlias string) error
 }
 
@@ -1130,11 +1131,42 @@ func (s *Service) ResolveAlias(ctx context.Context, name string) (*Credential, s
 
 // --- Virtual key methods ---
 
-// IssueVirtualKey generates a scoped virtual key. The plaintext token is returned once;
-// only its SHA256 hash is persisted. Scopes must be known aliases when non-empty.
+// LegacyVirtualKeyPrefix is the retired local-only token prefix. Tokens with
+// this prefix were minted locally and never accepted by the LiteLLM gateway,
+// which requires the sk- prefix. New issuance never mints this prefix;
+// existing rows are revoked by migration providers-008 and must be reissued
+// through the gateway. Use IsLegacyVirtualKeyToken to detect stored secrets
+// that still carry an unusable token.
+const LegacyVirtualKeyPrefix = "omk_"
+
+// GatewayVirtualKeyPrefix is the LiteLLM-accepted bearer prefix. Issued
+// product keys MUST carry this prefix; the gateway rejects anything else.
+const GatewayVirtualKeyPrefix = "sk-"
+
+// IsLegacyVirtualKeyToken reports whether a stored secret still carries a
+// retired omk_ token that the gateway will reject. Callers (setup ensure
+// paths for hermes/hindsight/karakeep, device provisioning) must reissue
+// through Service.IssueVirtualKey when this returns true.
+func IsLegacyVirtualKeyToken(token string) bool {
+	return strings.HasPrefix(strings.TrimSpace(token), LegacyVirtualKeyPrefix)
+}
+
+// IsLegacyVirtualKeyPrefix reports whether a persisted key_prefix belongs to
+// the retired omk_ lineage.
+func IsLegacyVirtualKeyPrefix(prefix string) bool {
+	return strings.HasPrefix(strings.TrimSpace(prefix), LegacyVirtualKeyPrefix)
+}
+
+// IssueVirtualKey issues a scoped virtual key through the LiteLLM gateway and
+// returns the gateway-accepted bearer plaintext exactly once. Only the SHA256
+// hash of that gateway plaintext is persisted, so local ValidateVirtualKey
+// correlates the same token the gateway authenticates. Scopes must be known
+// aliases when non-empty and are forwarded as the gateway models allowlist,
+// so out-of-scope use fails at the gateway and locally via Allows.
 // Owner and limit fields are optional but validated when present.
-// If a virtualKeyGateway is configured, the key is first issued in the gateway (LiteLLM)
-// and the returned gateway_key_id is persisted; if the gateway fails, no row is persisted.
+// A configured virtualKeyGateway is required: without it no gateway-accepted
+// token exists, so issuance fails closed instead of minting a local-only
+// token the gateway would reject. If the gateway fails, no row is persisted.
 func (s *Service) IssueVirtualKey(ctx context.Context, in IssueVirtualKeyInput) (*VirtualKeyWithToken, error) {
 	name := strings.TrimSpace(in.Name)
 	if name == "" {
@@ -1224,15 +1256,53 @@ func (s *Service) IssueVirtualKey(ctx context.Context, in IssueVirtualKeyInput) 
 		return nil, fmt.Errorf("%w: budget_amount is required when budget_duration is set", ErrValidation)
 	}
 
-	// Generate 32 random bytes, hex-encoded, prefixed for identification.
-	raw := make([]byte, 32)
-	if _, err := rand.Read(raw); err != nil {
-		return nil, fmt.Errorf("generate virtual key: %w", err)
+	// The product token MUST be the LiteLLM-accepted bearer. Issue in the
+	// gateway first; the gateway returns the sk- plaintext exactly once plus
+	// its row ID. The product persists only the hash of that same plaintext,
+	// so local ValidateVirtualKey correlates the token the gateway
+	// authenticates, and scopes travel as the gateway models allowlist.
+	if s.vkGateway == nil {
+		return nil, fmt.Errorf("%w: virtual key gateway not configured", ErrValidation)
 	}
-	// Token format: omk_<64 hex chars>  (no prompt content, no provider token)
-	token := "omk_" + hex.EncodeToString(raw)
+	gwVK := VirtualKey{
+		Name:             name,
+		Scopes:           scopes,
+		OwnerKind:        ownerKind,
+		OwnerID:          ownerID,
+		RPMLimit:         in.RPMLimit,
+		TPMLimit:         in.TPMLimit,
+		ConcurrencyLimit: in.ConcurrencyLimit,
+		BudgetAmount:     in.BudgetAmount,
+		BudgetDuration:   in.BudgetDuration,
+	}
+	if in.ExpiresAt != nil {
+		t := in.ExpiresAt.UTC()
+		gwVK.ExpiresAt = &t
+	}
+	issued, err := s.vkGateway.IssueVirtualKey(ctx, gwVK)
+	if err != nil {
+		return nil, fmt.Errorf("issue virtual key via gateway: %w", err)
+	}
+	token := strings.TrimSpace(issued.Token)
+	if token == "" {
+		return nil, fmt.Errorf("%w: gateway returned empty virtual key", ErrValidation)
+	}
+	if !strings.HasPrefix(token, GatewayVirtualKeyPrefix) {
+		return nil, fmt.Errorf("%w: gateway returned non-sk virtual key prefix", ErrValidation)
+	}
+	if IsLegacyVirtualKeyToken(token) {
+		return nil, fmt.Errorf("%w: gateway returned retired omk_ prefix", ErrValidation)
+	}
+	gatewayKeyIDStr := strings.TrimSpace(issued.KeyID)
+	if gatewayKeyIDStr == "" {
+		return nil, fmt.Errorf("%w: gateway returned empty key id", ErrValidation)
+	}
+	gatewayKeyID := &gatewayKeyIDStr
 	hash := hashToken(token)
-	prefix := token[:12] // "omk_" + 8 hex for prefix identification
+	prefix := token
+	if len(token) > 12 {
+		prefix = token[:12]
+	}
 	id := domain.ID(newID())
 	now := s.nowUTC()
 	scopesStr := strings.Join(scopes, ",")
@@ -1243,35 +1313,7 @@ func (s *Service) IssueVirtualKey(ctx context.Context, in IssueVirtualKeyInput) 
 		expiresAtStr = &v
 	}
 
-	// If gateway is configured, issue there first to obtain gateway_key_id.
-	var gatewayKeyID *string
-	if s.vkGateway != nil {
-		gwVK := VirtualKey{
-			Name:             name,
-			Scopes:           scopes,
-			OwnerKind:        ownerKind,
-			OwnerID:          ownerID,
-			RPMLimit:         in.RPMLimit,
-			TPMLimit:         in.TPMLimit,
-			ConcurrencyLimit: in.ConcurrencyLimit,
-			BudgetAmount:     in.BudgetAmount,
-			BudgetDuration:   in.BudgetDuration,
-		}
-		if in.ExpiresAt != nil {
-			t := in.ExpiresAt.UTC()
-			gwVK.ExpiresAt = &t
-		}
-		gid, err := s.vkGateway.IssueVirtualKey(ctx, gwVK)
-		if err != nil {
-			return nil, fmt.Errorf("issue virtual key via gateway: %w", err)
-		}
-		gidTrim := strings.TrimSpace(gid)
-		if gidTrim != "" {
-			gatewayKeyID = &gidTrim
-		}
-	}
-
-	_, err := s.db.ExecContext(ctx,
+	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO provider_virtual_keys (id, name, key_hash, key_prefix, scopes, gateway_key_id, owner_kind, owner_id, rpm_limit, tpm_limit, concurrency_limit, budget_amount, budget_duration, expires_at, revoked_at, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		string(id), name, hash, prefix, scopesStr,
@@ -1289,13 +1331,11 @@ func (s *Service) IssueVirtualKey(ctx context.Context, in IssueVirtualKeyInput) 
 		if isUniqueViolation(err) {
 			return nil, fmt.Errorf("%w: virtual key hash collision", ErrAlreadyExists)
 		}
-		// If we had issued in gateway, attempt to revoke to avoid orphan.
-		if gatewayKeyID != nil && s.vkGateway != nil {
-			_ = s.vkGateway.RevokeVirtualKey(ctx, *gatewayKeyID, name)
-		}
+		// Gateway already issued: revoke by alias + key id to avoid an
+		// orphan bearer nobody holds (plaintext was returned once above).
+		_ = s.vkGateway.RevokeVirtualKey(ctx, *gatewayKeyID, name)
 		return nil, fmt.Errorf("insert virtual key: %w", err)
 	}
-
 	vk := &VirtualKey{
 		ID:               id,
 		Name:             name,
@@ -1422,9 +1462,103 @@ func (s *Service) RevokeVirtualKey(ctx context.Context, id domain.ID) error {
 	return nil
 }
 
-// DeleteVirtualKey revokes a virtual key in the gateway (best-effort) and
-// deletes its metadata row. Returns ErrNotFound when no such row exists, so a
-// second DELETE of the same id surfaces 404 instead of a silent 204.
+// CleanupLegacyGatewayOrphans revokes pre-fix gateway rows whose bearer
+// plaintext was discarded at issuance (omk_ lineage: the product minted a
+// local-only omk_ token and kept only the gateway key ID, so the gateway
+// holds usable sk- rows with scopes/budget that nobody can present).
+//
+// It queries legacy rows REGARDLESS of revoked_at: migration
+// providers-008 revokes local omk_ rows before setup ensure callers run, so
+// filtering on revoked_at would miss every orphan. For each legacy row that
+// carries a gateway_key_id it revokes that exact stored handle plus the
+// row's alias; rows without a gateway_key_id never created a gateway row
+// and are skipped. Owner-agnostic: covers hermes, harness (user model keys,
+// hindsight, karakeep) and device rows alike.
+//
+// It performs no local writes and deletes no rows, so unrelated gateway
+// keys are never touched. Idempotent: gateway revoke is best-effort per
+// row and already-absent gateway rows count as cleaned. Returns the number
+// of gateway handles revoked; the first gateway error is returned alongside
+// the count so callers can log it without failing setup.
+func (s *Service) CleanupLegacyGatewayOrphans(ctx context.Context) (int, error) {
+	if s.vkGateway == nil {
+		return 0, nil
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT name, gateway_key_id FROM provider_virtual_keys WHERE key_prefix LIKE 'omk_%' AND gateway_key_id IS NOT NULL AND gateway_key_id != ''`)
+	if err != nil {
+		return 0, fmt.Errorf("list legacy virtual keys: %w", err)
+	}
+	defer rows.Close()
+	cleaned := 0
+	var firstErr error
+	for rows.Next() {
+		var name, gatewayKeyID string
+		if err := rows.Scan(&name, &gatewayKeyID); err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("scan legacy virtual key: %w", err)
+			}
+			continue
+		}
+		name = strings.TrimSpace(name)
+		gatewayKeyID = strings.TrimSpace(gatewayKeyID)
+		if gatewayKeyID == "" {
+			continue
+		}
+		if err := s.vkGateway.RevokeVirtualKey(ctx, gatewayKeyID, name); err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("revoke legacy gateway key %q: %w", name, err)
+			}
+			continue
+		}
+		cleaned++
+	}
+	if err := rows.Err(); err != nil && firstErr == nil {
+		firstErr = fmt.Errorf("iterate legacy virtual keys: %w", err)
+	}
+	return cleaned, firstErr
+}
+
+// GatewayRevokeVirtualKey revokes a virtual key's stored gateway handle
+// (+alias) and reports the gateway result for durable retry queues
+// (companion device revoke). It performs no local writes: revoked_at is
+// untouched, so already-locally-revoked rows stay as-is and callers retry
+// until nil. A gateway-side not-found counts as success (nil) — the bearer
+// is dead in LiteLLM either way. Rows without a stored gateway handle (or
+// no configured gateway) return nil: there is nothing to confirm.
+// Unknown local ids return ErrNotFound.
+func (s *Service) GatewayRevokeVirtualKey(ctx context.Context, id domain.ID) error {
+	if strings.TrimSpace(string(id)) == "" {
+		return fmt.Errorf("%w: id is required", ErrValidation)
+	}
+	vk, err := s.GetVirtualKey(ctx, id)
+	if err != nil {
+		return err
+	}
+	if vk.GatewayKeyID == nil || s.vkGateway == nil {
+		return nil
+	}
+	// Confirmation uses the strict gateway path: transport errors and
+	// unexpected statuses are returned, unlike the lenient RevokeVirtualKey
+	// which treats an unreachable gateway as revoked. Gateways exposing only
+	// the lenient method fall back to it (test doubles).
+	if strict, ok := s.vkGateway.(interface {
+		RevokeVirtualKeyStrict(ctx context.Context, gatewayKeyID, keyAlias string) error
+	}); ok {
+		return strict.RevokeVirtualKeyStrict(ctx, *vk.GatewayKeyID, vk.Name)
+	}
+	return s.vkGateway.RevokeVirtualKey(ctx, *vk.GatewayKeyID, vk.Name)
+}
+
+// DeleteVirtualKey revokes a virtual key in the gateway and deletes its
+// metadata row. Returns ErrNotFound when no such row exists, so a second
+// DELETE of the same id surfaces 404 instead of a silent 204.
+//
+// The row (including its gateway_key_id) is retained until the gateway
+// confirms revocation: on gateway failure the row is tombstoned (revoked_at
+// set, Validate rejects) and an error is returned instead of 204, so a live
+// gateway bearer is never orphaned by deleting its last handle. Retrying
+// delete re-attempts the gateway revoke and removes the row on success.
 func (s *Service) DeleteVirtualKey(ctx context.Context, id domain.ID) error {
 	if strings.TrimSpace(string(id)) == "" {
 		return fmt.Errorf("%w: id is required", ErrValidation)
@@ -1436,6 +1570,9 @@ func (s *Service) DeleteVirtualKey(ctx context.Context, id domain.ID) error {
 	if vk.GatewayKeyID != nil && s.vkGateway != nil {
 		if err := s.vkGateway.RevokeVirtualKey(ctx, *vk.GatewayKeyID, vk.Name); err != nil {
 			now := s.nowUTC()
+			_, _ = s.db.ExecContext(ctx,
+				`UPDATE provider_virtual_keys SET revoked_at = COALESCE(revoked_at, ?), updated_at = ? WHERE id = ?`,
+				now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), string(id))
 			_ = s.sink.Emit(ctx, domain.Event{
 				ID:         domain.ID(newID()),
 				Type:       "provider.virtual_key.revoke_gateway_failed",
@@ -1444,6 +1581,7 @@ func (s *Service) DeleteVirtualKey(ctx context.Context, id domain.ID) error {
 				Message:    fmt.Sprintf("virtual key gateway revoke failed: %v", err),
 				CreatedAt:  now,
 			})
+			return fmt.Errorf("delete virtual key: gateway revoke failed: %w", err)
 		}
 	}
 	res, err := s.db.ExecContext(ctx, `DELETE FROM provider_virtual_keys WHERE id = ?`, string(id))

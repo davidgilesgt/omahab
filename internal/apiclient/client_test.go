@@ -122,3 +122,94 @@ func TestVerifyLatestBackupError(t *testing.T) {
 		t.Fatalf("status = %d, want 404", apiErr.StatusCode)
 	}
 }
+
+func TestRestartApplicationRequest(t *testing.T) {
+	var gotMethod, gotPath, gotAuth string
+	var gotBody map[string]any
+	var decodeErr error
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		decodeErr = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(domain.Application{
+			ID: "app_38c354c34a89c73b02c2fa9b", Name: "forgejo",
+			DesiredState: "running", ObservedState: "running", Health: domain.HealthHealthy,
+		})
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "test-token")
+	c.HTTPClient = srv.Client()
+
+	app, err := c.RestartApplication(context.Background(), "app_38c354c34a89c73b02c2fa9b")
+	if decodeErr != nil {
+		t.Fatalf("decode request body: %v", decodeErr)
+	}
+	if err != nil {
+		t.Fatalf("RestartApplication error: %v", err)
+	}
+	if app.ID != "app_38c354c34a89c73b02c2fa9b" || app.Name != "forgejo" {
+		t.Fatalf("got %+v, want restarted forgejo application", app)
+	}
+	if gotMethod != http.MethodPost {
+		t.Fatalf("method = %q, want POST", gotMethod)
+	}
+	if gotPath != "/api/v1/applications/app_38c354c34a89c73b02c2fa9b/actions" {
+		t.Fatalf("path = %q, want actions route", gotPath)
+	}
+	if gotBody["action"] != "restart" {
+		t.Fatalf("body = %+v, want {action:restart}", gotBody)
+	}
+	if gotAuth != "Bearer test-token" {
+		t.Fatalf("auth = %q, want Bearer test-token", gotAuth)
+	}
+}
+
+func TestAckEventRequest(t *testing.T) {
+	var gotMethod, gotPath string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"348eb64ea50b468922aa940d1709d1b1","read":true}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "test-token")
+	c.HTTPClient = srv.Client()
+
+	if err := c.AckEvent(context.Background(), "348eb64ea50b468922aa940d1709d1b1"); err != nil {
+		t.Fatalf("AckEvent error: %v", err)
+	}
+	if gotMethod != http.MethodPost {
+		t.Fatalf("method = %q, want POST", gotMethod)
+	}
+	if gotPath != "/api/v1/events/348eb64ea50b468922aa940d1709d1b1/read" {
+		t.Fatalf("path = %q, want read route", gotPath)
+	}
+}
+
+func TestGetWorkspaceNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/workspaces/no-such-ws" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"workspace not found"}}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "test-token")
+	c.HTTPClient = srv.Client()
+
+	_, err := c.GetWorkspace(context.Background(), "no-such-ws")
+	if err == nil {
+		t.Fatal("expected not-found error, got nil")
+	}
+	if !IsNotFound(err) {
+		t.Fatalf("err = %v, want a 404 not-found error", err)
+	}
+}

@@ -96,7 +96,7 @@ export function HomePage() {
           <p className="muted">{assistant} is looking after this household.</p>
         </div>
         <div className="page-actions">
-          <a className="button secondary" href="/admin">
+          <a className="button secondary" href="/admin/">
             Admin
           </a>
         </div>

@@ -21,7 +21,14 @@ func ProvisionUserToken(username, token string) error {
 		// User not created yet (module creates it); retry on next start.
 		return fmt.Errorf("lookup user %q: %w", username, err)
 	}
-	dir := filepath.Join(u.HomeDir, ".config", "omahab")
+	home := u.HomeDir
+	// Shared test redirect with internal/sshkeys (OMAHAB_SSH_HOME): keeps the
+	// full admin-account flow, including this best-effort provisioning, inside
+	// a temp dir. Production never sets it.
+	if override := strings.TrimSpace(os.Getenv("OMAHAB_SSH_HOME")); override != "" {
+		home = override
+	}
+	dir := filepath.Join(home, ".config", "omahab")
 	path := filepath.Join(dir, "token")
 	if data, err := os.ReadFile(path); err == nil && strings.TrimSpace(string(data)) == strings.TrimSpace(token) {
 		return nil

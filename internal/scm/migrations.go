@@ -90,8 +90,19 @@ CREATE TABLE IF NOT EXISTS scm_mirrors (
 	created_at TEXT NOT NULL,
 	updated_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_scm_mirrors_repository_id ON scm_mirrors(repository_id);
 `,
 		},
-	}
+		{
+			Name: "scm-005-repo-ownership",
+			SQL: `
+-- Tracks whether the Forgejo repository predates the project (adopted) or
+-- was created by provisioning it. Ordinary project rm deletes only
+-- product-created repositories; adopted pre-existing repositories are
+-- preserved unless explicitly deleted. Legacy rows default to 0
+-- (product-created), preserving historical rm behavior; every new
+-- Provision records the true origin explicitly.
+ALTER TABLE scm_repositories ADD COLUMN adopted INTEGER NOT NULL DEFAULT 0;
+`,
+		},
+}
 }

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/omahab/omahab/internal/domain"
+	"github.com/omahab/omahab/internal/scm"
 	"github.com/omahab/omahab/internal/store"
 )
 
@@ -563,6 +564,9 @@ func TestService_Create_RollsBackOnRunnerFailure(t *testing.T) {
 			if err == nil {
 				t.Fatal("Create with failing runner should return an error")
 			}
+			if !errors.Is(err, ErrProvisionFailed) {
+				t.Fatalf("err = %v, want ErrProvisionFailed", err)
+			}
 			if ws != nil {
 				t.Fatalf("Create should return nil workspace on failure, got %+v", ws)
 			}
@@ -579,4 +583,102 @@ func TestService_Create_RollsBackOnRunnerFailure(t *testing.T) {
 
 func readFile(p string) ([]byte, error) {
 	return os.ReadFile(p)
+}
+
+// captureRunner records Runner.Up options while succeeding, so tests can
+// assert the provisioned backend context (source, env, naming).
+type captureRunner struct {
+	NoopRunner
+	mu   sync.Mutex
+	opts []RunnerOpts
+}
+
+func (r *captureRunner) Up(_ context.Context, _ string, _ domain.ID, _, _ string, opts RunnerOpts) error {
+	r.mu.Lock()
+	r.opts = append(r.opts, opts)
+	r.mu.Unlock()
+	return nil
+}
+
+func openBranchTestService(t *testing.T, runner Runner) (*Service, *scm.FakeForgejo) {
+	t.Helper()
+	st := openTestDB(t)
+	svc := New(st.DB(), runner)
+	fake := scm.NewFakeForgejo()
+	fake.Repos["omahab/dev-code"] = &scm.Repo{
+		Owner: "omahab", Name: "dev-code",
+		CloneURL: "https://git.example.com/omahab/dev-code.git",
+		Private:  true, DefaultBranch: "main",
+	}
+	fake.Branches["omahab/dev-code"] = map[string]*scm.Branch{
+		"main": {Name: "main", CommitSHA: "912a11906"},
+	}
+	svc.SetBranchCreator(fake)
+	svc.SetForgejo(fake)
+	svc.SetProjectResolver(func(_ context.Context, id domain.ID) (*domain.Project, error) {
+		return &domain.Project{ID: id, RepositoryURL: "https://git.example.com/omahab/dev-code.git"}, nil
+	})
+	svc.SetDomainResolver(func(_ context.Context) (string, error) { return "example.com", nil })
+	return svc, fake
+}
+
+// A branch-only create request (the reported repro: no title, branch main,
+// repo branch main already exists) must mint a unique ws/ branch off the
+// existing repo branch with full backend context, and list afterwards.
+func TestService_Create_BranchOnlyRequest_MintsWorkspaceBranch(t *testing.T) {
+	runner := &captureRunner{}
+	svc, fake := openBranchTestService(t, runner)
+	ctx := context.Background()
+	ws, err := svc.Create(ctx, CreateInput{ProjectID: "proj-dev-code", Branch: "main", Agent: "omp"})
+	if err != nil {
+		t.Fatalf("Create branch-only: %v", err)
+	}
+	if ws.Branch == "main" || !strings.HasPrefix(ws.Branch, "ws/main-") {
+		t.Fatalf("branch = %q, want ws/main-<short>", ws.Branch)
+	}
+	if _, ok := fake.Branches["omahab/dev-code"][ws.Branch]; !ok {
+		t.Fatalf("forgejo missing workspace branch %q (have %v)", ws.Branch, fake.Branches["omahab/dev-code"])
+	}
+	if len(runner.opts) != 1 {
+		t.Fatalf("runner Up calls = %d, want 1", len(runner.opts))
+	}
+	got := runner.opts[0]
+	if !strings.Contains(got.Source, "@"+ws.Branch) {
+		t.Fatalf("runner source = %q, want @%s suffix", got.Source, ws.Branch)
+	}
+	if got.WorkspaceEnv["OPENAI_BASE_URL"] != "https://models.example.com/v1" {
+		t.Fatalf("workspace env = %+v, want models.example.com base", got.WorkspaceEnv)
+	}
+	if strings.TrimSpace(got.Name) == "" {
+		t.Fatal("runner name empty")
+	}
+	list, err := svc.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 1 || list[0].Branch != ws.Branch {
+		t.Fatalf("list has %d items, want the created workspace", len(list))
+	}
+}
+
+// A branch-creation failure rolls back the pending row and surfaces
+// ErrProvisionFailed so callers can map it to an actionable status.
+func TestService_Create_BranchFailure_RollsBackAsProvisionFailed(t *testing.T) {
+	svc, fake := openBranchTestService(t, NoopRunner{})
+	fake.CreateBranchErr = errors.New("forgejo unavailable")
+	ctx := context.Background()
+	ws, err := svc.Create(ctx, CreateInput{ProjectID: "proj-dev-code", Title: "do work", Agent: "omp"})
+	if ws != nil {
+		t.Fatalf("expected nil workspace, got %+v", ws)
+	}
+	if !errors.Is(err, ErrProvisionFailed) {
+		t.Fatalf("err = %v, want ErrProvisionFailed", err)
+	}
+	list, err := svc.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 0 {
+		t.Fatalf("failed provision left %d phantom row(s)", len(list))
+	}
 }

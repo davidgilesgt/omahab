@@ -6,11 +6,13 @@ import (
 	"testing"
 
 	"github.com/omahab/omahab/internal/apitypes"
+	"github.com/omahab/omahab/internal/scm"
 )
 
 func TestCreateProjectKindValidation(t *testing.T) {
 	ctx := context.Background()
 	b := newTestBackend(t, nil)
+	bindProjectTestSCM(t, b, scm.NewFakeForgejo(), scm.NewFakeWoodpecker())
 
 	if _, err := b.CreateProject(ctx, apitypes.CreateProjectRequest{Name: "Bad Kind", Kind: "video"}); err == nil {
 		t.Fatal("kind video should fail validation")
@@ -36,6 +38,7 @@ func TestCreateProjectKindValidation(t *testing.T) {
 func TestCreateProjectDocsSkipsReleaseToken(t *testing.T) {
 	ctx := context.Background()
 	b := newTestBackend(t, nil)
+	bindProjectTestSCM(t, b, scm.NewFakeForgejo(), scm.NewFakeWoodpecker())
 
 	docs, err := b.CreateProject(ctx, apitypes.CreateProjectRequest{Name: "Gov Filing", Kind: "docs"})
 	if err != nil {

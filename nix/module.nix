@@ -226,7 +226,12 @@ in
       "d ${dataDir}/projects 0755 root root - -"
       "d ${dataDir}/workspaces 0755 root root - -"
       "d ${dataDir}/backups 0755 root root - -"
-      "d ${dataDir}/derived-indexes 0755 root root - -"
+      # Local restic repositories live here (per-repo subdirectories with
+      # the instance-ID suffix appended at run time). Under ${dataDir} so
+      # omahabd can write it within its sandbox, and outside every backup
+      # source tree so repositories never capture themselves. Never /tmp
+      # or /var/tmp: PrivateTmp hides those from the daemon.
+      "d ${dataDir}/backups/repos 0700 root root - -"
       "d /var/log/omahab 0750 root root - -"
       "d /var/cache/omahab 0755 root root - -"
       "d /var/lib/cloudflared 0700 cloudflared cloudflared - -"

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -15,6 +16,14 @@ import (
 
 	"github.com/omahab/omahab/internal/apitypes"
 )
+
+// errTechnitiumAuthRequired marks missing operator-owned Technitium console
+// credentials: the server no longer accepts the default login, the one-time
+// initial password is already shown (secret consumed), and no API token is
+// configured. Only the operator can restore access via the Technitium setup
+// view, so callers MUST treat this as an actionable pending prerequisite —
+// never as silent success and never as a permanent automatic failure.
+var errTechnitiumAuthRequired = errors.New("technitium auth required: operator console credentials needed")
 
 // Technitium DNS — household filtering on LAN :53, web/API on 127.0.0.1:5380.
 // Managed via HTTP API (APIDOCS): /api/status, /api/user/login,
@@ -284,8 +293,9 @@ func (b *Backend) ensureTechnitium(ctx context.Context) error {
 	}
 	if token == "" {
 		// Steady state: API token or session managed outside first-boot.
-		// Settings convergence needs auth; without it report clearly.
-		return fmt.Errorf("technitium auth required: initial password already shown and no API token configured")
+		// Settings convergence needs auth; without it the operator must
+		// restore console access (sentinel, not a system failure).
+		return fmt.Errorf("initial password already shown and no API token configured: %w", errTechnitiumAuthRequired)
 	}
 	lan := lanAddresses()
 	if err := technitiumApplySettings(ctx, token, lan); err != nil {
@@ -351,8 +361,12 @@ func technitiumLoginFromSecrets(ctx context.Context, b *Backend) (string, error)
 	if tok, err := b.secrets.RevealByName(ctx, "platform-app", "technitium_api_token"); err == nil && strings.TrimSpace(tok) != "" {
 		return strings.TrimSpace(tok), nil
 	}
-	return "", fmt.Errorf("technitium auth required: no initial password or API token in secrets")
+	return "", fmt.Errorf("no initial password or API token in secrets: %w", errTechnitiumAuthRequired)
 }
+
+// checkTechnitiumPortConflictFunc is the port-53 conflict probe used by setup.
+// It is a variable so tests can stub the host network binding.
+var checkTechnitiumPortConflictFunc = checkTechnitiumPortConflict
 
 // checkTechnitiumPortConflict refuses existing port-53 conflicts with an
 // actionable message. It never touches the conflicting service.

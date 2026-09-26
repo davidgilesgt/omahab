@@ -106,9 +106,10 @@ func loadOperation(stateDir, id string) (Operation, error) {
 
 // storageJournal persists a storage migration across restarts.
 type storageJournal struct {
-	Operation  Operation          `json:"operation"`
-	Placements []StoragePlacement `json:"placements"`
-	Previous   []StoragePlacement `json:"previous"`
+	Operation         Operation          `json:"operation"`
+	Placements        []StoragePlacement `json:"placements"`
+	Previous          []StoragePlacement `json:"previous"`
+	PreviousProposals []StoragePlacement `json:"previous_proposals,omitempty"`
 }
 
 func writeStorageJournal(stateDir string, j storageJournal) error {
@@ -170,6 +171,16 @@ func (b *Backend) dismissOperation(id string) (Operation, error) {
 	if err != nil {
 		return Operation{}, err
 	}
+	// Orphan pending no-op records (for example pre-validation storage
+	// placements recorded without a migration journal) never started work:
+	// nothing blocks on them and no journal holds live state, so removing
+	// the inert record is safe. Anything with a live journal stays on the
+	// resume/rollback path below.
+	if op.Status == OpPending && !hasLiveJournal(b.cfg.StateDir, op) {
+		_ = os.RemoveAll(filepath.Join(operationsDir(b.cfg.StateDir, op.Kind), id))
+		op.Status = OpCompleted
+		return op, nil
+	}
 	if op.Status == OpRunning || op.Status == OpPending || op.Status == OpPaused {
 		return Operation{}, fmt.Errorf("%w: cannot dismiss %s operation", apitypes.ErrConflict, op.Status)
 	}
@@ -185,6 +196,30 @@ func (b *Backend) dismissOperation(id string) (Operation, error) {
 	_ = os.RemoveAll(filepath.Join(operationsDir(b.cfg.StateDir, op.Kind), id))
 	op.Status = OpCompleted
 	return op, nil
+}
+
+// hasLiveJournal reports whether id holds journaled migration/restore state.
+// Storage placements recorded without migrate:true persist only a bare
+// operation record (no storage journal); a bare record unmarshals with an
+// empty wrapped operation, so the ID comparison distinguishes it from a
+// live migration journal.
+func hasLiveJournal(stateDir string, op Operation) bool {
+	switch op.Kind {
+	case "storage":
+		j, err := loadStorageJournal(stateDir, op.ID)
+		if err != nil {
+			return false
+		}
+		return j.Operation.ID == op.ID
+	case "restore":
+		j, err := loadRestoreJournal(stateDir, op.ID)
+		if err != nil {
+			return false
+		}
+		return j.Operation.ID == op.ID
+	default:
+		return true
+	}
 }
 
 func (b *Backend) resumeStorageOperation(ctx context.Context, id string) (Operation, error) {
@@ -228,7 +263,9 @@ func (b *Backend) runStorageRollback(id string) {
 			return err
 		}
 		ctx := context.Background()
-		prev := storageFile{Version: storageFileVersion, Placements: j.Previous}
+		// Restore the pre-migration active set; the failed targets stay
+		// proposed so the intent survives the reverted activation.
+		prev := storageFile{Version: storageFileVersion, Placements: j.Previous, Proposals: rollbackProposals(j)}
 		if err := writeStorageFile(storageJSONPath(b.cfg.StateDir), prev); err != nil {
 			return failStorageOp(b.cfg.StateDir, &j, err.Error())
 		}

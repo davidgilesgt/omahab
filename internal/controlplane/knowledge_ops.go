@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -174,6 +175,27 @@ func (b *Backend) KnowledgeSetIndexSetup(ctx context.Context, choice string) err
 	if err := b.knowledge.SetIndexSetupChoice(ctx, choice); err != nil {
 		return translateError(err)
 	}
+	// F-embedding-worker-no-models: stage + verify the selected artifact
+	// BEFORE touching the live worker config. Download failure returns an
+	// error (the persisted choice stays so reconcile retries); English stages
+	// for memory in every mode, worldwide additionally stages its document
+	// model, and the config below always carries the memory entry.
+	// Paths go through the embedding test seams (defaulting to production)
+	// so hermetic tests stage under t.TempDir instead of /var/lib/omahab.
+	if _, err := prepareChoiceModel(ctx, choice, embeddingModelsBaseDir); err != nil {
+		return translateError(err)
+	}
+	// Materialize the pinned config for the stored choice immediately
+	// (dashboard-driven, outside setup phases): every choice renders English
+	// for memory plus the worldwide document model when selected; full_text
+	// carries memory only and keeps document indexing off.
+	// Best-effort restart so /health reflects the loaded model;
+	// setupPhaseDependentApps converges the same state on reconcile.
+	if alias, werr := knowledge.WriteEmbeddingWorkerConfig(embeddingWorkerConfigPath, choice); werr != nil {
+		log.Printf("knowledge index setup: write worker config: %v", werr)
+	} else if rerr := b.redeployBundle(ctx, "embedding-worker"); rerr != nil {
+		log.Printf("knowledge index setup: restart embedding worker (alias %q): %v", alias, rerr)
+	}
 	return nil
 }
 func (b *Backend) GetHermesMCPToken(ctx context.Context) (string, error) {
@@ -286,4 +308,5 @@ func (b *Backend) refreshHermesMCPConsumer(ctx context.Context, newToken string)
 	}
 	return nil
 }
+
 // Identity extended

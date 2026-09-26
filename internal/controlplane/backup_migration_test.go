@@ -80,15 +80,15 @@ func TestMigrateBackupCredentialShapes_LegacyPerRepoAndShared(t *testing.T) {
 	ctx := context.Background()
 
 	ref1 := putLegacySecret(t, b, "backup_repo_repo1", "legacy-password-1")
-	repo1 := configureRepo(t, b, "repo1", "/tmp/repo1", ref1)
+	repo1 := configureRepo(t, b, "repo1", "/srv/omahab/backups/repos/repo1", ref1)
 
 	sharedRef := putLegacySecret(t, b, "backup_repo_credentials", "shared-password")
-	repo2 := configureRepo(t, b, "repo2", "/tmp/repo2", sharedRef)
-	repo3 := configureRepo(t, b, "repo3", "/tmp/repo3", sharedRef)
+	repo2 := configureRepo(t, b, "repo2", "/srv/omahab/backups/repos/repo2", sharedRef)
+	repo3 := configureRepo(t, b, "repo3", "/srv/omahab/backups/repos/repo3", sharedRef)
 
 	validJSON, _ := json.Marshal(backups.Credentials{Password: "valid-pass", Username: "user1", AccessKey: "key1"})
 	ref4 := putLegacySecret(t, b, "backup_repo_repo4", string(validJSON))
-	repo4 := configureRepo(t, b, "repo4", "/tmp/repo4", ref4)
+	repo4 := configureRepo(t, b, "repo4", "/srv/omahab/backups/repos/repo4", ref4)
 
 	if err := b.migrateBackupCredentialShapes(ctx); err != nil {
 		t.Fatalf("migrate: %v", err)
@@ -145,8 +145,8 @@ func TestMigrateBackupCredentialShapes_TwoDifferentPasswords(t *testing.T) {
 	ctx := context.Background()
 	refA := putLegacySecret(t, b, "backup_repo_a", "alpha-secret")
 	refB := putLegacySecret(t, b, "backup_repo_b", "beta-secret")
-	repoA := configureRepo(t, b, "a", "/tmp/a", refA)
-	repoB := configureRepo(t, b, "b", "/tmp/b", refB)
+	repoA := configureRepo(t, b, "a", "/srv/omahab/backups/repos/mig-a", refA)
+	repoB := configureRepo(t, b, "b", "/srv/omahab/backups/repos/mig-b", refB)
 	if err := b.migrateBackupCredentialShapes(ctx); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -167,7 +167,7 @@ func TestMigrateBackupCredentialShapes_RetryPreservesConverted(t *testing.T) {
 	b := newMigrationBackend(t)
 	ctx := context.Background()
 	ref := putLegacySecret(t, b, "backup_repo_retry", "retry-pass")
-	repo := configureRepo(t, b, "retry", "/tmp/retry", ref)
+	repo := configureRepo(t, b, "retry", "/srv/omahab/backups/repos/mig-retry", ref)
 	if err := b.migrateBackupCredentialShapes(ctx); err != nil {
 		t.Fatalf("migrate 1: %v", err)
 	}
@@ -196,12 +196,12 @@ func TestMigrateBackupCredentialShapes_EmptyAndInvalidTypes(t *testing.T) {
 	b := newMigrationBackend(t)
 	ctx := context.Background()
 	emptyRef := putLegacySecret(t, b, "backup_repo_empty", "nonempty-placeholder")
-	emptyRepo := configureRepo(t, b, "empty", "/tmp/empty", emptyRef)
+	emptyRepo := configureRepo(t, b, "empty", "/srv/omahab/backups/repos/mig-empty", emptyRef)
 	_ = emptyRepo
 	_ = emptyRef
 	badJSON := `{"Password":123,"Username":"u"}`
 	badRef := putLegacySecret(t, b, "backup_repo_bad", badJSON)
-	badRepo := configureRepo(t, b, "bad", "/tmp/bad", badRef)
+	badRepo := configureRepo(t, b, "bad", "/srv/omahab/backups/repos/mig-bad", badRef)
 	if err := b.migrateBackupCredentialShapes(ctx); err == nil {
 		t.Fatal("expected migration error for invalid field types")
 	} else if strings.Contains(err.Error(), "123") {
@@ -251,7 +251,7 @@ func TestCreateBackupRepositoryStoresJSONCredentials(t *testing.T) {
 	ctx := context.Background()
 	repo, err := b.CreateBackupRepository(ctx, apitypes.CreateBackupRepositoryRequest{
 		Label:    "generic",
-		Location: "/tmp/backup-generic",
+		Location: "/srv/omahab/backups/repos/generic",
 		Password: "generic-secret",
 	})
 	if err != nil {

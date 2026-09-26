@@ -6,15 +6,19 @@ import (
 	"strings"
 )
 
-// RunBackup starts a backup run: it resolves repository credentials, runs
-// every registered pre-backup hook, and only then snapshots the configured
-// paths with restic. Any hook failure aborts the run before restic starts,
+// RunBackup starts a backup run: it resolves repository credentials,
+// guarantees the scoped restic backend is initialized, runs every
+// registered pre-backup hook, and only then snapshots the configured paths
+// with restic. Any hook failure aborts the run before restic starts,
 // because copying live database files is not a valid backup.
 //
 // The returned run is the persisted record; when the run fails, the record
 // carries the failed stage and redacted error and the error is non-nil.
+// Preflight failures (unknown repository, unreachable backend) return
+// before any run row is inserted, so callers can fail fast before stopping
+// applications.
 func (s *Service) RunBackup(ctx context.Context, req RunRequest) (Run, error) {
-	repo, err := s.resolveRepository(ctx, req.RepositoryID)
+	repo, creds, err := s.PreflightRepository(ctx, req.RepositoryID)
 	if err != nil {
 		return Run{}, err
 	}
@@ -32,13 +36,6 @@ func (s *Service) RunBackup(ctx context.Context, req RunRequest) (Run, error) {
 		return Run{}, err
 	}
 
-	creds, err := s.secrets.Resolve(ctx, repo.SecretRef)
-	if err != nil {
-		werr := fmt.Errorf("resolve credentials for secret %s version %d: %w", repo.SecretRef.ID, repo.SecretRef.Version, err)
-		s.failRun(ctx, run, StageCredentials, werr)
-		return *run, fmt.Errorf("backups: backup run %s failed: %w", run.ID, err)
-	}
-
 	if herr := s.executeHooks(ctx, run, HookPreBackup, creds); herr != nil {
 		s.failRun(ctx, run, StageHooks, herr, creds.Password, creds.AccessKey)
 		return *run, fmt.Errorf("backups: backup run %s failed: %w", run.ID, herr)
@@ -51,7 +48,7 @@ func (s *Service) RunBackup(ctx context.Context, req RunRequest) (Run, error) {
 	if len(paths) == 0 {
 		paths = s.cfg.Paths
 	}
-	snap, err := s.runner.Backup(ctx, s.scopedRepository(ctx, repo), creds, BackupRequest{
+	snap, err := s.runner.Backup(ctx, repo, creds, BackupRequest{
 		Paths:    paths,
 		Host:     s.cfg.Host,
 		Tags:     backupTags,

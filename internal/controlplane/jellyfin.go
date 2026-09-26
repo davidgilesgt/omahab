@@ -66,20 +66,36 @@ func jellyfinOIDCCallback(domainName string) string {
 // file reference, never an inline value (the document lives in versioned
 // state and backups; the secret lives in the platform vault + one file).
 type jellyfinSSOProviderConfig struct {
-	OidEndpoint         string   `json:"OidEndpoint"`
-	OidClientId         string   `json:"OidClientId"`
-	OidSecretFile       string   `json:"OidSecretFile"`
-	Enabled             bool     `json:"Enabled"`
-	EnableAuthorization bool     `json:"EnableAuthorization"`
-	RoleClaim           string   `json:"RoleClaim"`
-	Roles               []string `json:"Roles"`
-	AdminRoles          []string `json:"AdminRoles"`
-	EnableAllFolders    bool     `json:"EnableAllFolders"`
+	OidEndpoint                 string   `json:"OidEndpoint"`
+	OidClientId                 string   `json:"OidClientId"`
+	OidSecretFile               string   `json:"OidSecretFile"`
+	Enabled                     bool     `json:"Enabled"`
+	EnableAuthorization         bool     `json:"EnableAuthorization"`
+	RoleClaim                   string   `json:"RoleClaim"`
+	OidScopes                   []string `json:"OidScopes"`
+	Roles                       []string `json:"Roles"`
+	AdminRoles                  []string `json:"AdminRoles"`
+	EnableAllFolders            bool     `json:"EnableAllFolders"`
+	AllowPrivateNetworkAddresses bool    `json:"AllowPrivateNetworkAddresses"`
 }
 
 // jellyfinProviderDoc renders the Flowfin config-as-code document. Pocket ID
 // groups are admins/members (SeedDefaultGroups); both may log in, only
 // admins receive the Jellyfin administrator role.
+//
+// Two Flowfin defaults must be overridden for this appliance, or every SSO
+// login fails closed at discovery/authorization:
+//   - AllowPrivateNetworkAddresses: Pocket ID lives at https://id.<domain>,
+//     which the Jellyfin host resolves to a tailnet/LAN address. Flowfin's
+//     hardened outbound transport refuses non-public addresses by default
+//     (SSRF/DNS-rebinding guard), so the discovery read fails with "the
+//     authorization server's discovery document could not be read". The
+//     relaxation is per-provider and keeps every other check (TLS, issuer,
+//     endpoint origins, signatures); loopback/link-local stay refused.
+//   - OidScopes includes "groups": Pocket ID only emits the groups claim
+//     when the groups scope is requested, and EnableAuthorization maps
+//     RoleClaim "groups" onto Roles/AdminRoles. Without it every login has
+//     no roles and authorization denies it.
 func jellyfinProviderDoc(domainName, clientID, secretPath string) ([]byte, error) {
 	doc := map[string]any{
 		"FormatVersion": 1,
@@ -92,9 +108,11 @@ func jellyfinProviderDoc(domainName, clientID, secretPath string) ([]byte, error
 					Enabled:             true,
 					EnableAuthorization: true,
 					RoleClaim:           "groups",
+					OidScopes:           []string{"openid", "profile", "email", "groups"},
 					Roles:               []string{"admins", "members"},
 					AdminRoles:          []string{"admins"},
 					EnableAllFolders:    true,
+					AllowPrivateNetworkAddresses: true,
 				},
 			},
 			"SamlConfigs": map[string]any{},

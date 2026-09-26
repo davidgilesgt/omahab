@@ -353,7 +353,14 @@ export function ProjectsPage() {
       setFormError(null);
       setShowForm(false);
     },
-    onError: (err) => toast.error(err instanceof Error ? err.message : "Could not create project"),
+    onError: (err) => {
+      const message = err instanceof Error ? err.message : "Could not create project";
+      // Keep server rejections (e.g. a name no slug can be derived from)
+      // visible next to the form with values intact, so a valid retry is
+      // one edit away. The toast alone is too easy to miss.
+      setFormError(message);
+      toast.error(message);
+    },
   });
   function openForm() {
     setFormError(null);
@@ -371,12 +378,14 @@ export function ProjectsPage() {
       setFormError("Name must be 100 characters or fewer.");
       return;
     }
-    if (trimmedSlug && !/^[a-z0-9-]+$/.test(trimmedSlug)) {
-      setFormError("Slug may only contain lowercase letters, numbers, and hyphens.");
+    if (!/[a-z0-9]/i.test(trimmedName)) {
+      setFormError("Name must contain at least one letter or number so a URL slug can be derived from it.");
       return;
     }
-    if (trimmedSlug.length > 63) {
-      setFormError("Slug must be 63 characters or fewer.");
+    // Mirror the server slug rule (lowercase, start/end alphanumeric,
+    // interior hyphens, max 63) so rejections explain themselves inline.
+    if (trimmedSlug && !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(trimmedSlug)) {
+      setFormError("Slug must start and end with a lowercase letter or number and contain only lowercase letters, numbers, and hyphens (max 63 characters).");
       return;
     }
     setFormError(null);
@@ -389,7 +398,7 @@ export function ProjectsPage() {
         <form className="form-stack" aria-label="New project" onSubmit={submit}>
           {instanceQuery.isLoading ? <LoadingState label="Checking setup" /> : instanceQuery.isError ? <ErrorState error={instanceQuery.error} retry={() => void instanceQuery.refetch()} /> : !domainReady ? <p className="muted">Set up a domain before creating projects. <Link to={`${adminPrefix}/setup`}>Continue setup</Link></p> : (
             <>
-              <label>Name<input value={name} onChange={(e) => setName(e.target.value)} required maxLength={100} disabled={create.isPending} /></label>
+              <label>Name<input value={name} onChange={(e) => setName(e.target.value)} maxLength={100} disabled={create.isPending} aria-describedby="new-project-error" /></label>
               <label>Slug (optional)<input value={slug} onChange={(e) => setSlug(e.target.value)} maxLength={63} placeholder="Derived from name" disabled={create.isPending} /></label>
               <label>Kind<select value={kind} onChange={(e) => setKind(e.target.value)} disabled={create.isPending}><option value="code">Code (deployable)</option><option value="docs">Docs (versioned only, no CI)</option></select></label>
               <div className="row-actions">
@@ -398,7 +407,7 @@ export function ProjectsPage() {
               </div>
             </>
           )}
-          {formError ? <p className="inline-error" role="alert">{formError}</p> : null}
+          {formError ? <p className="inline-error" role="alert" id="new-project-error">{formError}</p> : null}
           <InlineError error={create.error} />
         </form>
       )}

@@ -88,13 +88,24 @@ func (b *Backend) ensureKarakeepLiteLLMKey(ctx context.Context) error {
 		return nil
 	}
 	secretName := karakeepSecretName
+	// Best-effort orphan cleanup before the non-revoked lookup below (see
+	// providers-008 ordering note in CleanupLegacyGatewayOrphans).
+	if n, cerr := b.providers.CleanupLegacyGatewayOrphans(ctx); cerr != nil {
+		log.Printf("setup karakeep: legacy gateway orphan cleanup: %v", cerr)
+	} else if n > 0 {
+		log.Printf("setup karakeep: revoked %d legacy gateway orphan keys", n)
+	}
 	var vkID string
 	var expiresAt, revokedAt sql.NullString
 	nowStr := store.FormatTime(time.Now().UTC())
 	err = b.db.QueryRowContext(ctx, `SELECT id, expires_at, revoked_at FROM provider_virtual_keys WHERE owner_kind = 'harness' AND owner_id = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?) ORDER BY created_at DESC LIMIT 1`, karakeepKeyOwnerID, nowStr).Scan(&vkID, &expiresAt, &revokedAt)
 	if err == nil {
 		if v, rerr := b.secrets.RevealByName(ctx, "platform-app", secretName); rerr == nil && strings.TrimSpace(v) != "" {
-			return b.renderKarakeepAIEnv(ctx, existing, strings.TrimSpace(v))
+			if providers.IsLegacyVirtualKeyToken(v) {
+				log.Printf("setup karakeep: stored key is retired omk_, reissuing through gateway")
+			} else {
+				return b.renderKarakeepAIEnv(ctx, existing, strings.TrimSpace(v))
+			}
 		}
 		_ = b.providers.RevokeVirtualKey(ctx, domain.ID(vkID))
 	}

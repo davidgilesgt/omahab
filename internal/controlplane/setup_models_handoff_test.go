@@ -99,11 +99,13 @@ func (g *handoffFakeGateway) CreateGatewayCredential(_ context.Context, in provi
 	return nil
 }
 
-func (g *handoffFakeGateway) IssueVirtualKey(_ context.Context, _ providers.VirtualKey) (string, error) {
-	return "sk-test-virtual", nil
+func (g *handoffFakeGateway) IssueVirtualKey(_ context.Context, _ providers.VirtualKey) (providers.IssuedVirtualKey, error) {
+	return providers.IssuedVirtualKey{Token: "sk-test-virtual", KeyID: "key-test-virtual"}, nil
 }
 
 func (g *handoffFakeGateway) RevokeVirtualKey(_ context.Context, _, _ string) error { return nil }
+
+func (g *handoffFakeGateway) RevokeVirtualKeyStrict(_ context.Context, _, _ string) error { return nil }
 
 func (g *handoffFakeGateway) StartOAuth(_ context.Context, _, _ string) (providers.OAuthSession, error) {
 	return providers.OAuthSession{}, fmt.Errorf("oauth not configured")

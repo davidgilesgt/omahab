@@ -668,7 +668,11 @@ in
       requires = [ "omahab-embedding-init.service" ];
       wantedBy = [ "multi-user.target" ];
       # The worker serves no model until omahabd writes the pinned-models
-      # config (dashboard setup step); a default empty config keeps it up.
+      # config for the explicit setup choice (knowledge.EmbeddingWorkerConfigForChoice:
+      # english/worldwide render the real pinned model, full-text only renders
+      # empty); omahabd restarts this unit after rewriting the config, and
+      # /health then reflects the loaded model (ok with the chosen alias
+      # ready, degraded otherwise).
 
       serviceConfig = {
         Type = "simple";
@@ -684,6 +688,11 @@ in
         ProtectSystem = "strict";
         ProtectHome = true;
         ReadWritePaths = [ "/run/omahab-embedding" ];
+        # ProtectSystem=strict hides /var/lib/omahab: explicitly allow reading
+        # the pinned config omahabd renders plus the pinned model artifacts.
+        # Without these the worker cannot load the chosen model after restart
+        # (F-embedding-worker-no-models: Unknown with no usable embedding).
+        ReadOnlyPaths = [ "/var/lib/omahab/embedding/pinned_models.json" "/var/lib/omahab/models" ];
         StateDirectory = "omahab-embedding";
       };
     };
@@ -706,6 +715,12 @@ in
           mkdir -p /var/lib/omahab/embedding
           chown root:omahab-embedding /var/lib/omahab/embedding
           chmod 0750 /var/lib/omahab/embedding
+          # Pinned model artifacts live here; the worker reads them read-only
+          # (ReadOnlyPaths above). Created up front so a setup-chosen pin has
+          # a stable home before omahabd rewrites the config and restarts.
+          mkdir -p /var/lib/omahab/models
+          chown root:omahab-embedding /var/lib/omahab/models
+          chmod 0750 /var/lib/omahab/models
           if [ ! -s /var/lib/omahab/embedding/pinned_models.json ]; then
             printf '%s' '{"models":{},"models_base_dir":"/var/lib/omahab/models","allow_test_adapter":false}' > /var/lib/omahab/embedding/pinned_models.json
             chown root:omahab-embedding /var/lib/omahab/embedding/pinned_models.json

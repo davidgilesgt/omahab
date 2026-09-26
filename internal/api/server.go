@@ -24,8 +24,6 @@ import (
 	"github.com/omahab/omahab/internal/apitypes"
 	"github.com/omahab/omahab/internal/companion"
 	"github.com/omahab/omahab/internal/controlplane"
-	"github.com/omahab/omahab/internal/netenv"
-	"github.com/omahab/omahab/internal/tailnet"
 )
 
 //go:embed openapi.yaml
@@ -35,7 +33,7 @@ var openAPISpec []byte
 type Server struct {
 	backend          *controlplane.Backend
 	environments     *companion.Service
-	tokenHash        []byte // SHA256 of bearer token, nil means auth disabled (tests only)
+	tokenHash        []byte // SHA256 of panel bearer token; nil fails closed with 401 on admin routes
 	emailHMACKey     []byte
 	scmWebhookSecret []byte
 	version          string
@@ -191,7 +189,8 @@ func (s *Server) buildRouter() chi.Router {
 		r.Post("/api/v1/hindsight/embeddings", s.withBodyLimit(1_000_000, s.handleHindsightEmbeddings))
 	})
 
-	// Authenticated API group (lan placement: LAN + tailnet sources bypass the token).
+	// Authenticated API group: every route requires the panel bearer token.
+	// bearerAuth fails closed with 401 when no token is configured.
 	r.Group(func(r chi.Router) {
 		r.Use(s.bearerAuth)
 
@@ -299,7 +298,7 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/api/v1/knowledge/index-setup", s.handleKnowledgeGetIndexSetup)
 		r.Put("/api/v1/knowledge/index-setup", s.withBodyLimit(defaultBodyLimit, s.handleKnowledgeSetIndexSetup))
 		r.Get("/api/v1/hermes/mcp-token", s.handleGetHermesMCPToken)
-		r.Post("/api/v1/hermes/mcp-token/rotate", s.handleRotateHermesMCPToken)
+		r.Post("/api/v1/hermes/mcp-token/rotate", s.withBodyLimit(defaultBodyLimit, s.handleRotateHermesMCPToken))
 
 		// Setup (first-run provisioning)
 		r.Get("/api/v1/setup", s.handleGetSetup)
@@ -316,6 +315,7 @@ func (s *Server) buildRouter() chi.Router {
 		r.Post("/api/v1/operations/{id}/actions", s.withBodyLimit(defaultBodyLimit, s.handleOperationAction))
 		r.Get("/api/v1/system/ssh-keys", s.handleListSystemSSHKeys)
 		r.Post("/api/v1/system/ssh-keys", s.withBodyLimit(64<<10, s.handleAddSystemSSHKeys))
+		r.Delete("/api/v1/system/ssh-keys", s.withBodyLimit(defaultBodyLimit, s.handleDeleteSystemSSHKeys))
 		r.Get("/api/v1/technitium/setup", s.handleGetTechnitiumSetup)
 		r.Post("/api/v1/backup-repositories/{id}/snapshots/import", s.handleImportRepoSnapshots)
 		r.Get("/api/v1/backup-repositories", s.handleListBackupRepositories)
@@ -337,6 +337,7 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/api/v1/users/{id}/app-access", s.handleListApplicationAccess)
 		r.Get("/api/v1/users/{id}/groups", s.handleGetUserGroups)
 		r.Put("/api/v1/users/{id}/groups", s.withBodyLimit(defaultBodyLimit, s.handleSetUserGroups))
+		r.Get("/api/v1/groups", s.handleListGroups)
 		// Model gateway (LiteLLM virtual keys) + native setup-models onboarding.
 		// No endpoint accepts provider credentials from the browser.
 		r.Get("/api/v1/setup/models", s.handleGetModelSetup)
@@ -353,6 +354,8 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/api/v1/companion/devices", s.handleListCompanionDevices)
 		r.Delete("/api/v1/companion/devices/{id}", s.handleRevokeCompanionDevice)
 		r.Put("/api/v1/companion/devices/{id}/allow-oauth", s.withBodyLimit(defaultBodyLimit, s.handleSetDeviceAllowOAuth))
+		r.Post("/api/v1/companion/devices/{id}/environment-grant", s.withBodyLimit(defaultBodyLimit, s.handleGrantDeviceEnvironment))
+		r.Delete("/api/v1/companion/devices/{id}/environment-grant", s.handleRevokeDeviceEnvironment)
 
 		// Phone notifications (ntfy) — admin
 		r.Get("/api/v1/ntfy", s.handleGetNtfyConfig)
@@ -624,26 +627,19 @@ func (s *Server) timeoutMiddleware(d time.Duration) func(http.Handler) http.Hand
 	}
 }
 
-// bearerAuth enforces constant-time bearer token comparison. Skipped only for /up and HMAC routes
-// which are not inside the authenticated group. Device tokens (oma_dev_...) are rejected with 403
-// on every admin route to enforce allowlist: companion devices may only call device-endpoints.
-// LAN exception: on lan placement (the ISO-installer default), requests from
-// LAN source addresses (RFC1918/ULA/link-local/loopback) bypass the token —
-// the LAN is the trusted path. Tailnet sources (100.64.0.0/10) bypass it too:
-// tailnet membership already authenticates the caller, so a home-LAN install
-// never asks for the panel token on any of its own origins. On vps placement
-// every source needs the token.
+// bearerAuth enforces constant-time bearer token comparison on every admin
+// route. There are no network-based exceptions: LAN, tailnet, and WAN
+// callers all present the panel bearer token. Routes with different
+// authentication (public /up and /api/v1/public/status, HMAC webhooks,
+// device endpoints, the dedicated MCP token) live outside this group and
+// are unaffected. Device tokens (oma_dev_...) are rejected with 403 on
+// every admin route to enforce allowlist: companion devices may only call
+// device-endpoints. When no panel token is configured the group fails
+// closed with 401 instead of serving admin routes openly.
 func (s *Server) bearerAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.tokenHash == nil {
-			// No token configured; allow (used in tests). But still reject device tokens if they appear,
-			// to preserve 403 semantics even when auth disabled? In tests tokenHash=nil means auth disabled,
-			// so we allow all. However deviceAuth tests use nil tokenHash; bearerAuth with nil should still allow admin routes.
-			next.ServeHTTP(w, r)
-			return
-		}
-		if controlplane.Placement() == "lan" && (netenv.IsLANAddr(clientIP(r)) || tailnet.IsTailscaleIPv4(clientIP(r))) {
-			next.ServeHTTP(w, r)
+			writeError(w, r, errUnauthorized("panel token not configured"))
 			return
 		}
 		hdr := r.Header.Get("Authorization")
@@ -681,14 +677,6 @@ func (s *Server) bearerAuth(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
-}
-
-func clientIP(r *http.Request) string {
-	host := r.RemoteAddr
-	if i := strings.LastIndex(host, ":"); i > 0 {
-		host = host[:i]
-	}
-	return host
 }
 
 // deviceAuth validates companion device tokens (oma_dev_...) via companion.Service.

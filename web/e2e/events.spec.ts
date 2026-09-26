@@ -14,6 +14,7 @@ async function fulfillJSON(route: Route, value: unknown, status = 200) {
 }
 
 async function installEventsAPI(page: Page) {
+  await page.addInitScript(() => sessionStorage.setItem("omahab.session", "test-token"));
   await page.route("**/up", (route) => fulfillJSON(route, { status: "ok" }));
   await page.route("**/api/v1/**", async (route) => {
     const path = new URL(route.request().url()).pathname;

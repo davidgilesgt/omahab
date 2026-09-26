@@ -964,14 +964,44 @@ func (s *Service) IsDeviceGranted(ctx context.Context, deviceID string) (bool, e
 	}
 	return cnt > 0, nil
 }
+// GrantedDeviceIDs returns the set of device IDs holding an environment grant.
+// Used to enrich device listings with owner-consent state (names only, never values).
+func (s *Service) GrantedDeviceIDs(ctx context.Context) (map[string]bool, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT device_id FROM device_environment_grants`)
+	if err != nil {
+		return nil, fmt.Errorf("list grants: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan grant: %w", err)
+		}
+		out[strings.TrimSpace(id)] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list grants rows: %w", err)
+	}
+	return out, nil
+}
 
 // GrantDevice grants environment to device (idempotent). Bumps revision on new grant.
+// The device must exist and not be revoked; grants are explicit owner consent only —
+// enrollment never grants (see EnrollDevice, which inserts no grant row).
 func (s *Service) GrantDevice(ctx context.Context, deviceID string) error {
-	now := s.nowUTC()
 	trimmed := strings.TrimSpace(deviceID)
 	if trimmed == "" {
 		return fmt.Errorf("%w: device_id is required", ErrValidation)
 	}
+	dev, err := s.GetDevice(ctx, trimmed)
+	if err != nil {
+		return err
+	}
+	if dev.RevokedAt != nil {
+		return fmt.Errorf("%w: device revoked", ErrRevoked)
+	}
+	now := s.nowUTC()
 	res, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO device_environment_grants (device_id, granted_at, created_at) VALUES (?, ?, ?)`, trimmed, store.FormatTime(now), store.FormatTime(now))
 	if err != nil {
 		return err
@@ -985,8 +1015,16 @@ func (s *Service) GrantDevice(ctx context.Context, deviceID string) error {
 }
 
 // RevokeGrant removes grant for device. Bumps revision if grant existed.
+// Unknown devices return ErrNotFound so admin revocation of a typo is visible.
 func (s *Service) RevokeGrant(ctx context.Context, deviceID string) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM device_environment_grants WHERE device_id = ?`, strings.TrimSpace(deviceID))
+	trimmed := strings.TrimSpace(deviceID)
+	if trimmed == "" {
+		return fmt.Errorf("%w: device_id is required", ErrValidation)
+	}
+	if _, err := s.GetDevice(ctx, trimmed); err != nil {
+		return err
+	}
+	res, err := s.db.ExecContext(ctx, `DELETE FROM device_environment_grants WHERE device_id = ?`, trimmed)
 	if err != nil {
 		return err
 	}
@@ -994,6 +1032,107 @@ func (s *Service) RevokeGrant(ctx context.Context, deviceID string) error {
 		if _, err := s.IncrementRevision(ctx); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+// Pending revocation targets for durable device-revoke retry.
+// A row survives restarts; the retry driver re-attempts until the external
+// confirms, and handles are cleared only on confirmed success — never early.
+const (
+	RevokeTargetGatewayKey   = "gateway_key"
+	RevokeTargetForgejoToken = "forgejo_token"
+	RevokeTargetHtpasswd     = "htpasswd"
+	RevokeTargetDeviceSecret = "device_secret"
+)
+
+// RevocationPending is one unconfirmed external revoke for a device.
+// Handle/alias are the exact retry handles (key ID + alias, token name,
+// htpasswd user, secret name). Values never appear here.
+type RevocationPending struct {
+	DeviceID  string
+	Target    string
+	Handle    string
+	Alias     string
+	Attempts  int
+	LastError string
+	UpdatedAt time.Time
+}
+
+// QueueRevocationPending records (or refreshes) an unconfirmed external revoke.
+// Idempotent per (device, target, handle): attempts increment, last error and
+// timestamp refresh. The handle row is never deleted here.
+func (s *Service) QueueRevocationPending(ctx context.Context, deviceID, target, handle, alias string, rerr error) error {
+	trimmed := strings.TrimSpace(deviceID)
+	if trimmed == "" || strings.TrimSpace(target) == "" {
+		return fmt.Errorf("%w: device_id and target are required", ErrValidation)
+	}
+	msg := ""
+	if rerr != nil {
+		msg = rerr.Error()
+		if len(msg) > 1000 {
+			msg = msg[:1000]
+		}
+	}
+	now := store.FormatTime(s.nowUTC())
+	_, err := s.db.ExecContext(ctx, `INSERT INTO device_revocation_pending (device_id, target, handle, alias, attempts, last_error, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?)
+		ON CONFLICT (device_id, target, handle) DO UPDATE SET attempts = attempts + 1, last_error = excluded.last_error, alias = excluded.alias, updated_at = excluded.updated_at`,
+		trimmed, strings.TrimSpace(target), strings.TrimSpace(handle), strings.TrimSpace(alias), msg, now)
+	if err != nil {
+		return fmt.Errorf("queue revocation pending: %w", err)
+	}
+	return nil
+}
+
+// ListRevocationPending returns all unconfirmed external revokes ordered oldest first.
+func (s *Service) ListRevocationPending(ctx context.Context) ([]RevocationPending, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT device_id, target, handle, alias, attempts, last_error, updated_at FROM device_revocation_pending ORDER BY updated_at ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("list revocation pending: %w", err)
+	}
+	defer rows.Close()
+	var out []RevocationPending
+	for rows.Next() {
+		var p RevocationPending
+		var updatedStr string
+		if err := rows.Scan(&p.DeviceID, &p.Target, &p.Handle, &p.Alias, &p.Attempts, &p.LastError, &updatedStr); err != nil {
+			return nil, fmt.Errorf("scan revocation pending: %w", err)
+		}
+		p.UpdatedAt, _ = store.ParseTime(updatedStr)
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list revocation pending rows: %w", err)
+	}
+	if out == nil {
+		out = []RevocationPending{}
+	}
+	return out, nil
+}
+
+// ClearRevocationPending deletes the pending row only after the external
+// confirmed. Callers must not call this on failure paths.
+func (s *Service) ClearRevocationPending(ctx context.Context, deviceID, target, handle string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM device_revocation_pending WHERE device_id = ? AND target = ? AND handle = ?`, strings.TrimSpace(deviceID), strings.TrimSpace(target), strings.TrimSpace(handle))
+	if err != nil {
+		return fmt.Errorf("clear revocation pending: %w", err)
+	}
+	return nil
+}
+
+// RemoveDeviceBackupCredentials removes the device's htpasswd entry and
+// reloads the restic server, surfacing errors for the retry queue.
+// Missing file is success (idempotent); reload uses the same best-effort
+// systemd-absent tolerance as enrollment.
+func (s *Service) RemoveDeviceBackupCredentials(ctx context.Context, deviceID string) error {
+	trimmed := strings.TrimSpace(deviceID)
+	if trimmed == "" {
+		return fmt.Errorf("%w: device_id is required", ErrValidation)
+	}
+	if err := s.removeHtpasswdEntry("dev-" + trimmed); err != nil {
+		return fmt.Errorf("remove htpasswd entry: %w", err)
+	}
+	if err := s.reloadResticServer(ctx); err != nil {
+		return fmt.Errorf("reload restic server: %w", err)
 	}
 	return nil
 }
@@ -1177,6 +1316,13 @@ func (s *Service) ensureDeviceVirtualKey(ctx context.Context, deviceID string) (
 		return "", fmt.Errorf("providers or secrets not configured")
 	}
 	secretName := "device-key." + deviceID
+	// Best-effort orphan cleanup before the non-revoked lookup below (see
+	// providers-008 ordering note in CleanupLegacyGatewayOrphans).
+	if n, cerr := s.providers.CleanupLegacyGatewayOrphans(ctx); cerr != nil {
+		log.Printf("companion: legacy gateway orphan cleanup: %v", cerr)
+	} else if n > 0 {
+		log.Printf("companion: revoked %d legacy gateway orphan keys", n)
+	}
 	// Check for existing valid vk row
 	var vkID string
 	var expiresAt sql.NullString
@@ -1185,9 +1331,14 @@ func (s *Service) ensureDeviceVirtualKey(ctx context.Context, deviceID string) (
 	err := s.db.QueryRowContext(ctx, `SELECT id, expires_at, revoked_at FROM provider_virtual_keys WHERE owner_kind = 'device' AND owner_id = ? AND (revoked_at IS NULL) AND (expires_at IS NULL OR expires_at > ?) ORDER BY created_at DESC LIMIT 1`, deviceID, nowStr).Scan(&vkID, &expiresAt, &revokedAt)
 	foundValid := err == nil
 	if foundValid {
-		// Try to reveal cached plaintext
+		// Try to reveal cached plaintext; a retired omk_ secret is treated
+		// as a cache miss so the device is reissued a gateway sk- bearer.
 		if v, err := s.secrets.RevealByName(ctx, "platform-app", secretName); err == nil && strings.TrimSpace(v) != "" {
-			return strings.TrimSpace(v), nil
+			if providers.IsLegacyVirtualKeyToken(v) {
+				log.Printf("companion: device key is retired omk_, reissuing through gateway")
+			} else {
+				return strings.TrimSpace(v), nil
+			}
 		}
 		// Cache miss but row exists -> need to re-issue (revoke old row and create new)
 		_ = s.providers.RevokeVirtualKey(ctx, domain.ID(vkID))

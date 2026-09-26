@@ -1047,6 +1047,14 @@ func (s *scriptedRunner) Check(_ context.Context, _ domain.Application, _ apps.D
 	return s.health, nil
 }
 
+// starts reports how many times the runner started an app (redeploy
+// observability for tests). Call after the operation under test returns.
+func (s *scriptedRunner) starts() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.startCount
+}
+
 func newSetupBackend(t *testing.T, runner apps.Runner) (*Backend, *events.Service) {
 	t.Helper()
 	st, err := store.Open(":memory:")
@@ -1597,13 +1605,18 @@ type recordingGateway struct {
 	mu     sync.Mutex
 	issues []providers.VirtualKey
 	token  string
+	keyID  string
 }
 
-func (g *recordingGateway) IssueVirtualKey(_ context.Context, vk providers.VirtualKey) (string, error) {
+func (g *recordingGateway) IssueVirtualKey(_ context.Context, vk providers.VirtualKey) (providers.IssuedVirtualKey, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.issues = append(g.issues, vk)
-	return g.token, nil
+	keyID := g.keyID
+	if keyID == "" {
+		keyID = "key-test-" + strings.TrimSpace(vk.Name)
+	}
+	return providers.IssuedVirtualKey{Token: g.token, KeyID: keyID}, nil
 }
 
 func (g *recordingGateway) RevokeVirtualKey(_ context.Context, _, _ string) error { return nil }

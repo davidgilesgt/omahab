@@ -403,6 +403,16 @@ for _ in $(seq 1 "$BOOT_TIMEOUT"); do
 done
 [[ $ok -eq 1 ]] || die "installed system never served $BASE/up (see $WORKDIR/serial-boot.log)"
 
+# The installed administrator token is provisioned into the test account.
+# Fetch it through the existing SSH key channel; never print or store it.
+PANEL_TOKEN="$(ssh -T -i "$SSH_KEY" -p "$SSH_PORT" \
+  -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+  admin@127.0.0.1 'cat ~/.config/omahab/token' 2>/dev/null)" || die "could not read installed administrator token"
+[[ "$PANEL_TOKEN" =~ ^[a-z0-9]{8}$ ]] || die "installed administrator token is missing or invalid"
+unauth_status="$(curl -s -o /dev/null -w '%{http_code}' -m 15 "$BASE/api/v1/setup")"
+[[ "$unauth_status" == 401 ]] || die "anonymous setup request returned $unauth_status (want 401)"
+log "ok: anonymous setup denied"
+
 check() {  # check <name> <curl-args...> -- <grep-pattern>
   local name="$1"; shift
   local pattern=""
@@ -411,7 +421,7 @@ check() {  # check <name> <curl-args...> -- <grep-pattern>
     if [[ "$1" == "--" ]]; then pattern="$2"; shift 2; break; fi
     args+=("$1"); shift
   done
-  if curl -sf -m 15 "${args[@]}" | grep -q "$pattern"; then
+  if curl -sf -m 15 -H "Authorization: Bearer $PANEL_TOKEN" "${args[@]}" | grep -q "$pattern"; then
     log "ok: $name"
   else
     die "FAILED: $name (pattern '$pattern' not matched)"
@@ -439,12 +449,12 @@ fi
 
 # --- Recovery scenario: generate a phrase, confirm it survived the
 # install (kit written), and watch the setup checklist flip recovery_key.
-# LAN placement allows these pre-auth; the phrase itself never hits the log.
-RECOVERY_FP="$(curl -sf -m 15 -X POST "$BASE/api/v1/recovery/generate" | python3 -c 'import json,sys; print(json.load(sys.stdin)["fingerprint"])')" || true
+# The disposable panel token is required even through the loopback tunnel.
+RECOVERY_FP="$(curl -sf -m 15 -H "Authorization: Bearer $PANEL_TOKEN" -X POST "$BASE/api/v1/recovery/generate" | python3 -c 'import json,sys; print(json.load(sys.stdin)["fingerprint"])')" || true
 [[ -n "$RECOVERY_FP" ]] || die "FAILED: recovery generate (empty fingerprint)"
 log "ok: recovery generate (fingerprint received)"
 check "recovery confirm (saved_ack)" -X POST -H 'Content-Type: application/json' -d "{\"fingerprint\":\"$RECOVERY_FP\",\"saved_ack\":true}" "$BASE/api/v1/recovery/confirm" -- '"confirmed":true'
-if curl -sf -m 15 "$BASE/api/v1/setup" | python3 -c 'import json,sys; checks = json.load(sys.stdin)["checks"]; sys.exit(0 if any(c["id"] == "recovery_key" and c["status"] == "ok" for c in checks) else 1)'; then
+if curl -sf -m 15 -H "Authorization: Bearer $PANEL_TOKEN" "$BASE/api/v1/setup" | python3 -c 'import json,sys; checks = json.load(sys.stdin)["checks"]; sys.exit(0 if any(c["id"] == "recovery_key" and c["status"] == "ok" for c in checks) else 1)'; then
   log "ok: setup checklist flips recovery_key"
 else
   die "FAILED: setup checklist flips recovery_key (recovery_key not ok after confirm)"

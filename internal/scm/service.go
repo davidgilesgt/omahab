@@ -91,11 +91,15 @@ type Repository struct {
 	ForgejoRemoteID int64     `json:"forgejo_remote_id"`
 	Private         bool      `json:"private"`
 	ActionsDisabled bool      `json:"actions_disabled"`
-	DesiredState    string    `json:"desired_state"`
-	ObservedState   string    `json:"observed_state"`
-	ObservedDetail  string    `json:"observed_detail"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	// Adopted reports that the Forgejo repository predates the project and
+	// was adopted by provisioning rather than created by it. Teardown
+	// preserves adopted repositories and removes only product-created ones.
+	Adopted        bool      `json:"adopted"`
+	DesiredState   string    `json:"desired_state"`
+	ObservedState  string    `json:"observed_state"`
+	ObservedDetail string    `json:"observed_detail"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 // CIRepoState is the persisted desired/observed state for the Woodpecker repo.
@@ -398,9 +402,9 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) (*ProvisionR
 	} else {
 		repoID = newID()
 		_, err = s.db.ExecContext(ctx,
-			`INSERT INTO scm_repositories (id, project_id, owner, name, clone_url, default_branch, forgejo_remote_id, private, actions_disabled, desired_state, observed_state, observed_detail, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			repoID, string(in.ProjectID), owner, repoName, "", defaultBranch, 0, 1, 0, "provisioned", "pending", "", nowStr, nowStr,
+			`INSERT INTO scm_repositories (id, project_id, owner, name, clone_url, default_branch, forgejo_remote_id, private, actions_disabled, adopted, desired_state, observed_state, observed_detail, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			repoID, string(in.ProjectID), owner, repoName, "", defaultBranch, 0, 1, 0, 0, "provisioned", "pending", "", nowStr, nowStr,
 		)
 		if err != nil {
 			if isUniqueViolation(err) {
@@ -494,6 +498,25 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) (*ProvisionR
 		}
 	} else {
 		createdForgejoRepo = true
+	}
+	// Record creation ownership durably: a conflict-adopted repository
+	// predates this request unless it matches our own row's earlier linkage
+	// (our own previous attempt's repository surviving its cleanup), in
+	// which case the product created it.
+	adoptedRepo := !createdForgejoRepo
+	if adoptedRepo && forgejoRepo != nil {
+		if (repoRow.ForgejoRemoteID != 0 && repoRow.ForgejoRemoteID == forgejoRepo.RemoteID) ||
+			(repoRow.CloneURL != "" && repoRow.CloneURL == forgejoRepo.CloneURL) {
+			adoptedRepo = false
+		}
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE scm_repositories SET adopted=?, updated_at=? WHERE id=?`,
+		boolToInt(adoptedRepo), time.Now().UTC().Format(time.RFC3339Nano), repoID,
+	); err != nil {
+		markError("record repository ownership failed")
+		compensate()
+		return nil, fmt.Errorf("record repository ownership: %w", err)
 	}
 
 	cloneURL := forgejoRepo.CloneURL
@@ -845,8 +868,16 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) (*ProvisionR
 		Warnings:         warnings,
 	}, nil
 }
-// Deprovision removes all external resources for a project: Woodpecker repo and secrets, Forgejo repo and CI user/token, encrypted secrets, and SCM rows. 404 is treated as already removed.
+// Deprovision removes all external resources for a project: Woodpecker repo and secrets, CI user/token, encrypted secrets, and SCM rows, plus the Forgejo repository itself when the product created it. A repository adopted from pre-existing state (Repository.Adopted) is always preserved; only an explicit out-of-band deletion removes it. 404 is treated as already removed.
 func (s *Service) Deprovision(ctx context.Context, projectID domain.ID) error {
+	return s.deprovision(ctx, projectID, false)
+}
+
+// deprovision implements Deprovision. preserveRepo forces repository
+// preservation regardless of origin; it is the hook a future explicit
+// user-deletion override would clear. Adopted repositories are preserved
+// unconditionally via the durable ownership flag.
+func (s *Service) deprovision(ctx context.Context, projectID domain.ID, preserveRepo bool) error {
 	if strings.TrimSpace(string(projectID)) == "" {
 		return fmt.Errorf("%w: project_id is required", ErrValidation)
 	}
@@ -862,6 +893,11 @@ func (s *Service) Deprovision(ctx context.Context, projectID domain.ID) error {
 		repoID = repo.ID
 		forgejoOwner = repo.Owner
 		forgejoName = repo.Name
+		// An adopted repository predates the project: remove everything
+		// around it but never the repository itself.
+		if repo.Adopted {
+			preserveRepo = true
+		}
 		if ci, cerr := s.getCIRepoByRepositoryID(ctx, repo.ID); cerr == nil && ci != nil {
 			woodpeckerRepoID = ci.WoodpeckerRepoID
 			ciRepoID = ci.ID
@@ -884,7 +920,7 @@ func (s *Service) Deprovision(ctx context.Context, projectID domain.ID) error {
 			_, _ = s.db.ExecContext(ctx, `DELETE FROM scm_ci_repos WHERE repository_id=?`, string(repoID))
 		}
 	}
-	if forgejoOwner != "" && forgejoName != "" {
+	if !preserveRepo && forgejoOwner != "" && forgejoName != "" {
 		if err := s.forgejo.DeleteRepo(ctx, RepoRef{Owner: forgejoOwner, Name: forgejoName}); err != nil && !isNotFoundErr(err) {
 			return fmt.Errorf("delete forgejo repo: %w", err)
 		}
@@ -1349,21 +1385,21 @@ func (s *Service) TemplateFor(ctx context.Context, projectID domain.ID, registry
 
 func (s *Service) getRepositoryByProjectID(ctx context.Context, projectID domain.ID) (*Repository, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, project_id, owner, name, clone_url, default_branch, forgejo_remote_id, private, actions_disabled, desired_state, observed_state, observed_detail, created_at, updated_at
+		`SELECT id, project_id, owner, name, clone_url, default_branch, forgejo_remote_id, private, actions_disabled, adopted, desired_state, observed_state, observed_detail, created_at, updated_at
 		 FROM scm_repositories WHERE project_id=?`, string(projectID))
 	return scanRepository(row)
 }
 
 func (s *Service) getRepositoryByOwnerName(ctx context.Context, owner, name string) (*Repository, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, project_id, owner, name, clone_url, default_branch, forgejo_remote_id, private, actions_disabled, desired_state, observed_state, observed_detail, created_at, updated_at
+		`SELECT id, project_id, owner, name, clone_url, default_branch, forgejo_remote_id, private, actions_disabled, adopted, desired_state, observed_state, observed_detail, created_at, updated_at
 		 FROM scm_repositories WHERE owner=? AND name=?`, owner, name)
 	return scanRepository(row)
 }
 
 func (s *Service) getRepositoryByID(ctx context.Context, id domain.ID) (*Repository, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, project_id, owner, name, clone_url, default_branch, forgejo_remote_id, private, actions_disabled, desired_state, observed_state, observed_detail, created_at, updated_at
+		`SELECT id, project_id, owner, name, clone_url, default_branch, forgejo_remote_id, private, actions_disabled, adopted, desired_state, observed_state, observed_detail, created_at, updated_at
 		 FROM scm_repositories WHERE id=?`, string(id))
 	return scanRepository(row)
 }
@@ -1401,8 +1437,8 @@ type rowScanner interface{ Scan(dest ...any) error }
 func scanRepository(row rowScanner) (*Repository, error) {
 	var id, projectID, owner, name, cloneURL, defaultBranch, desiredState, observedState, observedDetail, createdAt, updatedAt string
 	var forgejoRemoteID int64
-	var priv, actionsDisabled int
-	if err := row.Scan(&id, &projectID, &owner, &name, &cloneURL, &defaultBranch, &forgejoRemoteID, &priv, &actionsDisabled, &desiredState, &observedState, &observedDetail, &createdAt, &updatedAt); err != nil {
+	var priv, actionsDisabled, adopted int
+	if err := row.Scan(&id, &projectID, &owner, &name, &cloneURL, &defaultBranch, &forgejoRemoteID, &priv, &actionsDisabled, &adopted, &desiredState, &observedState, &observedDetail, &createdAt, &updatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("%w: repository not found", ErrNotFound)
 		}
@@ -1420,6 +1456,7 @@ func scanRepository(row rowScanner) (*Repository, error) {
 		ForgejoRemoteID: forgejoRemoteID,
 		Private:         priv != 0,
 		ActionsDisabled: actionsDisabled != 0,
+		Adopted:         adopted != 0,
 		DesiredState:    desiredState,
 		ObservedState:   observedState,
 		ObservedDetail:  observedDetail,

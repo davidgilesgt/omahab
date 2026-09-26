@@ -280,8 +280,8 @@ func TestHindsightUnusableKeyReplaced(t *testing.T) {
 	if tok == "sk-wrong-scope" || strings.TrimSpace(tok) == "" {
 		t.Fatalf("token = %q, want replacement differing from wrong scope", tok)
 	}
-	if !strings.HasPrefix(tok, "omk_") {
-		t.Fatalf("token = %q, want omk_ virtual key", tok)
+	if !strings.HasPrefix(tok, "sk-") {
+		t.Fatalf("token = %q, want sk- gateway bearer", tok)
 	}
 	stored, err := b.secrets.RevealByName(ctx, "platform-app", "hindsight_litellm_key")
 	if err != nil || stored != tok {

@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/omahab/omahab/internal/apps"
 	"github.com/omahab/omahab/internal/backups"
@@ -108,6 +110,12 @@ type capturePlan struct {
 	// systemUnits are native units stopped for the capture (meilisearch)
 	// with their prior active state.
 	systemUnits []stoppedUnit
+	// stoppedApps records the applications quiesce actually stopped, in
+	// stop order, so resume restores exactly the pre-backup running
+	// set even when quiesce fails partway through.
+	stoppedApps []domain.ID
+	// stoppedSysUnits records the native units quiesce actually stopped.
+	stoppedSysUnits []string
 }
 
 type stoppedUnit struct {
@@ -232,9 +240,16 @@ func (b *Backend) planBackupCapture(ctx context.Context, scopes []string) (*capt
 	return plan, nil
 }
 
-// quiesceCapture stops selected writers; prior running state restores in the
-// deferred resume even on failure. Backup quiescence writes no maintenance
-// markers and no permanent pause records.
+// backupResumeTimeout bounds the full resume pass. A hung service manager
+// must surface as a reported resume error, never as apps silently left
+// stopped.
+const backupResumeTimeout = 10 * time.Minute
+
+// quiesceCapture stops selected writers and records everything it stopped
+// on the plan. On partial failure the caller must still resume the plan:
+// the returned error describes the failed stop, and plan.stoppedApps /
+// plan.stoppedSysUnits hold the earlier stops to restore. Backup
+// quiescence writes no maintenance markers and no permanent pause records.
 func (b *Backend) quiesceCapture(ctx context.Context, plan *capturePlan) error {
 	for _, u := range plan.systemUnits {
 		if !u.active {
@@ -243,6 +258,7 @@ func (b *Backend) quiesceCapture(ctx context.Context, plan *capturePlan) error {
 		if out, err := exec.CommandContext(ctx, "systemctl", "stop", u.unit).CombinedOutput(); err != nil {
 			return fmt.Errorf("stop %s: %v: %s", u.unit, err, strings.TrimSpace(string(out)))
 		}
+		plan.stoppedSysUnits = append(plan.stoppedSysUnits, u.unit)
 	}
 	for _, bd := range plan.bundles {
 		rows, err := b.appsByBundle(ctx, bd.ID)
@@ -250,38 +266,52 @@ func (b *Backend) quiesceCapture(ctx context.Context, plan *capturePlan) error {
 			return err
 		}
 		for _, a := range rows {
+			cur, err := b.apps.Status(ctx, a.ID)
+			if err != nil {
+				return translateError(err)
+			}
+			if cur.ObservedState != apps.ObservedRunning {
+				continue
+			}
 			if _, err := b.apps.Quiesce(ctx, a.ID); err != nil {
 				return translateError(err)
 			}
+			plan.stoppedApps = append(plan.stoppedApps, a.ID)
 		}
 	}
 	return nil
 }
 
-func (b *Backend) resumeCapture(ctx context.Context, plan *capturePlan) {
-	for _, bd := range plan.bundles {
-		rows, err := b.appsByBundle(ctx, bd.ID)
+// resumeCapture restarts exactly what quiesce stopped, in reverse stop
+// order, under a bounded timeout. Every failure is collected and returned
+// so a failed resume is reported rather than logged and hidden; callers
+// join it with any backup error. Applications whose desired state moved
+// away from running meanwhile are left alone.
+func (b *Backend) resumeCapture(ctx context.Context, plan *capturePlan) error {
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), backupResumeTimeout)
+	defer cancel()
+	var errs []error
+	for i := len(plan.stoppedApps) - 1; i >= 0; i-- {
+		id := plan.stoppedApps[i]
+		cur, err := b.apps.Status(rctx, id)
 		if err != nil {
+			errs = append(errs, fmt.Errorf("resume status %q: %w", id, translateError(err)))
 			continue
 		}
-		for _, a := range rows {
-			cur, err := b.apps.Status(ctx, a.ID)
-			if err != nil || cur.DesiredState != apps.DesiredRunning {
-				continue
-			}
-			if _, err := b.apps.Start(ctx, a.ID); err != nil {
-				log.Printf("backup resume: start %q: %v", a.Name, err)
-			}
-		}
-	}
-	for _, u := range plan.systemUnits {
-		if !u.active {
+		if cur.DesiredState != apps.DesiredRunning {
 			continue
 		}
-		if out, err := exec.CommandContext(ctx, "systemctl", "start", u.unit).CombinedOutput(); err != nil {
-			log.Printf("backup resume: start %s: %v: %s", u.unit, err, strings.TrimSpace(string(out)))
+		if _, err := b.apps.Start(rctx, id); err != nil {
+			errs = append(errs, fmt.Errorf("resume %q: %w", cur.Name, translateError(err)))
 		}
 	}
+	for i := len(plan.stoppedSysUnits) - 1; i >= 0; i-- {
+		unit := plan.stoppedSysUnits[i]
+		if out, err := exec.CommandContext(rctx, "systemctl", "start", unit).CombinedOutput(); err != nil {
+			errs = append(errs, fmt.Errorf("resume %s: %v: %s", unit, err, strings.TrimSpace(string(out))))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // dumpControlDB takes the control SQLite DB with VACUUM INTO through the
@@ -386,9 +416,12 @@ func (b *Backend) backupExcludes(ctx context.Context, sources []string) []string
 	return excludes
 }
 
-// CreateBackupScoped runs a scoped snapshot: resolve scopes, stop selected
-// writers, dump databases, capture with restic, and resume writers in a
-// defer even on failure. Any dump or capture error fails the backup.
+// CreateBackupScoped runs a scoped snapshot: preflight the repository,
+// resolve scopes, stop selected writers, dump databases, capture with
+// restic, and resume writers even on failure. Any dump or capture error
+// fails the backup; a failed resume is reported alongside, never hidden,
+// so a failed backup always leaves applications in their pre-backup
+// running state or reports exactly which resume failed.
 func (b *Backend) CreateBackupScoped(ctx context.Context, repository string, scopes []string) (domain.Backup, error) {
 	if b.backups == nil {
 		return domain.Backup{}, translateError(fmt.Errorf("%w: backups not configured", ErrNotConfigured))
@@ -401,78 +434,105 @@ func (b *Backend) CreateBackupScoped(ctx context.Context, repository string, sco
 	if err != nil {
 		return domain.Backup{}, translateError(err)
 	}
-	var runErr error
 	var result domain.Backup
 	err = withMaintenanceLock(func() error {
+		// Preflight before stopping anything: an uninitialized or
+		// unreachable repository must fail here, with writers still
+		// running, not after quiesce.
+		if _, _, err := b.backups.PreflightRepository(ctx, strings.TrimSpace(repository)); err != nil {
+			return translateError(err)
+		}
 		if err := b.quiesceCapture(ctx, plan); err != nil {
-			return translateError(err)
-		}
-		defer b.resumeCapture(ctx, plan)
-		staging, err := os.MkdirTemp(filepath.Join(b.cfg.StateDir, "dumps"), "run-")
-		if err != nil {
-			return err
-		}
-		success := false
-		defer func() {
-			if !success {
-				log.Printf("backup staging kept for inspection: %s", staging)
-			} else {
-				_ = os.RemoveAll(staging)
+			qerr := translateError(err)
+			if rerr := b.resumeCapture(ctx, plan); rerr != nil {
+				return errors.Join(qerr, fmt.Errorf("backup resume after failed quiesce: %w", translateError(rerr)))
 			}
-		}()
-		// Control checkpoint + identity material.
-		hasConfig := false
-		for _, s := range resolved {
-			if s == backups.ScopeServerConfig {
-				hasConfig = true
+			return qerr
+		}
+		captured, opErr := b.runCaptureLocked(ctx, plan, resolved, repository)
+		if rerr := b.resumeCapture(ctx, plan); rerr != nil {
+			rerr = fmt.Errorf("backup resume: %w", translateError(rerr))
+			if opErr != nil {
+				return errors.Join(opErr, rerr)
 			}
+			return rerr
 		}
-		if hasConfig {
-			if err := dumpControlDB(ctx, b.db, filepath.Join(staging, "control.db")); err != nil {
-				return translateError(err)
-			}
-			if kit, err := os.ReadFile(filepath.Join(b.cfg.StateDir, "recovery.kit")); err == nil {
-				_ = os.WriteFile(filepath.Join(staging, "recovery.kit"), kit, 0o600)
-			}
-			if raw, err := os.ReadFile(storageJSONPath(b.cfg.StateDir)); err == nil {
-				_ = os.WriteFile(filepath.Join(staging, "storage.json"), raw, 0o600)
-			}
+		if opErr != nil {
+			return opErr
 		}
-		// Logical database dumps as the postgres OS user.
-		for _, dbName := range plan.databases {
-			if err := dumpPostgresDB(ctx, dbName, filepath.Join(staging, dbName+".pgdump")); err != nil {
-				return translateError(err)
-			}
-		}
-		manifest, err := b.buildManifest(ctx, resolved, plan)
-		if err != nil {
-			return translateError(err)
-		}
-		if err := backups.WriteManifest(staging, manifest); err != nil {
-			return translateError(err)
-		}
-		sources := dedupePaths(append([]string{staging}, plan.sources...))
-		run, err := b.backups.RunBackup(ctx, backups.RunRequest{
-			RepositoryID: strings.TrimSpace(repository),
-			Trigger:      backups.TriggerManual,
-			Scopes:       resolved,
-			Paths:        sources,
-			Excludes:     b.backupExcludes(ctx, sources),
-		})
-		if err != nil {
-			return translateError(err)
-		}
-		result, runErr = b.GetBackup(ctx, domain.ID(run.ID))
-		if runErr != nil {
-			return runErr
-		}
-		success = true
+		result = captured
 		return nil
 	})
 	if err != nil {
 		return domain.Backup{}, err
 	}
-	return result, runErr
+	return result, nil
+}
+
+// runCaptureLocked stages dumps and the manifest and runs the restic
+// capture. The caller owns quiesce/resume around it; every error is
+// already translated for API callers.
+func (b *Backend) runCaptureLocked(ctx context.Context, plan *capturePlan, resolved []string, repository string) (domain.Backup, error) {
+	staging, err := os.MkdirTemp(filepath.Join(b.cfg.StateDir, "dumps"), "run-")
+	if err != nil {
+		return domain.Backup{}, err
+	}
+	success := false
+	defer func() {
+		if !success {
+			log.Printf("backup staging kept for inspection: %s", staging)
+		} else {
+			_ = os.RemoveAll(staging)
+		}
+	}()
+	// Control checkpoint + identity material.
+	hasConfig := false
+	for _, s := range resolved {
+		if s == backups.ScopeServerConfig {
+			hasConfig = true
+		}
+	}
+	if hasConfig {
+		if err := dumpControlDB(ctx, b.db, filepath.Join(staging, "control.db")); err != nil {
+			return domain.Backup{}, translateError(err)
+		}
+		if kit, err := os.ReadFile(filepath.Join(b.cfg.StateDir, "recovery.kit")); err == nil {
+			_ = os.WriteFile(filepath.Join(staging, "recovery.kit"), kit, 0o600)
+		}
+		if raw, err := os.ReadFile(storageJSONPath(b.cfg.StateDir)); err == nil {
+			_ = os.WriteFile(filepath.Join(staging, "storage.json"), raw, 0o600)
+		}
+	}
+	// Logical database dumps as the postgres OS user.
+	for _, dbName := range plan.databases {
+		if err := dumpPostgresDB(ctx, dbName, filepath.Join(staging, dbName+".pgdump")); err != nil {
+			return domain.Backup{}, translateError(err)
+		}
+	}
+	manifest, err := b.buildManifest(ctx, resolved, plan)
+	if err != nil {
+		return domain.Backup{}, translateError(err)
+	}
+	if err := backups.WriteManifest(staging, manifest); err != nil {
+		return domain.Backup{}, translateError(err)
+	}
+	sources := dedupePaths(append([]string{staging}, plan.sources...))
+	run, err := b.backups.RunBackup(ctx, backups.RunRequest{
+		RepositoryID: strings.TrimSpace(repository),
+		Trigger:      backups.TriggerManual,
+		Scopes:       resolved,
+		Paths:        sources,
+		Excludes:     b.backupExcludes(ctx, sources),
+	})
+	if err != nil {
+		return domain.Backup{}, translateError(err)
+	}
+	got, err := b.GetBackup(ctx, domain.ID(run.ID))
+	if err != nil {
+		return domain.Backup{}, err
+	}
+	success = true
+	return got, nil
 }
 
 func (b *Backend) buildManifest(ctx context.Context, scopes []string, plan *capturePlan) (backups.SnapshotManifest, error) {

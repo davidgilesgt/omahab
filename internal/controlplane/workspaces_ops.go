@@ -166,6 +166,11 @@ func (b *Backend) CreateWorkspace(ctx context.Context, req apitypes.CreateWorksp
 		if _, err := b.projects.Get(ctx, projectID); err != nil {
 			if proj, err2 := b.projects.GetBySlug(ctx, string(projectID)); err2 == nil {
 				projectID = proj.ID
+			} else {
+				// Unknown project by ID and slug: fail fast with 404 instead
+				// of provisioning against a synthetic repo URL that can only
+				// end in a rolled-back backend failure.
+				return domain.Workspace{}, translateError(fmt.Errorf("%w: project %q not found", store.ErrNotFound, string(req.ProjectID)))
 			}
 		}
 	}
@@ -178,6 +183,13 @@ func (b *Backend) CreateWorkspace(ctx context.Context, req apitypes.CreateWorksp
 		Branch:             req.Branch,
 	})
 	if err != nil {
+		if errors.Is(err, workspaces.ErrProvisionFailed) {
+			// Provisioning (branch creation or runner backend) failed after
+			// validation passed and the pending row was rolled back. Surface
+			// the safe runner/Forgejo detail as 503 instead of a bare 500
+			// "internal error" so operators can act on it.
+			return domain.Workspace{}, fmt.Errorf("%w: workspace provisioning failed: %v", apitypes.ErrServiceUnavailable, err)
+		}
 		return domain.Workspace{}, translateError(err)
 	}
 	if b.events != nil {
@@ -261,6 +273,9 @@ func (b *Backend) CreateCompanionWorkspace(ctx context.Context, req apitypes.Com
 		Agent:        "omp",
 	})
 	if err != nil {
+		if errors.Is(err, workspaces.ErrProvisionFailed) {
+			return domain.Workspace{}, fmt.Errorf("%w: workspace provisioning failed: %v", apitypes.ErrServiceUnavailable, err)
+		}
 		return domain.Workspace{}, translateError(err)
 	}
 	if b.events != nil {

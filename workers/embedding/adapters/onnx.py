@@ -54,8 +54,11 @@ class OnnxEmbeddingModel(EmbeddingModel):
         # Validate artifact presence eagerly — startup should fail fast.
         if not self._artifact_path.exists():
             raise FileNotFoundError(f"artifact_path not found: {self._artifact_path}")
-        # Determine model file
-        candidates = ["model.onnx", "model_optimized.onnx", "onnx/model.onnx"]
+        # Determine model file. Quantized single-file builds
+        # (onnx/model_quantized.onnx, e.g. onnx-community Qwen3-Embedding)
+        # are first-class production artifacts for CPU-only appliances:
+        # same architecture/tokenizer/dims, smaller RAM and faster load.
+        candidates = ["model.onnx", "model_optimized.onnx", "onnx/model.onnx", "onnx/model_quantized.onnx"]
         model_file: Path | None = None
         for c in candidates:
             p = self._artifact_path / c

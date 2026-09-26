@@ -98,6 +98,29 @@ func run() error {
 			}
 		}
 	}()
+	go func() {
+		retry := func() {
+			ctx, cancel := context.WithTimeout(sigCtx, 45*time.Second)
+			defer cancel()
+			completed, err := backend.RetryPendingDeviceRevocations(ctx)
+			if err != nil {
+				logger.Error("device credential revocation retry failed", "error", err)
+			} else if completed > 0 {
+				logger.Info("device credentials revoked", "count", completed)
+			}
+		}
+		retry()
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-sigCtx.Done():
+				return
+			case <-ticker.C:
+				retry()
+			}
+		}
+	}()
 	// Create API server
 	token := backend.APIToken()
 	emailKey := backend.EmailHMACKey()

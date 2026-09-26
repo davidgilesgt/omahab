@@ -3,9 +3,11 @@ info:
   title: Omahab Control API
   description: |
     Authenticated control-plane API for omahabd. All routes are under /api/v1 except
-    /up. Bearer authentication uses the 8-character panel token, except for /up and
-    the email webhook which uses a separate HMAC authentication path. On lan placement
-    (the default), requests from LAN source addresses and tailnet addresses (100.64.0.0/10) bypass the bearer token.
+    /up. Bearer authentication uses the 8-character panel token, required on every
+    admin route from every network (LAN, tailnet, and WAN alike; there are no
+    network-based exceptions). Separate authentication paths: /up and
+    /api/v1/public/status are public, the email webhook uses HMAC, companion device
+    endpoints use device tokens, and /mcp uses the dedicated Hermes MCP token.
     Mutating requests require Content-Type application/json. Unknown JSON fields are
     rejected. Request bodies are limited (1 MiB JSON, 5 MiB email webhook) and
     per-request timeouts are enforced. SSE streaming at /api/v1/events/stream supports
@@ -53,7 +55,7 @@ paths:
   /api/v1/tailscale/up:
     post:
       summary: Start Tailscale enrollment (authenticated)
-      description: Runs `tailscale up` and returns the printed auth URL ("" when already enrolled). On lan placement, LAN and tailnet sources bypass the bearer token.
+      description: Runs `tailscale up` and returns the printed auth URL ("" when already enrolled). Requires the panel bearer token.
       operationId: tailscaleUp
       responses:
         '200':
@@ -69,7 +71,7 @@ paths:
   /api/v1/tailscale/status:
     get:
       summary: Poll Tailscale enrollment state (authenticated)
-      description: Poll Tailscale enrollment state. On lan placement, LAN and tailnet sources bypass the bearer token.
+      description: Poll Tailscale enrollment state. Requires the panel bearer token.
       operationId: tailscaleStatus
       responses:
         '200':
@@ -1256,6 +1258,49 @@ paths:
         '204': { description: Deleted }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/hermes/mcp-token:
+    get:
+      summary: Get Hermes MCP token
+      description: Admin only. Returns the live Hermes MCP token in plaintext; requires the panel bearer token.
+      operationId: getHermesMCPToken
+      responses:
+        '200':
+          description: Current token
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token]
+                properties:
+                  token: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/Error' }
+  /api/v1/hermes/mcp-token/rotate:
+    post:
+      summary: Rotate Hermes MCP token
+      description: Admin only. Rotates the Hermes MCP token and returns the fresh value. The request carries no parameters - send {} (or an empty body). Malformed JSON is rejected with 400 and leaves the active token untouched.
+      operationId: rotateHermesMCPToken
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        '200':
+          description: Fresh token
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token]
+                properties:
+                  token: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/Error' }
+
   /api/v1/provider-oauth/{provider}/start:
     post:
       summary: Start provider OAuth flow
@@ -1650,12 +1695,13 @@ paths:
     parameters: [{ $ref: '#/components/parameters/IdPath' }]
     delete:
       summary: Revoke companion device
-      description: Admin only. Marks revoked_at, revokes its LiteLLM virtual key (owner_kind=device) and future companion API access. Idempotent.
+      description: Admin only. Marks revoked_at, revokes its LiteLLM virtual key (owner_kind=device) and future companion API access. Idempotent; repeat DELETE converges pending retries. A 503 means the device is locally contained but external revocations (gateway bearer, Forgejo token, restic htpasswd/reload, cached secret, sync shares) are unconfirmed with retry in progress.
       operationId: revokeCompanionDevice
       responses:
         '204': { description: Revoked }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '503': { description: Device contained but external revocations pending retry }
   /api/v1/companion/devices/{id}/allow-oauth:
     parameters: [{ $ref: '#/components/parameters/IdPath' }]
     put:
@@ -1668,14 +1714,57 @@ paths:
           application/json:
             schema:
               type: object
+              required: [allow]
               properties:
                 allow: { type: boolean }
-                allow_provider_oauth: { type: boolean }
+              additionalProperties: false
       responses:
         '200': { description: Updated device, content: { application/json: { schema: { $ref: '#/components/schemas/CompanionDevice' } } } }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/companion/devices/{id}/environment-grant:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    post:
+      summary: Grant tool environment to device
+      description: Admin only. Grants the current tool environment to the enrolled device and returns the grant revision. Names, booleans, and revision only - never secret values.
+      operationId: grantDeviceEnvironment
+      responses:
+        '200':
+          description: Grant state
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [device_id, granted, revision]
+                properties:
+                  device_id: { type: string }
+                  granted: { type: boolean }
+                  revision: { type: integer }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      summary: Revoke tool environment from device
+      description: Admin only. Revokes the tool environment grant; the device receives an empty bundle on next sync. Names, booleans, and revision only - never secret values.
+      operationId: revokeDeviceEnvironment
+      responses:
+        '200':
+          description: Grant state
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [device_id, granted, revision]
+                properties:
+                  device_id: { type: string }
+                  granted: { type: boolean }
+                  revision: { type: integer }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
 
   /api/v1/email/ingest:
       summary: Ingest email from Email Worker (HMAC auth)
@@ -2152,6 +2241,23 @@ paths:
         '204': { description: Updated }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/groups:
+    get:
+      summary: List Pocket ID groups
+      description: Admin only. Returns the Pocket ID group directory in server order for resolving group names to ids. Requires Pocket ID to be bound; otherwise the identity-not-configured error. Element shape matches GET /api/v1/users/{id}/groups items.
+      operationId: listGroups
+      responses:
+        '200':
+          description: Group directory
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Group' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+
   /api/v1/hindsight/embeddings:
     post:
       summary: Hindsight embeddings adapter (machine endpoint)
@@ -2700,7 +2806,7 @@ components:
       properties:
         id: { type: string }
         name: { type: string }
-        friendly_name: { type: string }
+        friendlyName: { type: string }
 
     SetupStatus:
       type: object
@@ -2982,6 +3088,7 @@ components:
         tpm: { type: integer, nullable: true, minimum: 1 }
         concurrency: { type: integer, nullable: true, minimum: 1 }
         budget: { type: number, nullable: true, minimum: 0 }
+        budget_duration: { type: string, nullable: true, description: LiteLLM budget window, e.g. 30d or 1mo. Required when budget is set. }
         created_at: { type: string, format: date-time }
         expires_at: { type: string, format: date-time, nullable: true }
     CreateModelKeyRequest:
@@ -2996,6 +3103,7 @@ components:
         tpm: { type: integer, minimum: 1 }
         concurrency: { type: integer, minimum: 1 }
         budget: { type: number, minimum: 0 }
+        budget_duration: { type: string, description: LiteLLM budget window, e.g. 30d or 1mo. Required when budget is set. }
         expires_at: { type: string, format: date-time }
       additionalProperties: false
     OAuthSession:
@@ -3064,11 +3172,12 @@ components:
     CompanionDevice:
       type: object
       description: Companion device record (device token never returned; only prefix)
-      required: [id, name, allow_provider_oauth, created_at, updated_at]
+      required: [id, name, allow_provider_oauth, granted, created_at, updated_at]
       properties:
         id: { type: string }
         name: { type: string }
         allow_provider_oauth: { type: boolean }
+        granted: { type: boolean, description: True while the device holds the tool environment grant }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
     CompanionEnrollment:

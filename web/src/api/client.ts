@@ -11,10 +11,13 @@ import type {
   CreateCompanionEnrollmentResponse,
   CreateModelKeyResponse,
   DeleteSSHKeyRequest,
+  DeviceEnvGrant,
   Disk,
   DoctorReport,
   Exposure,
   ExposureState,
+  Group,
+  AppAccess,
   IndexSetupOption,
   Instance,
   KnowledgeConsent,
@@ -210,8 +213,14 @@ export class ApiClient {
   createUser = (input: { name: string; email: string; groups?: string[] }) => this.request<User>("/users", { method: "POST", body: JSON.stringify(input) });
   setUserDisabled = (id: string, disabled: boolean) =>
     this.request<User>(`/users/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ disabled }) });
-  setUserGroups = (id: string, groups: string[]) =>
-    this.request<User>(`/users/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ groups }) });
+  // Effective Pocket ID membership: GET returns [{id, name}], PUT replaces by
+  // Pocket ID group IDs. Never PATCH /users {groups} for membership — that only
+  // touches local groups_json and leaves sharing rules unchanged.
+  userGroups = (id: string) => this.list<Group>(`/users/${encodeURIComponent(id)}/groups`);
+  allGroups = () => this.list<Group>("/groups");
+  userAppAccess = (id: string) => this.list<AppAccess>(`/users/${encodeURIComponent(id)}/app-access`);
+  setUserGroups = (id: string, groupIds: string[]) =>
+    this.request<void>(`/users/${encodeURIComponent(id)}/groups`, { method: "PUT", body: JSON.stringify({ group_ids: groupIds }) });
   beginRecovery = (id: string) =>
     this.request<RecoverySession>(`/users/${encodeURIComponent(id)}/recovery`, { method: "POST", body: JSON.stringify({}) });
   issueEnrollment = (id: string) => this.request<User>(`/users/${encodeURIComponent(id)}/enrollment`, { method: "POST", body: JSON.stringify({}) });
@@ -238,7 +247,7 @@ export class ApiClient {
 
   // Model keys (virtual keys) — metadata, plaintext returned once on create
   modelKeys = () => this.list<ModelKey>("/model-keys");
-  createModelKey = (input: { name: string; owner_kind: "hermes" | "device" | "harness"; owner_id: string; scopes?: ModelAliasName[]; rpm?: number; tpm?: number; concurrency?: number; budget?: number; expires_at?: string }) =>
+  createModelKey = (input: { name: string; owner_kind: "hermes" | "device" | "harness"; owner_id: string; scopes?: ModelAliasName[]; rpm?: number; tpm?: number; concurrency?: number; budget?: number; budget_duration?: string; expires_at?: string }) =>
     this.request<CreateModelKeyResponse>("/model-keys", { method: "POST", body: JSON.stringify(input) });
   deleteModelKey = (id: string) =>
     this.request<void>(`/model-keys/${encodeURIComponent(id)}`, { method: "DELETE" });
@@ -268,10 +277,17 @@ export class ApiClient {
   setDeviceAllowOAuth = (id: string, allow: boolean) =>
     this.request<CompanionDevice>(`/companion/devices/${encodeURIComponent(id)}/allow-oauth`, {
       method: "PUT",
-      body: JSON.stringify({ allow, allow_provider_oauth: allow }),
+      // Server rejects unknown fields: {allow} only, never allow_provider_oauth.
+      body: JSON.stringify({ allow }),
     });
   revokeCompanionDevice = (id: string) =>
     this.request<void>(`/companion/devices/${encodeURIComponent(id)}`, { method: "DELETE", body: JSON.stringify({}) });
+  // Tool-environment distribution grant per device (CompanionGrants contract):
+  // POST grants, DELETE revokes; handler ignores the body, {} keeps decoding happy.
+  grantDeviceEnv = (id: string) =>
+    this.request<DeviceEnvGrant>(`/companion/devices/${encodeURIComponent(id)}/environment-grant`, { method: "POST", body: JSON.stringify({}) });
+  revokeDeviceEnvGrant = (id: string) =>
+    this.request<DeviceEnvGrant>(`/companion/devices/${encodeURIComponent(id)}/environment-grant`, { method: "DELETE", body: JSON.stringify({}) });
 
   // Phone notifications (ntfy) — admin
   ntfyConfig = () => this.request<NtfyConfig>("/ntfy");

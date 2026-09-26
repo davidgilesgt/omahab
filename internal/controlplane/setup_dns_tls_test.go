@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -215,6 +216,7 @@ func TestSetupStatusMetadataAndTailscaleAction(t *testing.T) {
 		"tunnel":                   {"Provision Cloudflare Tunnel", "system"},
 		"dashboard_dns":            {"Publish dashboard DNS", "system"},
 		"core_apps":                {"Install core services", "system"},
+		"technitium_dns":           {"Connect household DNS", "operator"},
 		"woodpecker_connection":    {"Connect Woodpecker", "operator"},
 		"automatic_reconciliation": {"Verify DNS, TLS, and service routes", "system"},
 	}
@@ -611,4 +613,163 @@ func (m *memEdge) DeleteRoute(_ context.Context, hostname string) error {
 	defer m.mu.Unlock()
 	delete(m.routes, hostname)
 	return nil
+}
+
+func exposureTestBackend(t *testing.T, bundles ...apps.Bundle) (*Backend, *memEdge, *memDNS) {
+	t.Helper()
+	ctx := context.Background()
+	b, _ := newSetupBackend(t, &scriptedRunner{health: domain.HealthHealthy})
+	b.cfg.CaddyConfigPath = filepath.Join(t.TempDir(), "caddy", "caddy.json")
+	if len(bundles) > 0 {
+		digest := "sha256:" + strings.Repeat("a", 64)
+		withDigest := make([]apps.Bundle, 0, len(bundles)+1)
+		withDigest = append(withDigest, testSetupBundle("caddy", digest, domain.ExposurePublic, "", nil))
+		withDigest = append(withDigest, bundles...)
+		cat, err := apps.NewCatalog(withDigest...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		svc, err := apps.NewService(b.db, apps.Options{Catalog: cat, Runner: &scriptedRunner{health: domain.HealthHealthy}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.apps = svc
+	}
+	if err := b.store.Migrate(ctx, exposure.Migrations()...); err != nil {
+		t.Fatal(err)
+	}
+	edge := &memEdge{routes: map[string]exposure.Route{}}
+	dns := &memDNS{}
+	expSvc, err := exposure.New(b.store, exposure.Config{
+		Domain:      "omahab.com",
+		TailscaleIP: "100.75.94.122",
+		TunnelDNS:   "tunnel.example.com",
+	}, exposure.Clients{DNS: dns, Edge: edge})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.exposure = expSvc
+	b.httpsProbe = func(_ context.Context, _ string) error { return nil }
+	return b, edge, dns
+}
+
+// The household entry point must converge like the admin dashboard: the
+// HomePage serves tiles on home.<domain> (same omahabd), so both exposure
+// phases provision its DNS + edge route. Regression for F-home-dns-missing
+// (home.omahab.com NXDOMAIN while app hostnames resolved).
+func TestSetupExposureProvisionsHomeRoute(t *testing.T) {
+	ctx := context.Background()
+	b, edge, dns := exposureTestBackend(t)
+
+	if err := b.setupPhaseLoginExposure(ctx); err != nil {
+		t.Fatalf("login exposure: %v", err)
+	}
+	edge.mu.Lock()
+	home, okHome := edge.routes["home.omahab.com"]
+	admin, okAdmin := edge.routes["omahab.omahab.com"]
+	edge.mu.Unlock()
+	if !okHome || home.Upstream != "http://127.0.0.1:8484" {
+		t.Fatalf("login home route = %+v, present=%v", home, okHome)
+	}
+	if !okAdmin || admin.Upstream != "http://127.0.0.1:8484" {
+		t.Fatalf("login admin route = %+v, present=%v", admin, okAdmin)
+	}
+
+	if err := b.setupPhaseExposure(ctx); err != nil {
+		t.Fatalf("final exposure: %v", err)
+	}
+	edge.mu.Lock()
+	home, okHome = edge.routes["home.omahab.com"]
+	edge.mu.Unlock()
+	if !okHome || home.Upstream != "http://127.0.0.1:8484" {
+		t.Fatalf("final home route = %+v, present=%v", home, okHome)
+	}
+	dns.mu.Lock()
+	defer dns.mu.Unlock()
+	for _, want := range []string{"home.omahab.com", "omahab.omahab.com"} {
+		found := false
+		for _, r := range dns.recs {
+			if r.Name == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing DNS record for %s: %+v", want, dns.recs)
+		}
+	}
+}
+
+// Woodpecker's ci hostname must reach the edge as soon as the dependent-apps
+// phase installs it, using the same incremental pattern as core bundles.
+// Regression for F-dev-woodpecker-tls-serving (launch URL listed while Caddy
+// served no certificate: the edge route only appeared at final exposure).
+func TestExposeBundleRouteProvisionsWoodpeckerCI(t *testing.T) {
+	ctx := context.Background()
+	digest := "sha256:" + strings.Repeat("a", 64)
+	woodpecker := testSetupBundle("woodpecker", digest, domain.ExposurePrivate, "ci", nil)
+	b, edge, dns := exposureTestBackend(t, woodpecker)
+
+	var bundle *apps.Bundle
+	for _, bd := range b.apps.CatalogBundles() {
+		if bd.ID == "woodpecker" {
+			c := bd
+			bundle = &c
+		}
+	}
+	if bundle == nil {
+		t.Fatal("woodpecker missing from catalog")
+	}
+	b.exposeBundleRoute(ctx, *bundle, "omahab.com")
+
+	edge.mu.Lock()
+	route, ok := edge.routes["ci.omahab.com"]
+	edge.mu.Unlock()
+	if !ok {
+		t.Fatalf("missing ci.omahab.com edge route: %+v", edge.routes)
+	}
+	if route.Upstream != "http://127.0.0.1:8000" {
+		t.Fatalf("ci upstream = %q, want native woodpecker loopback", route.Upstream)
+	}
+	dns.mu.Lock()
+	defer dns.mu.Unlock()
+	for _, r := range dns.recs {
+		if r.Name == "ci.omahab.com" {
+			return
+		}
+	}
+	t.Fatalf("missing ci.omahab.com DNS record: %+v", dns.recs)
+}
+
+// End state: once woodpecker is installed, the final exposure phase must
+// carry ci.<domain> to the edge even if the incremental call was skipped.
+func TestFinalExposureIncludesInstalledWoodpeckerCI(t *testing.T) {
+	ctx := context.Background()
+	digest := "sha256:" + strings.Repeat("a", 64)
+	woodpecker := testSetupBundle("woodpecker", digest, domain.ExposurePrivate, "ci", nil)
+	b, edge, _ := exposureTestBackend(t, woodpecker)
+
+	var bundle *apps.Bundle
+	for _, bd := range b.apps.CatalogBundles() {
+		if bd.ID == "woodpecker" {
+			c := bd
+			bundle = &c
+		}
+	}
+	if bundle == nil {
+		t.Fatal("woodpecker missing from catalog")
+	}
+	if _, err := b.apps.Install(ctx, defaultInstallRequest(*bundle, "omahab.com")); err != nil {
+		t.Fatalf("install woodpecker: %v", err)
+	}
+	if err := b.setupPhaseExposure(ctx); err != nil {
+		t.Fatalf("final exposure: %v", err)
+	}
+	edge.mu.Lock()
+	defer edge.mu.Unlock()
+	for _, want := range []string{"ci.omahab.com", "home.omahab.com", "omahab.omahab.com"} {
+		if _, ok := edge.routes[want]; !ok {
+			t.Fatalf("missing %s edge route: %+v", want, edge.routes)
+		}
+	}
 }

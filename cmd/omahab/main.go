@@ -1018,10 +1018,7 @@ func newAppCmd() *cobra.Command {
 			if flagJSON {
 				return printJSON(res)
 			}
-			fmt.Printf("restart %s: %s\n", res.ID, res.Status)
-			if res.Message != "" {
-				fmt.Println(res.Message)
-			}
+			fmt.Printf("restart %s (%s): desired=%s observed=%s health=%s\n", res.ID, res.Name, res.DesiredState, res.ObservedState, res.Health)
 			return nil
 		},
 	})
@@ -2279,6 +2276,16 @@ func newRunnerCmd() *cobra.Command {
 				fmt.Printf("attached to %s via clientd\n", args[0])
 				return nil
 			}
+			// Validate the workspace exists before any local sudo escalation so
+			// an unknown ID surfaces a clear not-found error instead of a sudo
+			// terminal failure in non-interactive callers.
+			c, err := resolveClient()
+			if err != nil {
+				return handleFailure(err)
+			}
+			if _, err := c.GetWorkspace(ctx, args[0]); err != nil {
+				return handleFailure(err)
+			}
 			// Server path: re-exec via sudo when not root, then POST /api/v1/workspaces/{id}/attach
 			if os.Geteuid() != 0 {
 				if sudoPath, err := exec.LookPath("sudo"); err == nil {
@@ -2292,10 +2299,6 @@ func newRunnerCmd() *cobra.Command {
 					}
 					return nil
 				}
-			}
-			c, err := resolveClient()
-			if err != nil {
-				return handleFailure(err)
 			}
 			if err := c.AttachWorkspace(ctx, args[0]); err != nil {
 				return handleFailure(err)

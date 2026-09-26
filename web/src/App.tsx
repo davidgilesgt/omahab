@@ -153,8 +153,8 @@ export default function App() {
         <Route path="/login" element={<LoginPage />} />
         <Route path="/bootstrap" element={<Navigate to="/" replace />} />
         <Route path="/welcome/:token" element={<WelcomePage />} />
+        {/* No exact /admin route: it outranks /admin/* at /admin/ and renders a blank self-redirect. */}
         <Route path="/admin/*" element={<AdminDashboardRoutes />} />
-        <Route path="/admin" element={<Navigate to="/admin/" replace />} />
         <Route path="/" element={<HomePage />} />
         <Route path="/*" element={<HomeHostRedirects />} />
       </Routes>
@@ -165,7 +165,7 @@ export default function App() {
       <Route path="/login" element={<LoginPage />} />
       <Route path="/bootstrap" element={<Navigate to="/" replace />} />
       <Route path="/welcome/:token" element={<WelcomePage />} />
-      <Route path="/admin" element={<Navigate to="/admin/" replace />} />
+      {/* No exact /admin route: it outranks /admin/* at /admin/ and renders a blank self-redirect. */}
       <Route path="/admin/*" element={<AdminDashboardRoutes />} />
       <Route path="/*" element={<DashboardRoutes />} />
     </Routes>

@@ -8,6 +8,7 @@ import (
 	"github.com/omahab/omahab/internal/apitypes"
 	"github.com/omahab/omahab/internal/companion"
 	"github.com/omahab/omahab/internal/domain"
+	"github.com/omahab/omahab/internal/events"
 	"github.com/omahab/omahab/internal/identity"
 	"github.com/omahab/omahab/internal/providers"
 
@@ -218,7 +219,119 @@ func (b *Backend) UpdateUser(ctx context.Context, id domain.ID, req apitypes.Upd
 	if err != nil {
 		return domain.User{}, translateError(err)
 	}
-	return b.GetUser(ctx, id)
+	updated, err := b.GetUser(ctx, id)
+	if err != nil {
+		return domain.User{}, err
+	}
+	// Synchronize disable state to Pocket ID. Local-only persistence left
+	// disabled users fully active (session, passkey login, app access,
+	// recovery); the upstream account must follow the local flag, and
+	// re-enable must restore access.
+	if req.Disabled != nil {
+		if *req.Disabled != u.Disabled {
+			// Retire enrollment links while the account is still enabled
+			// upstream so burns are accepted, then sync the flag.
+			if disabled {
+				if err := b.retireInvitations(ctx, string(id), "user disabled"); err != nil {
+					return updated, err
+				}
+			}
+			if err := b.syncPocketDisabled(ctx, updated); err != nil {
+				// Roll local back so it never claims a state Pocket ID
+				// rejected: a failed disable leaves the account enabled
+				// everywhere, and retry re-attempts the full transition.
+				oldDis := 0
+				if u.Disabled {
+					oldDis = 1
+				}
+				if _, rollbackErr := b.db.ExecContext(ctx, `UPDATE controlplane_users SET disabled = ?, updated_at = ? WHERE id = ?`, oldDis, store.FormatTime(time.Now().UTC()), string(id)); rollbackErr != nil {
+					return updated, errors.Join(err, fmt.Errorf("restore local account state: %w", rollbackErr))
+				}
+				rolledBack, readErr := b.GetUser(ctx, id)
+				return rolledBack, errors.Join(err, readErr)
+			}
+			if disabled {
+				if err := b.deleteRecoveryArtifacts(ctx, updated.Email); err != nil {
+					return updated, err
+				}
+			}
+			typ := "identity.recovery"
+			msg := fmt.Sprintf("user %s re-enabled", updated.Email)
+			if disabled {
+				msg = fmt.Sprintf("user %s disabled", updated.Email)
+			}
+			// identity.recovery is the allowlisted identity-security bucket;
+			// the message carries the transition.
+			_, _ = b.events.Publish(ctx, events.PublishInput{Type: typ, Severity: "security", Message: msg})
+			return b.GetUser(ctx, id)
+		}
+		// Steady state (flag unchanged, e.g. a retried PATCH after a sync
+		// outage): converge upstream to the local flag so a previously
+		// failed sync heals instead of being skipped forever.
+		if err := b.syncPocketDisabled(ctx, updated); err != nil {
+			return updated, err
+		}
+		return b.GetUser(ctx, id)
+	}
+	return updated, nil
+}
+
+// syncPocketDisabled pushes the local disabled flag to the linked Pocket ID
+// account and verifies it read back. On disable it additionally demonstrates
+// the existing-session control: Pocket ID sessions are stateless JWTs and the
+// pinned build (v2.14.0) re-loads the user on every authenticated request and
+// rejects disabled accounts (middleware/jwt_auth.go Verify → UserDisabled;
+// passkey login in webauthn/service.go VerifyLogin and one-time-link exchange
+// in onetimeaccess/service.go completeTokenExchange do the same; OIDC refresh
+// and authorize re-validate the user at issuance in oidc/token_handler.go via
+// ClaimsService.ValidateUserAccess). There is no admin session-revocation
+// route because there are no server-side sessions to revoke; the disabled
+// flag itself ends sessions, and the verification read below proves the flag
+// landed instead of claiming a revocation.
+func (b *Backend) syncPocketDisabled(ctx context.Context, u domain.User) error {
+	if strings.TrimSpace(u.PocketUserID) == "" {
+		return nil // local-only user: nothing upstream to sync
+	}
+	if b.pocketClient == nil {
+		_ = b.bindPocketID(ctx)
+	}
+	if b.pocketClient == nil {
+		return translateError(fmt.Errorf("%w: cannot sync disable state for %q: PocketID not configured", ErrNotConfigured, u.Email))
+	}
+	if err := b.pocketClient.DisableUser(ctx, u.PocketUserID, u.Disabled); err != nil {
+		return translateError(err)
+	}
+	if err := b.pocketClient.RevokeUserSessions(ctx, u.PocketUserID); err != nil && !errors.Is(err, identity.ErrRevocationNotSupported) {
+		return translateError(err)
+	}
+	pu, err := b.pocketClient.GetUser(ctx, u.PocketUserID)
+	if err != nil {
+		return translateError(err)
+	}
+	if pu.Disabled != u.Disabled {
+		return translateError(fmt.Errorf("Pocket ID did not confirm disable state for %q (want disabled=%v)", u.Email, u.Disabled))
+	}
+	if u.Disabled {
+		_, _ = b.events.Publish(ctx, events.PublishInput{
+			Type:     "identity.recovery",
+			Severity: "security",
+			Message:  fmt.Sprintf("user %s disabled and verified upstream; existing sessions fail per-request authentication", u.Email),
+		})
+	}
+	return nil
+}
+
+// deleteRecoveryArtifacts removes issued recovery/login codes for email so a
+// disabled user cannot redeem previously issued links.
+func (b *Backend) deleteRecoveryArtifacts(ctx context.Context, email string) error {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" {
+		return nil
+	}
+	if _, err := b.db.ExecContext(ctx, `DELETE FROM identity_recoveries WHERE email = ?`, email); err != nil {
+		return translateError(err)
+	}
+	return nil
 }
 
 func (b *Backend) DeleteUser(ctx context.Context, id domain.ID) error {
@@ -237,6 +350,9 @@ func (b *Backend) IssueUserEnrollment(ctx context.Context, id domain.ID) (domain
 	u, err := b.GetUser(ctx, id)
 	if err != nil {
 		return domain.User{}, err
+	}
+	if b.userLoginBlocked(ctx, &u) {
+		return domain.User{}, translateError(store.Validationf("account %q is disabled", u.Email))
 	}
 	// Try to bind Pocket ID if not yet configured (best-effort)
 	if b.pocketClient == nil {
@@ -263,13 +379,16 @@ func (b *Backend) IssueUserEnrollment(ctx context.Context, id domain.ID) (domain
 				groupIDs = u.Groups
 			}
 		}
-		pid, url, exp, cerr := b.pocketClient.CreateUser(ctx, u.Email, u.Name, isAdmin, groupIDs)
+		pid, enrollmentURL, exp, cerr := b.pocketClient.CreateUser(ctx, u.Email, u.Name, isAdmin, groupIDs)
 		if cerr != nil {
 			return domain.User{}, translateError(cerr)
 		}
 		_, _ = b.db.ExecContext(ctx, `UPDATE controlplane_users SET pocket_user_id = ? WHERE id = ?`, pid, string(id))
 		u.PocketUserID = pid
-		u.EnrollmentURL = &url
+		if err := b.recordOrBurn(ctx, string(id), pid, invitationCodeFromURL(enrollmentURL), enrollmentURL, exp); err != nil {
+			return domain.User{}, err
+		}
+		u.EnrollmentURL = &enrollmentURL
 		t := exp
 		u.EnrollmentExpiresAt = &t
 		return u, nil
@@ -278,19 +397,243 @@ func (b *Backend) IssueUserEnrollment(ctx context.Context, id domain.ID) (domain
 	if b.pocketClient == nil {
 		return domain.User{}, translateError(fmt.Errorf("%w: identity not configured", ErrNotConfigured))
 	}
-	url, exp, err := b.pocketClient.IssueEnrollment(ctx, u.PocketUserID)
+	// Fail closed: every unexpired prior link must be confirmed burned before
+	// B is minted. An unconfirmed burn returns an error with A preserved as
+	// the single current link — B is never issued while A may still work.
+	if err := b.burnActiveInvitations(ctx, string(id), "enrollment reissued"); err != nil {
+		return domain.User{}, err
+	}
+	if err := b.supersedeInvitations(ctx, string(id)); err != nil {
+		return domain.User{}, err
+	}
+	enrollmentURL, exp, err := b.pocketClient.IssueEnrollment(ctx, u.PocketUserID)
 	if err != nil {
 		return domain.User{}, translateError(err)
 	}
-	u.EnrollmentURL = &url
+	if err := b.recordOrBurn(ctx, string(id), u.PocketUserID, invitationCodeFromURL(enrollmentURL), enrollmentURL, exp); err != nil {
+		return domain.User{}, err
+	}
+	u.EnrollmentURL = &enrollmentURL
 	t := exp
 	u.EnrollmentExpiresAt = &t
+	_, _ = b.events.Publish(ctx, events.PublishInput{Type: "identity.recovery", Severity: "security", Message: fmt.Sprintf("enrollment reissued for %s; prior links revoked", u.Email)})
 	return u, nil
+}
+
+// userLoginBlocked reports whether the user must be refused new login
+// artifacts (recovery codes, enrollment links, app access, passkey state).
+// The local disabled flag is authoritative; Pocket ID is consulted
+// opportunistically and converged back to local when it reports disabled.
+func (b *Backend) userLoginBlocked(ctx context.Context, u *domain.User) bool {
+	if u.Disabled {
+		return true
+	}
+	if b.pocketClient == nil || strings.TrimSpace(u.PocketUserID) == "" {
+		return false
+	}
+	pu, err := b.pocketClient.GetUser(ctx, u.PocketUserID)
+	if err != nil {
+		return false
+	}
+	if pu.Disabled {
+		now := store.FormatTime(time.Now().UTC())
+		_, _ = b.db.ExecContext(ctx, `UPDATE controlplane_users SET disabled = 1, updated_at = ? WHERE id = ?`, now, string(u.ID))
+		u.Disabled = true
+		return true
+	}
+	return false
+}
+
+// findLocalUserByEmail returns the controlplane user for email, if any.
+func (b *Backend) findLocalUserByEmail(ctx context.Context, email string) (domain.User, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	var did, remail, name, groupsJSON, created, updated string
+	var disabled int
+	var pocketID sql.NullString
+	err := b.db.QueryRowContext(ctx, `SELECT id, email, name, groups_json, disabled, created_at, updated_at, pocket_user_id FROM controlplane_users WHERE email = ?`, email).Scan(&did, &remail, &name, &groupsJSON, &disabled, &created, &updated, &pocketID)
+	if err != nil {
+		if strings.Contains(err.Error(), "no such column") {
+			err = b.db.QueryRowContext(ctx, `SELECT id, email, name, groups_json, disabled, created_at, updated_at FROM controlplane_users WHERE email = ?`, email).Scan(&did, &remail, &name, &groupsJSON, &disabled, &created, &updated)
+			pocketID = sql.NullString{}
+		}
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return domain.User{}, translateError(fmt.Errorf("%w: user %q not found", store.ErrNotFound, email))
+			}
+			return domain.User{}, translateError(err)
+		}
+	}
+	var groups []string
+	if err := json.Unmarshal([]byte(groupsJSON), &groups); err != nil {
+		return domain.User{}, fmt.Errorf("decode groups for user %s: %w", did, err)
+	}
+	if groups == nil {
+		groups = []string{}
+	}
+	ct, _ := store.ParseTime(created)
+	ut, _ := store.ParseTime(updated)
+	return domain.User{
+		ID:           domain.ID(did),
+		Email:        remail,
+		Name:         name,
+		Groups:       groups,
+		Disabled:     disabled == 1,
+		CreatedAt:    ct,
+		UpdatedAt:    ut,
+		PocketUserID: pocketID.String,
+	}, nil
+}
+
+// invitationCodeFromURL extracts the one-time code from a Pocket ID /lc/ URL.
+func invitationCodeFromURL(enrollmentURL string) string {
+	if i := strings.LastIndex(enrollmentURL, "/lc/"); i >= 0 {
+		return enrollmentURL[i+len("/lc/"):]
+	}
+	return ""
+}
+
+// recordInvitation inserts the current invitation row for single-active
+// tracking. A ledger failure is fatal to issuance: the caller burns the
+// just-minted token via recordOrBurn so no usable untracked URL escapes.
+func (b *Backend) recordInvitation(ctx context.Context, userID, pocketUserID, code, enrollmentURL string, expiresAt time.Time) error {
+	now := store.FormatTime(time.Now().UTC())
+	exp := store.FormatTime(expiresAt.UTC())
+	if _, err := b.db.ExecContext(ctx, `INSERT INTO identity_invitations (id, user_id, pocket_user_id, code, url, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		store.NewID(), userID, pocketUserID, code, enrollmentURL, exp, now); err != nil {
+		return translateError(err)
+	}
+	return nil
+}
+
+// recordOrBurn records a just-minted invitation; if the ledger write fails it
+// burns the token first so the caller never returns a usable untracked URL,
+// then returns the ledger error.
+func (b *Backend) recordOrBurn(ctx context.Context, userID, pocketUserID, code, enrollmentURL string, expiresAt time.Time) error {
+	if err := b.recordInvitation(ctx, userID, pocketUserID, code, enrollmentURL, expiresAt); err != nil {
+		if strings.TrimSpace(code) != "" && b.pocketClient != nil {
+			_ = b.pocketClient.ConsumeOneTimeToken(ctx, code)
+		}
+		return err
+	}
+	return nil
+}
+
+// invitationPending is one current (non-superseded) invitation row.
+type invitationPending struct{ id, code, exp string }
+
+// listActiveInvitations returns the current invitation rows for the user.
+func (b *Backend) listActiveInvitations(ctx context.Context, userID string) ([]invitationPending, error) {
+	rows, err := b.db.QueryContext(ctx, `SELECT id, code, expires_at FROM identity_invitations WHERE user_id = ? AND superseded_at IS NULL`, userID)
+	if err != nil {
+		return nil, translateError(err)
+	}
+	var active []invitationPending
+	for rows.Next() {
+		var p invitationPending
+		if err := rows.Scan(&p.id, &p.code, &p.exp); err != nil {
+			rows.Close()
+			return nil, translateError(err)
+		}
+		active = append(active, p)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, translateError(err)
+	}
+	rows.Close()
+	return active, nil
+}
+
+// supersedeInvitations marks all current invitation rows superseded.
+func (b *Backend) supersedeInvitations(ctx context.Context, userID string) error {
+	now := store.FormatTime(time.Now().UTC())
+	if _, err := b.db.ExecContext(ctx, `UPDATE identity_invitations SET superseded_at = ? WHERE user_id = ? AND superseded_at IS NULL`, now, userID); err != nil {
+		return translateError(err)
+	}
+	return nil
+}
+
+// invitationBurnable reports whether a code is worth burning: present,
+// unexpired, and with a Pocket ID client to burn it through.
+func (b *Backend) invitationBurnable(p invitationPending) bool {
+	if b.pocketClient == nil || strings.TrimSpace(p.code) == "" {
+		return false
+	}
+	if t, terr := store.ParseTime(p.exp); terr == nil {
+		return time.Now().UTC().Before(t)
+	}
+	return false
+}
+
+// burnActiveInvitations confirms every burnable prior link consumed upstream
+// and marks those rows revoked. Any unconfirmed burn aborts with an error and
+// leaves the ledger untouched: the old link stays the single current one and
+// no replacement is issued.
+func (b *Backend) burnActiveInvitations(ctx context.Context, userID, reason string) error {
+	active, err := b.listActiveInvitations(ctx, userID)
+	if err != nil {
+		return err
+	}
+	for _, p := range active {
+		if !b.invitationBurnable(p) {
+			continue
+		}
+		if berr := b.pocketClient.ConsumeOneTimeToken(ctx, p.code); berr != nil {
+			note := fmt.Sprintf("%s: previous link could not be revoked and remains the current invitation (valid until %s): %s", reason, p.exp, berr.Error())
+			_, _ = b.events.Publish(ctx, events.PublishInput{Type: "identity.recovery", Severity: "warning", Message: note})
+			return translateError(fmt.Errorf("previous enrollment link could not be revoked; reissue blocked until revocation succeeds: %w", berr))
+		}
+		_, _ = b.db.ExecContext(ctx, `UPDATE identity_invitations SET revoked = 1 WHERE id = ?`, p.id)
+	}
+	return nil
+}
+
+// retireInvitations supersedes all current invitation rows for the local user
+// and best-effort burns their unexpired Pocket ID one-time codes.
+// Per-code burn outcomes are recorded on the rows and in the event log.
+// It is used on disable, where enforcement does not depend on burns: a
+// disabled account cannot redeem any link (Pocket ID rejects the exchange),
+// so an unconfirmed burn is recorded, not fatal. Reissue uses the fail-closed
+// burnActiveInvitations instead. It returns nil unless ledger persistence
+// itself fails.
+func (b *Backend) retireInvitations(ctx context.Context, userID, reason string) error {
+	active, err := b.listActiveInvitations(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if err := b.supersedeInvitations(ctx, userID); err != nil {
+		return err
+	}
+	for _, p := range active {
+		if !b.invitationBurnable(p) {
+			continue // already dead or nothing to burn with
+		}
+		if berr := b.pocketClient.ConsumeOneTimeToken(ctx, p.code); berr != nil {
+			note := fmt.Sprintf("%s: previous link may remain valid until %s: %s", reason, p.exp, berr.Error())
+			_, _ = b.db.ExecContext(ctx, `UPDATE identity_invitations SET revoked = 0, note = ? WHERE id = ?`, note, p.id)
+			_, _ = b.events.Publish(ctx, events.PublishInput{Type: "identity.recovery", Severity: "warning", Message: note})
+		} else {
+			_, _ = b.db.ExecContext(ctx, `UPDATE identity_invitations SET revoked = 1 WHERE id = ?`, p.id)
+		}
+	}
+	return nil
 }
 
 func (b *Backend) CreateRecoverySession(ctx context.Context, email string) (apitypes.RecoverySession, error) {
 	if b.identity == nil {
 		return apitypes.RecoverySession{}, translateError(fmt.Errorf("%w: identity not configured (PocketID missing)", ErrNotConfigured))
+	}
+	normalized := strings.ToLower(strings.TrimSpace(email))
+	if local, err := b.findLocalUserByEmail(ctx, normalized); err == nil {
+		if b.userLoginBlocked(ctx, &local) {
+			return apitypes.RecoverySession{}, translateError(store.Validationf("account %q is disabled", normalized))
+		}
+	} else if b.pocketClient != nil {
+		// No local record (or lookup failed): consult Pocket ID directly so
+		// a disabled upstream account cannot mint codes through this path.
+		if pu, perr := b.pocketClient.GetUserByEmail(ctx, normalized); perr == nil && pu.Disabled {
+			return apitypes.RecoverySession{}, translateError(store.Validationf("account %q is disabled", normalized))
+		}
 	}
 	rec, err := b.identity.Recover(ctx, email)
 	if err != nil {
@@ -311,6 +654,9 @@ func (b *Backend) CreateUserRecoverySession(ctx context.Context, userID domain.I
 	u, err := b.GetUser(ctx, userID)
 	if err != nil {
 		return apitypes.RecoverySession{}, err
+	}
+	if b.userLoginBlocked(ctx, &u) {
+		return apitypes.RecoverySession{}, translateError(store.Validationf("account %q is disabled", u.Email))
 	}
 	return b.CreateRecoverySession(ctx, u.Email)
 }
@@ -361,6 +707,10 @@ func (b *Backend) ListModelKeys(ctx context.Context, p apitypes.Pagination) ([]a
 			v := *vk.BudgetAmount
 			mk.Budget = &v
 		}
+		if vk.BudgetDuration != nil {
+			v := *vk.BudgetDuration
+			mk.BudgetDuration = &v
+		}
 		out = append(out, mk)
 	}
 	return paginate(out, p), nil
@@ -392,6 +742,7 @@ func (b *Backend) CreateModelKey(ctx context.Context, req apitypes.CreateModelKe
 		TPMLimit:         req.TPM,
 		ConcurrencyLimit: req.Concurrency,
 		BudgetAmount:     req.Budget,
+		BudgetDuration:   req.BudgetDuration,
 	}
 	res, err := b.providers.IssueVirtualKey(ctx, in)
 	if err != nil {
@@ -402,18 +753,19 @@ func (b *Backend) CreateModelKey(ctx context.Context, req apitypes.CreateModelKe
 		// Gateway already called via providers.Service; no extra step needed.
 	}
 	mk := apitypes.ModelKey{
-		ID:          res.VirtualKey.ID,
-		Name:        res.VirtualKey.Name,
-		KeyPrefix:   res.VirtualKey.KeyPrefix,
-		OwnerKind:   ownerKind,
-		OwnerID:     ownerID,
-		Scopes:      res.VirtualKey.Scopes,
-		RPM:         req.RPM,
-		TPM:         req.TPM,
-		Concurrency: req.Concurrency,
-		Budget:      req.Budget,
-		CreatedAt:   res.VirtualKey.CreatedAt,
-		ExpiresAt:   res.VirtualKey.ExpiresAt,
+		ID:             res.VirtualKey.ID,
+		Name:           res.VirtualKey.Name,
+		KeyPrefix:      res.VirtualKey.KeyPrefix,
+		OwnerKind:      ownerKind,
+		OwnerID:        ownerID,
+		Scopes:         res.VirtualKey.Scopes,
+		RPM:            req.RPM,
+		TPM:            req.TPM,
+		Concurrency:    req.Concurrency,
+		Budget:         req.Budget,
+		BudgetDuration: req.BudgetDuration,
+		CreatedAt:      res.VirtualKey.CreatedAt,
+		ExpiresAt:      res.VirtualKey.ExpiresAt,
 	}
 	return mk, res.Token, nil
 }
@@ -713,6 +1065,9 @@ func (b *Backend) GetEnrollmentState(ctx context.Context, userID string) (identi
 	if err != nil {
 		return identity.EnrollmentState{}, err
 	}
+	if b.userLoginBlocked(ctx, &u) {
+		return identity.EnrollmentState{}, translateError(store.Validationf("account %q is disabled", u.Email))
+	}
 	if strings.TrimSpace(u.PocketUserID) == "" {
 		return identity.EnrollmentState{}, translateError(store.Validation("user has no linked Pocket ID account"))
 	}
@@ -730,6 +1085,11 @@ func (b *Backend) ListApplicationAccess(ctx context.Context, userID string) ([]i
 	u, err := b.GetUser(ctx, domain.ID(strings.TrimSpace(userID)))
 	if err != nil {
 		return nil, err
+	}
+	// A disabled user holds no app access: fail closed instead of listing
+	// the member apps they could reach before disable.
+	if b.userLoginBlocked(ctx, &u) {
+		return nil, translateError(store.Validationf("account %q is disabled", u.Email))
 	}
 	if strings.TrimSpace(u.PocketUserID) == "" {
 		return nil, translateError(store.Validation("user has no linked Pocket ID account"))
@@ -762,6 +1122,21 @@ func (b *Backend) GetUserGroups(ctx context.Context, userID string) ([]identity.
 	return groups, nil
 }
 
+func (b *Backend) ListGroups(ctx context.Context) ([]apitypes.Group, error) {
+	if b.pocketClient == nil {
+		return nil, translateError(fmt.Errorf("%w: identity not configured", ErrNotConfigured))
+	}
+	groups, err := b.pocketClient.ListGroups(ctx)
+	if err != nil {
+		return nil, translateError(err)
+	}
+	out := make([]apitypes.Group, 0, len(groups))
+	for _, g := range groups {
+		out = append(out, apitypes.Group(g))
+	}
+	return out, nil
+}
+
 func (b *Backend) SetUserGroups(ctx context.Context, userID string, groupIDs []string) error {
 	u, err := b.GetUser(ctx, domain.ID(strings.TrimSpace(userID)))
 	if err != nil {
@@ -774,6 +1149,27 @@ func (b *Backend) SetUserGroups(ctx context.Context, userID string, groupIDs []s
 		return translateError(fmt.Errorf("%w: identity not configured", ErrNotConfigured))
 	}
 	if err := b.pocketClient.SetUserGroups(ctx, u.PocketUserID, groupIDs); err != nil {
+		return translateError(err)
+	}
+	// Sync local groups_json to the effective Pocket ID membership so GET
+	// /api/v1/users reflects the edit without a second round-trip.
+	effective, err := b.pocketClient.GetUserGroups(ctx, u.PocketUserID)
+	if err != nil {
+		return translateError(err)
+	}
+	names := make([]string, 0, len(effective))
+	for _, g := range effective {
+		n := strings.TrimSpace(g.Name)
+		if n == "" {
+			n = strings.TrimSpace(g.FriendlyName)
+		}
+		if n != "" {
+			names = append(names, n)
+		}
+	}
+	groupsJSON, _ := json.Marshal(names)
+	now := store.FormatTime(time.Now().UTC())
+	if _, err := b.db.ExecContext(ctx, `UPDATE controlplane_users SET groups_json = ?, updated_at = ? WHERE id = ?`, string(groupsJSON), now, string(u.ID)); err != nil {
 		return translateError(err)
 	}
 	return nil

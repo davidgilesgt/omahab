@@ -77,11 +77,21 @@ func (c *CommandRunner) bin() string {
 }
 
 // env builds the child environment. Secret values appear here and nowhere
-// else in a restic invocation.
+// else in a restic invocation. The environment is deliberately minimal
+// (PATH plus restic variables), so a configured CacheDir must be carried
+// explicitly: restic honors RESTIC_CACHE_DIR, and XDG_CACHE_HOME is set
+// alongside as a fallback for cache lookups that only consult XDG. The
+// directory is created best-effort so every product restic invocation
+// carries a writable cache instead of failing with "unable to locate
+// cache directory".
 func (c *CommandRunner) env(repo Repository, creds Credentials) []string {
 	env := []string{"PATH=" + os.Getenv("PATH")}
 	if c.CacheDir != "" {
-		env = append(env, "RESTIC_CACHE_DIR="+c.CacheDir)
+		_ = os.MkdirAll(c.CacheDir, 0o700)
+		env = append(env,
+			"RESTIC_CACHE_DIR="+c.CacheDir,
+			"XDG_CACHE_HOME="+c.CacheDir,
+		)
 	}
 	env = append(env,
 		"RESTIC_REPOSITORY="+repo.Location,

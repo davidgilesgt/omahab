@@ -9,6 +9,7 @@ async function fulfillJSON(route: Route, value: unknown, status = 200) {
 async function installSetupAPI(page: Page) {
   let setupRequests = 0;
   let retryStarted = false;
+  await page.addInitScript(() => sessionStorage.setItem("omahab.session", "test-token"));
 
   await page.route("**/up", (route) => fulfillJSON(route, { status: "ok" }));
   await page.route("**/api/v1/**", async (route) => {

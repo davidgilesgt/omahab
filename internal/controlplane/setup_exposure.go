@@ -213,6 +213,10 @@ func (b *Backend) setupPhaseExposure(ctx context.Context) error {
 	// Native loopback: omahabd listens on the host, not in a container —
 	// host.docker.internal does not resolve here (live 2026-09-12: 502s).
 	routes["omahab."+domainName] = "http://127.0.0.1:8484"
+	// The household entry point serves the same omahabd: App.tsx renders
+	// HomePage (tiles + welcome links) on the home host, so home.<domain>
+	// needs its own DNS + edge route, not just the admin omahab.<domain>.
+	routes["home."+domainName] = "http://127.0.0.1:8484"
 	return b.exposeRoutes(ctx, routes)
 }
 
@@ -232,6 +236,8 @@ func (b *Backend) setupPhaseLoginExposure(ctx context.Context) error {
 	routes := map[string]string{
 		// Native loopback, see setupPhaseExposure.
 		"omahab." + domainName: "http://127.0.0.1:8484",
+		// Household entry point on the same omahabd (HomePage tiles).
+		"home." + domainName: "http://127.0.0.1:8484",
 	}
 	if b.apps != nil {
 		installed := map[string]bool{}

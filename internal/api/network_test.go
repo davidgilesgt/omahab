@@ -6,60 +6,96 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/omahab/omahab/internal/controlplane"
 )
 
-// TestBearerAuthLANBypass pins the LAN trust boundary: on lan placement,
-// LAN and tailnet sources reach admin routes without a token while WAN
-// sources get 401.
-func TestBearerAuthLANBypass(t *testing.T) {
+// TestBearerAuthRequiresTokenEverywhere pins the fail-closed boundary: LAN,
+// tailnet, and WAN sources all receive 401 on admin routes without a token.
+// There is no network-based bypass; the panel bearer token is required from
+// every source address.
+func TestBearerAuthRequiresTokenEverywhere(t *testing.T) {
 	backend := newRealBackend(t, nil)
 	srv := newRealServer(t, backend)
 
-	lan := httptest.NewRequest(http.MethodGet, "/api/v1/network/status", nil)
-	lan.RemoteAddr = "192.168.1.10:54321"
-	lanRec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(lanRec, lan)
-	if lanRec.Code != http.StatusOK {
-		t.Fatalf("lan without token = %d, body %s, want 200", lanRec.Code, lanRec.Body.String())
+	anonPaths := []struct{ method, path, body string }{
+		{http.MethodGet, "/api/v1/network/status", ""},
+		{http.MethodGet, "/api/v1/secrets", ""},
+		{http.MethodGet, "/api/v1/users", ""},
+		{http.MethodGet, "/api/v1/model-keys", ""},
+		{http.MethodGet, "/api/v1/hermes/mcp-token", ""},
+		{http.MethodPost, "/api/v1/hermes/mcp-token/rotate", "{}"},
+		{http.MethodGet, "/api/v1/applications", ""},
+		{http.MethodGet, "/api/v1/setup", ""},
+	}
+	for _, remote := range []string{"192.168.1.10:54321", "100.89.20.15:54321", "100.0.0.1:54321", "203.0.113.9:54321"} {
+		for _, tc := range anonPaths {
+			var body *strings.Reader
+			if tc.body == "" {
+				body = strings.NewReader("")
+			} else {
+				body = strings.NewReader(tc.body)
+			}
+			req := httptest.NewRequest(tc.method, tc.path, body)
+			req.RemoteAddr = remote
+			if tc.body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, req)
+			if rec.Code != http.StatusUnauthorized {
+				t.Errorf("%s %s %s without token = %d, body %s, want 401", remote, tc.method, tc.path, rec.Code, rec.Body.String())
+			}
+		}
 	}
 
-	// Tailnet is trusted like LAN on lan placement: the setup wizard hops
-	// from the LAN origin to the 100.x origin without a token to carry.
-	tail := httptest.NewRequest(http.MethodGet, "/api/v1/network/status", nil)
-	tail.RemoteAddr = "100.89.20.15:54321"
-	tailRec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(tailRec, tail)
-	if tailRec.Code != http.StatusOK {
-		t.Fatalf("tailnet without token = %d, body %s, want 200", tailRec.Code, tailRec.Body.String())
-	}
-
-	// The rest of 100/8 outside 100.64/10 is public space, not tailnet.
-	public100 := httptest.NewRequest(http.MethodGet, "/api/v1/network/status", nil)
-	public100.RemoteAddr = "100.0.0.1:54321"
-	public100Rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(public100Rec, public100)
-	if public100Rec.Code != http.StatusUnauthorized {
-		t.Fatalf("public 100/8 without token = %d, body %s, want 401", public100Rec.Code, public100Rec.Body.String())
-	}
-
-	wan := httptest.NewRequest(http.MethodGet, "/api/v1/network/status", nil)
-	wan.RemoteAddr = "203.0.113.9:54321"
-	wanRec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(wanRec, wan)
-	if wanRec.Code != http.StatusUnauthorized {
-		t.Fatalf("wan without token = %d, body %s, want 401", wanRec.Code, wanRec.Body.String())
+	// The same callers with the panel bearer token get through.
+	for _, tc := range anonPaths {
+		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+		req.RemoteAddr = "192.168.1.10:54321"
+		req.Header.Set("Authorization", "Bearer test-token")
+		if tc.body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code == http.StatusUnauthorized {
+			t.Errorf("%s %s with token = 401, body %s, want authorized", tc.method, tc.path, rec.Body.String())
+		}
 	}
 
 	bad := httptest.NewRequest(http.MethodGet, "/api/v1/network/status", nil)
-	bad.RemoteAddr = "203.0.113.9:54321"
+	bad.RemoteAddr = "192.168.1.10:54321"
 	bad.Header.Set("Authorization", "Bearer wrong-token")
 	badRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(badRec, bad)
 	if badRec.Code != http.StatusUnauthorized {
-		t.Fatalf("wan wrong token = %d, body %s, want 401", badRec.Code, badRec.Body.String())
+		t.Fatalf("lan wrong token = %d, body %s, want 401", badRec.Code, badRec.Body.String())
+	}
+}
+
+// TestBearerAuthFailsClosedWithoutToken pins fail-closed startup: when no
+// panel token is configured, admin routes reject every caller with 401
+// instead of serving openly.
+func TestBearerAuthFailsClosedWithoutToken(t *testing.T) {
+	backend := newRealBackend(t, nil)
+	srv, err := New(Config{Backend: backend})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, hdr := range []string{"", "Bearer test-token"} {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/secrets", nil)
+		req.RemoteAddr = "192.168.1.10:54321"
+		if hdr != "" {
+			req.Header.Set("Authorization", hdr)
+		}
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("no-token server, auth %q = %d, body %s, want 401", hdr, rec.Code, rec.Body.String())
+		}
 	}
 }
 

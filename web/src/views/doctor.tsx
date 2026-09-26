@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "../auth";
+import { copyText } from "../components/copyButton";
 import { ErrorState, LoadingState, PageHeader, Section, StatusPill } from "../components/ui";
 import { useToast } from "../components/toast";
 
@@ -27,7 +28,7 @@ export function DoctorPage() {
   const toast = useToast();
   const query = useQuery({ queryKey: ["doctor"], queryFn: client.doctor });
 
-  function copyMarkdown() {
+  async function copyMarkdown() {
     const data = query.data;
     if (!data) return;
     const lines: string[] = [
@@ -43,11 +44,22 @@ export function DoctorPage() {
       const det = (c.detail ?? "").replaceAll("|", "\\|").replaceAll("\n", " ");
       lines.push(`| ${c.name} | ${c.status} | ${msg} | ${det} | ${rem} |`);
     }
-    const text = lines.join("\n");
-    navigator.clipboard
-      .writeText(text)
-      .then(() => toast.success("Doctor report copied as Markdown"))
-      .catch(() => toast.error("Could not copy to clipboard"));
+    // copyText falls back to execCommand when the async clipboard is
+    // unavailable (insecure context, headless, denied permission), and every
+    // path reports back: success toast, or an actionable error toast.
+    let ok = false;
+    try {
+      ok = await copyText(lines.join("\n"));
+    } catch {
+      ok = false;
+    }
+    if (ok) {
+      toast.success("Doctor report copied as Markdown");
+    } else if (typeof navigator !== "undefined" && !navigator.clipboard) {
+      toast.error("Clipboard is unavailable over insecure HTTP. Open the panel over HTTPS or copy the report manually.");
+    } else {
+      toast.error("Could not copy to clipboard. Select and copy the report manually.");
+    }
   }
 
   if (query.isLoading) return <LoadingState label="Running health checks" />;
@@ -65,7 +77,7 @@ export function DoctorPage() {
             <button className="button secondary" type="button" onClick={() => void query.refetch()} disabled={query.isFetching}>
               {query.isFetching ? "Re-running…" : "Re-run"}
             </button>
-            <button className="button ghost" type="button" onClick={copyMarkdown}>
+            <button className="button ghost" type="button" onClick={() => void copyMarkdown()}>
               Copy as Markdown
             </button>
           </>

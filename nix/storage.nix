@@ -57,9 +57,11 @@ let
           LEGACY="false"
           if [ -f "$CFG" ]; then
             if ${pkgs.jq}/bin/jq -e 'type == "object"' "$CFG" >/dev/null 2>&1; then
-              UUID=$(${pkgs.jq}/bin/jq -r --arg v "$VOLUME" '.placements[] | select(.volume == $v and ((.pending // false) | not)) | .fs_uuid // empty' "$CFG" | head -n1)
-              LEGACY=$(${pkgs.jq}/bin/jq -r --arg v "$VOLUME" '.placements[] | select(.volume == $v) | (.legacy // false | tostring)' "$CFG" | head -n1)
-            else
+              # Null-tolerant: pre-validation files may carry placements:null;
+              # treat as unplaced (system disk) so boot stays safe.
+              UUID=$(${pkgs.jq}/bin/jq -r --arg v "$VOLUME" '(.placements // [])[] | select(.volume == $v and ((.pending // false) | not)) | .fs_uuid // empty' "$CFG" | head -n1)
+              LEGACY=$(${pkgs.jq}/bin/jq -r --arg v "$VOLUME" '(.placements // [])[] | select(.volume == $v) | (.legacy // false | tostring)' "$CFG" | head -n1)
+            elif ${pkgs.jq}/bin/jq -e 'type == "array"' "$CFG" >/dev/null 2>&1; then
               # v1 array compat: old media binds onto the Immich library
               # subvolume without moving existing <disk>/media content.
               if [ "$VOLUME" = "immich:state" ]; then

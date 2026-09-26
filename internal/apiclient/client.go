@@ -233,15 +233,11 @@ func (c *Client) GetApplication(ctx context.Context, id string) (*domain.Applica
 	return &out, nil
 }
 
-type AppActionResponse struct {
-	ID      string `json:"id"`
-	Status  string `json:"status"`
-	Message string `json:"message,omitempty"`
-}
-
-func (c *Client) RestartApplication(ctx context.Context, id string) (*AppActionResponse, error) {
-	var out AppActionResponse
-	if err := c.post(ctx, "/applications/"+url.PathEscape(id)+"/restart", map[string]any{}, &out); err != nil {
+// RestartApplication restarts an application via the lifecycle actions route.
+// The server answers with the updated application record.
+func (c *Client) RestartApplication(ctx context.Context, id string) (*domain.Application, error) {
+	var out domain.Application
+	if err := c.post(ctx, "/applications/"+url.PathEscape(id)+"/actions", map[string]string{"action": "restart"}, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -642,7 +638,7 @@ func (c *Client) GetEvent(ctx context.Context, id string) (*domain.Event, error)
 }
 
 func (c *Client) AckEvent(ctx context.Context, id string) error {
-	return c.post(ctx, "/events/"+url.PathEscape(id)+"/ack", map[string]any{}, nil)
+	return c.post(ctx, "/events/"+url.PathEscape(id)+"/read", map[string]any{}, nil)
 }
 
 // WatchEvents streams SSE events. Caller handles context cancellation.
@@ -779,13 +775,6 @@ func (c *Client) ListWorkspaces(ctx context.Context) ([]domain.Workspace, error)
 func (c *Client) GetWorkspace(ctx context.Context, id string) (*domain.Workspace, error) {
 	var out domain.Workspace
 	if err := c.get(ctx, "/workspaces/"+url.PathEscape(id), &out); err != nil {
-		if apiErr, ok := err.(*APIError); ok && apiErr.StatusCode == http.StatusNotFound {
-			// try runner alias
-			var out2 domain.Workspace
-			if err2 := c.get(ctx, "/runners/"+url.PathEscape(id), &out2); err2 == nil {
-				return &out2, nil
-			}
-		}
 		return nil, err
 	}
 	return &out, nil
@@ -797,11 +786,6 @@ func (c *Client) CreateWorkspace(ctx context.Context, req CreateWorkspaceRequest
 		return nil, err
 	}
 	return &out, nil
-}
-
-// Backward compat alias
-func (c *Client) CreateRunner(ctx context.Context, req CreateWorkspaceRequest) (*domain.Workspace, error) {
-	return c.CreateWorkspace(ctx, req)
 }
 
 func (c *Client) StopWorkspace(ctx context.Context, id string) error {
@@ -898,4 +882,3 @@ func (c *Client) ForwardProviderOAuthCallback(ctx context.Context, provider, ses
 	}
 	return &out, nil
 }
-

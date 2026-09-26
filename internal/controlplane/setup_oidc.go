@@ -197,6 +197,14 @@ func (b *Backend) setupPhaseOIDC(ctx context.Context) error {
 				return fmt.Errorf("ensure technitium group access: %w", err)
 			}
 			if err := b.ensureTechnitiumSSO(ctx, domainName, tClientID, tClientSecret); err != nil {
+				if errors.Is(err, errTechnitiumAuthRequired) {
+					// Operator-owned console credentials are missing; the
+					// core-apps phase already recorded the actionable
+					// pending step. SSO applies on the next reconcile after
+					// the operator restores access — never fail siblings.
+					log.Printf("setup oidc: technitium SSO deferred: operator console credentials needed")
+					return nil
+				}
 				return fmt.Errorf("ensure technitium sso: %w", err)
 			}
 			return nil
@@ -417,8 +425,13 @@ func (b *Backend) ensurePaperlessOIDC(ctx context.Context, domainName string) er
 		// them via /admin/.
 		"PAPERLESS_SOCIAL_AUTO_SIGNUP":          "true",
 		"PAPERLESS_SOCIALACCOUNT_ALLOW_SIGNUPS": "true",
-		"PAPERLESS_DISABLE_REGULAR_LOGIN":       "true",
-		"PAPERLESS_REDIRECT_LOGIN_TO_SSO":       "true",
+		// New social signups join the members group at creation (group must
+		// exist with permissions: converged by ensurePaperlessMemberAccess
+		// below). Without this, auto-provisioned accounts carry zero Django
+		// permissions and every document/settings API 403s.
+		"PAPERLESS_SOCIAL_ACCOUNT_DEFAULT_GROUPS": paperlessMemberGroup,
+		"PAPERLESS_DISABLE_REGULAR_LOGIN":         "true",
+		"PAPERLESS_REDIRECT_LOGIN_TO_SSO":         "true",
 	}, "paperless"); err != nil {
 		return fmt.Errorf("write paperless appenv: %w", err)
 	}
@@ -430,6 +443,14 @@ func (b *Backend) ensurePaperlessOIDC(ctx context.Context, domainName string) er
 	// initial admin, SSO never engages by default (live 2026-09-13).
 	if err := b.ensurePaperlessInitialAdmin(ctx); err != nil {
 		return fmt.Errorf("ensure paperless initial admin: %w", err)
+	}
+	// Household SSO baseline: the members group holds the minimum document +
+	// UI-settings permissions and every existing SSO user belongs to it, so
+	// the currently 403ing household account converges on the next setup run
+	// and future signups inherit it via DEFAULT_GROUPS above. Never grants
+	// staff/superuser and never touches the seeded admin.
+	if err := b.ensurePaperlessMemberAccess(ctx); err != nil {
+		return fmt.Errorf("ensure paperless member access: %w", err)
 	}
 	log.Printf("setup oidc: paperless client ensured")
 	return nil

@@ -584,13 +584,12 @@
         "enrolled"
       ],
       "steps": [
-        "Cause one automatic reconciliation to fail.",
-        "Observe the failure, retry reconciliation, and inspect created DNS, tunnel, and secret resources."
+        "Run reconciliation before the Technitium token is configured.",
+        "Configure the token, retry, and inspect DNS, tunnel, and secret resources."
       ],
       "expected": [
-        "The failure detail and action appear without a reload.",
-        "The successful retry replaces the failure detail.",
-        "No duplicate tunnels or records appear."
+        "Missing Technitium authentication appears as an operator action, not a permanent automatic failure.",
+        "A successful retry clears the action without duplicate tunnels or records."
       ],
       "evidence_types": [
         "BROWSER",
@@ -1051,11 +1050,12 @@
         "enrolled"
       ],
       "steps": [
-        "Disable a test member.",
-        "Attempt login, then enable and retry."
+        "Sign in with a passkey in an isolated browser context.",
+        "Disable the member and retry the existing session, passkey login, app access, and recovery.",
+        "Enable the member and retry passkey login."
       ],
       "expected": [
-        "Disabled login fails.",
+        "Disabled members cannot continue an existing session, sign in, use apps, or start recovery.",
         "Enabled login succeeds."
       ],
       "evidence_types": [
@@ -1404,8 +1404,8 @@
         "Open each project."
       ],
       "expected": [
-        "Both projects are created.",
-        "Their kinds are recorded correctly."
+        "Both projects have reachable Forgejo repositories under the omahab organization.",
+        "Code has a CI configuration; docs has no deploy pipeline."
       ],
       "evidence_types": [
         "BROWSER",
@@ -1427,12 +1427,12 @@
         "enrolled"
       ],
       "steps": [
-        "Submit empty, oversized, and illegal names.",
-        "Observe errors and retry valid."
+        "Submit empty, oversized, and punctuation-only names.",
+        "Check visible validation errors, then retry with a valid name."
       ],
       "expected": [
-        "Invalid names are rejected.",
-        "Valid retry succeeds."
+        "Each invalid name shows an actionable error and creates no project.",
+        "Valid retry succeeds and its repository exists."
       ],
       "evidence_types": [
         "BROWSER",
@@ -1749,11 +1749,11 @@
         "enrolled"
       ],
       "steps": [
-        "Create a generic repository through the Omahab API (not a direct restic run).",
+        "Create a generic repository under /srv/omahab/backups/repos through the Omahab API.",
         "Run a product backup of known app data and wait for completion."
       ],
       "expected": [
-        "The Omahab backup completes and the snapshot is listed.",
+        "The first backup initializes its scoped repository, completes, and lists a snapshot.",
         "Credentials store as backups.Credentials JSON with the exact password bytes."
       ],
       "evidence_types": [
@@ -1803,12 +1803,13 @@
         "enrolled"
       ],
       "steps": [
-        "Break a disposable repository target exclusively.",
-        "Run a backup."
+        "Record the running application set and break a disposable repository target.",
+        "Run a backup and inspect application state after the failure."
       ],
       "expected": [
-        "The failure is reported with remediation.",
-        "No partial snapshot is marked good."
+        "The failure is reported and no partial snapshot is marked good.",
+        "Every application running before the backup returns to running state.",
+        "A failed application resume remains visible as a failed recovery."
       ],
       "evidence_types": [
         "BROWSER",
@@ -1997,11 +1998,11 @@
         "enrolled"
       ],
       "steps": [
-        "Change a member group.",
-        "Verify effective app access, not just labels."
+        "Move a member to the guests group with the People dialog.",
+        "Reload Pocket ID groups and application access."
       ],
       "expected": [
-        "Group changes apply to sharing rules.",
+        "Pocket ID membership changes to guests and disallowed applications disappear.",
         "Dashboard roles are unaffected as documented."
       ],
       "evidence_types": [
@@ -2322,11 +2323,11 @@
       ],
       "steps": [
         "Deny OAuth for a device and attempt login.",
-        "Allow and retry."
+        "Use the Devices page to allow OAuth and retry after reload."
       ],
       "expected": [
         "Denied login fails.",
-        "Allowed login succeeds."
+        "Allowed login succeeds and the saved control stays enabled."
       ],
       "evidence_types": [
         "BROWSER",
@@ -2935,12 +2936,12 @@
         "enrolled"
       ],
       "steps": [
-        "Open home.<domain>.",
-        "Verify tiles and welcome links."
+        "Resolve home.<domain> from an enrolled workstation.",
+        "Open the HTTPS page and use a tile and a welcome link."
       ],
       "expected": [
-        "Home tiles load.",
-        "Welcome links work."
+        "DNS resolves to the appliance and the home page loads with valid TLS.",
+        "Tiles and welcome links open their intended destinations."
       ],
       "evidence_types": [
         "BROWSER"
@@ -3495,10 +3496,11 @@
         "enrolled"
       ],
       "steps": [
-        "Test valid use, wrong owner, forbidden model, expiration, revocation, and post-rotation rejection."
+        "Issue a product virtual key and call the LiteLLM gateway with an allowed model.",
+        "Test wrong owner, forbidden model, expiration, revocation, and post-rotation rejection."
       ],
       "expected": [
-        "Valid use succeeds.",
+        "The issued key works at the gateway for its allowed model.",
         "Every invalid case is rejected."
       ],
       "evidence_types": [
@@ -3655,11 +3657,12 @@
         "enrolled"
       ],
       "steps": [
-        "Rotate and delete variables.",
-        "Reconnect a real test client and run diagnostics."
+        "Enroll a test device and explicitly grant tool environment access.",
+        "Create and rotate a variable; reconnect the device after each change.",
+        "Revoke the grant, reconnect, and run diagnostics."
       ],
       "expected": [
-        "Reconnect applies current values.",
+        "Granted devices receive the current value; revoked devices receive no value.",
         "Diagnostics reveal names only."
       ],
       "evidence_types": [
@@ -4965,12 +4968,12 @@
         "enrolled"
       ],
       "steps": [
-        "Copy the final committed source as unhealthy fixture under $RUN/upgrade/ with a distinct version and a Nix override setting omahabd OM AHAB_LISTEN to 127.0.0.1:18484 (breaks the :8484 health probe).",
+        "Copy the final committed source as an unhealthy fixture under $RUN/upgrade/ with a distinct version and a Nix override setting omahabd OMAHAB_LISTEN to 127.0.0.1:18484.",
         "Copy it to /var/lib/omahab/test-releases/unhealthy in the disposable guest.",
         "Run sudo omahab system upgrade --flake path:/var/lib/omahab/test-releases/unhealthy."
       ],
       "expected": [
-        "The unhealthy switch fails its health gate and automatically restores the previous generation.",
+        "A failed switch or health check automatically restores the previous generation.",
         "/up, reported version, and persisted data verify afterward."
       ],
       "evidence_types": [
@@ -5341,12 +5344,14 @@
       "steps": [
         "Complete Forgejo provisioning through automatic setup (Pocket ID client, auth source, org teams, Woodpecker OAuth).",
         "Restart Forgejo, retry automatic setup, and confirm native administrator operations still complete.",
-        "Log in to Forgejo through Pocket ID in the browser and authorize Woodpecker; keep local password login disabled."
+        "Log in to Forgejo through Pocket ID as an admins user, verify the omahab organization and private repositories, then authorize Woodpecker; keep local password login disabled.",
+        "Log in as a members user and verify omahab membership; move that user to guests in Pocket ID, log in again, and verify private repository access is removed."
       ],
       "expected": [
         "Browser SSO succeeds after provisioning; an independent Jellyfin failure does not prevent the auth source from existing.",
         "A rejected stored automation token is replaced even when its former token name remains in Forgejo.",
-        "Woodpecker authorization completes."
+        "Woodpecker authorization completes.",
+        "Forgejo maps current Pocket ID groups to the omahab teams; guests cannot read private organization repositories."
       ],
       "evidence_types": [
         "BROWSER",
@@ -5435,13 +5440,16 @@
         "enrolled"
       ],
       "steps": [
+        "Sign in as a new household SSO member without administrator privileges.",
         "Generate a run-local PDF under the new run fixtures/ with valid xref, 612x792pt page, Helvetica 12pt, 36pt left margin, separate lines for run ID and TEXTPDF-7XK2.",
         "Require pdftotext -bbox to show the complete token within the page with no PDF syntax warnings; render the fixture visually.",
-        "Upload via JSON base64, then compare visible original-page text, full detail content from /api/documents/{id}/, full-text search for the exact token after processing, and downloaded original hash."
+        "List and upload through Paperless; compare detail text, exact-token search, and original download hash.",
+        "Sign in as a second SSO member and request the first member's document by ID and download URL."
       ],
       "expected": [
-        "All four outputs agree on the fixture token; title search or excerpts are not used as indexing proof.",
-        "Paperless settings stay unchanged unless a valid fixture shows a new defect."
+        "The household member can use documents without broad administrator privileges.",
+        "All four outputs agree on the fixture token; title search or excerpts are not indexing proof.",
+        "The second member cannot read the first member's document metadata or download."
       ],
       "evidence_types": [
         "BROWSER",
@@ -5558,13 +5566,13 @@
         "enrolled"
       ],
       "steps": [
-        "Open the embedding-worker interface through its resolved URL.",
-        "Exercise its required proof with synthetic fixtures.",
-        "Verify persistence after logout, restart, and reboot."
+        "Select the English embedding model during setup.",
+        "Inspect worker status and request an embedding for synthetic text.",
+        "Restart the worker and repeat status and embedding requests."
       ],
       "expected": [
-        "The fixture remains usable after restart.",
-        "Hashes match the recorded values."
+        "The chosen model is healthy and returns a 768-dimension vector.",
+        "Restart preserves the model and valid inference."
       ],
       "evidence_types": [
         "BROWSER",
@@ -5876,7 +5884,6 @@
         "ui:/bootstrap",
         "ui:/welcome/:token",
         "ui:/admin/*",
-        "ui:/admin",
         "ui:/",
         "ui:/*"
       ],
@@ -5887,11 +5894,11 @@
       "requires": [],
       "steps": [
         "Open login, bootstrap, welcome, admin, home, and fallback routes.",
-        "Verify redirects and guards."
+        "Open /admin/ directly and follow the Overview link from /admin/doctor."
       ],
       "expected": [
-        "Auth guards work.",
-        "Redirects land correctly."
+        "Auth guards work and redirects land correctly.",
+        "Both admin index entries render the Overview dashboard."
       ],
       "evidence_types": [
         "BROWSER"
@@ -6325,10 +6332,12 @@
       "requires": [],
       "steps": [
         "Upload via JSON base64 to the authorized Paperless path.",
-        "Attempt multipart upload and verify the documented contract."
+        "Attempt multipart upload and verify the documented contract.",
+        "Submit malformed JSON to Hermes token rotation and retry with a valid body."
       ],
       "expected": [
-        "JSON upload returns 201; multipart upload returns 415 matching the OpenAPI JSON-only contract."
+        "JSON upload returns 201; multipart upload returns 415 matching the OpenAPI JSON-only contract.",
+        "Malformed rotation returns 400 without changing the token; valid rotation changes it."
       ],
       "evidence_types": [
         "LIVE_API"
@@ -6375,7 +6384,8 @@
         "api:GET /api/v1/operations/{id}",
         "api:POST /api/v1/operations/{id}/actions",
         "api:GET /api/v1/system/ssh-keys",
-        "api:POST /api/v1/system/ssh-keys"
+        "api:POST /api/v1/system/ssh-keys",
+        "api:DELETE /api/v1/system/ssh-keys"
       ],
       "sources": [
         "internal/api/server.go",
@@ -6383,12 +6393,14 @@
       ],
       "requires": [],
       "steps": [
-        "Exercise Cover recovery and operations through authenticated API calls.",
-        "Verify success, validation, permission, and missing-state paths."
+        "PUT an empty storage object and inspect the file and operation list.",
+        "Dismiss a previous pending storage operation with no moves.",
+        "Exercise other recovery and SSH routes with and without the administrator token."
       ],
       "expected": [
-        "Responses match the OpenAPI contract.",
-        "Errors are stable JSON envelopes."
+        "Empty storage returns 400 without a file change or new operation.",
+        "The pending no-op operation can be dismissed; SSH key DELETE revokes access.",
+        "Unauthorized callers receive 401 without recovery data."
       ],
       "evidence_types": [
         "LIVE_API"
@@ -6440,7 +6452,8 @@
         "api:GET /api/v1/users/{id}/enrollment",
         "api:GET /api/v1/users/{id}/app-access",
         "api:GET /api/v1/users/{id}/groups",
-        "api:PUT /api/v1/users/{id}/groups"
+        "api:PUT /api/v1/users/{id}/groups",
+        "api:GET /api/v1/groups"
       ],
       "sources": [
         "internal/api/server.go",
@@ -6448,12 +6461,12 @@
       ],
       "requires": [],
       "steps": [
-        "Exercise Cover users and identity through authenticated API calls.",
-        "Verify success, validation, permission, and missing-state paths."
+        "Request administrator identity and secret routes without a token from LAN and tailnet sources.",
+        "Repeat with the administrator token and with a companion device token."
       ],
       "expected": [
-        "Responses match the OpenAPI contract.",
-        "Errors are stable JSON envelopes."
+        "Anonymous callers receive 401 and no identity or secret data.",
+        "Administrator requests succeed; device tokens cannot access administrator routes."
       ],
       "evidence_types": [
         "LIVE_API"
@@ -6499,7 +6512,9 @@
         "api:POST /api/v1/companion-enrollments",
         "api:GET /api/v1/companion/devices",
         "api:DELETE /api/v1/companion/devices/{id}",
-        "api:PUT /api/v1/companion/devices/{id}/allow-oauth"
+        "api:PUT /api/v1/companion/devices/{id}/allow-oauth",
+        "api:POST /api/v1/companion/devices/{id}/environment-grant",
+        "api:DELETE /api/v1/companion/devices/{id}/environment-grant"
       ],
       "sources": [
         "internal/api/server.go",
@@ -6507,12 +6522,12 @@
       ],
       "requires": [],
       "steps": [
-        "Exercise Cover companion admin through authenticated API calls.",
-        "Verify success, validation, permission, and missing-state paths."
+        "Enroll a device, then grant and revoke environment access with the administrator token.",
+        "Verify the device receives values only while granted and rejects administrator routes."
       ],
       "expected": [
-        "Responses match the OpenAPI contract.",
-        "Errors are stable JSON envelopes."
+        "The grant changes effective access and returns no secret values.",
+        "Device tokens cannot manage grants or other administrator routes."
       ],
       "evidence_types": [
         "LIVE_API"

@@ -300,6 +300,9 @@ func (b *Backend) UpdateApplication(ctx context.Context, id domain.ID, req apity
 		if !req.Exposure.Valid() {
 			return domain.Application{}, translateError(fmt.Errorf("%w: invalid exposure", store.ErrValidation))
 		}
+		if err := b.checkExposureCeiling(ctx, "application", id, *req.Exposure); err != nil {
+			return domain.Application{}, err
+		}
 		_, err := b.db.ExecContext(ctx, `UPDATE apps SET exposure = ?, updated_at = ? WHERE id = ?`, string(*req.Exposure), store.FormatTime(time.Now().UTC()), string(id))
 		if err != nil {
 			return domain.Application{}, translateError(err)
@@ -456,6 +459,9 @@ func (b *Backend) UpdateExposure(ctx context.Context, resourceType string, id do
 	if !exposure.Valid() {
 		return apitypes.ExposureState{}, translateError(fmt.Errorf("%w: invalid exposure", store.ErrValidation))
 	}
+	if err := b.checkExposureCeiling(ctx, resourceType, id, exposure); err != nil {
+		return apitypes.ExposureState{}, err
+	}
 	// Update exposure_services directly; if not exists, create via exposure service? For now update row
 	res, err := b.db.ExecContext(ctx, `UPDATE exposure_services SET exposure = ?, updated_at = ?, revision = revision + 1 WHERE id = ?`, string(exposure), store.FormatTime(time.Now().UTC()), string(id))
 	if err != nil {
@@ -466,6 +472,176 @@ func (b *Backend) UpdateExposure(ctx context.Context, resourceType string, id do
 		return apitypes.ExposureState{}, translateError(fmt.Errorf("%w: exposure %q not found", store.ErrNotFound, id))
 	}
 	return b.GetExposure(ctx, resourceType, id)
+}
+
+// exposureRank orders exposure for ceiling checks, mirroring install-time
+// validation in apps/service.go. Empty ranks as private.
+func exposureRank(e domain.Exposure) int {
+	switch e {
+	case "", domain.ExposurePrivate:
+		return 0
+	case domain.ExposureShared:
+		return 1
+	case domain.ExposurePublic:
+		return 2
+	default:
+		return -1
+	}
+}
+
+// exposureCeiling resolves the catalog bundle governing an exposure update
+// target. It returns false when ownership cannot be proven: public exposure
+// is a security boundary, so unresolvable service/application targets fail
+// closed in checkExposureCeiling.
+func (b *Backend) exposureCeiling(ctx context.Context, kind string, id domain.ID) (apps.Bundle, bool) {
+	if b.apps == nil {
+		return apps.Bundle{}, false
+	}
+	bundles := b.apps.CatalogBundles()
+	if len(bundles) == 0 {
+		return apps.Bundle{}, false
+	}
+	byID := func(id string) (apps.Bundle, bool) {
+		for _, bd := range bundles {
+			if bd.ID == id {
+				return bd, true
+			}
+		}
+		return apps.Bundle{}, false
+	}
+	// Application targets resolve through the installed app record only:
+	// a missing app (or one from outside the catalog) proves nothing.
+	if kind == "application" {
+		st, err := b.apps.Status(ctx, id)
+		if err != nil {
+			return apps.Bundle{}, false
+		}
+		return byID(st.BundleID)
+	}
+	// Service and project rows resolve through the exposure record.
+	return b.exposureRowBundle(ctx, bundles, byID, string(id))
+}
+
+// exposureRow reads one exposure_services row by service id or hostname.
+func (b *Backend) exposureRow(ctx context.Context, key string) (hostname, upstream string, found bool) {
+	if err := b.db.QueryRowContext(ctx,
+		`SELECT hostname, upstream FROM exposure_services WHERE id = ? OR hostname = ?`,
+		key, key).Scan(&hostname, &upstream); err != nil {
+		return "", "", false
+	}
+	return hostname, upstream, true
+}
+
+// exposureRowBundle maps an exposure row to its owning catalog bundle. Only
+// unambiguous signals count: bundle id, full hostname, a route label
+// claimed by exactly one bundle, or an upstream claimed by exactly one
+// bundle. Shared upstreams or routes stay unresolved rather than guessing
+// an owner.
+func (b *Backend) exposureRowBundle(ctx context.Context, bundles []apps.Bundle, byID func(string) (apps.Bundle, bool), key string) (apps.Bundle, bool) {
+	if bd, ok := byID(key); ok {
+		return bd, true
+	}
+	hostname, upstream, found := b.exposureRow(ctx, key)
+	if !found {
+		return apps.Bundle{}, false
+	}
+	if bd, ok := byID(hostname); ok {
+		return bd, true
+	}
+	label := hostname
+	if i := strings.Index(label, "."); i >= 0 {
+		label = label[:i]
+	}
+	var owner apps.Bundle
+	claims := 0
+	for _, bd := range bundles {
+		if label != "" && (label == bd.Route || label == bd.ID) {
+			owner, claims = bd, claims+1
+		}
+	}
+	if claims == 1 {
+		return owner, true
+	}
+	if claims > 1 {
+		return apps.Bundle{}, false
+	}
+	if upstream != "" {
+		owner, claims = apps.Bundle{}, 0
+		for _, bd := range bundles {
+			up, uerr := bundleUpstream(bd)
+			if uerr != nil || up == "" || up != upstream {
+				continue
+			}
+			owner, claims = bd, claims+1
+		}
+		if claims == 1 {
+			return owner, true
+		}
+	}
+	return apps.Bundle{}, false
+}
+
+// unownedExposureRow reports whether key names a persisted exposure row that
+// no catalog bundle claims by any signal: a proven user project row with no
+// catalog ceiling. Any claim, even an ambiguous one, disqualifies it.
+func (b *Backend) unownedExposureRow(ctx context.Context, key string) bool {
+	hostname, upstream, found := b.exposureRow(ctx, key)
+	if !found || b.apps == nil {
+		return false
+	}
+	bundles := b.apps.CatalogBundles()
+	byID := func(id string) (apps.Bundle, bool) {
+		for _, bd := range bundles {
+			if bd.ID == id {
+				return bd, true
+			}
+		}
+		return apps.Bundle{}, false
+	}
+	if _, ok := byID(key); ok {
+		return false
+	}
+	if _, ok := byID(hostname); ok {
+		return false
+	}
+	label := hostname
+	if i := strings.Index(label, "."); i >= 0 {
+		label = label[:i]
+	}
+	for _, bd := range bundles {
+		if label != "" && (label == bd.Route || label == bd.ID) {
+			return false
+		}
+		if upstream != "" {
+			if up, uerr := bundleUpstream(bd); uerr == nil && up != "" && up == upstream {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// checkExposureCeiling rejects exposure above the target's catalog
+// max_exposure, matching install-time limits. Lowering to private is always
+// safe and needs no ceiling; any other service/application escalation
+// without a proven catalog owner fails closed. Project rows pass only with
+// a proven owner (enforced) or as proven ownerless rows (no ceiling to
+// enforce). It runs before any change.
+func (b *Backend) checkExposureCeiling(ctx context.Context, kind string, id domain.ID, exposure domain.Exposure) error {
+	if exposure == domain.ExposurePrivate {
+		return nil
+	}
+	bd, ok := b.exposureCeiling(ctx, kind, id)
+	if !ok {
+		if kind == "project" && b.unownedExposureRow(ctx, string(id)) {
+			return nil
+		}
+		return translateError(fmt.Errorf("%w: cannot verify catalog max_exposure for %s %q", store.ErrValidation, kind, string(id)))
+	}
+	if exposureRank(exposure) > exposureRank(bd.MaxExposure) {
+		return translateError(fmt.Errorf("%w: bundle %q supports at most %q exposure", store.ErrValidation, bd.ID, bd.MaxExposure))
+	}
+	return nil
 }
 
 // Projects

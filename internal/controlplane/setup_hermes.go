@@ -27,6 +27,14 @@ func (b *Backend) ensureHermesLiteLLMKey(ctx context.Context) error {
 		return nil
 	}
 	secretName := "hermes_litellm_key"
+	// Pre-fix installs hold orphan gateway rows (plaintext discarded at
+	// issuance) plus unusable omk_ secrets. Cleanup is best-effort and never
+	// fails setup; it revokes exact stored gateway handles only.
+	if n, cerr := b.providers.CleanupLegacyGatewayOrphans(ctx); cerr != nil {
+		log.Printf("setup dependent_apps: legacy gateway orphan cleanup: %v", cerr)
+	} else if n > 0 {
+		log.Printf("setup dependent_apps: revoked %d legacy gateway orphan keys", n)
+	}
 	var vkID string
 	var expiresAt, revokedAt sql.NullString
 	nowStr := store.FormatTime(time.Now().UTC())
@@ -34,19 +42,25 @@ func (b *Backend) ensureHermesLiteLLMKey(ctx context.Context) error {
 	if err == nil {
 		if v, rerr := b.secrets.RevealByName(ctx, "platform-app", secretName); rerr == nil && strings.TrimSpace(v) != "" {
 			tok := strings.TrimSpace(v)
-			if err := b.renderHermesKeyEnv(ctx, tok); err != nil {
-				return err
-			}
-			if inst, err := b.store.Instance(ctx); err == nil {
-				if d := strings.TrimSpace(inst.Domain); d != "" && d != "example.com" && d != "not-configured.invalid" {
-					if err := b.renderHermesConfig(ctx, d); err != nil {
-						return err
+			if providers.IsLegacyVirtualKeyToken(tok) {
+				log.Printf("setup dependent_apps: hermes key is retired omk_, reissuing through gateway")
+				_ = b.providers.RevokeVirtualKey(ctx, domain.ID(vkID))
+			} else {
+				if err := b.renderHermesKeyEnv(ctx, tok); err != nil {
+					return err
+				}
+				if inst, err := b.store.Instance(ctx); err == nil {
+					if d := strings.TrimSpace(inst.Domain); d != "" && d != "example.com" && d != "not-configured.invalid" {
+						if err := b.renderHermesConfig(ctx, d); err != nil {
+							return err
+						}
 					}
 				}
+				return nil
 			}
-			return nil
+		} else {
+			_ = b.providers.RevokeVirtualKey(ctx, domain.ID(vkID))
 		}
-		_ = b.providers.RevokeVirtualKey(ctx, domain.ID(vkID))
 	}
 	kind := providers.OwnerKindHermes
 	ownerID := "hermes"

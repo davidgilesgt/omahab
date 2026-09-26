@@ -71,25 +71,27 @@ type ModelKey struct {
 	OwnerKind   string     `json:"owner_kind"`
 	OwnerID     string     `json:"owner_id"`
 	Scopes      []string   `json:"scopes"`
-	RPM         *int       `json:"rpm,omitempty"`
-	TPM         *int       `json:"tpm,omitempty"`
-	Concurrency *int       `json:"concurrency,omitempty"`
-	Budget      *float64   `json:"budget,omitempty"`
-	CreatedAt   time.Time  `json:"created_at"`
-	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
+	RPM            *int       `json:"rpm,omitempty"`
+	TPM            *int       `json:"tpm,omitempty"`
+	Concurrency    *int       `json:"concurrency,omitempty"`
+	Budget         *float64   `json:"budget,omitempty"`
+	BudgetDuration *string    `json:"budget_duration,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+	ExpiresAt      *time.Time `json:"expires_at,omitempty"`
 }
 
 // CreateModelKeyRequest is the body for POST /api/v1/model-keys.
 type CreateModelKeyRequest struct {
-	Name        string     `json:"name"`
-	OwnerKind   string     `json:"owner_kind"`
-	OwnerID     string     `json:"owner_id"`
-	Scopes      []string   `json:"scopes,omitempty"`
-	RPM         *int       `json:"rpm,omitempty"`
-	TPM         *int       `json:"tpm,omitempty"`
-	Concurrency *int       `json:"concurrency,omitempty"`
-	Budget      *float64   `json:"budget,omitempty"`
-	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
+	Name           string     `json:"name"`
+	OwnerKind      string     `json:"owner_kind"`
+	OwnerID        string     `json:"owner_id"`
+	Scopes         []string   `json:"scopes,omitempty"`
+	RPM            *int       `json:"rpm,omitempty"`
+	TPM            *int       `json:"tpm,omitempty"`
+	Concurrency    *int       `json:"concurrency,omitempty"`
+	Budget         *float64   `json:"budget,omitempty"`
+	BudgetDuration *string    `json:"budget_duration,omitempty"`
+	ExpiresAt      *time.Time `json:"expires_at,omitempty"`
 }
 
 // OAuthSession is the safe OAuth session returned to clients; never includes device codes, tokens, or master key.
@@ -127,6 +129,9 @@ type CompanionDevice struct {
 	EnvVariableCount   int        `json:"env_variable_count"`
 	BackupLastSnapshot *time.Time `json:"backup_last_snapshot,omitempty"`
 	AllowProviderOAuth bool       `json:"allow_provider_oauth"`
+	// Granted reports explicit owner consent to share tool-environment values
+	// with this device. Metadata only; values are never embedded here.
+	Granted            bool       `json:"granted"`
 	LastSeenAt         *time.Time `json:"last_seen_at,omitempty"`
 	RevokedAt          *time.Time `json:"revoked_at,omitempty"`
 	CreatedAt          time.Time  `json:"created_at"`

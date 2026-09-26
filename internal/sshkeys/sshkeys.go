@@ -464,26 +464,43 @@ func EnsureAuthorizedKeysAt(home string, uid, gid int, newKeys []SSHKey) (int, s
 	return addedCount, akPath, nil
 }
 
+// resolveSSHHome maps a username to its authorized_keys location. The account
+// must still resolve via user.Lookup (existence, uid, and gid always come
+// from the system); only the file location moves when OMAHAB_SSH_HOME names
+// a directory. Production never sets it; it exists so API/CLI tests can
+// exercise the full add/list/delete flow against a temp dir instead of a
+// real home directory.
+func resolveSSHHome(username string) (home string, uid, gid int, err error) {
+	u, err := user.Lookup(username)
+	if err != nil {
+		return "", 0, 0, fmt.Errorf("lookup user %q: %w", username, err)
+	}
+	uid, err = strconv.Atoi(u.Uid)
+	if err != nil {
+		return "", 0, 0, fmt.Errorf("invalid uid for %q: %w", username, err)
+	}
+	gid, err = strconv.Atoi(u.Gid)
+	if err != nil {
+		return "", 0, 0, fmt.Errorf("invalid gid for %q: %w", username, err)
+	}
+	home = u.HomeDir
+	if override := strings.TrimSpace(os.Getenv("OMAHAB_SSH_HOME")); override != "" {
+		home = override
+	}
+	if home == "" {
+		return "", 0, 0, fmt.Errorf("user %q has no home directory", username)
+	}
+	return home, uid, gid, nil
+}
+
 // EnsureAuthorizedKeys merges newKeys into the user's authorized_keys file
 // additively (existing keys kept; duplicates skipped) and writes it back
 // with 0600 and correct ownership when running as root.
 // It is a thin wrapper over EnsureAuthorizedKeysAt for existing callers.
 func EnsureAuthorizedKeys(username string, newKeys []SSHKey) (added int, path string, err error) {
-	u, err := user.Lookup(username)
+	home, uid, gid, err := resolveSSHHome(username)
 	if err != nil {
-		return 0, "", fmt.Errorf("lookup user %q: %w", username, err)
-	}
-	home := u.HomeDir
-	if home == "" {
-		return 0, "", fmt.Errorf("user %q has no home directory", username)
-	}
-	uid, err := strconv.Atoi(u.Uid)
-	if err != nil {
-		return 0, "", fmt.Errorf("invalid uid for %q: %w", username, err)
-	}
-	gid, err := strconv.Atoi(u.Gid)
-	if err != nil {
-		return 0, "", fmt.Errorf("invalid gid for %q: %w", username, err)
+		return 0, "", err
 	}
 	return EnsureAuthorizedKeysAt(home, uid, gid, newKeys)
 }
@@ -492,13 +509,9 @@ func EnsureAuthorizedKeys(username string, newKeys []SSHKey) (added int, path st
 // Missing file means empty list. Comments, blank and unparseable lines are not
 // advertised as valid keys. Symlinked managed directories/files are rejected.
 func ReadAuthorizedKeys(username string) ([]SSHKey, error) {
-	u, err := user.Lookup(username)
+	home, _, _, err := resolveSSHHome(username)
 	if err != nil {
-		return nil, fmt.Errorf("lookup user %q: %w", username, err)
-	}
-	home := u.HomeDir
-	if home == "" {
-		return nil, fmt.Errorf("user %q has no home directory", username)
+		return nil, err
 	}
 	sshDir := filepath.Join(home, ".ssh")
 	akPath := filepath.Join(sshDir, "authorized_keys")
@@ -559,11 +572,10 @@ func RemoveAuthorizedKey(username, fingerprint string, confirmLast bool) (bool, 
 	if fingerprint == "" {
 		return false, fmt.Errorf("fingerprint required")
 	}
-	u, err := user.Lookup(username)
+	home, uid, gid, err := resolveSSHHome(username)
 	if err != nil {
-		return false, fmt.Errorf("lookup user %q: %w", username, err)
+		return false, err
 	}
-	home := u.HomeDir
 	sshDir := filepath.Join(home, ".ssh")
 	akPath := filepath.Join(sshDir, "authorized_keys")
 
@@ -656,8 +668,6 @@ func RemoveAuthorizedKey(username, fingerprint string, confirmLast bool) (bool, 
 		newData = []byte{}
 	}
 
-	uid, _ := strconv.Atoi(u.Uid)
-	gid, _ := strconv.Atoi(u.Gid)
 	if err := writeAuthorizedKeysAtomic(sshDir, akPath, newData, uid, gid); err != nil {
 		return false, err
 	}

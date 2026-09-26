@@ -167,6 +167,17 @@ export interface Workspace {
   created_at: string;
 }
 
+export interface Group {
+  id: string;
+  name: string;
+  friendlyName?: string | null;
+}
+
+export interface AppAccess {
+  client_id: string;
+  client_name: string;
+}
+
 export interface User {
   id: ID;
   email: string;
@@ -180,7 +191,7 @@ export interface User {
   pocket_user_id?: string | null;
 }
 
-export type ModelAliasName = "omahab/fast" | "omahab/balanced" | "omahab/reasoning" | "omahab/summarization" | "omahab/embedding" | "omahab/karakeep" | "omahab/memory";
+export type ModelAliasName = "omahab/fast" | "omahab/balanced" | "omahab/reasoning" | "omahab/summarization" | "omahab/karakeep" | "omahab/memory";
 
 export interface ModelSetupDeployment {
   id: string;
@@ -215,6 +226,7 @@ export interface ModelKey {
   tpm?: number | null;
   concurrency?: number | null;
   budget?: number | null;
+  budget_duration?: string | null;
   created_at: string;
   expires_at?: string | null;
 }
@@ -330,6 +342,12 @@ export interface CompanionDevice {
   revoked_at?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface DeviceEnvGrant {
+  device_id: string;
+  granted: boolean;
+  revision: number;
 }
 export interface NtfyConfig {
   enabled: boolean;

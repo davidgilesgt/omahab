@@ -1948,6 +1948,32 @@ func (s *Server) handleGetHermesMCPToken(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleRotateHermesMCPToken(w http.ResponseWriter, r *http.Request) {
+	// The rotate contract carries no parameters: clients send {} (or an
+	// empty body). Validate before mutating so a malformed body fails with
+	// 400 without invalidating the active token.
+	if r.ContentLength != 0 {
+		var empty struct{}
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&empty); err != nil {
+			if errors.Is(err, io.EOF) {
+				// Empty body rotates like {}.
+			} else {
+				var maxErr *http.MaxBytesError
+				if errors.As(err, &maxErr) {
+					writeError(w, r, errPayloadTooLarge("request body too large"))
+				} else if strings.Contains(err.Error(), "unknown field") {
+					writeError(w, r, errUnknownField(err.Error()))
+				} else {
+					writeError(w, r, errInvalidJSON(err.Error()))
+				}
+				return
+			}
+		} else if dec.More() {
+			writeError(w, r, errInvalidJSON("trailing data after JSON object"))
+			return
+		}
+	}
 	tok, err := s.backend.RotateHermesMCPToken(r.Context())
 	if err != nil {
 		writeError(w, r, err)
@@ -2006,6 +2032,15 @@ func (s *Server) handleSetUserGroups(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleListGroups(w http.ResponseWriter, r *http.Request) {
+	groups, err := s.backend.ListGroups(r.Context())
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, groups)
 }
 
 // --- setup ---

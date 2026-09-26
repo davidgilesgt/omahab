@@ -694,7 +694,7 @@ func (b *Backend) ensureForgejoAuthSource(ctx context.Context, domain, clientID,
 	}
 	id := parseAuthSourceID(out, "PocketID")
 	discovery := fmt.Sprintf("https://id.%s/.well-known/openid-configuration", strings.TrimSpace(domain))
-	scopes := "openid email profile"
+	scopes := "openid email profile groups"
 	groupClaim := "groups"
 	adminGroup := "admins"
 	teamMap := `{"admins":{"omahab":["admins"]},"members":{"omahab":["members"]}}`

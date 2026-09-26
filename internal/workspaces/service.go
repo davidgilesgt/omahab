@@ -28,6 +28,11 @@ var (
 	ErrCapabilityInvalid  = errors.New("invalid capability")
 	ErrCapabilityExpired  = errors.New("capability expired")
 	ErrCapabilityConsumed = errors.New("capability already consumed")
+	// ErrProvisionFailed marks a workspace provisioning failure (branch
+	// creation or runner backend start) after validation passed. The pending
+	// row is still rolled back; callers map it to an actionable
+	// service-unavailable error instead of a bare internal error.
+	ErrProvisionFailed = errors.New("workspace provisioning failed")
 )
 
 // Workspace statuses.
@@ -299,91 +304,26 @@ func parseRepoRef(cloneURL string) (scm.RepoRef, string, error) {
 // (and any issued credentials) is rolled back and nil is returned with the error.
 func (s *Service) Create(ctx context.Context, in CreateInput) (*domain.Workspace, error) {
 	title := strings.TrimSpace(in.Title)
+	if title == "" {
+		// Branch-only requests (e.g. {"project_id":..., "branch":"main"}) carry
+		// no title. Treat the branch value as the title so creation always
+		// mints a unique ws/<slug>-XXXX branch off the repo default instead
+		// of sitting directly on an existing repo branch like main with no
+		// credentials or workspace env. This matches the CLI, which sends
+		// Title=Branch when --title is omitted.
+		title = strings.TrimSpace(in.Branch)
+	}
 	instructions := in.Instructions // preserve as-is, but trim leading/trailing whitespace for empty check?
 	// Validate title (+slug) before project_id so callers get the
 	// field error for the title they typed, not a downstream missing ref.
-	legacyBranch := title == "" && strings.TrimSpace(in.Branch) != "" && !in.SkipBranchCreate
-	if !legacyBranch {
-		if title == "" {
-			return nil, fmt.Errorf("%w: title is required", ErrValidation)
-		}
-		if slugify(title) == "" {
-			return nil, fmt.Errorf("%w: title must contain alphanumeric characters", ErrValidation)
-		}
+	if title == "" {
+		return nil, fmt.Errorf("%w: title is required", ErrValidation)
+	}
+	if slugify(title) == "" {
+		return nil, fmt.Errorf("%w: title must contain alphanumeric characters", ErrValidation)
 	}
 	if strings.TrimSpace(string(in.ProjectID)) == "" {
 		return nil, fmt.Errorf("%w: project_id is required", ErrValidation)
-	}
-	if legacyBranch {
-		// Old API using Branch directly: treat Branch as the desired branch and bypass slug generation.
-		// Validate branch directly.
-		branch := strings.TrimSpace(in.Branch)
-		if branch == "." || branch == ".." || strings.Contains(branch, "..") {
-			return nil, fmt.Errorf("%w: branch contains path traversal", ErrValidation)
-		}
-		if !branchRe.MatchString(branch) {
-			return nil, fmt.Errorf("%w: invalid branch name", ErrValidation)
-		}
-		agent := strings.TrimSpace(in.Agent)
-		if agent == "" {
-			agent = "omp"
-		}
-		if !allowedAgents[agent] {
-			return nil, fmt.Errorf("%w: unsupported agent %q", ErrValidation, agent)
-		}
-		devcontainerSource := strings.TrimSpace(in.DevcontainerSource)
-		if devcontainerSource == "" {
-			devcontainerSource = "default"
-		}
-		if devcontainerSource != "default" && devcontainerSource != "devcontainer" {
-			return nil, fmt.Errorf("%w: devcontainer source must be 'default' or 'devcontainer'", ErrValidation)
-		}
-		// Check existing
-		var existingID string
-		err := s.db.QueryRowContext(ctx,
-			`SELECT id FROM workspaces WHERE project_id = ? AND branch = ? AND status IN (?, ?)`,
-			string(in.ProjectID), branch, StatusPending, StatusRunning).Scan(&existingID)
-		if err == nil {
-			return nil, ErrAlreadyExists
-		}
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("check existing workspace: %w", err)
-		}
-		id := newID()
-		now := time.Now().UTC()
-		// Insert with title empty, instructions
-		_, err = s.db.ExecContext(ctx,
-			`INSERT INTO workspaces (id, project_id, branch, title, instructions, agent, devcontainer_source, status, last_active_at, created_at, updated_at)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			id, string(in.ProjectID), branch, title, instructions, agent, devcontainerSource, StatusPending,
-			now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
-		)
-		if err != nil {
-			if isUniqueViolation(err) {
-				return nil, ErrAlreadyExists
-			}
-			return nil, fmt.Errorf("insert workspace: %w", err)
-		}
-		ws := &domain.Workspace{
-			ID:           domain.ID(id),
-			ProjectID:    in.ProjectID,
-			Branch:       branch,
-			Title:        title,
-			Instructions: instructions,
-			Agent:        agent,
-			Status:       StatusPending,
-			LastActiveAt: now,
-			CreatedAt:    now,
-		}
-		if err := s.runner.Up(ctx, id, in.ProjectID, branch, agent, RunnerOpts{DevcontainerSource: devcontainerSource}); err != nil {
-			return s.rollbackCreate(ctx, id, "", "", fmt.Errorf("runner up: %w", err))
-		}
-		if _, err := s.db.ExecContext(ctx, `UPDATE workspaces SET status = ?, updated_at = ? WHERE id = ?`,
-			StatusRunning, now.Format(time.RFC3339Nano), id); err != nil {
-			return nil, fmt.Errorf("mark workspace running: %w", err)
-		}
-		ws.Status = StatusRunning
-		return ws, nil
 	}
 	// Slugify title
 	slug := slugify(title)
@@ -499,10 +439,10 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*domain.Workspace
 				ws.Branch = branch
 				err2 := s.branchCreator.CreateBranch(ctx, repoRef, branch, defaultBranch)
 				if err2 != nil {
-					return s.rollbackCreate(ctx, id, "", "", fmt.Errorf("create branch: %w", err2))
+					return s.rollbackCreate(ctx, id, "", "", fmt.Errorf("%w: create branch %q: %w", ErrProvisionFailed, branch, err2))
 				}
 			} else {
-				return s.rollbackCreate(ctx, id, "", "", fmt.Errorf("create branch: %w", err))
+				return s.rollbackCreate(ctx, id, "", "", fmt.Errorf("%w: create branch %q: %w", ErrProvisionFailed, branch, err))
 			}
 		}
 	}
@@ -606,7 +546,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*domain.Workspace
 	// Delegate to Runner. On failure roll back the pending row (plus any issued
 	// credentials) so a failed provision never leaves a phantom workspace.
 	if err := s.runner.Up(ctx, id, in.ProjectID, branch, agent, opts); err != nil {
-		return s.rollbackCreate(ctx, id, gatewayKeyID, forgejoTokenName, fmt.Errorf("runner up: %w", err))
+		return s.rollbackCreate(ctx, id, gatewayKeyID, forgejoTokenName, fmt.Errorf("%w: start workspace backend: %w", ErrProvisionFailed, err))
 	}
 
 	// Mark running on success

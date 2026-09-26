@@ -393,3 +393,51 @@ func TestJellyfinPathsDefault(t *testing.T) {
 		t.Fatalf("sso dir = %q", got)
 	}
 }
+
+// Regression for F-jellyfin-sso-discovery: the Flowfin plugin reads the
+// discovery document server-side over a transport that refuses non-public
+// addresses by default, and Pocket ID only emits the groups claim when the
+// groups scope is requested. Without both, /SSO/OID/start/pocketid fails
+// with "the authorization server's discovery document could not be read"
+// and role authorization denies every login.
+func TestJellyfinProviderDocPrivateNetworkAndScopes(t *testing.T) {
+	raw, err := jellyfinProviderDoc("omahab.com", "cid", "/srv/omahab/apps/jellyfin/sso/pocketid-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Configuration struct {
+			OidConfigs map[string]struct {
+				OidEndpoint                  string   `json:"OidEndpoint"`
+				OidScopes                    []string `json:"OidScopes"`
+				RoleClaim                    string   `json:"RoleClaim"`
+				AllowPrivateNetworkAddresses bool     `json:"AllowPrivateNetworkAddresses"`
+			} `json:"OidConfigs"`
+		} `json:"Configuration"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	p, ok := doc.Configuration.OidConfigs["pocketid"]
+	if !ok {
+		t.Fatal("missing pocketid provider")
+	}
+	if !p.AllowPrivateNetworkAddresses {
+		t.Fatal("AllowPrivateNetworkAddresses must be true: id.<domain> resolves to a tailnet/LAN address the plugin otherwise refuses")
+	}
+	if p.RoleClaim != "groups" {
+		t.Fatalf("RoleClaim = %q, want groups", p.RoleClaim)
+	}
+	want := map[string]bool{"openid": false, "profile": false, "email": false, "groups": false}
+	for _, s := range p.OidScopes {
+		if _, ok := want[s]; !ok {
+			t.Fatalf("unexpected scope %q", s)
+		}
+		want[s] = true
+	}
+	for s, seen := range want {
+		if !seen {
+			t.Fatalf("OidScopes missing %q (Pocket ID omits the groups claim without it): %v", s, p.OidScopes)
+		}
+	}
+}

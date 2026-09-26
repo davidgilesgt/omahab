@@ -1,20 +1,20 @@
 package controlplane
 
 import (
-	"github.com/omahab/omahab/internal/apitypes"
 	"context"
-	"github.com/omahab/omahab/internal/domain"
 	"errors"
-	"github.com/omahab/omahab/internal/events"
 	"fmt"
+	"github.com/omahab/omahab/internal/apitypes"
+	"github.com/omahab/omahab/internal/domain"
+	"github.com/omahab/omahab/internal/events"
 	"github.com/omahab/omahab/internal/projects"
 	"github.com/omahab/omahab/internal/scm"
 
 	"database/sql"
 	"github.com/omahab/omahab/internal/store"
+	"github.com/omahab/omahab/internal/workspaces"
 	"strings"
 	"time"
-	"github.com/omahab/omahab/internal/workspaces"
 )
 
 func (b *Backend) ListProjects(ctx context.Context, p apitypes.Pagination) ([]domain.Project, error) {
@@ -32,15 +32,77 @@ func (b *Backend) ListProjects(ctx context.Context, p apitypes.Pagination) ([]do
 	return paginate(out, p), nil
 }
 
-func (b *Backend) GetProject(ctx context.Context, id domain.ID) (domain.Project, error) {
+func (b *Backend) GetProject(ctx context.Context, idOrSlug domain.ID) (domain.Project, error) {
 	if b.projects == nil {
 		return domain.Project{}, translateError(fmt.Errorf("%w: projects not configured", ErrNotConfigured))
+	}
+	id, err := b.resolveProjectID(ctx, idOrSlug)
+	if err != nil {
+		return domain.Project{}, err
 	}
 	pr, err := b.projects.Get(ctx, id)
 	if err != nil {
 		return domain.Project{}, translateError(err)
 	}
 	return pr.Project, nil
+}
+
+// resolveProjectID accepts a hex ID or a slug (both advertised as
+// `<id|slug>` by the CLI) and returns the canonical project ID. ID lookup
+// wins; slug lookup is the fallback. No alias route is needed because every
+// /projects/{id} handler funnels through here.
+func (b *Backend) resolveProjectID(ctx context.Context, idOrSlug domain.ID) (domain.ID, error) {
+	if b.projects == nil {
+		return "", translateError(fmt.Errorf("%w: projects not configured", ErrNotConfigured))
+	}
+	raw := strings.TrimSpace(string(idOrSlug))
+	if raw == "" {
+		return "", translateError(fmt.Errorf("%w: project id or slug is required", store.ErrValidation))
+	}
+	if pr, err := b.projects.Get(ctx, domain.ID(raw)); err == nil {
+		return pr.ID, nil
+	}
+	if pr, err := b.projects.GetBySlug(ctx, raw); err == nil {
+		return pr.ID, nil
+	}
+	if lower := strings.ToLower(raw); lower != raw {
+		if pr, err := b.projects.GetBySlug(ctx, lower); err == nil {
+			return pr.ID, nil
+		}
+	}
+	return "", translateError(fmt.Errorf("%w: project %q not found", store.ErrNotFound, raw))
+}
+
+// mapSCMError maps SCM sentinel errors onto the store sentinels the API
+// error layer already renders (400/404/409); any other provisioning failure
+// surfaces as 503 with the underlying cause so the caller can retry.
+func mapSCMError(err error) error {
+	if err == nil {
+		return nil
+	}
+	switch {
+	case errors.Is(err, scm.ErrValidation):
+		return fmt.Errorf("%w: project repository: %v", store.ErrValidation, err)
+	case errors.Is(err, scm.ErrConflict):
+		return fmt.Errorf("%w: project repository: %v", store.ErrConflict, err)
+	case errors.Is(err, scm.ErrNotFound):
+		return fmt.Errorf("%w: project repository: %v", store.ErrNotFound, err)
+	default:
+		return fmt.Errorf("%w: project repository provisioning failed: %v", apitypes.ErrServiceUnavailable, err)
+	}
+}
+
+// BindFakeSCMForTest binds an SCM service built on the given fakes (tests
+// only). Production wiring is Backend.bindSCM; this exists so API-layer
+// tests can provision projects now that CreateProject requires a backing
+// repository.
+func (b *Backend) BindFakeSCMForTest(forgejo scm.ForgejoClient, woodpecker scm.WoodpeckerClient) error {
+	svc, err := scm.New(b.db, forgejo, woodpecker, scm.NewMemorySecretStore(), scm.NoopSink{})
+	if err != nil {
+		return err
+	}
+	b.scm = svc
+	return nil
 }
 
 func (b *Backend) CreateProject(ctx context.Context, req apitypes.CreateProjectRequest) (domain.Project, error) {
@@ -86,6 +148,12 @@ func (b *Backend) CreateProject(ctx context.Context, req apitypes.CreateProjectR
 		return domain.Project{}, translateError(fmt.Errorf("%w: kind must be code or docs", store.ErrValidation))
 	}
 	docsOnly := kind == "docs"
+	// The repository is the project: without an SCM backend no Forgejo
+	// repository can exist, so fail before writing any row rather than
+	// reporting a successful create that has no backing repo.
+	if b.scm == nil {
+		return domain.Project{}, translateError(fmt.Errorf("%w: project repository backend is unavailable; retry once setup finishes SCM binding", apitypes.ErrServiceUnavailable))
+	}
 	pr, err := b.projects.Create(ctx, projects.CreateParams{
 		Slug:          slug,
 		Name:          name,
@@ -107,49 +175,74 @@ func (b *Backend) CreateProject(ctx context.Context, req apitypes.CreateProjectR
 		}
 	}
 
-	// scm provision: private repo, actions disabled, woodpecker linked, .woodpecker.yaml seeded, webhook ensured
-	if b.scm != nil {
-		inst, _ := b.store.Instance(ctx)
-		domain := ""
-		if inst.Domain != "" {
-			domain = strings.TrimSpace(inst.Domain)
-		}
-		regHost := registryHost(domain)
-		callbackBase := ""
-		webhookURL := ""
-		webhookSecret := ""
-		if domain != "" && domain != "example.com" && domain != "not-configured.invalid" {
-			callbackBase = "https://" + domain
-			webhookURL = "https://" + domain + "/api/v1/scm/webhook"
-			if b.secrets != nil {
-				if sec, err := b.secrets.RevealByName(ctx, "platform-app", "forgejo_webhook_secret"); err == nil {
-					webhookSecret = strings.TrimSpace(sec)
-				}
+	// scm provision: private repo, actions disabled, woodpecker linked, .woodpecker.yaml seeded, webhook ensured.
+	// b.scm is guaranteed non-nil by the check above.
+	inst, _ := b.store.Instance(ctx)
+	baseDomain := strings.TrimSpace(inst.Domain)
+	regHost := registryHost(baseDomain)
+	callbackBase := ""
+	webhookURL := ""
+	webhookSecret := ""
+	if baseDomain != "" && baseDomain != "example.com" && baseDomain != "not-configured.invalid" {
+		callbackBase = "https://" + baseDomain
+		webhookURL = "https://" + baseDomain + "/api/v1/scm/webhook"
+		if b.secrets != nil {
+			if sec, err := b.secrets.RevealByName(ctx, "platform-app", "forgejo_webhook_secret"); err == nil {
+				webhookSecret = strings.TrimSpace(sec)
 			}
 		}
-		provInput := scm.ProvisionInput{
-			ProjectID:          pr.ID,
-			Owner:              "omahab",
-			RepoName:           slug,
-			Description:        name,
-			DefaultBranch:      "main",
-			RegistryHost:       regHost,
-			ReleaseCallbackURL: callbackBase,
-			ReleaseToken:       releaseToken,
-			WebhookURL:         webhookURL,
-			WebhookSecret:      webhookSecret,
-			DocsOnly:           docsOnly,
+	}
+	// Provision records repository ownership durably on the SCM row
+	// (adopted vs product-created); failure cleanup below relies on that
+	// flag via Deprovision, which never deletes an adopted repository.
+	provInput := scm.ProvisionInput{
+		ProjectID:          pr.ID,
+		Owner:              "omahab",
+		RepoName:           slug,
+		Description:        name,
+		DefaultBranch:      "main",
+		RegistryHost:       regHost,
+		ReleaseCallbackURL: callbackBase,
+		ReleaseToken:       releaseToken,
+		WebhookURL:         webhookURL,
+		WebhookSecret:      webhookSecret,
+		DocsOnly:           docsOnly,
+	}
+	provRes, err := b.scm.Provision(ctx, provInput)
+	if err != nil {
+		_, _ = b.events.Publish(ctx, events.PublishInput{Type: "ci.failed", Severity: "warning", Message: "scm provision failed: " + err.Error(), ResourceID: string(pr.ID)})
+		// Never report a successful create without its backing Forgejo
+		// repository. Compensate half-created externals; if compensation
+		// itself fails, retain the project record, its release token, and
+		// the error-state SCM row so the failure stays visible and
+		// retryable — never erase tracking of a repository that may still
+		// exist. Only once cleanup has succeeded are our rows removed so a
+		// retry starts clean. Deprovision consults the durable ownership
+		// flag, so an adopted pre-existing repository is preserved while
+		// product-created resources are compensated.
+		mapped := mapSCMError(err)
+		if derr := b.scm.Deprovision(ctx, pr.ID); derr != nil {
+			_, _ = b.events.Publish(ctx, events.PublishInput{Type: "ci.failed", Severity: "warning", Message: "scm cleanup failed: " + derr.Error(), ResourceID: string(pr.ID)})
+			return domain.Project{}, translateError(fmt.Errorf("%w (scm cleanup failed: %v)", mapped, derr))
 		}
-		if provRes, err := b.scm.Provision(ctx, provInput); err != nil {
-			_, _ = b.events.Publish(ctx, events.PublishInput{Type: "ci.failed", Severity: "warning", Message: "scm provision failed: " + err.Error(), ResourceID: string(pr.ID)})
-		} else if provRes != nil && provRes.PipelineTemplate != "" {
-			_, _ = b.events.Publish(ctx, events.PublishInput{Type: "service.update_available", Severity: "info", Message: "pipeline template generated", ResourceID: string(pr.ID), Data: map[string]any{"pipeline_template": provRes.PipelineTemplate}})
+		_, _ = b.db.ExecContext(ctx, `DELETE FROM project_release_tokens WHERE project_id = ?`, string(pr.ID))
+		if derr := b.projects.DeleteProjectRecord(ctx, pr.ID); derr != nil {
+			_, _ = b.events.Publish(ctx, events.PublishInput{Type: "ci.failed", Severity: "warning", Message: "project rollback failed: " + derr.Error(), ResourceID: string(pr.ID)})
+			return domain.Project{}, translateError(fmt.Errorf("%w (rollback after %v)", derr, err))
 		}
+		return domain.Project{}, translateError(mapped)
+	}
+	if provRes != nil && provRes.PipelineTemplate != "" {
+		_, _ = b.events.Publish(ctx, events.PublishInput{Type: "service.update_available", Severity: "info", Message: "pipeline template generated", ResourceID: string(pr.ID), Data: map[string]any{"pipeline_template": provRes.PipelineTemplate}})
 	}
 	return pr.Project, nil
 }
 
-func (b *Backend) UpdateProject(ctx context.Context, id domain.ID, req apitypes.UpdateProjectRequest) (domain.Project, error) {
+func (b *Backend) UpdateProject(ctx context.Context, idOrSlug domain.ID, req apitypes.UpdateProjectRequest) (domain.Project, error) {
+	id, err := b.resolveProjectID(ctx, idOrSlug)
+	if err != nil {
+		return domain.Project{}, err
+	}
 	fields := []string{}
 	args := []any{}
 	if req.Name != nil {
@@ -187,9 +280,13 @@ func (b *Backend) UpdateProject(ctx context.Context, id domain.ID, req apitypes.
 	return b.GetProject(ctx, id)
 }
 
-func (b *Backend) DeleteProject(ctx context.Context, id domain.ID) error {
+func (b *Backend) DeleteProject(ctx context.Context, idOrSlug domain.ID) error {
 	if b.projects == nil {
 		return translateError(fmt.Errorf("%w: projects not configured", ErrNotConfigured))
+	}
+	id, err := b.resolveProjectID(ctx, idOrSlug)
+	if err != nil {
+		return err
 	}
 	// Capture hostname before delete for exposure cleanup.
 	proj, _ := b.projects.Get(ctx, id)
@@ -206,7 +303,21 @@ func (b *Backend) DeleteProject(ctx context.Context, id domain.ID) error {
 			}
 		}
 	}
-	if err := b.projects.Delete(ctx, id); err != nil {
+	// Tear down in dependency order under one deploy lock: the live runtime
+	// first, then the Forgejo/CI resources, then the record. A failed
+	// undeploy aborts with everything intact (the repository is never
+	// touched before the runtime is down); a failed deprovision aborts with
+	// the record and releases retained as explicit retry state. Missing
+	// remotes are already-gone, not an error.
+	teardown := func(ctx context.Context, _ *projects.Project) error {
+		if b.scm != nil {
+			if err := b.scm.Deprovision(ctx, id); err != nil {
+				return mapSCMError(err)
+			}
+		}
+		return nil
+	}
+	if err := b.projects.DeleteWithTeardown(ctx, id, teardown); err != nil {
 		return translateError(err)
 	}
 	if hostname != "" {
@@ -284,6 +395,7 @@ func (b *Backend) RollbackRelease(ctx context.Context, projectID domain.ID, rele
 	}
 	return *rel, nil
 }
+
 // Secrets (metadata only)
 
 func (b *Backend) IssueReleaseToken(ctx context.Context, projectID domain.ID) (apitypes.ReleaseTokenResponse, error) {
@@ -379,6 +491,7 @@ func (b *Backend) ForgejoWebhookSecret(ctx context.Context) (string, error) {
 	}
 	return strings.TrimSpace(sec), nil
 }
+
 // OnPullRequest handles a verified pull_request webhook event (opened/synchronized/reopened).
 // It records a normalized domain event and performs the Step 6 automated review:
 // - Fork PRs (HeadRepoFullName != BaseRepoFullName) are skipped with ci.review_skipped_untrusted.
@@ -392,20 +505,20 @@ func (b *Backend) OnPullRequest(ctx context.Context, ev scm.PullRequestEvent) er
 		ResourceID: ev.Repository.Owner + "/" + ev.Repository.Name,
 		Message:    fmt.Sprintf("pull_request %s #%d %s/%s", ev.Action, ev.PullRequest.Index, ev.Repository.Owner, ev.Repository.Name),
 		Data: map[string]any{
-			"action":               ev.Action,
-			"owner":                ev.Repository.Owner,
-			"repo":                 ev.Repository.Name,
-			"pull_index":           ev.PullRequest.Index,
-			"pull_title":           ev.PullRequest.Title,
-			"pull_state":           ev.PullRequest.State,
-			"head_sha":             ev.PullRequest.HeadSHA,
-			"head_branch":          ev.PullRequest.HeadBranch,
-			"base_branch":          ev.PullRequest.BaseBranch,
-			"head_repo_full_name":  ev.PullRequest.HeadRepoFullName,
-			"base_repo_full_name":  ev.PullRequest.BaseRepoFullName,
-			"author":               ev.PullRequest.Author,
-			"html_url":             ev.PullRequest.HTMLURL,
-			"sender":               ev.Sender,
+			"action":              ev.Action,
+			"owner":               ev.Repository.Owner,
+			"repo":                ev.Repository.Name,
+			"pull_index":          ev.PullRequest.Index,
+			"pull_title":          ev.PullRequest.Title,
+			"pull_state":          ev.PullRequest.State,
+			"head_sha":            ev.PullRequest.HeadSHA,
+			"head_branch":         ev.PullRequest.HeadBranch,
+			"base_branch":         ev.PullRequest.BaseBranch,
+			"head_repo_full_name": ev.PullRequest.HeadRepoFullName,
+			"base_repo_full_name": ev.PullRequest.BaseRepoFullName,
+			"author":              ev.PullRequest.Author,
+			"html_url":            ev.PullRequest.HTMLURL,
+			"sender":              ev.Sender,
 		},
 	})
 	// Fork detection: skip untrusted forks until microVM isolation exists.
@@ -468,12 +581,12 @@ func (b *Backend) OnPullRequest(ctx context.Context, ev scm.PullRequestEvent) er
 	title := fmt.Sprintf("review-pr-%d", ev.PullRequest.Index)
 	prompt := buildReviewPrompt(ev)
 	ws, err := b.workspaces.Create(ctx, workspaces.CreateInput{
-		ProjectID:        proj.ID,
-		Title:            title,
-		Branch:           headBranch,
-		SkipBranchCreate: true,
-		Instructions:     prompt,
-		Agent:            "omp",
+		ProjectID:          proj.ID,
+		Title:              title,
+		Branch:             headBranch,
+		SkipBranchCreate:   true,
+		Instructions:       prompt,
+		Agent:              "omp",
 		DevcontainerSource: "default",
 	})
 	if err != nil {
@@ -499,12 +612,12 @@ func (b *Backend) OnPullRequest(ctx context.Context, ev scm.PullRequestEvent) er
 				}
 			}
 			ws, err = b.workspaces.Create(ctx, workspaces.CreateInput{
-				ProjectID:        proj.ID,
-				Title:            title,
-				Branch:           headBranch,
-				SkipBranchCreate: true,
-				Instructions:     prompt,
-				Agent:            "omp",
+				ProjectID:          proj.ID,
+				Title:              title,
+				Branch:             headBranch,
+				SkipBranchCreate:   true,
+				Instructions:       prompt,
+				Agent:              "omp",
 				DevcontainerSource: "default",
 			})
 		}
@@ -621,16 +734,17 @@ func (b *Backend) OnPush(ctx context.Context, ev scm.PushEvent) error {
 		ResourceID: ev.Repository.Owner + "/" + ev.Repository.Name,
 		Message:    fmt.Sprintf("push %s %s", ev.Repository.Owner+"/"+ev.Repository.Name, ev.Ref),
 		Data: map[string]any{
-			"owner":      ev.Repository.Owner,
-			"repo":       ev.Repository.Name,
-			"ref":        ev.Ref,
-			"after":      ev.AfterSHA,
-			"before":     ev.BeforeSHA,
-			"sender":     ev.Sender,
+			"owner":  ev.Repository.Owner,
+			"repo":   ev.Repository.Name,
+			"ref":    ev.Ref,
+			"after":  ev.AfterSHA,
+			"before": ev.BeforeSHA,
+			"sender": ev.Sender,
 		},
 	})
 	return nil
 }
+
 // Helpers for OnPullRequest automated review (Step 6).
 
 func (b *Backend) postReviewFailure(ctx context.Context, ev scm.PullRequestEvent, reason string) {

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/omahab/omahab/internal/apitypes"
 	"github.com/omahab/omahab/internal/apps"
@@ -253,6 +254,9 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (apitypes.SetupStatus, err
 	}
 	checks = append(checks, coreCheck)
 
+	// --- technitium_dns check (operator-owned household DNS credentials) ---
+	checks = append(checks, b.technitiumDNSCheck(ctx))
+
 	// --- admin_passkeys check ---
 	passCheck := apitypes.SetupCheck{ID: "admin_passkeys"}
 	target := 2
@@ -426,11 +430,11 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (apitypes.SetupStatus, err
 	case serr != nil:
 		storageCheck.Status = "failed"
 		storageCheck.Detail = "storage.json unreadable"
-	case !exists || len(sf.Placements) == 0:
+	case !exists || (len(sf.Placements) == 0 && len(sf.Proposals) == 0):
 		storageCheck.Status = "skipped"
 		storageCheck.Detail = "root disk holds everything"
 	default:
-		pending := 0
+		pending := len(sf.Proposals)
 		for _, p := range sf.Placements {
 			if p.Pending {
 				pending++
@@ -703,6 +707,10 @@ func applySetupCheckMeta(c apitypes.SetupCheck) apitypes.SetupCheck {
 	case "core_apps":
 		c.Label = "Install core services"
 		c.Owner = "system"
+	case "technitium_dns":
+		c.Label = "Connect household DNS"
+		c.Owner = "operator"
+		c.Action = "Open the Technitium setup view to restore console access, then retry automatic setup."
 	case "woodpecker_connection":
 		c.Label = "Connect Woodpecker"
 		c.Owner = "operator"
@@ -718,7 +726,7 @@ func applySetupCheckMeta(c apitypes.SetupCheck) apitypes.SetupCheck {
 }
 
 func orderSetupChecks(checks []apitypes.SetupCheck) []apitypes.SetupCheck {
-	order := []string{"ssh_keys", "domain", "cloudflare_dns", "tailscale", "recovery_key", "admin_passkeys", "knowledge_index_setup", "backups_configured", "storage_configured", "tunnel", "dashboard_dns", "core_apps", "woodpecker_connection", "automatic_reconciliation", "recovery_tested", "restore_tested"}
+	order := []string{"ssh_keys", "domain", "cloudflare_dns", "tailscale", "recovery_key", "admin_passkeys", "knowledge_index_setup", "backups_configured", "storage_configured", "tunnel", "dashboard_dns", "core_apps", "technitium_dns", "woodpecker_connection", "automatic_reconciliation", "recovery_tested", "restore_tested"}
 	byID := make(map[string]apitypes.SetupCheck, len(checks))
 	for _, c := range checks {
 		byID[c.ID] = c
@@ -765,6 +773,45 @@ func (b *Backend) automaticReconciliationCheck(ctx context.Context) apitypes.Set
 	}
 	c.Status = "pending"
 	c.Detail = "Waiting to run"
+	return c
+}
+
+// technitiumDNSCheck reports household DNS convergence as an operator-owned
+// prerequisite. Missing console credentials stay pending with the recovery
+// step — they never fail automatic reconciliation on their own. This check
+// only reports ok, pending, or skipped, never failed.
+func (b *Backend) technitiumDNSCheck(ctx context.Context) apitypes.SetupCheck {
+	c := apitypes.SetupCheck{ID: "technitium_dns"}
+	if !technitiumInstalled(ctx, b) {
+		c.Status = "skipped"
+		c.Detail = "household DNS not installed"
+		return c
+	}
+	if b.secrets != nil {
+		if v, err := b.secrets.RevealByName(ctx, "platform-app", "technitium_initial_password"); err == nil && strings.TrimSpace(v) != "" {
+			c.Status = "ok"
+			c.Detail = "console credentials configured"
+			return c
+		}
+		if v, err := b.secrets.RevealByName(ctx, "platform-app", "technitium_api_token"); err == nil && strings.TrimSpace(v) != "" {
+			c.Status = "ok"
+			c.Detail = "console credentials configured"
+			return c
+		}
+	}
+	// No stored credentials: first boot still rotates the default login on
+	// its own, so only ask the operator when the server no longer accepts
+	// it. A brief probe keeps the checklist fast; any probe error stays
+	// pending rather than failing the checklist.
+	pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if hasDefault, _, err := technitiumStatus(pctx); err == nil && hasDefault {
+		c.Status = "pending"
+		c.Detail = "rotating default console credentials on next reconcile"
+		return c
+	}
+	c.Status = "pending"
+	c.Detail = "console credentials needed"
 	return c
 }
 

@@ -9,10 +9,14 @@ import (
 	"testing"
 
 	"github.com/omahab/omahab/internal/apitypes"
+	"github.com/omahab/omahab/internal/scm"
 )
 
 func TestReleaseTokenIssueVerifyRejectWrongProject(t *testing.T) {
 	backend := newRealBackend(t, nil)
+	if err := backend.BindFakeSCMForTest(scm.NewFakeForgejo(), scm.NewFakeWoodpecker()); err != nil {
+		t.Fatalf("bind fake SCM: %v", err)
+	}
 	ctx := context.Background()
 
 	proj1, err := backend.CreateProject(ctx, apitypes.CreateProjectRequest{
@@ -112,6 +116,9 @@ func TestKnowledgePermissionDenial(t *testing.T) {
 
 func TestWorkspaceCapabilityIssueValidate(t *testing.T) {
 	backend := newRealBackend(t, nil)
+	if err := backend.BindFakeSCMForTest(scm.NewFakeForgejo(), scm.NewFakeWoodpecker()); err != nil {
+		t.Fatalf("bind fake SCM: %v", err)
+	}
 	ctx := context.Background()
 
 	proj, err := backend.CreateProject(ctx, apitypes.CreateProjectRequest{
@@ -174,6 +181,9 @@ func TestWorkspaceCapabilityIssueValidate(t *testing.T) {
 
 func TestMirrorConfigRoundTrip(t *testing.T) {
 	backend := newRealBackend(t, nil)
+	if err := backend.BindFakeSCMForTest(scm.NewFakeForgejo(), scm.NewFakeWoodpecker()); err != nil {
+		t.Fatalf("bind fake SCM: %v", err)
+	}
 	ctx := context.Background()
 	proj, err := backend.CreateProject(ctx, apitypes.CreateProjectRequest{
 		Slug:          "mirror-test",

@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/tls"
@@ -27,6 +28,7 @@ import (
 	"github.com/omahab/omahab/internal/edge"
 	"github.com/omahab/omahab/internal/events"
 	"github.com/omahab/omahab/internal/health"
+	"github.com/omahab/omahab/internal/knowledge"
 	"github.com/omahab/omahab/internal/providers"
 	"github.com/omahab/omahab/internal/secrets"
 	"github.com/omahab/omahab/internal/store"
@@ -1159,19 +1161,54 @@ func (b *Backend) setupPhaseCoreApps(ctx context.Context) error {
 	// Technitium DNS: refuse port-53 conflicts with an actionable message,
 	// then converge via API (Quad9 DoH forwarders, blocklists, loopback web
 	// 127.0.0.1:5380, LAN :53 binds, private-only recursion, default admin
-	// rotation shown once via API).
-	if technitiumInstalled(ctx, b) {
-		if err := checkTechnitiumPortConflict(); err != nil {
-			return err
-		}
-		if err := b.ensureTechnitium(ctx); err != nil {
-			return fmt.Errorf("technitium setup: %w", err)
-		}
+	// rotation shown once via API). Missing operator-owned console
+	// credentials only defer household DNS convergence (actionable pending
+	// step); every other setup phase still runs.
+	if err := b.convergeTechnitiumOrDefer(ctx); err != nil {
+		return err
 	}
 	// Default sync folders: obsidian vault (AI-shared notes source) and
 	// drops inbox (unshared; the smart router fans out to Paperless/Immich).
 	// Best-effort: never fails setup.
 	b.ensureDefaultSyncFolders(ctx)
+	return nil
+}
+
+// convergeTechnitiumOrDefer converges Technitium when installed. Port-53
+// conflicts and real convergence errors still fail the phase. Missing
+// operator-owned console credentials (errTechnitiumAuthRequired) only defer:
+// an operator-owned pending event records the exact recovery step and the
+// phase continues, so DNS, tunnel, secrets, and exposures still converge
+// exactly once while the operator step stays visible.
+func (b *Backend) convergeTechnitiumOrDefer(ctx context.Context) error {
+	if !technitiumInstalled(ctx, b) {
+		return nil
+	}
+	if err := checkTechnitiumPortConflictFunc(); err != nil {
+		return err
+	}
+	if err := b.ensureTechnitium(ctx); err != nil {
+		if errors.Is(err, errTechnitiumAuthRequired) {
+			detail := "Technitium console credentials needed: open the Technitium setup view to restore admin access, then retry automatic setup; household DNS convergence deferred"
+			log.Printf("setup core apps: %s", detail)
+			if b.events != nil {
+				_, _ = b.events.Publish(ctx, events.PublishInput{
+					Type:       "setup.step_failed",
+					Severity:   "warning",
+					ResourceID: "setup:technitium_auth",
+					Message:    "automatic setup deferred household DNS: " + detail,
+					Data: map[string]any{
+						"step":  "core_apps",
+						"error": detail,
+						"code":  "technitium_auth",
+						"owner": "operator",
+					},
+				})
+			}
+			return nil
+		}
+		return fmt.Errorf("technitium setup: %w", err)
+	}
 	return nil
 }
 
@@ -1338,6 +1375,80 @@ func pruneLitellmEnv(existing map[string]string) bool {
 
 // Phase 5b: Dependent apps — Woodpecker and Hermes after OIDC
 
+// embeddingWorkerConfigPath is the worker's pinned-models config, defaulting
+// to the canonical knowledge.EmbeddingWorkerConfigPath (mirrors the unit's
+// --config flag in nix/apps.nix). Variable so tests can redirect it.
+// Ownership (root:omahab-embedding, 0640) is applied best-effort inside
+// knowledge.WriteEmbeddingWorkerConfig.
+var embeddingWorkerConfigPath = knowledge.EmbeddingWorkerConfigPath
+
+// embeddingModelsBaseDir is where setup staging lands, defaulting to the
+// canonical knowledge.EmbeddingModelsBaseDir. Variable so tests stage tiny
+// verified fixtures under t.TempDir instead of /var/lib/omahab/models.
+var embeddingModelsBaseDir = knowledge.EmbeddingModelsBaseDir
+
+// prepareChoiceModel stages every model artifact the stored choice requires
+// (English always for memory; worldwide additionally stages its document
+// model). Variable seam for tests: staging is idempotent by verification
+// but hits the network on a cold cache.
+var prepareChoiceModel = knowledge.PrepareChoiceModel
+
+// ensureEmbeddingWorkerConfig materializes the operator's document-search
+// choice into the embedding worker's pinned-models config and restarts it
+// (through the apps service) when the config changed. No stored choice yet
+// means nothing to do (the knowledge_index_setup checklist item stays
+// pending; the worker keeps its boot-empty config). full_text selects the
+// English memory model without a semantic document index.
+// An invalid stored choice fails loudly: setup must never default silently.
+func (b *Backend) ensureEmbeddingWorkerConfig(ctx context.Context) error {
+	if b.knowledge == nil {
+		return nil
+	}
+	choice, err := b.knowledge.GetIndexSetupChoice(ctx)
+	if err != nil {
+		return fmt.Errorf("read index setup choice: %w", err)
+	}
+	if strings.TrimSpace(choice) == "" {
+		return nil
+	}
+	// Stage the model artifacts first: the worker can only serve what is
+	// present under the models dir at restart. English stages for memory in
+	// every mode; worldwide additionally stages its document model.
+	if _, err := prepareChoiceModel(ctx, choice, embeddingModelsBaseDir); err != nil {
+		return fmt.Errorf("stage embedding model for choice %q: %w", choice, err)
+	}
+	prev, readErr := os.ReadFile(embeddingWorkerConfigPath)
+	if readErr != nil && !os.IsNotExist(readErr) {
+		return fmt.Errorf("read worker config: %w", readErr)
+	}
+	// Ownership (root:omahab-embedding, 0640) is applied best-effort inside
+	// the helper; an unreadable config surfaces as worker /health degraded.
+	alias, err := knowledge.WriteEmbeddingWorkerConfig(embeddingWorkerConfigPath, choice)
+	if err != nil {
+		return fmt.Errorf("write worker config for choice %q: %w", choice, err)
+	}
+	next, err := os.ReadFile(embeddingWorkerConfigPath)
+	if err != nil {
+		return fmt.Errorf("re-read worker config: %w", err)
+	}
+	if readErr == nil && bytes.Equal(prev, next) {
+		log.Printf("setup dependent_apps: embedding worker config unchanged (choice %q)", choice)
+		return nil
+	}
+	// Restart through the apps service (Stop+Start; native Unknown-as-OK
+	// applies), matching the KnowledgeSetIndexSetup immediate hook. A
+	// missing worker bundle is a no-op so this stays safe pre-install.
+	if err := b.redeployBundle(ctx, "embedding-worker"); err != nil {
+		return fmt.Errorf("restart embedding worker: %w", err)
+	}
+	if alias == "" {
+		log.Printf("setup dependent_apps: embedding worker restarted for full-text only")
+	} else {
+		log.Printf("setup dependent_apps: embedding worker restarted with model %s", alias)
+	}
+	return nil
+}
+
 func (b *Backend) setupPhaseDependentApps(ctx context.Context) error {
 	if b.apps == nil {
 		return fmt.Errorf("apps not configured")
@@ -1357,6 +1468,22 @@ func (b *Backend) setupPhaseDependentApps(ctx context.Context) error {
 		if err := b.bindSCM(ctx); err != nil {
 			log.Printf("setup dependent_apps: scm rebind deferred: %v", err)
 		}
+	}
+	// Revoke pre-fix gateway orphans for harness-issued user keys, which have
+	// no setup ensure of their own (per-owner ensures only reissue their own
+	// secrets). Best-effort and idempotent; never fails setup.
+	if b.providers != nil {
+		if n, cerr := b.providers.CleanupLegacyGatewayOrphans(ctx); cerr != nil {
+			log.Printf("setup dependent_apps: legacy gateway orphan cleanup: %v", cerr)
+		} else if n > 0 {
+			log.Printf("setup dependent_apps: revoked %d legacy gateway orphan keys", n)
+		}
+	}
+	// The embedding worker boots model-less; Hindsight (below, via Hermes)
+	// needs the pinned model serving before it activates. Converge the
+	// operator's document-search choice first.
+	if err := b.ensureEmbeddingWorkerConfig(ctx); err != nil {
+		return err
 	}
 	var woodpeckerBundle *apps.Bundle
 	woodpeckerSkipped := false
@@ -1479,6 +1606,10 @@ func (b *Backend) setupPhaseDependentApps(ctx context.Context) error {
 		}
 	}
 	log.Printf("setup dependent_apps: woodpecker server and agent healthy")
+	// Publish the ci.<domain> route now so the edge serves it (and its
+	// certificate) as soon as the app is healthy; the final exposure phase
+	// verifies everything. Best-effort: exposeBundleRoute only logs.
+	b.exposeBundleRoute(ctx, *woodpeckerBundle, domainName)
 	// Hermes needs a real LiteLLM virtual key (OwnerKindHermes) issued
 	// once LiteLLM is healthy; it replaces the placeholder secret file.
 	// Afterwards the hermes bundle is installed/started now that the OIDC
@@ -1538,6 +1669,9 @@ func (b *Backend) ensureHermesDependentApp(ctx context.Context) error {
 		return err
 	}
 	log.Printf("setup dependent_apps: hermes installed")
+	// Same immediate-route treatment as woodpecker above: publish ai.<domain>
+	// once installed so the edge serves it without waiting for final exposure.
+	b.exposeBundleRoute(ctx, *hermesBundle, domainName)
 	return nil
 }
 

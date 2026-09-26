@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -230,6 +231,16 @@ func (s *Service) GetBySlug(ctx context.Context, slug string) (*Project, error) 
 // DataDir/projects/<slug>/storage is retained by default — destroying data
 // is a separate operation.
 func (s *Service) Delete(ctx context.Context, id domain.ID) error {
+	return s.DeleteWithTeardown(ctx, id, nil)
+}
+
+// DeleteWithTeardown removes a project and its release history after tearing
+// down its live runtime — all under one deploy lock so a concurrent deploy
+// cannot slip between undeploy and record removal. The optional teardown
+// runs after a successful undeploy and before record removal (callers use it
+// for external resources such as the Forgejo repository); a teardown error
+// aborts with the record and releases intact, leaving explicit retry state.
+func (s *Service) DeleteWithTeardown(ctx context.Context, id domain.ID, teardown func(ctx context.Context, p *Project) error) error {
 	if strings.TrimSpace(string(id)) == "" {
 		return invalidf("id", "must not be empty")
 	}
@@ -241,17 +252,17 @@ func (s *Service) Delete(ctx context.Context, id domain.ID) error {
 	}
 	return s.withDeployLock(ctx, p.ID, func() error {
 		// Re-check inside the lock in case the row disappeared between fetch
-		// and lock acquisition.
-		active, err := s.hasReleases(ctx, p.ID)
-		if err != nil {
+		// and lock acquisition. Undeploy the live runtime when release
+		// history exists; an undeploy error that affirmatively reports no
+		// live deployment is tolerated so never-deployed projects stay
+		// deletable, while any other failure aborts so a live deployment
+		// is never abandoned with its record deleted.
+		if err := s.undeployIfActive(ctx, p); err != nil {
 			return err
 		}
-		if active {
-			if err := s.runner.Undeploy(ctx, UndeployInput{
-				App:      p.Slug,
-				Hostname: s.routeHostname(p),
-			}); err != nil {
-				return fmt.Errorf("%w: %w", ErrUndeployFailed, err)
+		if teardown != nil {
+			if err := teardown(ctx, p); err != nil {
+				return err
 			}
 		}
 		tx, err := s.db.BeginTx(ctx, nil)
@@ -294,29 +305,78 @@ func (s *Service) HasReleases(ctx context.Context, projectID domain.ID) (bool, e
 	return s.hasReleases(ctx, projectID)
 }
 
-// UndeployProject tears down the runtime deployment for a project if it has releases.
-// It is used by controlplane DeleteProject to undeploy before SCM/exposure teardown.
+// UndeployProject tears down the runtime deployment for a project if release
+// history exists. Like Delete, it tolerates an undeploy error that
+// affirmatively reports no live deployment and aborts on any other failure.
 func (s *Service) UndeployProject(ctx context.Context, id domain.ID) error {
 	p, err := s.fetchProject(ctx, "id = ?", string(id))
 	if err != nil {
 		return err
 	}
 	return s.withDeployLock(ctx, p.ID, func() error {
-		active, err := s.hasReleases(ctx, p.ID)
-		if err != nil {
-			return err
-		}
-		if active {
-			if err := s.runner.Undeploy(ctx, UndeployInput{
-				App:      p.Slug,
-				Hostname: s.routeHostname(p),
-			}); err != nil {
-				return fmt.Errorf("%w: %w", ErrUndeployFailed, err)
-			}
-		}
-		return nil
+		return s.undeployIfActive(ctx, p)
 	})
 }
+
+// undeployIfActive tears down the runtime deployment when release history
+// exists. Callers must hold the per-project deploy lock (Delete and
+// UndeployProject both do) so a concurrent deploy cannot race the teardown.
+func (s *Service) undeployIfActive(ctx context.Context, p *Project) error {
+	active, err := s.hasReleases(ctx, p.ID)
+	if err != nil {
+		return err
+	}
+	if !active {
+		return nil
+	}
+	if err := s.runner.Undeploy(ctx, UndeployInput{
+		App:      p.Slug,
+		Hostname: s.routeHostname(p),
+	}); err != nil {
+		if isAbsentAppError(err) {
+			s.emit(ctx, "project.undeploy_skipped", severityInfo, p.ID,
+				fmt.Sprintf("project %q undeploy skipped: no live deployment (%v)", p.Slug, err),
+				map[string]any{"slug": p.Slug})
+			return nil
+		}
+		return fmt.Errorf("%w: %w", ErrUndeployFailed, err)
+	}
+	return nil
+}
+
+// isAbsentAppError reports whether an undeploy failure affirmatively states
+// that no live deployment exists (e.g. omahab-once "no application found at
+// host"). Only affirmative-absence phrasing matches: tooling failures (such
+// as a missing omahab-once binary) and unrecognized errors still abort the
+// delete so a live deployment is never abandoned with its record deleted.
+func isAbsentAppError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "binary") || strings.Contains(msg, "not configured") {
+		return false
+	}
+	for _, s := range []string{
+		"no application found",
+		"application not found",
+		"app not found",
+		"unknown application",
+		"unknown app",
+		"no such application",
+		"not deployed",
+		"already undeployed",
+		"already removed",
+	} {
+		if strings.Contains(msg, s) {
+			return true
+		}
+	}
+	// omahab-once may quote the missing app name: app "blog" not found.
+	return absentAppQuotedRe.MatchString(msg)
+}
+
+var absentAppQuotedRe = regexp.MustCompile(`\bapp\s+"[^"]+"\s+not found\b`)
 
 // DeleteProjectRecord deletes the project and its releases without undeploying.
 // It is used after external teardown has succeeded.

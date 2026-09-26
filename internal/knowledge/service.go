@@ -746,8 +746,8 @@ func IndexSetupOptions() []IndexSetupOption {
 	world := "omahab-embed-worldwide"
 	return []IndexSetupOption{
 		{ID: "english", Label: "Best English model", Description: "Highest quality English embeddings (Nomic Embed Text v1.5). Best for English-only collections.", ModelAlias: &eng},
-		{ID: "worldwide", Label: "Best worldwide model", Description: "Multilingual embeddings (Qwen3 Embedding 0.6B). Best for mixed-language collections.", ModelAlias: &world},
-		{ID: "full_text", Label: "Full-text only", Description: "No local embeddings; use full-text search only. Zero model download and memory.", ModelAlias: nil},
+		{ID: "worldwide", Label: "Best worldwide model", Description: "Multilingual embeddings (multilingual-e5-large, ONNX). Best for mixed-language collections.", ModelAlias: &world},
+		{ID: "full_text", Label: "Full-text only", Description: "Full-text document search; memory requires the English model (staged automatically).", ModelAlias: nil},
 	}
 }
 

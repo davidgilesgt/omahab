@@ -35,6 +35,7 @@ type fakeRunner struct {
 	healthOK    bool
 	healthText  string
 	deployErr   error
+	undeployErr error
 	block       chan struct{}
 	healthCalls int
 }
@@ -63,7 +64,7 @@ func (f *fakeRunner) Undeploy(_ context.Context, in UndeployInput) error {
 	f.mu.Lock()
 	f.undeployed = append(f.undeployed, in)
 	f.mu.Unlock()
-	return nil
+	return f.undeployErr
 }
 
 type fakeRecorder struct {

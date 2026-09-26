@@ -125,14 +125,14 @@ function tryPatchCache(ev: ControlEvent, queryClient: QueryClient): boolean {
 
 
 export function useEventStream() {
-  const { client, token, lanBypass } = useAuth();
+  const { client, token } = useAuth();
   const queryClient = useQueryClient();
   const toast = useToast();
   // The stream effect must not restart when the toast context value
   // re-renders; reach the latest error announcer through a ref.
   const toastRef = useRef(toast);
   toastRef.current = toast;
-  const authorized = token !== null || lanBypass === true;
+  const authorized = token !== null;
   const lastIdRef = useRef<string | null>(null);
 
   useEffect(() => {

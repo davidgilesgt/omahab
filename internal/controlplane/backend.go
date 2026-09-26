@@ -349,7 +349,15 @@ func (b *Backend) initServices(ctx context.Context) error {
 	projSvc.SetReleaseTokenVerifier(projSvc)
 	projSvc.SetSecrets(b.secrets)
 	b.projects = projSvc
-	// backups with real HookSource
+	// backups with real HookSource. The restic cache lives under the
+	// state dir and is handed to every product restic invocation via
+	// CommandRunner: the child environment is otherwise minimal, so
+	// without this every restic call fails with "unable to locate cache
+	// directory" before any snapshot.
+	backupCacheDir := b.cfg.StateDir + "/restic-cache"
+	if err := os.MkdirAll(backupCacheDir, 0o700); err != nil {
+		log.Printf("backups: ensure restic cache dir %q: %v", backupCacheDir, err)
+	}
 	backupSvc := backups.New(b.store, backups.Config{
 		Paths: []string{
 			b.cfg.StateDir,
@@ -358,9 +366,9 @@ func (b *Backend) initServices(ctx context.Context) error {
 			b.cfg.DataDir + "/sync",
 		},
 		VerifyRoot: b.cfg.DataDir + "/backups/verify",
-		CacheDir:   b.cfg.StateDir + "/restic-cache",
+		CacheDir:   backupCacheDir,
 	}, backups.Deps{
-		Runner:     &backups.CommandRunner{},
+		Runner:     &backups.CommandRunner{CacheDir: backupCacheDir},
 		Hooks:      backups.NewAppHookSource(appSvc),
 		HookRunner: &backups.ExecHookRunner{},
 		Secrets:    backupSecretSource{service: secSvc},
