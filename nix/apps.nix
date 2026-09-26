@@ -667,12 +667,11 @@ in
       ];
       requires = [ "omahab-embedding-init.service" ];
       wantedBy = [ "multi-user.target" ];
-      # The worker serves no model until omahabd writes the pinned-models
-      # config for the explicit setup choice (knowledge.EmbeddingWorkerConfigForChoice:
-      # english/worldwide render the real pinned model, full-text only renders
-      # empty); omahabd restarts this unit after rewriting the config, and
-      # /health then reflects the loaded model (ok with the chosen alias
-      # ready, degraded otherwise).
+      # The worker starts without a model until setup records a choice.
+      # Every choice stages the English memory model. Worldwide document
+      # search also stages its own model; full-text document search does not.
+      # After config changes, omahabd restarts this unit so /health reflects
+      # the loaded aliases.
 
       serviceConfig = {
         Type = "simple";
@@ -688,10 +687,8 @@ in
         ProtectSystem = "strict";
         ProtectHome = true;
         ReadWritePaths = [ "/run/omahab-embedding" ];
-        # ProtectSystem=strict hides /var/lib/omahab: explicitly allow reading
-        # the pinned config omahabd renders plus the pinned model artifacts.
-        # Without these the worker cannot load the chosen model after restart
-        # (F-embedding-worker-no-models: Unknown with no usable embedding).
+        # Keep the config and verified model artifacts read-only in the
+        # worker sandbox. Setup stages them before restarting this unit.
         ReadOnlyPaths = [ "/var/lib/omahab/embedding/pinned_models.json" "/var/lib/omahab/models" ];
         StateDirectory = "omahab-embedding";
       };
