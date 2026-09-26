@@ -32,6 +32,11 @@ checks before the final interactive campaign.
 If test-tool changes require commits, complete repository commit gates first.
 Run the final ISO campaign from the resulting source state.
 
+Every administrator API request needs the panel bearer token, including
+requests from the LAN, tailnet, and the ISO harness loopback tunnel.
+The ISO harness reads the disposable token from the installed admin account
+over SSH. Never copy that value into an evidence file or a browser log.
+
 ## Ownership
 
 The coordinator owns the VM, credentials, shared configuration, and final
@@ -141,7 +146,7 @@ Generate test identities, passkeys, SSH keys, recovery material, application
 passwords, and all internal integration tokens. Generate test email
 addresses under the supplied domain. Generate a password for a disposable
 generic restic repository outside backed-up paths at
-`/var/tmp/omahab-test-backup`. Export the completed encrypted repository
+`/srv/omahab/backups/repos/omahab-test-backup`. Export the completed encrypted repository
 into the host run directory before destructive recovery tests.
 
 Keep Hetzner, other provider logins, external email delivery, and

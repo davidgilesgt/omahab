@@ -39,8 +39,9 @@ The console (tty1) shows the LAN panel URL and the 8-character panel token:
 ```
 
 Open the URL on any device in the same LAN (mDNS `<hostname>.local` also works, best-effort — the console derives it from the installed hostname, so `--hostname haven` gives `haven.local`, not a fixed `omahab.local`).
-On a home-LAN install (lan placement, the default) no token is needed, on the LAN or the tailnet. On a vps install, enter the panel token on every source. The token lives at `/var/lib/omahab/api.token` (root 0600) and is
-provisioned to the admin user's `~/.config/omahab/token` (default user `omahab`, configurable via `services.omahab.adminUser`) at daemon startup.
+On every placement, enter the panel token to access administration from the LAN, tailnet, or VPS.
+The token lives at `/var/lib/omahab/api.token` (root 0600).
+At daemon startup, it is copied to `~/.config/omahab/token` for the configured admin user (default `omahab`).
 
 Then work through the setup checklist at `http://<lan-ip>:8484/setup`:
 
@@ -66,8 +67,10 @@ After the handoff, complete enrollment at `http://<tailscale-ip>:8484`:
 - **Backups** — Hetzner Storage Box (recommended, ~€4/mo). Create a sub-account with SSH enabled; enter its username and password once. The system generates an ed25519 key at `/var/lib/omahab/backup_ssh/id_ed25519` (0600) and appends it to `.ssh/authorized_keys` via SFTP:23 (`golang.org/x/crypto/ssh` + `github.com/pkg/sftp`, `known_hosts` recorded, password discarded, location `sftp://<user>@<host>:23/./omahab/<instanceID>` with `-o sftp.command=...`, restic password `HKDF-SHA256(seed, salt "omahab-recovery-v1", info "restic-password")` so the phrase alone opens the repository, stored as `platform-app/backup_repo_credentials`); first backup + verify run immediately so “Verify a restore” passes on day one; then daily backup + weekly verify timers are enabled. Generic restic URL remains as “Advanced” (restic URL + password).
 - **Storage placement** *(optional)* — dedicate a disk to media (photos) or data; the `omahab-storage` unit orders the mount before `postgresql`, `immich-server`, and `syncthing` (not every app unit).
 - **AI providers** — provider credentials/OAuth and model aliases.
-- **Semantic index** — pick the pinned embedding model (or full-text only).
+- **Semantic index** — choose an English or worldwide document model, or full-text document search. Hindsight memory always uses the English model.
 
+After domain setup, open `https://home.<domain>/` for household links and the private dashboard.
+Use the panel token for administration on that host as well.
 
 ## Applications
 
@@ -154,7 +157,7 @@ omahab project rollback <project-id> <release-id>
 ## Security model
 
 - `omahabd` binds `0.0.0.0:8484`; the nftables table `inet omahab` is the admission boundary: TCP 8484 on `tailscale0`, generic `lo` accept, `br-*` from `172.30.0.2` (Caddy dashboard upstream), and (lan placement) RFC1918/ULA/link-local LAN ranges.
-- On lan placement (the ISO-installer default), LAN and tailnet (100.64.0.0/10) sources reach the panel without a token; on vps placement every source needs the 8-character panel token.
+- Every administrative API request requires the panel token, including requests from LAN, tailnet, and loopback sources.
 - Default-deny inbound; SSH 22, Tailscale UDP 41641, 80/443 on `tailscale0`, the `br-*` dashboard-upstream rule above, and ICMP echo/error classes are the other accepts.
 - sshd on the installed system: no passwords, no root login (`PermitRootLogin no`); the ISO-live environment uses `prohibit-password` and the dev VM re-enables passwords for development. Config is atomic with the generation.
 - Secrets live under `/var/lib/omahab/secrets` (0700) and per-bundle `appenv` files (0640, service-user group); a `.nix` file never holds a secret.

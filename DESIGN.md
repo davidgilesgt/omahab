@@ -212,12 +212,10 @@ services.omahab.enable = true;
 ### 5.3 First-boot access
 
 On first boot the console (tty1) shows the LAN panel URL and the 8-character panel token.
-There is no claim step: on lan placement (the ISO-installer default) LAN sources and
-tailnet sources (100.64.0.0/10) reach the panel at `:8484` without a token — tailnet
-membership already authenticates the caller, so a home-LAN install never asks for the
-token on any of its own origins. On vps placement every source needs the panel token
-(`/var/lib/omahab/api.token`, root 0600, provisioned to the configured admin user's `~/.config/omahab/token` at daemon
-startup). SSH keys come from the installer's `--authorized-keys-file` (optional) and are extended as the first setup-checklist
+There is no claim step. The panel requires its 8-character token on every placement and source, including LAN and tailnet.
+The token is stored at `/var/lib/omahab/api.token` (root 0600).
+At startup, the daemon copies it to `~/.config/omahab/token` for the configured admin user.
+SSH keys come from the installer's `--authorized-keys-file` (optional) and are extended as the first setup-checklist
 step; Tailscale enrollment lives on the checklist too. `omahab setup` is the SSH
 fallback for the Tailscale + Cloudflare-domain/token part of the flow (it does not manage SSH keys; key provisioning lives in the `install`/`omahab-install-disk` path).
 
@@ -245,7 +243,7 @@ PermitRootLogin no
 - Cloudflare Tunnel uses outbound connections;
 - `omahabd` runs with `docker`/`podman` supplementary groups and CI builds use the rootless podman builder socket; the Docker socket is not restricted to `omahabd` alone in the closure;
 - root-owned secret material under `/var/lib/omahab` (0700/0600), per-bundle env files 0640 with service-user group;
-- key-only SSH; the 8-character panel token guards panel access on vps placement, while on lan placement LAN + tailnet (100.64.0.0/10) sources bypass it;
+- key-only SSH; every administrative API request requires the panel token, including requests from LAN and tailnet sources;
 - health and security checks through `omahab doctor`;
 - explicit, supervised upgrades (`omahab system upgrade` with health gate + automatic rollback); no unattended rebuilds.
 
@@ -695,6 +693,12 @@ Automated review (Step 6): same-repo PRs (`HeadRepoFullName == BaseRepoFullName`
 ### 15.1 Paperless-ngx
 
 Paperless-ngx is the authoritative document-management application. Use its REST API for retrieval and document operations. For the Hermes assistant, the Paperless tools are served via the MCP server described in §13.2 (`docs_search`, `doc_get`, `docs_tags`, `docs_correspondents`, `docs_types`, `doc_add_tag`, `doc_upload`), each returning source IDs and deep links. Hermes retrieves relevant material instead of injecting the full archive into every conversation.
+
+Paperless SSO assigns new and existing household users to a `members` group.
+That group can view and add documents and use the settings page.
+Paperless applies its own object permissions to document lists, downloads, and direct URLs.
+The baseline does not grant staff access, document changes, or document deletion.
+
 ### 15.2 Local semantic indexing
 
 Local semantic indexing is offered during setup:
@@ -716,13 +720,13 @@ omahab-embed-english
 omahab-embed-worldwide
 ```
 
-Omahab pins the actual model for each release based on a repeatable Paperless retrieval benchmark. The UI displays model name, license, download size, and expected memory. Model replacement triggers a background re-index while the previous index remains usable.
-
-Candidate families to benchmark include:
-
-- English: Nomic Embed Text v1.5 or a stronger English-optimized model in the same local resource class;
-- Worldwide: Nomic Embed Text v2 MoE and Qwen3 Embedding 0.6B.
-
+Omahab pins the model revision, file hashes, and required files for each release.
+The English model is `nomic-ai/nomic-embed-text-v1.5` (ONNX, 768 dimensions).
+The worldwide model is `Xenova/multilingual-e5-large` (quantized ONNX, 1024 dimensions).
+Setup downloads only the selected document model and the English model required for Hindsight memory.
+Full-text-only document search still downloads the English memory model.
+The UI displays the model name, license, download size, and expected memory.
+Setup checks the model hashes before it changes the worker configuration or starts the worker.
 Embedding inference runs in an isolated Python worker on local CPU, preferably through ONNX Runtime or another efficient runtime. The worker owns model-specific tokenization, inference, pooling, normalization, and batching. `omahabd` owns model selection, pinned artifact metadata, source permissions, indexing jobs, and re-index state. A worker failure or memory spike must not take down the host control plane.
 
 Store vectors with source document, page/chunk, and content checksum. The index is sensitive derived data and follows Paperless permissions and backup policy. The Python worker receives only the content and scoped job metadata required for its current work; it is not a general local model server and receives no provider credentials.
@@ -884,6 +888,10 @@ A backup is not healthy until Omahab has demonstrated that it can restore the re
 
 Setup guidance: Hetzner Storage Box (recommended, ~€4/mo). Create a sub-account with SSH enabled; enter its username and password once. The system generates an ed25519 key at `/var/lib/omahab/backup_ssh/id_ed25519` (0600, root), uploads the public key to `.ssh/authorized_keys` via SFTP:23 (password auth, `golang.org/x/crypto/ssh` + `github.com/pkg/sftp`), records the host key in `known_hosts`, discards the password, and sets `location = sftp://<user>@<host>:23/./omahab/<instanceID>` with `-o sftp.command=ssh -p 23 -i ... -o UserKnownHostsFile=... -o BatchMode=yes ... -s sftp` on every restic invocation. The restic password is derived via `HKDF-SHA256(seed, salt "omahab-recovery-v1", info "restic-password")` from the recovery-phrase seed, so the phrase alone …
 
+For a local repository, use `/srv/omahab/backups/repos/<name>` so restic does not back up its own repository.
+Before stopping services, verify that an attached repository is initialized and writable.
+Initialize only a repository that Omahab creates; never initialize an attached repository without its owner.
+
 ### 19.1 Machine backups
 
 Each Omarchy workstation gets its own append-only restic repository on the server:
@@ -929,6 +937,10 @@ ntfy is an optional delivery adapter. Initial onboarding creates no phone subscr
 ## 21. Omarchy companion
 
 Only Omarchy is supported initially.
+
+Companion enrollment does not grant environment-variable access.
+An administrator grants access to each device in the dashboard or through the admin API.
+Revocation removes the device grant and its remote credentials; incomplete cleanup remains pending for retry.
 
 ### 21.1 Local daemon
 
@@ -1039,7 +1051,7 @@ Applications not selected for the initial default:
 ### 23.2 Foundation release
 
 - NixOS closure, appliance images, and the first-boot console wizard;
-- panel token + LAN bypass, SSH-key enrollment, declarative sshd hardening;
+- panel token on every administrative request, SSH-key enrollment, declarative sshd hardening;
 - amd64 and arm64 support;
 - same-disk and separate-data layouts;
 - `omahabd` and control database;
@@ -1090,7 +1102,7 @@ Omahab is not complete until these scenarios work end to end.
 ### Installation and recovery
 
 1. Boot the appliance image on a fresh machine.
-2. Open the panel from the LAN (no token needed) — SSH keys are seeded by the installer.
+2. Open the panel from the LAN with the panel token — SSH keys are seeded by the installer.
 3. Join Tailscale and configure Cloudflare from the dashboard.
 4. Enroll two passkeys.
 5. Lose passkey access.

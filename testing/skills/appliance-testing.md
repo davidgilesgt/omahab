@@ -13,6 +13,10 @@ exclusive operations, backup, restore, and recovery.
   disk and rebuilds the ISO when HEAD moved.
 - Never touch the root-level `nixos.qcow2` dev-VM state.
 - All generated test files and build results belong under `dist/`.
+- The harness reads the disposable panel token through the installed admin
+  account over SSH. It checks that anonymous setup requests return 401.
+- Authenticate every administrator API probe, including loopback probes.
+- Never record the token, request headers, or response bodies with secrets.
 
 ## Capacity gate
 
@@ -108,7 +112,7 @@ exclusive operations, backup, restore, and recovery.
 ## Backup and recovery
 
 - Place the disposable generic restic repository outside backed-up paths
-  at `/var/tmp/omahab-test-backup`.
+  at `/srv/omahab/backups/repos/omahab-test-backup`.
 - Prove `backups.create` and `backups.verify` through the Omahab product
   path only: create the repository through the API, run a product backup,
   verify it, and restore a known file with hash comparison. No generic
