@@ -49,7 +49,13 @@ test ! -f "$ROOT/$a" && test ! -f "$ROOT/$b" && test ! -f "$ROOT/$c" && pass "no
 
 # Stray nix result symlinks pin store closures (GBs `nix store gc` can
 # never free). Builds must use `-o dist/...` per AGENTS.md.
-if compgen -G "$ROOT/result*" > /dev/null || test -e "$ROOT/iso-result"; then
+stray_result=0
+for path in "$ROOT"/result* "$ROOT"/iso-result; do
+  if [[ -e "$path" || -L "$path" ]]; then
+    stray_result=1
+  fi
+done
+if (( stray_result )); then
   fail_check "stray nix result symlink at root (use -o dist/...; rm result*)"
 else
   pass "no root result symlinks"
@@ -104,8 +110,9 @@ else
   fail_check "jq not found for catalog unit check"
 fi
 if command -v go >/dev/null 2>&1; then
-  go build ./... && pass "go build" || fail_check "go build"
-  go vet ./... && pass "go vet" || fail_check "go vet"
+  # Limit builds to product packages; dist/ holds independent campaign fixtures.
+  go build ./internal/... ./cmd/... && pass "go build" || fail_check "go build"
+  go vet ./internal/... ./cmd/... && pass "go vet" || fail_check "go vet"
   go test ./internal/config/ -run 'TestDefaultListenIsLoopback|TestLoadWithoutListenEnvUsesLoopbackDefault|TestLoadAcceptsPackagedWildcardWhenExplicitlySet' -count=1 >/dev/null 2>&1 && pass "loopback API default" || fail_check "loopback API default"
   go run ./cmd/omahab catalog validate deploy/catalog/catalog.json && pass "catalog validate" || fail_check "catalog validate"
 else
