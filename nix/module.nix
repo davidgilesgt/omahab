@@ -554,8 +554,10 @@ in
 
     systemd.services.omahab-builder-prune = {
       description = "Omahab builder image prune — weekly";
-      after = [ "network-online.target" ];
-      wants = [ "network-online.target" ];
+      # Prune through the running builder's API socket: a second rootless
+      # podman here would need setuid newuidmap, which hardenBase blocks.
+      requires = [ "omahab-builder.socket" ];
+      after = [ "omahab-builder.socket" ];
       unitConfig = {
         RequiresMountsFor = [ "/var/lib/omahab-builder" ];
         ConditionPathExists = "/var/lib/omahab-builder";
@@ -564,24 +566,11 @@ in
         Type = "oneshot";
         User = "omahab-builder";
         Group = "omahab-builder";
-        ExecStart = "${config.virtualisation.podman.package}/bin/podman image prune --all --force --filter until=168h";
-        ProtectHome = false;
-        ReadWritePaths = [
-          "/var/lib/omahab-builder"
-          "/run/omahab-builder"
-        ];
-        RestrictAddressFamilies = [
-          "AF_UNIX"
-          "AF_INET"
-          "AF_INET6"
-        ];
-        RestrictNamespaces = false;
+        ExecStart = "${config.virtualisation.podman.package}/bin/podman --remote --url unix:///run/omahab-builder/podman.sock image prune --all --force --filter until=168h";
+        RestrictAddressFamilies = [ "AF_UNIX" ];
         MemoryDenyWriteExecute = true;
       };
-      environment = {
-        HOME = "/var/lib/omahab-builder";
-        PATH = lib.mkForce "/run/wrappers/bin:${lib.makeBinPath [ config.virtualisation.podman.package pkgs.shadow ]}";
-      };
+      environment.HOME = "/tmp";
     };
 
     systemd.timers.omahab-builder-prune = {
