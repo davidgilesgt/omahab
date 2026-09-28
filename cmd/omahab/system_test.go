@@ -1217,6 +1217,36 @@ func TestRunSystemCheckUpdate_NoUpdateClearsMarkers(t *testing.T) {
 	}
 }
 
+// Before the first release is published GitHub 404s releases/latest; the
+// nightly check must succeed (not degrade the host) and keep prior markers.
+func TestRunSystemCheckUpdate_UnpublishedReleaseIsNoUpdate(t *testing.T) {
+	tmp := t.TempDir()
+	candidate := filepath.Join(tmp, "candidate.json")
+	available := filepath.Join(tmp, "available")
+	restore := patchUpgradePaths(t, "/tmp/x", candidate, available)
+	defer restore()
+	if err := os.WriteFile(available, []byte("0.2.0"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	origHttp := httpGetFunc
+	httpGetFunc = func(string) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(strings.NewReader("Not Found")), Header: make(http.Header)}, nil
+	}
+	defer func() { httpGetFunc = origHttp }()
+	if err := runSystemCheckUpdate(); err != nil {
+		t.Fatalf("unpublished release must not fail: %v", err)
+	}
+	if _, err := os.Stat(available); err != nil {
+		t.Fatalf("prior marker must be retained: %v", err)
+	}
+	httpGetFunc = func(string) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusBadGateway, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header)}, nil
+	}
+	if err := runSystemCheckUpdate(); err == nil {
+		t.Fatal("other non-200 statuses must still fail")
+	}
+}
+
 func TestParseMetadataPath(t *testing.T) {
 	cases := []struct {
 		json string

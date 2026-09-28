@@ -659,6 +659,17 @@ func runSystemCheckUpdate() error {
 		return handleFailure(fmt.Errorf("check %s: %w", url, err))
 	}
 	defer resp.Body.Close()
+	cur := strings.TrimPrefix(strings.TrimSpace(version), "v")
+	if resp.StatusCode == http.StatusNotFound {
+		// GitHub answers releases/latest with 404 until a release is
+		// published: nothing to offer, not a failed check. Prior markers
+		// are left as-is, matching other non-authoritative outcomes.
+		if flagJSON {
+			return printJSON(checkUpdateResult{Current: cur})
+		}
+		fmt.Printf("No published release at %s (running v%s)\n", url, cur)
+		return nil
+	}
 	if resp.StatusCode != http.StatusOK {
 		return handleFailure(fmt.Errorf("check %s: unexpected status %d", url, resp.StatusCode))
 	}
@@ -671,7 +682,6 @@ func runSystemCheckUpdate() error {
 	if m.Version == "" || m.FlakeRef == "" {
 		return handleFailure(fmt.Errorf("manifest %s: missing version or flake_ref", url))
 	}
-	cur := strings.TrimPrefix(strings.TrimSpace(version), "v")
 	latestRaw := m.Version
 	latest := strings.TrimPrefix(latestRaw, "v")
 	updateAvailable := latest != "" && latest != cur
