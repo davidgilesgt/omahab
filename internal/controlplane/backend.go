@@ -426,6 +426,12 @@ func (b *Backend) initServices(ctx context.Context) error {
 			pocketProbe = health.NewPocketIDProbe(v)
 		}
 	}
+	// DNS/TLS probe the household entry point omahabd publishes itself
+	// (setup_exposure.go); the bare apex has no record by design.
+	healthHost := ""
+	if d := strings.TrimSpace(inst.Domain); d != "" {
+		healthHost = "home." + d
+	}
 	b.health = health.New(health.Options{
 		DB:         b.db,
 		Sink:       newHealthSink(b.events),
@@ -438,7 +444,7 @@ func (b *Backend) initServices(ctx context.Context) error {
 		PocketID:   pocketProbe,
 		Instance:   health.NewInstanceProbe(b.db),
 		Encryption: health.NewEncryptionProbe(),
-		Hostname:   inst.Domain,
+		Hostname:   healthHost,
 		InstanceID: string(inst.ID),
 	})
 

@@ -620,7 +620,7 @@ func NewEncryptionProbe(opts ...EncryptionProbeOption) EncryptionProbe {
 	return p
 }
 
-const encryptionRecommendation = "Recommend LUKS on bare metal and encrypted Proxmox storage for VMs (DESIGN §9)."
+const encryptionRecommendation = "Recommend LUKS on bare metal and encrypted Proxmox storage for VMs."
 
 func (p *encryptionProbe) CheckEncryption(ctx context.Context) (bool, string, error) {
 	if p.runner == nil {
