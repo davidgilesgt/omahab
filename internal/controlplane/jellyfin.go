@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -66,17 +67,17 @@ func jellyfinOIDCCallback(domainName string) string {
 // file reference, never an inline value (the document lives in versioned
 // state and backups; the secret lives in the platform vault + one file).
 type jellyfinSSOProviderConfig struct {
-	OidEndpoint                 string   `json:"OidEndpoint"`
-	OidClientId                 string   `json:"OidClientId"`
-	OidSecretFile               string   `json:"OidSecretFile"`
-	Enabled                     bool     `json:"Enabled"`
-	EnableAuthorization         bool     `json:"EnableAuthorization"`
-	RoleClaim                   string   `json:"RoleClaim"`
-	OidScopes                   []string `json:"OidScopes"`
-	Roles                       []string `json:"Roles"`
-	AdminRoles                  []string `json:"AdminRoles"`
-	EnableAllFolders            bool     `json:"EnableAllFolders"`
-	AllowPrivateNetworkAddresses bool    `json:"AllowPrivateNetworkAddresses"`
+	OidEndpoint                  string   `json:"OidEndpoint"`
+	OidClientId                  string   `json:"OidClientId"`
+	OidSecretFile                string   `json:"OidSecretFile"`
+	Enabled                      bool     `json:"Enabled"`
+	EnableAuthorization          bool     `json:"EnableAuthorization"`
+	RoleClaim                    string   `json:"RoleClaim"`
+	OidScopes                    []string `json:"OidScopes"`
+	Roles                        []string `json:"Roles"`
+	AdminRoles                   []string `json:"AdminRoles"`
+	EnableAllFolders             bool     `json:"EnableAllFolders"`
+	AllowPrivateNetworkAddresses bool     `json:"AllowPrivateNetworkAddresses"`
 }
 
 // jellyfinProviderDoc renders the Flowfin config-as-code document. Pocket ID
@@ -102,16 +103,16 @@ func jellyfinProviderDoc(domainName, clientID, secretPath string) ([]byte, error
 		"Configuration": map[string]any{
 			"OidConfigs": map[string]any{
 				jellyfinSSOProvider: jellyfinSSOProviderConfig{
-					OidEndpoint:         "https://id." + strings.TrimSpace(domainName) + "/.well-known/openid-configuration",
-					OidClientId:         strings.TrimSpace(clientID),
-					OidSecretFile:       secretPath,
-					Enabled:             true,
-					EnableAuthorization: true,
-					RoleClaim:           "groups",
-					OidScopes:           []string{"openid", "profile", "email", "groups"},
-					Roles:               []string{"admins", "members"},
-					AdminRoles:          []string{"admins"},
-					EnableAllFolders:    true,
+					OidEndpoint:                  "https://id." + strings.TrimSpace(domainName) + "/.well-known/openid-configuration",
+					OidClientId:                  strings.TrimSpace(clientID),
+					OidSecretFile:                secretPath,
+					Enabled:                      true,
+					EnableAuthorization:          true,
+					RoleClaim:                    "groups",
+					OidScopes:                    []string{"openid", "profile", "email", "groups"},
+					Roles:                        []string{"admins", "members"},
+					AdminRoles:                   []string{"admins"},
+					EnableAllFolders:             true,
 					AllowPrivateNetworkAddresses: true,
 				},
 			},
@@ -239,9 +240,20 @@ func jellyfinCall(ctx context.Context, method, path string, query url.Values, bo
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("jellyfin %s %s: http %d: %s", method, path, resp.StatusCode, strings.TrimSpace(string(out)))
+		return nil, &jellyfinStatusError{method: method, path: path, status: resp.StatusCode, body: strings.TrimSpace(string(out))}
 	}
 	return out, nil
+}
+
+// jellyfinStatusError is a non-2xx Jellyfin API reply.
+type jellyfinStatusError struct {
+	method, path string
+	status       int
+	body         string
+}
+
+func (e *jellyfinStatusError) Error() string {
+	return fmt.Sprintf("jellyfin %s %s: http %d: %s", e.method, e.path, e.status, e.body)
 }
 
 type jellyfinPublicInfo struct {
@@ -312,9 +324,23 @@ func (b *Backend) ensureJellyfinSetup(ctx context.Context) error {
 			}
 		}
 		// Upstream initializes the first user during GET /Startup/User.
-		// POST returns 404 until that initialization succeeds.
-		if _, err := jellyfinCall(ctx, http.MethodGet, "/Startup/User", nil, nil, ""); err != nil {
-			return fmt.Errorf("jellyfin init first user: %w", err)
+		// POST returns 404 until that initialization succeeds. Jellyfin
+		// answers /System/Info/Public before core startup finishes and
+		// 503s this route until then (seen after the SSO-doc restart), so
+		// retry within the readiness window instead of aborting setup.
+		for {
+			_, err := jellyfinCall(waitCtx, http.MethodGet, "/Startup/User", nil, nil, "")
+			if err == nil {
+				break
+			}
+			if se := (*jellyfinStatusError)(nil); !errors.As(err, &se) || se.status != http.StatusServiceUnavailable {
+				return fmt.Errorf("jellyfin init first user: %w", err)
+			}
+			select {
+			case <-waitCtx.Done():
+				return fmt.Errorf("jellyfin init first user: %w", err)
+			case <-time.After(2 * time.Second):
+			}
 		}
 		if _, err := jellyfinCall(ctx, http.MethodPost, "/Startup/User", nil, map[string]string{
 			"Name": "admin", "Password": password,

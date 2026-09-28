@@ -98,10 +98,13 @@ type jellyfinFake struct {
 	libraryExists   bool
 	authFails       bool
 	getInitFails    bool
-	completeFails   bool
-	mu              sync.Mutex
-	calls           []string
-	libraryQuery    string
+	// getInit503s makes the first N GET /Startup/User calls answer 503, as
+	// upstream does while core startup is still running.
+	getInit503s   int
+	completeFails bool
+	mu            sync.Mutex
+	calls         []string
+	libraryQuery  string
 }
 
 func (f *jellyfinFake) handler() http.Handler {
@@ -118,6 +121,11 @@ func (f *jellyfinFake) handler() http.Handler {
 		defer f.mu.Unlock()
 		if r.Method == http.MethodGet {
 			f.calls = append(f.calls, "init-user")
+			if f.getInit503s > 0 {
+				f.getInit503s--
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
 			if f.getInitFails {
 				w.WriteHeader(http.StatusInternalServerError)
 				return
@@ -250,6 +258,19 @@ func TestEnsureJellyfinSetupFirstRun(t *testing.T) {
 	}
 	if fake.has("user") || fake.has("complete") || fake.has("create-library") {
 		t.Fatalf("second run must not duplicate writes: %v", fake.calls)
+	}
+}
+
+// Jellyfin answers /System/Info/Public before startup finishes and 503s
+// /Startup/User meanwhile; setup must wait it out, not abort.
+func TestEnsureJellyfinSetupWaitsOutStartup503(t *testing.T) {
+	fake := &jellyfinFake{getInit503s: 2}
+	b := setupJellyfinTest(t, fake)
+	if err := b.ensureJellyfinSetup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !fake.has("user:admin") || !fake.has("complete") {
+		t.Fatalf("setup did not finish after 503s: %v", fake.calls)
 	}
 }
 
