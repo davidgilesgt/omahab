@@ -275,7 +275,7 @@ EOF
           self.nixosModules.omahab
           ./nix/installed-hardware.nix
           ./nix/install-local.nix
-          ({ lib, ... }: {
+          ({ lib, pkgs, ... }: {
             # Enabled by the backend-generated install-local; this
             # explicit module ensures `nix eval ...#omahab-installed`
             # evaluates with the service on even with the committed
@@ -287,6 +287,12 @@ EOF
             # only see ttyS0. Without this, phase-2 boot failures are
             # silent and /up hangs are undiagnosable.
             boot.kernelParams = [ "console=ttyS0,115200n8" ];
+            # console= makes systemd spawn serial-getty@ttyS0 even when
+            # the port has no UART (e.g. Proxmox VMs without serial0);
+            # agetty then fails "not a tty" and Restart=always floods the
+            # journal. sysfs type 0 is PORT_UNKNOWN: skip cleanly.
+            systemd.services."serial-getty@ttyS0".serviceConfig.ExecCondition =
+              "${pkgs.bash}/bin/bash -c '[ \"$(cat /sys/class/tty/ttyS0/type)\" != 0 ]'";
           })
         ];
       };
