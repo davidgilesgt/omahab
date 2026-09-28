@@ -252,7 +252,12 @@ type jellyfinStatusError struct {
 	body         string
 }
 
+// Error omits HTML bodies (Jellyfin's startup page): they surface verbatim
+// in the setup banner and carry nothing an operator can act on.
 func (e *jellyfinStatusError) Error() string {
+	if e.body == "" || strings.HasPrefix(e.body, "<") {
+		return fmt.Sprintf("jellyfin %s %s: http %d", e.method, e.path, e.status)
+	}
 	return fmt.Sprintf("jellyfin %s %s: http %d: %s", e.method, e.path, e.status, e.body)
 }
 
