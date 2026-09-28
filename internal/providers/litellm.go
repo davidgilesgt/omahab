@@ -191,10 +191,12 @@ type CommandRunner interface {
 type litellmGateway struct {
 	httpClient *http.Client
 	baseURL    string
-	masterKey  string
-	configDir  string
-	runner     CommandRunner
-	auth       AuthHelper
+	// masterKey resolves the LiteLLM master key per call: setup mints it
+	// after omahabd starts, so a startup snapshot would stay empty.
+	masterKey func() string
+	configDir string
+	runner    CommandRunner
+	auth      AuthHelper
 	// in-memory OAuth sessions for the gateway (never persist device codes/tokens)
 	sessions map[string]*oauthRecord
 }
@@ -217,12 +219,15 @@ type AuthHelper interface {
 
 // GatewayOptions configures NewLiteLLMGateway.
 type GatewayOptions struct {
-	HTTPClient  *http.Client
-	BaseURL     string
-	MasterKey   string
-	ConfigDir   string
-	Runner      CommandRunner
-	AuthAdapter AuthHelper
+	HTTPClient *http.Client
+	BaseURL    string
+	MasterKey  string
+	// MasterKeySource, when set, is consulted on every call and wins over
+	// MasterKey. Production wiring reads the secrets store through it.
+	MasterKeySource func() string
+	ConfigDir       string
+	Runner          CommandRunner
+	AuthAdapter     AuthHelper
 }
 
 // NewLiteLLMGateway creates a gateway.
@@ -243,10 +248,15 @@ func NewLiteLLMGateway(db any, opts GatewayOptions) (*litellmGateway, error) {
 	if configDir == "" {
 		configDir = "/srv/omahab/apps/litellm/config"
 	}
+	masterKey := opts.MasterKeySource
+	if masterKey == nil {
+		static := opts.MasterKey
+		masterKey = func() string { return static }
+	}
 	return &litellmGateway{
 		httpClient: httpClient,
 		baseURL:    baseURL,
-		masterKey:  strings.TrimSpace(opts.MasterKey),
+		masterKey:  func() string { return strings.TrimSpace(masterKey()) },
 		configDir:  configDir,
 		runner:     opts.Runner,
 		auth:       opts.AuthAdapter,
@@ -269,7 +279,7 @@ func (g *litellmGateway) Health(ctx context.Context) error {
 	}
 	// If no master key, we cannot probe authenticated endpoint; treat as healthy for config-only tests
 	// but still require master key in production wiring (caller can check).
-	if g.masterKey == "" {
+	if g.masterKey() == "" {
 		// Attempt unauthenticated liveliness as best-effort; if fails, still return nil for test wiring.
 		// Production backend will provide masterKey; empty means test.
 		return nil
@@ -281,8 +291,7 @@ func (g *litellmGateway) Health(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("health request: %w", err)
 	}
-	req.Header.Set("x-litellm-key", g.masterKey)
-	req.Header.Set("Authorization", "Bearer "+g.masterKey)
+	g.gatewayAuth(req)
 	resp, err := g.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("health probe failed: %w", err)
@@ -316,7 +325,7 @@ func (g *litellmGateway) verifyPin(ctx context.Context) error {
 		}
 	}
 	// Real native model request smoke: list models through the gateway.
-	if strings.TrimSpace(g.masterKey) == "" {
+	if g.masterKey() == "" {
 		return nil
 	}
 	ctx2, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -404,12 +413,13 @@ func (ExecRunner) Run(ctx context.Context, args ...string) (string, error) {
 
 // gatewayAuth attaches LiteLLM master-key authentication to a gateway request.
 func (g *litellmGateway) gatewayAuth(req *http.Request) {
-	req.Header.Set("x-litellm-key", g.masterKey)
-	req.Header.Set("Authorization", "Bearer "+g.masterKey)
+	key := g.masterKey()
+	req.Header.Set("x-litellm-key", key)
+	req.Header.Set("Authorization", "Bearer "+key)
 }
 
 func (g *litellmGateway) gatewayGet(ctx context.Context, path string, query map[string]string) ([]byte, int, error) {
-	if strings.TrimSpace(g.masterKey) == "" {
+	if g.masterKey() == "" {
 		return nil, 0, fmt.Errorf("%w: gateway not configured", ErrValidation)
 	}
 	ctx2, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -437,7 +447,7 @@ func (g *litellmGateway) gatewayGet(ctx context.Context, path string, query map[
 }
 
 func (g *litellmGateway) gatewayPost(ctx context.Context, path string, payload any) ([]byte, int, error) {
-	if strings.TrimSpace(g.masterKey) == "" {
+	if g.masterKey() == "" {
 		return nil, 0, fmt.Errorf("%w: gateway not configured", ErrValidation)
 	}
 	ctx2, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -779,7 +789,7 @@ func (g *litellmGateway) IssueVirtualKey(ctx context.Context, vk VirtualKey) (Is
 			return IssuedVirtualKey{}, fmt.Errorf("%w: unsupported scope %q", ErrValidation, s)
 		}
 	}
-	if strings.TrimSpace(g.masterKey) == "" {
+	if g.masterKey() == "" {
 		return IssuedVirtualKey{}, fmt.Errorf("%w: gateway master key not configured", ErrValidation)
 	}
 	ctx2, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -818,8 +828,7 @@ func (g *litellmGateway) IssueVirtualKey(ctx context.Context, vk VirtualKey) (Is
 		return IssuedVirtualKey{}, fmt.Errorf("key generate request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-litellm-key", g.masterKey)
-	req.Header.Set("Authorization", "Bearer "+g.masterKey)
+	g.gatewayAuth(req)
 	resp, err := g.httpClient.Do(req)
 	if err != nil {
 		return IssuedVirtualKey{}, fmt.Errorf("key generate failed: %w", err)
@@ -882,7 +891,7 @@ func (g *litellmGateway) revokeVirtualKey(ctx context.Context, gatewayKeyID, key
 			return fmt.Errorf("%w: gatewayKeyID contains invalid characters", ErrValidation)
 		}
 	}
-	if strings.TrimSpace(g.masterKey) == "" {
+	if g.masterKey() == "" {
 		// No master key: treat as success in test
 		return nil
 	}
@@ -911,8 +920,7 @@ func (g *litellmGateway) revokeVirtualKey(ctx context.Context, gatewayKeyID, key
 		return fmt.Errorf("key delete request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-litellm-key", g.masterKey)
-	req.Header.Set("Authorization", "Bearer "+g.masterKey)
+	g.gatewayAuth(req)
 	resp, err := g.httpClient.Do(req)
 	if err != nil {
 		if strict {

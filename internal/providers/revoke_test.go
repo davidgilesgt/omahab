@@ -26,7 +26,7 @@ func TestRevokeVirtualKeySendsAlias(t *testing.T) {
 		_, _ = w.Write([]byte(`{}`))
 	}))
 	defer srv.Close()
-	g := &litellmGateway{httpClient: srv.Client(), baseURL: srv.URL, masterKey: "test-master"}
+	g := &litellmGateway{httpClient: srv.Client(), baseURL: srv.URL, masterKey: func() string { return "test-master" }}
 	if err := g.RevokeVirtualKey(context.Background(), "litellm-key-id-123", "hermes-qa-probe"); err != nil {
 		t.Fatalf("RevokeVirtualKey: %v", err)
 	}

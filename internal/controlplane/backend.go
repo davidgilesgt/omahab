@@ -52,27 +52,27 @@ type Backend struct {
 	version   string
 	startedAt time.Time
 
-	apps         *apps.Service
-	projects     *projects.Service
-	secrets      *secrets.Service
-	events       *events.Service
-	health       *health.Service
-	syncer       *syncer.Service
-	workspaces   *workspaces.Service
-	providers    *providers.Service
-	gateway      providers.GatewayAdmin
-	environments *companion.Service
-	emailing     *emailing.Service
-	backups      *backups.Service
-	hermes       *hermes.Service
-	scm          *scm.Service
-	knowledge    *knowledge.Service
-	identity     *identity.Service
-	integrations *integrations.Service
-	exposure     *exposure.Service
-	exposureMu   sync.Mutex
+	apps          *apps.Service
+	projects      *projects.Service
+	secrets       *secrets.Service
+	events        *events.Service
+	health        *health.Service
+	syncer        *syncer.Service
+	workspaces    *workspaces.Service
+	providers     *providers.Service
+	gateway       providers.GatewayAdmin
+	environments  *companion.Service
+	emailing      *emailing.Service
+	backups       *backups.Service
+	hermes        *hermes.Service
+	scm           *scm.Service
+	knowledge     *knowledge.Service
+	identity      *identity.Service
+	integrations  *integrations.Service
+	exposure      *exposure.Service
+	exposureMu    sync.Mutex
 	hermesTokenMu sync.Mutex
-	mcpServer    *mcp.Server
+	mcpServer     *mcp.Server
 
 	masterKey [32]byte
 	apiToken  string
@@ -110,6 +110,7 @@ type Backend struct {
 	embeddingSocketPath string
 	embeddingHTTPClient *http.Client
 }
+
 // Options for New
 type Options struct {
 	Config    config.Config
@@ -489,7 +490,16 @@ func (b *Backend) initServices(ctx context.Context) error {
 	if strings.TrimSpace(b.cfg.DataDir) == "" {
 		cfgDir = "/srv/omahab/apps/litellm/config"
 	}
-	masterKey := secretOrEnv("litellm_master_key", "LITELLM_MASTER_KEY")
+	// Setup mints litellm_master_key after omahabd starts; resolve per call
+	// so the gateway picks it up (and rotations) without a daemon restart.
+	masterKeySource := func() string {
+		if v, err := secSvc.RevealByName(context.Background(), "platform-app", "litellm_master_key"); err == nil {
+			if v = strings.TrimSpace(v); v != "" {
+				return v
+			}
+		}
+		return strings.TrimSpace(os.Getenv("LITELLM_MASTER_KEY"))
+	}
 	// Subscription logins run through the packaged provider-auth helper
 	// (same pinned environment as the gateway), never fake challenges.
 	// Auth state lives under the apps litellm tree, owned by the fixed
@@ -513,12 +523,12 @@ func (b *Backend) initServices(ctx context.Context) error {
 		ServiceUser: "litellm",
 	})
 	if gw, err := providers.NewLiteLLMGateway(b.db, providers.GatewayOptions{
-		HTTPClient: http.DefaultClient,
-		BaseURL:    "http://127.0.0.1:4000",
-		MasterKey:  masterKey,
-		ConfigDir:  cfgDir,
-		Runner:     providers.ExecRunner{},
-		AuthAdapter: authAdapter,
+		HTTPClient:      http.DefaultClient,
+		BaseURL:         "http://127.0.0.1:4000",
+		MasterKeySource: masterKeySource,
+		ConfigDir:       cfgDir,
+		Runner:          providers.ExecRunner{},
+		AuthAdapter:     authAdapter,
 	}); err == nil {
 		b.gateway = gw
 		// Inject gateway into providers service for virtual key issuance

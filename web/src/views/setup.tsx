@@ -124,9 +124,9 @@ function ProvidersSetupBox({ status, isLoading, isError, error, onRetry }: { sta
       <div className="setup-actions">
         {status?.management_url ? (
           <a className="button secondary" href={status.management_url} target="_blank" rel="noreferrer">Open LiteLLM</a>
-        ) : (
+        ) : status ? (
           <span className="muted">LiteLLM URL unavailable — install LiteLLM first.</span>
-        )}
+        ) : null}
         <button className="button secondary" type="button" onClick={() => void queryClient.invalidateQueries({ queryKey: ["setup", "models"] })}>
           Refresh models
         </button>

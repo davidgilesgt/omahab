@@ -225,6 +225,38 @@ func TestGatewayIssueRequiresMasterKey(t *testing.T) {
 	}
 }
 
+// Setup mints the master key after omahabd builds the gateway; the gateway
+// must use a key that appears later instead of a startup snapshot.
+func TestGatewayMasterKeySourcePicksUpLateKey(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"key":"sk-late","key_id":"key-late"}`))
+	}))
+	t.Cleanup(srv.Close)
+	key := ""
+	gw, err := NewLiteLLMGateway(struct{}{}, GatewayOptions{
+		BaseURL:         srv.URL,
+		MasterKey:       "sk-ignored-static",
+		MasterKeySource: func() string { return key },
+		ConfigDir:       t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("NewLiteLLMGateway: %v", err)
+	}
+	if _, err := gw.IssueVirtualKey(context.Background(), VirtualKey{Name: "x"}); err == nil {
+		t.Fatal("issuance before the key exists must fail closed")
+	}
+	key = " sk-minted-later "
+	if _, err := gw.IssueVirtualKey(context.Background(), VirtualKey{Name: "x"}); err != nil {
+		t.Fatalf("issuance after the key appears: %v", err)
+	}
+	if gotAuth != "Bearer sk-minted-later" {
+		t.Fatalf("Authorization = %q, want the late trimmed key", gotAuth)
+	}
+}
+
 // The gateway returns the LiteLLM-accepted plaintext plus its row id, and
 // forwards the scopes as the models allowlist.
 func TestGatewayIssueReturnsBearerAndKeyID(t *testing.T) {
@@ -332,6 +364,7 @@ func TestLegacyOmkRetireAndReissue(t *testing.T) {
 		t.Fatalf("reissued token = %q, want gateway sk- bearer", reissued.Token)
 	}
 }
+
 // SecurityAudit: the gateway row must carry every caller-supplied limit so a
 // directly presented sk- cannot bypass RPM/TPM/concurrency/budget metadata.
 func TestGatewayIssueForwardsLimits(t *testing.T) {
