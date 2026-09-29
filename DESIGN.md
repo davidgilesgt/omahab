@@ -347,37 +347,36 @@ The supported happy path requires:
 
 Bootstrap and recovery cannot depend exclusively on the custom domain. The server remains reachable through its Tailscale IP, `*.ts.net` name, SSH, or local console.
 
-### 7.2 No split DNS
+### 7.2 Split-horizon DNS
 
-Private services use public DNS records that resolve to the server's stable Tailscale IP. The address resolves publicly but is routable only by authorized tailnet devices.
+Private services use public DNS records that resolve to the server's stable Tailscale IP; tailnet clients use those. LAN clients optionally resolve the same names through Technitium, the household resolver running on the server (`:53`, LAN-only), which answers `<app>.<domain>` with the host's LAN IP so Caddy serves 80/443 on the LAN with the same Cloudflare-issued certificates.
 
-Example private state:
+Public/tailnet state (unchanged):
 
 ```dns
-ai.example.com       CNAME  ai.home.example.com
+ai.example.com       CNAME  <tunnel-id>.cfargotunnel.com   (shared/public)
+ai.example.com       CNAME  ai.home.example.com            (private)
 ai.home.example.com  A      100.x.y.z
 ```
 
-These are Cloudflare DNS-only records. They are not orange-cloud proxied.
-
-Public state:
+LAN-only override (Technitium forwarder zone for the apex, FWD record = `this-server`):
 
 ```dns
-ai.example.com       CNAME  <tunnel-id>.cfargotunnel.com
-ai.home.example.com  A      100.x.y.z
+ai.example.com       A      192.168.z.z   (host LAN IP, TTL 60)
 ```
 
-`omahabd` changes the vanity record when exposure changes. The private `.home` anchor remains stable.
+omahabd owns this forwarder zone and reconciles it after exposure changes and once a minute: every exposed service hostname gets an A record at the first RFC1918 address on the host, A records for retired routes are removed, and everything else in the zone resolves through this server's normal path (Quad9 DoH forwarders plus blocklists still apply). Households opt in by pointing router DHCP DNS at the server; the host's own resolver prepends 127.0.0.1 with the router kept as fallback, so a Technitium outage never breaks the host or the household.
 
 Consequences:
 
-- no local DNS server is required;
-- all clients must use Tailscale for private services;
-- service names and tailnet IPs are visible in public DNS;
-- aggressive DNS-rebinding filters may require fallback to `*.ts.net`;
-- replacing the server's Tailscale identity requires DNS updates.
+- LAN clients get app names without Tailscale; tailnet clients are unaffected (public Cloudflare records still point at the Tailscale IP);
+- the nftables table admits 80/443 from RFC1918/ULA/link-local only on `lan` placement (comment strings distinct from the `:8484` dashboard rules, so Close LAN removes only the dashboard rules);
+- the dashboard on `:8484` stays tailnet-only after Close LAN; HTTPS on 80/443 remains (the panel token gates administration either way);
+- direct app ports (e.g. Jellyfin 8096) stay refused — Caddy is the only serving path;
+- service names and tailnet IPs remain visible in public DNS, as before.
 
 The installer and companion test resolution, certificate validity, routing, Tailscale identity, and Omahab instance identity before reporting success.
+
 
 ### 7.3 Exposure modes
 
@@ -934,6 +933,21 @@ Default surfaces:
 
 ntfy is an optional delivery adapter. Initial onboarding creates no phone subscription.
 
+Alert delivery policy (owner decision): warning/error events go to the laptop
+by default via `omahab-clientd` desktop notifications (notify-send/mako) —
+deduped, rate-limited (5/min), with SSE reconnect replay protection and a
+dashboard deep link in the body. Phone push stays opt-in.
+
+`omahabd` runs a periodic host-health loop (every 5 minutes, jittered) over
+`health.CheckAndEmit`, so disk-low, backup-stale/failed, TLS/DNS, and
+service-down states publish events without anyone opening the dashboard.
+First observations are silent baselines; transitions emit once; recoveries
+emit `service.healthy` (info); steady failures re-remind at 2× the storm
+interval. The nightly `omahab system check-update` marker surfaces as a
+`service.update_available` event (once per version) and as
+`update_available`/`latest_version` on `GET /api/v1/status` for the dashboard
+banner.
+
 ## 21. Omarchy companion
 
 Only Omarchy is supported initially.
@@ -1126,6 +1140,8 @@ Omahab is not complete until these scenarios work end to end.
 5. Boot a fresh appliance image on a replacement.
 6. On the setup checklist choose “Restore from backup” → enter Hetzner username+host+password (once) + 24-word phrase → system derives restic password, uploads key, lists `restic snapshots --json --latest 10`, restores `--target /` with `--include` per `DefaultPaths()` (including `/var/lib/tailscale` so Tailscale IP is kept; fallback to normal Tailscale step if rejected), unwraps `recovery.kit` → `master.key`, runs `post_restore` hooks, restarts `omahabd` (or `omahab backup restore --fresh` from SSH).
 7. Confirm photos, databases, repositories, identities, and projects are usable.
+
+**Retention.** Server repositories (Hetzner SFTP, local) apply a retention policy so daily snapshots do not grow forever. Every snapshot is tagged `omahab` plus one `scope:<name>` tag per captured scope; retention runs `restic forget --prune --group-by tags` with keep-daily 7, keep-weekly 4, keep-monthly 12, keep-yearly 2 — applied per scope group so `server-config` history is independent of chatty `app:` scopes. The pass is planned with `--dry-run --json`; the newest verified-restorable snapshot (per repository, from `backup_snapshots.verified_at`) is removed from the forget set before applying, so the only verified proof can never be pruned away. It runs weekly (`omahab-backup-prune.timer` → `omahab backup prune` → `POST /api/v1/backups/prune`) and opportunistically after scheduled backups when due (>7 days since last pass, recorded in `backup_retention_state`). Failures publish `backup.retention_failed` (warning); `restic stats --mode restore-size --json` reports post-prune size; a local repository with <5 GiB free publishes `backup.repo_space_low`. The policy and last outcome surface read-only in the backups status (`GET` backup status `retention` field).
 
 
 ### Project deployment
