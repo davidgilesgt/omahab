@@ -653,6 +653,236 @@
       ]
     },
     {
+      "id": "security.caddy.token",
+      "area": "setup",
+      "title": "Keep the DNS token out of Caddy config dumps",
+      "covers": [
+        "manual:caddy-token"
+      ],
+      "sources": [
+        "internal/edge/config.go",
+        "internal/cloudflare/edge.go",
+        "internal/controlplane/setup_phases.go"
+      ],
+      "requires": [
+        "enrolled",
+        "domain"
+      ],
+      "steps": [
+        "Read the Caddy config through the local admin endpoint.",
+        "Inspect the rendered Caddy environment file.",
+        "Force one certificate renewal."
+      ],
+      "expected": [
+        "The dump shows the environment placeholder, never the token value.",
+        "The environment file is readable only by root and the Caddy group.",
+        "The DNS challenge still issues certificates."
+      ],
+      "evidence_types": [
+        "LIVE_CLI",
+        "UNIT"
+      ]
+    },
+    {
+      "id": "security.secrets.modes",
+      "area": "setup",
+      "title": "Converge secret files to mode 0600",
+      "covers": [
+        "manual:secrets-modes"
+      ],
+      "sources": [
+        "internal/controlplane/setup_phases.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Create one secret file with wider permissions.",
+        "Run one setup reconcile pass.",
+        "List the mode of every secret file."
+      ],
+      "expected": [
+        "Legacy wide modes change to 0600 root-only.",
+        "New secrets are written 0600 from the start.",
+        "Applications still start from rendered environment files."
+      ],
+      "evidence_types": [
+        "LIVE_CLI",
+        "UNIT"
+      ]
+    },
+    {
+      "id": "setup.gated.start",
+      "area": "setup",
+      "title": "Start gated units when their gate appears",
+      "covers": [
+        "manual:gated-start"
+      ],
+      "sources": [
+        "nix/apps.nix",
+        "internal/controlplane/setup_phases.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Boot a fresh system and confirm gated units are skipped.",
+        "Complete the setup step that renders the environment file.",
+        "Check the service state right after the file appears."
+      ],
+      "expected": [
+        "The service becomes active without a manual start.",
+        "Units without their gate stay skipped, not failed.",
+        "No unit reports degraded while its gate is absent."
+      ],
+      "evidence_types": [
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "setup.restore.box",
+      "area": "setup",
+      "title": "Offer restore from backup before the domain step",
+      "covers": [
+        "manual:restore-box",
+        "ui:/setup"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "web/src/views/restoreFromBackup.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open the setup flow on a fresh install with no recovery phrase.",
+        "Check the box position against the Domain step.",
+        "Complete the recovery step and reopen the flow."
+      ],
+      "expected": [
+        "The optional restore box appears above the Domain step.",
+        "The box disappears once the recovery step is done.",
+        "A new install can skip the box with no penalty."
+      ],
+      "evidence_types": [
+        "BROWSER"
+      ]
+    },
+    {
+      "id": "dns.hermes.defer",
+      "area": "setup",
+      "title": "Defer Hermes when memory is unconfigured",
+      "covers": [
+        "manual:hermes-defer"
+      ],
+      "sources": [
+        "internal/controlplane/setup_phases.go",
+        "internal/controlplane/setup_hindsight.go"
+      ],
+      "requires": [
+        "enrolled",
+        "domain"
+      ],
+      "steps": [
+        "Run setup on a fresh install with no AI model configured.",
+        "Read the setup status and pending operator actions.",
+        "Configure the memory model and run setup again."
+      ],
+      "expected": [
+        "Setup completes and installs Hermes.",
+        "A pending operator action names the missing memory model.",
+        "The assistant host record exists after setup."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "dns.anchor.selfheal",
+      "area": "setup",
+      "title": "Self-heal a stale assistant anchor record",
+      "covers": [
+        "manual:anchor-selfheal"
+      ],
+      "sources": [
+        "internal/controlplane/setup_exposure.go",
+        "internal/cloudflare/edge.go"
+      ],
+      "requires": [
+        "enrolled",
+        "domain"
+      ],
+      "steps": [
+        "Seed one assistant host record with a foreign tailnet address.",
+        "Run setup to completion.",
+        "Resolve the assistant host on a public resolver and on the host."
+      ],
+      "expected": [
+        "The record points to this host after setup.",
+        "No foreign-address record remains.",
+        "Public and local names resolve to the current address."
+      ],
+      "evidence_types": [
+        "LIVE_API",
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "dns.host.resolver",
+      "area": "setup",
+      "title": "Resolve host names through local Technitium",
+      "covers": [
+        "manual:host-resolver"
+      ],
+      "sources": [
+        "nix/module.nix"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Read the resolver configuration before and after a rebuild.",
+        "Stop the tailnet daemon and resolve one application host.",
+        "Restart the tailnet daemon."
+      ],
+      "expected": [
+        "The resolver lists the local DNS address, not the tailnet resolver.",
+        "Host names still resolve without the tailnet daemon.",
+        "The tailnet reconnects after restart."
+      ],
+      "evidence_types": [
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "setup.household.dns.copy",
+      "area": "setup",
+      "title": "Name the LAN address in household DNS guidance",
+      "covers": [
+        "manual:household-dns-copy"
+      ],
+      "sources": [
+        "web/src/views/setup.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open the DNS setup guidance on a fresh run.",
+        "Compare the shown addresses with the host interfaces."
+      ],
+      "expected": [
+        "The copy names the host LAN address for the router.",
+        "A secondary resolver is recommended.",
+        "The tailnet address is never suggested for the router."
+      ],
+      "evidence_types": [
+        "BROWSER"
+      ]
+    },
+    {
       "id": "ssh.paste",
       "area": "setup",
       "title": "Paste a test SSH key",
@@ -1709,6 +1939,33 @@
       ]
     },
     {
+      "id": "dev.builder.prune",
+      "area": "development",
+      "title": "Prune builder images through the API socket",
+      "covers": [
+        "manual:builder-prune"
+      ],
+      "sources": [
+        "nix/module.nix"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Run the builder prune service by hand.",
+        "Read the unit result and the builder image list.",
+        "Confirm the weekly timer is active."
+      ],
+      "expected": [
+        "The service exits zero under its hardening settings.",
+        "Pruning goes through the builder API socket.",
+        "No privileged helper is required."
+      ],
+      "evidence_types": [
+        "LIVE_CLI"
+      ]
+    },
+    {
       "id": "backups.guidance",
       "area": "lifecycle",
       "title": "Show no-repository guidance",
@@ -1871,6 +2128,153 @@
       ]
     },
     {
+      "id": "backups.retention.prune",
+      "area": "lifecycle",
+      "title": "Prune per scope with the default policy",
+      "covers": [
+        "manual:retention-prune",
+        "api:POST /api/v1/backups/prune"
+      ],
+      "sources": [
+        "internal/backups/retention.go",
+        "internal/backups/runner_retention.go",
+        "cmd/omahab/main.go",
+        "nix/module.nix"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Run more than fifteen daily backups on one repository.",
+        "Run the backup prune command.",
+        "List the remaining snapshots per scope."
+      ],
+      "expected": [
+        "Snapshots thin to the default daily, weekly, monthly, and yearly counts.",
+        "Each scope keeps its own history.",
+        "A retention event records the result."
+      ],
+      "evidence_types": [
+        "LIVE_API",
+        "LIVE_CLI",
+        "UNIT"
+      ]
+    },
+    {
+      "id": "backups.retention.verified",
+      "area": "lifecycle",
+      "title": "Keep the newest verified snapshot",
+      "covers": [
+        "manual:retention-verified"
+      ],
+      "sources": [
+        "internal/backups/retention.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Verify one snapshot.",
+        "Run a prune whose policy would remove that snapshot.",
+        "List and restore the verified snapshot."
+      ],
+      "expected": [
+        "The verified snapshot survives the prune.",
+        "The prune result names it as protected.",
+        "The restore still works."
+      ],
+      "evidence_types": [
+        "LIVE_API",
+        "UNIT"
+      ]
+    },
+    {
+      "id": "backups.retention.failure",
+      "area": "lifecycle",
+      "title": "Report retention failure as a warning",
+      "covers": [
+        "manual:retention-failure"
+      ],
+      "sources": [
+        "internal/backups/retention.go",
+        "internal/backups/events.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Point one repository at an unreachable backend.",
+        "Run the backup prune.",
+        "Run one normal backup afterwards."
+      ],
+      "expected": [
+        "A warning-severity retention failure event appears.",
+        "The command exits nonzero with a clear error.",
+        "Normal backups still run."
+      ],
+      "evidence_types": [
+        "LIVE_API",
+        "UNIT"
+      ]
+    },
+    {
+      "id": "backups.retention.timer",
+      "area": "lifecycle",
+      "title": "Enable the weekly prune timer",
+      "covers": [
+        "manual:retention-timer"
+      ],
+      "sources": [
+        "nix/module.nix",
+        "internal/controlplane/wizard.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Complete backup setup.",
+        "List the appliance timers.",
+        "Compare the prune timer with the backup and verify timers."
+      ],
+      "expected": [
+        "The weekly prune timer is active and persistent.",
+        "All three backup timers appear together after setup."
+      ],
+      "evidence_types": [
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "backups.scheduled.trigger",
+      "area": "lifecycle",
+      "title": "Record the scheduled trigger and run retention",
+      "covers": [
+        "manual:scheduled-trigger"
+      ],
+      "sources": [
+        "cmd/omahab/main.go",
+        "internal/backups/run.go",
+        "internal/backups/retention.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Let the daily timer fire one backup.",
+        "Read the run record trigger field.",
+        "Wait past the prune interval and let the timer fire again."
+      ],
+      "expected": [
+        "The run records a scheduled trigger.",
+        "A retention pass runs after the prune interval elapses."
+      ],
+      "evidence_types": [
+        "LIVE_API",
+        "LIVE_CLI",
+        "UNIT"
+      ]
+    },
+    {
       "id": "inbox.unread",
       "area": "dashboard",
       "title": "Show unread count",
@@ -1900,6 +2304,38 @@
       "evidence_types": [
         "BROWSER",
         "LIVE_API"
+      ]
+    },
+    {
+      "id": "inbox.noise",
+      "area": "dashboard",
+      "title": "Keep routine lifecycle events read",
+      "covers": [
+        "manual:inbox-noise",
+        "api:GET /api/v1/events/unread-count"
+      ],
+      "sources": [
+        "internal/events/service.go",
+        "internal/events/routine_noise_test.go",
+        "web/src/views/operations.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Run a reconcile that redeploys one application.",
+        "Watch the inbox badge and the unread-count endpoint.",
+        "Open the inbox list and read the new rows."
+      ],
+      "expected": [
+        "Started, stopped, and recovered-service rows appear as read.",
+        "The unread badge and count stay unchanged.",
+        "Failures still count as unread."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API",
+        "UNIT"
       ]
     },
     {
@@ -1957,26 +2393,125 @@
       ]
     },
     {
-      "id": "inbox.ntfy",
+      "id": "inbox.sse.stable",
       "area": "dashboard",
-      "title": "Configure ntfy topics",
+      "title": "Keep the event stream past sixty seconds",
       "covers": [
-        "manual:inbox-ntfy"
+        "manual:sse-stability",
+        "api:GET /api/v1/events/stream"
       ],
       "sources": [
-        "web/src/views/operations.tsx",
-        "web/src/App.tsx"
+        "internal/api/sse.go",
+        "cmd/omahabd/main.go",
+        "web/src/components/useEventStream.ts",
+        "web/src/components/shell.tsx"
       ],
       "requires": [
         "enrolled"
       ],
       "steps": [
-        "Configure ntfy for a test topic.",
-        "Deliver a real Omahab event."
+        "Open the dashboard and keep the tab open past two minutes.",
+        "Force the stream to fail three times.",
+        "Watch the topbar while the stream is down."
       ],
       "expected": [
-        "The message arrives with expected content.",
-        "Other topics receive nothing."
+        "Heartbeat frames arrive every fifteen seconds and the stream stays open.",
+        "A reconnecting label shows after repeated failures and clears on recovery.",
+        "No incomplete-chunked-encoding error appears in the browser console."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "inbox.ntfy",
+      "area": "dashboard",
+      "title": "Pair phone push with the private topic URL",
+      "covers": [
+        "manual:inbox-ntfy"
+      ],
+      "sources": [
+        "web/src/views/operations.tsx",
+        "internal/events/ntfy.go",
+        "web/src/App.tsx"
+      ],
+      "requires": [
+        "enrolled",
+        "domain"
+      ],
+      "steps": [
+        "Enable phone notifications with a domain configured.",
+        "Scan the shown code or copy the address.",
+        "Deliver one real event and inspect the shown address."
+      ],
+      "expected": [
+        "The address uses the private notification host over HTTPS.",
+        "No raw host-and-port address appears in the copy.",
+        "The message arrives on the topic and other topics receive nothing."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "alerts.health.transitions",
+      "area": "dashboard",
+      "title": "Alert on state transitions only",
+      "covers": [
+        "manual:health-transitions",
+        "api:GET /api/v1/doctor"
+      ],
+      "sources": [
+        "internal/health/service.go",
+        "internal/controlplane/apps_ops.go",
+        "cmd/omahabd/main.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Stop one gated service with the dashboard closed.",
+        "Wait one health cycle, then restart the service.",
+        "Restart the appliance daemon and wait another cycle."
+      ],
+      "expected": [
+        "One unhealthy event and one healthy recovery event appear.",
+        "Steady states repeat nothing.",
+        "A daemon restart emits no baseline events."
+      ],
+      "evidence_types": [
+        "LIVE_API",
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "alerts.update.banner",
+      "area": "dashboard",
+      "title": "Show the update banner once per version",
+      "covers": [
+        "manual:update-banner",
+        "api:GET /api/v1/status"
+      ],
+      "sources": [
+        "internal/controlplane/update.go",
+        "internal/domain/types.go",
+        "internal/api/handlers.go",
+        "web/src/views/operations.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Publish a release manifest with a newer version.",
+        "Run the release check and open the overview.",
+        "Restart the appliance daemon and open the overview again."
+      ],
+      "expected": [
+        "The overview shows the update banner from the status fields.",
+        "One update event lands in the inbox.",
+        "A restart repeats neither the event nor the banner."
       ],
       "evidence_types": [
         "BROWSER",
@@ -2416,6 +2951,65 @@
       ]
     },
     {
+      "id": "alerts.notify.desktop",
+      "area": "companion",
+      "title": "Notify the laptop for warning events",
+      "covers": [
+        "manual:notify-desktop"
+      ],
+      "sources": [
+        "internal/client/notifier.go",
+        "internal/client/daemon.go",
+        "companion/PROTOCOL.md",
+        "internal/api/sse.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Enroll one device on a desktop system.",
+        "Trigger one warning-severity event.",
+        "Replay the same event, then trigger five more within one minute."
+      ],
+      "expected": [
+        "A desktop notification appears within seconds and ends with the event link.",
+        "A replayed event notifies nothing more.",
+        "The sixth distinct alert within one minute is suppressed."
+      ],
+      "evidence_types": [
+        "LIVE_CLI",
+        "INTEGRATION"
+      ]
+    },
+    {
+      "id": "security.sudo.attach",
+      "area": "companion",
+      "title": "Attach without a sudo password",
+      "covers": [
+        "manual:sudo-attach"
+      ],
+      "sources": [
+        "nix/module.nix",
+        "cmd/omahab/main.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Run one workspace attach with non-interactive sudo over SSH.",
+        "Start one workspace from the companion daemon.",
+        "Read the authentication journal for the session."
+      ],
+      "expected": [
+        "Both paths run without a password prompt.",
+        "No password-required entry appears for these commands.",
+        "Other sudo commands still require a password."
+      ],
+      "evidence_types": [
+        "LIVE_CLI"
+      ]
+    },
+    {
       "id": "sync.empty",
       "area": "companion",
       "title": "Show empty sync list",
@@ -2658,6 +3252,37 @@
       ]
     },
     {
+      "id": "ai.providers.late-key",
+      "area": "ai",
+      "title": "Use the LiteLLM key minted after start",
+      "covers": [
+        "manual:litellm-late-key"
+      ],
+      "sources": [
+        "internal/controlplane/backend.go",
+        "internal/providers/litellm.go",
+        "internal/controlplane/setup_phases.go"
+      ],
+      "requires": [
+        "enrolled",
+        "openrouter-key"
+      ],
+      "steps": [
+        "Start the daemon before any LiteLLM master key exists.",
+        "Complete the providers step, which mints the master key.",
+        "List models and issue one virtual key through the gateway."
+      ],
+      "expected": [
+        "Gateway calls succeed without a daemon restart.",
+        "A later key rotation is picked up the same way.",
+        "Calls made before the key exists fail with a clear cause."
+      ],
+      "evidence_types": [
+        "LIVE_API",
+        "UNIT"
+      ]
+    },
+    {
       "id": "doctor.healthy",
       "area": "dashboard",
       "title": "Show healthy doctor",
@@ -2666,17 +3291,21 @@
       ],
       "sources": [
         "web/src/views/doctor.tsx",
+        "internal/health/service.go",
+        "internal/controlplane/backend.go",
         "internal/api/server.go"
       ],
       "requires": [
-        "enrolled"
+        "enrolled",
+        "domain"
       ],
       "steps": [
         "Open doctor on a healthy appliance.",
+        "Confirm the DNS and TLS checks name the household host.",
         "Run the checks."
       ],
       "expected": [
-        "All checks pass.",
+        "All checks pass, with DNS and TLS resolving and validating the home subdomain of the configured domain.",
         "Healthy checks do not show remediation.",
         "The report copies without secrets or remediation for healthy checks."
       ],
@@ -2838,6 +3467,36 @@
       "expected": [
         "History restores each view.",
         "No state is lost."
+      ],
+      "evidence_types": [
+        "BROWSER"
+      ]
+    },
+    {
+      "id": "nav.inbox.route",
+      "area": "dashboard",
+      "title": "Use the canonical inbox route",
+      "covers": [
+        "manual:inbox-route",
+        "ui:/inbox",
+        "ui:inbox"
+      ],
+      "sources": [
+        "web/src/App.tsx",
+        "web/src/components/shell.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Click Inbox in the sidebar.",
+        "Open the old events address by hand.",
+        "Compare both addresses and the badge."
+      ],
+      "expected": [
+        "The sidebar links to the inbox route and highlights it.",
+        "The old events address redirects to the inbox route.",
+        "The badge shows the unread count on both."
       ],
       "evidence_types": [
         "BROWSER"
@@ -3832,6 +4491,39 @@
       "evidence_types": [
         "BROWSER",
         "LIVE_API"
+      ]
+    },
+    {
+      "id": "alerts.ntfy.optin",
+      "area": "messaging",
+      "title": "Keep phone push off until opted in",
+      "covers": [
+        "manual:ntfy-optin",
+        "api:GET /api/v1/ntfy",
+        "api:PUT /api/v1/ntfy"
+      ],
+      "sources": [
+        "internal/events/ntfy.go",
+        "internal/events/ntfy_optin_test.go",
+        "web/src/views/operations.tsx"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Trigger error events on a fresh install with push off.",
+        "Enable phone notifications, then disable them again.",
+        "Trigger one more error event after disabling."
+      ],
+      "expected": [
+        "No push is sent while the toggle is off.",
+        "Enabling creates a private topic and push starts.",
+        "Disabling stops push without a restart."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API",
+        "UNIT"
       ]
     },
     {
@@ -4982,6 +5674,268 @@
       ]
     },
     {
+      "id": "recovery.apply.cli",
+      "area": "lifecycle",
+      "title": "Restore a fresh machine from backup",
+      "covers": [
+        "manual:recovery-apply-cli"
+      ],
+      "sources": [
+        "cmd/omahab/recovery_apply.go",
+        "internal/backups/recovery_apply.go",
+        "internal/controlplane/recovery_restore.go"
+      ],
+      "requires": [
+        "recovery-material"
+      ],
+      "steps": [
+        "Boot a fresh appliance with a repository that holds server state.",
+        "Run the recovery apply command with the repository URL.",
+        "Enter the recovery phrase and confirm the daemon stop."
+      ],
+      "expected": [
+        "Snapshots are listed and the newest server snapshot is staged and validated.",
+        "State files swap atomically with a rollback copy kept.",
+        "The daemon restarts on the restored state."
+      ],
+      "evidence_types": [
+        "LIVE_CLI",
+        "INTEGRATION"
+      ]
+    },
+    {
+      "id": "recovery.apply.list",
+      "area": "lifecycle",
+      "title": "Mark server snapshots in the recovery list",
+      "covers": [
+        "manual:recovery-apply-list"
+      ],
+      "sources": [
+        "cmd/omahab/recovery_apply.go",
+        "internal/backups/recovery_apply.go"
+      ],
+      "requires": [
+        "recovery-material"
+      ],
+      "steps": [
+        "Run the recovery list command with the repository URL.",
+        "Enter the recovery phrase.",
+        "Compare the listed snapshots with the repository."
+      ],
+      "expected": [
+        "Snapshots print newest first.",
+        "Snapshots without server state are marked.",
+        "Application-only snapshots cannot be selected."
+      ],
+      "evidence_types": [
+        "LIVE_CLI",
+        "UNIT"
+      ]
+    },
+    {
+      "id": "recovery.apply.fingerprint",
+      "area": "lifecycle",
+      "title": "Refuse a foreign recovery phrase",
+      "covers": [
+        "manual:recovery-fingerprint"
+      ],
+      "sources": [
+        "internal/backups/recovery_apply.go",
+        "internal/controlplane/recovery_restore.go"
+      ],
+      "requires": [
+        "recovery-material"
+      ],
+      "steps": [
+        "Start a recovery apply with a valid phrase from a different install.",
+        "Read the error and the state directory.",
+        "Retry with the matching phrase."
+      ],
+      "expected": [
+        "The fingerprint check fails before any state change.",
+        "No file under the state directory changes.",
+        "The matching phrase proceeds."
+      ],
+      "evidence_types": [
+        "LIVE_CLI",
+        "UNIT"
+      ]
+    },
+    {
+      "id": "recovery.apply.rollback",
+      "area": "lifecycle",
+      "title": "Roll back a failed restore swap",
+      "covers": [
+        "manual:recovery-rollback"
+      ],
+      "sources": [
+        "internal/backups/recovery_apply.go"
+      ],
+      "requires": [
+        "recovery-material"
+      ],
+      "steps": [
+        "Stage a restore, then corrupt one staged file.",
+        "Apply the staged restore.",
+        "Compare every swapped file with the pre-restore state."
+      ],
+      "expected": [
+        "The swap fails and reports the damaged file.",
+        "Every swapped file returns to its exact prior bytes.",
+        "The daemon restarts on the old state."
+      ],
+      "evidence_types": [
+        "LIVE_CLI",
+        "UNIT"
+      ]
+    },
+    {
+      "id": "recovery.phrase.handoff",
+      "area": "lifecycle",
+      "title": "Consume the phrase handoff once",
+      "covers": [
+        "manual:phrase-handoff"
+      ],
+      "sources": [
+        "internal/controlplane/recovery_restore.go",
+        "nix/module.nix"
+      ],
+      "requires": [
+        "recovery-material"
+      ],
+      "steps": [
+        "Trigger the restore unit through the panel.",
+        "Inspect the handoff file during and after the run.",
+        "Read the operation journal."
+      ],
+      "expected": [
+        "The handoff file is root-only on the memory filesystem.",
+        "The file is removed once the unit reads it.",
+        "The journal stores only the phrase fingerprint."
+      ],
+      "evidence_types": [
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "recovery.errors.command",
+      "area": "lifecycle",
+      "title": "Name a real command in restore errors",
+      "covers": [
+        "manual:recovery-errors"
+      ],
+      "sources": [
+        "internal/controlplane/restore.go",
+        "internal/controlplane/restore_live.go",
+        "cmd/omahab/recovery_apply.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Trigger a server-state restore through the panel or CLI.",
+        "Read the returned error text.",
+        "Run the command named by the error."
+      ],
+      "expected": [
+        "The error names the recovery apply command.",
+        "The named command exists and prints help."
+      ],
+      "evidence_types": [
+        "LIVE_API",
+        "UNIT"
+      ]
+    },
+    {
+      "id": "recovery.restore.api",
+      "area": "lifecycle",
+      "title": "Stage and apply a restore through the API",
+      "covers": [
+        "manual:recovery-restore-api",
+        "api:POST /api/v1/recovery/restore/snapshots",
+        "api:POST /api/v1/recovery/restore",
+        "api:POST /api/v1/recovery/restore/{id}/apply",
+        "api:GET /api/v1/recovery/restore/{id}"
+      ],
+      "sources": [
+        "internal/api/recovery_restore.go",
+        "internal/api/server.go",
+        "internal/controlplane/recovery_restore.go"
+      ],
+      "requires": [
+        "recovery-material"
+      ],
+      "steps": [
+        "Call every restore route without the panel token.",
+        "List snapshots with valid recovery material.",
+        "Stage a restore, poll the operation, and apply it."
+      ],
+      "expected": [
+        "Unauthorized calls receive 401 with no data.",
+        "Listing marks server-state snapshots and validates the phrase.",
+        "Staging answers with an operation, and apply starts the restore unit."
+      ],
+      "evidence_types": [
+        "LIVE_API",
+        "UNIT"
+      ]
+    },
+    {
+      "id": "system.update.check.no-release",
+      "area": "lifecycle",
+      "title": "Treat a missing release as no update",
+      "covers": [
+        "manual:update-check-no-release"
+      ],
+      "sources": [
+        "cmd/omahab/system.go",
+        "nix/module.nix"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Point the release URL at an address that answers 404.",
+        "Run the release check command and the timer unit.",
+        "Point the URL at an address that answers 500 and repeat."
+      ],
+      "expected": [
+        "The 404 case exits zero and prints no published release.",
+        "The timer unit reports success, not failure.",
+        "Other status codes exit nonzero and fail the unit."
+      ],
+      "evidence_types": [
+        "LIVE_CLI",
+        "UNIT"
+      ]
+    },
+    {
+      "id": "setup.serial.getty",
+      "area": "lifecycle",
+      "title": "Skip the serial login without a UART",
+      "covers": [
+        "manual:serial-getty-skip"
+      ],
+      "sources": [
+        "flake.nix",
+        "nix/module.nix"
+      ],
+      "requires": [],
+      "steps": [
+        "Boot the installed system in a guest without a serial device.",
+        "Check the serial login unit state.",
+        "Read the journal for that unit over ten minutes."
+      ],
+      "expected": [
+        "The unit is skipped by its condition.",
+        "No restart loop or journal flood appears.",
+        "A guest with a real serial device still gets the login."
+      ],
+      "evidence_types": [
+        "LIVE_CLI"
+      ]
+    },
+    {
       "id": "clarity.setup",
       "area": "clarity",
       "title": "Measure first-run setup",
@@ -5560,6 +6514,7 @@
       "sources": [
         "deploy/catalog/catalog.json",
         "nix/apps.nix",
+        "internal/apps/systemd.go",
         "internal/api/server.go"
       ],
       "requires": [
@@ -5568,10 +6523,12 @@
       "steps": [
         "Select the English embedding model during setup.",
         "Inspect worker status and request an embedding for synthetic text.",
+        "Stop the worker and open the applications view.",
         "Restart the worker and repeat status and embedding requests."
       ],
       "expected": [
         "The chosen model is healthy and returns a 768-dimension vector.",
+        "Health comes from the worker unix socket, and a stopped worker shows unhealthy and appears in the attention list.",
         "Restart preserves the model and valid inference."
       ],
       "evidence_types": [
@@ -5680,12 +6637,13 @@
         "enrolled"
       ],
       "steps": [
-        "Verify clean skip with no devices (service gated on htpasswd existence).",
-        "Enroll the first device and confirm an authenticated backup through the product path.",
+        "Verify clean skip with no devices and no failed unit.",
+        "Enroll the first device and confirm the service starts by itself, then complete an authenticated backup through the product path.",
         "Revoke the last device and confirm denial via the retained empty htpasswd without deleting backup data."
       ],
       "expected": [
-        "No-device state skips cleanly; first enrollment enables authenticated backup.",
+        "No-device state stays skipped without a failed or degraded unit; first enrollment starts the service with no manual action.",
+        "The first enrollment permits an authenticated backup.",
         "Revocation denies access; backup data remains."
       ],
       "evidence_types": [
@@ -5703,6 +6661,7 @@
       "sources": [
         "deploy/catalog/catalog.json",
         "nix/apps.nix",
+        "internal/controlplane/jellyfin.go",
         "internal/api/server.go"
       ],
       "requires": [
@@ -5713,7 +6672,8 @@
         "Reconcile, restart jellyfin.service, reboot the guest, and compare the retained sso-secret.key hash privately before and after."
       ],
       "expected": [
-        "Fresh startup completes only after stored secret and successful authentication; the secret-key hash is unchanged across restart and reboot.",
+        "Fresh startup completes only after stored secret and successful authentication; the startup wizard completes even while the media server answers 503 during core startup.",
+        "The secret-key hash is unchanged across restart and reboot.",
         "The Media library persists; previously configured servers with unknown passwords warn and skip without failing setup."
       ],
       "evidence_types": [
@@ -5748,6 +6708,94 @@
       "evidence_types": [
         "BROWSER",
         "LIVE_API"
+      ]
+    },
+    {
+      "id": "dns.split.horizon",
+      "area": "household",
+      "title": "Answer app hostnames with the LAN address",
+      "covers": [
+        "manual:split-horizon"
+      ],
+      "sources": [
+        "internal/controlplane/technitium.go",
+        "internal/controlplane/network.go",
+        "nix/module.nix"
+      ],
+      "requires": [
+        "enrolled",
+        "domain"
+      ],
+      "steps": [
+        "From a LAN client, query the host resolver for each application hostname.",
+        "Query one public name through the same resolver.",
+        "Query one application hostname from a public resolver."
+      ],
+      "expected": [
+        "Application hostnames return the host LAN address.",
+        "Public names still resolve through the upstream forwarder.",
+        "The public resolver returns the tailnet address."
+      ],
+      "evidence_types": [
+        "LIVE_API",
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "dns.zone.removal",
+      "area": "household",
+      "title": "Remove zone records with their routes",
+      "covers": [
+        "manual:zone-removal"
+      ],
+      "sources": [
+        "internal/controlplane/technitium.go",
+        "internal/controlplane/network.go"
+      ],
+      "requires": [
+        "enrolled",
+        "domain"
+      ],
+      "steps": [
+        "Install one application and confirm its zone record.",
+        "Remove the application exposure.",
+        "List the zone records."
+      ],
+      "expected": [
+        "The removed record is gone from the zone.",
+        "Other application records remain unchanged."
+      ],
+      "evidence_types": [
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "net.lan.https",
+      "area": "household",
+      "title": "Admit LAN traffic on 80 and 443 only",
+      "covers": [
+        "manual:lan-https"
+      ],
+      "sources": [
+        "nix/module.nix",
+        "internal/controlplane/network.go"
+      ],
+      "requires": [
+        "enrolled",
+        "domain"
+      ],
+      "steps": [
+        "From a LAN client, open one application HTTPS address.",
+        "Attempt the dashboard port and one direct application port.",
+        "Close LAN access and retry all three."
+      ],
+      "expected": [
+        "Application HTTPS loads from the LAN.",
+        "Direct application ports are refused.",
+        "The dashboard port closes with LAN access while HTTPS stays open."
+      ],
+      "evidence_types": [
+        "LIVE_CLI"
       ]
     },
     {
@@ -5804,6 +6852,86 @@
       ]
     },
     {
+      "id": "resources.postgres.memory",
+      "area": "household",
+      "title": "Scale PostgreSQL memory to host RAM",
+      "covers": [
+        "manual:postgres-memory"
+      ],
+      "sources": [
+        "nix/apps.nix"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Read the tuning file and the host memory total.",
+        "Query the live shared buffer setting.",
+        "Reboot and read both again."
+      ],
+      "expected": [
+        "Shared buffers match one quarter of memory, clamped between 128 MB and 8 GB.",
+        "The tuning unit runs before PostgreSQL starts.",
+        "A reboot with the same memory does not restart PostgreSQL."
+      ],
+      "evidence_types": [
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "resources.oom.protection",
+      "area": "household",
+      "title": "Protect PostgreSQL from the OOM killer",
+      "covers": [
+        "manual:oom-protection"
+      ],
+      "sources": [
+        "nix/apps.nix"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Read the OOM score adjustment of PostgreSQL and the bursty worker units.",
+        "Induce heavy memory pressure on the appliance.",
+        "Watch which unit the kernel kills."
+      ],
+      "expected": [
+        "PostgreSQL carries a strongly protective score.",
+        "Bursty workers carry raised scores and are killed first.",
+        "A killed worker restarts without data loss."
+      ],
+      "evidence_types": [
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "resources.worker.scaling",
+      "area": "household",
+      "title": "Scale worker counts to the CPU count",
+      "covers": [
+        "manual:worker-scaling"
+      ],
+      "sources": [
+        "nix/apps.nix"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Read the rendered worker environment for each scaled unit.",
+        "Compare the values with the host CPU count.",
+        "Reboot and read them again."
+      ],
+      "expected": [
+        "Worker counts follow the documented clamps for the CPU count.",
+        "Values recompute at boot without unit failures."
+      ],
+      "evidence_types": [
+        "LIVE_CLI"
+      ]
+    },
+    {
       "id": "cov.ui.dashboard",
       "area": "coverage",
       "title": "Cover dashboard routes",
@@ -5821,7 +6949,9 @@
         "ui:/devices",
         "ui:/ai",
         "ui:/doctor",
-        "ui:*"
+        "ui:*",
+        "ui:/inbox",
+        "ui:inbox"
       ],
       "sources": [
         "web/src/App.tsx",
@@ -6678,6 +7808,85 @@
       ],
       "evidence_types": [
         "LIVE_API"
+      ]
+    },
+    {
+      "id": "resources.zram.swap",
+      "area": "household",
+      "title": "Use zram swap sized to half of RAM",
+      "covers": [
+        "manual:zram-swap"
+      ],
+      "sources": [
+        "nix/module.nix"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Boot the installed system.",
+        "Run swapon --show and zramctl."
+      ],
+      "expected": [
+        "A zram0 swap device is active with zstd compression.",
+        "Its size is about 50% of RAM.",
+        "No disk swap device is active."
+      ],
+      "evidence_types": [
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "resources.journald.cap",
+      "area": "household",
+      "title": "Cap the system journal at 1G",
+      "covers": [
+        "manual:journald-cap"
+      ],
+      "sources": [
+        "nix/module.nix"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Read /etc/systemd/journald.conf.",
+        "Run journalctl --disk-usage."
+      ],
+      "expected": [
+        "SystemMaxUse=1G is set.",
+        "Journal disk usage stays below 1G."
+      ],
+      "evidence_types": [
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "resources.qemu.agent",
+      "area": "lifecycle",
+      "title": "Run the guest agent in a Proxmox VM",
+      "covers": [
+        "manual:qemu-guest-agent"
+      ],
+      "sources": [
+        "nix/module.nix"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Enable the QEMU guest agent in the Proxmox VM options.",
+        "Run systemctl status qemu-guest-agent in the VM.",
+        "Shut down the VM from the Proxmox UI."
+      ],
+      "expected": [
+        "The unit is active in the VM.",
+        "Proxmox shows the guest IP addresses.",
+        "The VM shuts down cleanly.",
+        "On bare metal the agent does not start."
+      ],
+      "evidence_types": [
+        "LIVE_CLI"
       ]
     }
   ]
