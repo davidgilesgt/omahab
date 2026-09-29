@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
+	"math/rand/v2"
 	"net/url"
 	"strings"
 	"time"
@@ -37,13 +39,20 @@ func (b *Backend) GetStatus(ctx context.Context) (domain.Status, error) {
 			}
 		}
 	}
-	return domain.Status{
+	status := domain.Status{
 		InstanceID: inst.ID,
 		Version:    b.version,
 		Health:     healthVal,
 		StartedAt:  b.startedAt,
 		Now:        time.Now().UTC(),
-	}, nil
+	}
+	if b.updates != nil {
+		if st := b.updates.Poll(ctx); st.Available {
+			status.UpdateAvailable = true
+			status.LatestVersion = st.Latest
+		}
+	}
+	return status, nil
 }
 
 func (b *Backend) GetInstance(ctx context.Context) (domain.Instance, error) {
@@ -290,6 +299,68 @@ func (b *Backend) RefreshApplicationHealth(ctx context.Context) error {
 	}
 	return b.apps.RefreshHealth(ctx)
 }
+
+// StartHealthEmitter runs health.CheckAndEmit on a jittered interval so
+// disk-low, backup-stale, TLS/DNS, and service-down states surface as events
+// without anyone opening the dashboard. Storm suppression stays inside
+// CheckAndEmit; recovery emits as service.healthy info events. It runs until
+// ctx is cancelled and never fails the process on check errors.
+func (b *Backend) StartHealthEmitter(ctx context.Context, every time.Duration) {
+	if every <= 0 {
+		every = 5 * time.Minute
+	}
+	run := func() {
+		checkCtx, cancel := context.WithTimeout(ctx, every)
+		defer cancel()
+		if _, err := b.health.CheckAndEmit(checkCtx); err != nil && ctx.Err() == nil {
+			b.log().Warn("periodic health check failed", "err", err)
+		}
+	}
+	// Stagger the first check so a fleet of appliances does not probe in
+	// lockstep; jitter up to 15% of the interval.
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(jitter(every)):
+	}
+	run()
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			run()
+		}
+	}
+}
+
+// StartUpdatePoller publishes a service.update_available event (once per new
+// version) when the nightly check-update marker appears, and keeps the
+// status endpoint's fields fresh.
+func (b *Backend) StartUpdatePoller(ctx context.Context, every time.Duration) {
+	if every <= 0 {
+		every = updatePollInterval
+	}
+	_ = b.updates.PollAndEmit(ctx, b.events)
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			_ = b.updates.PollAndEmit(ctx, b.events)
+		}
+	}
+}
+
+func jitter(d time.Duration) time.Duration {
+	return time.Duration(float64(d) * (0.05 + 0.1*rand.Float64()))
+}
+
+func (b *Backend) log() *slog.Logger { return slog.Default() }
 
 func (b *Backend) UpdateApplication(ctx context.Context, id domain.ID, req apitypes.UpdateApplicationRequest) (domain.Application, error) {
 	if b.apps == nil {

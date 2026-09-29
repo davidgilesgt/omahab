@@ -42,6 +42,10 @@ type Status struct {
 	Health     Health    `json:"health"`
 	StartedAt  time.Time `json:"started_at"`
 	Now        time.Time `json:"now"`
+	// UpdateAvailable reports a newer release found by the nightly
+	// `omahab system check-update`; LatestVersion is that release.
+	UpdateAvailable bool   `json:"update_available,omitempty"`
+	LatestVersion   string `json:"latest_version,omitempty"`
 }
 
 type Application struct {

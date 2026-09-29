@@ -477,7 +477,13 @@ func (s *Service) CheckAndEmit(ctx context.Context) (*Report, error) {
 		lastStatus := s.lastStatus[c.Name]
 		lastEmit := s.lastEmitted[c.Name]
 		shouldEmit := false
-		if lastStatus != c.Status {
+		if lastStatus == "" {
+			// First observation of a component is the baseline, not news:
+			// record it silently so daemon restarts never storm the inbox
+			// with a snapshot of every component. Genuine failures surface
+			// on the next cycle via the same-status reminder path.
+			shouldEmit = false
+		} else if lastStatus != c.Status {
 			// Status change always eligible, but still respect minInterval to prevent flapping? We allow immediate on change, but flap will be caught by interval.
 			if now.Sub(lastEmit) >= s.minInterval || lastEmit.IsZero() {
 				shouldEmit = true
@@ -491,8 +497,11 @@ func (s *Service) CheckAndEmit(ctx context.Context) (*Report, error) {
 				shouldEmit = true
 			}
 		}
+		if lastStatus == "" {
+			s.lastEmitted[c.Name] = now
+		}
+		s.lastStatus[c.Name] = c.Status
 		if shouldEmit {
-			s.lastStatus[c.Name] = c.Status
 			s.lastEmitted[c.Name] = now
 		}
 		s.mu.Unlock()
@@ -509,7 +518,7 @@ func (s *Service) CheckAndEmit(ctx context.Context) (*Report, error) {
 		case "unknown":
 			severity = "warning"
 		}
-		typ := componentToEventType(c.Name)
+		typ := componentToEventType(c.Name, c.Status)
 		if typ == "" {
 			continue
 		}
@@ -578,7 +587,12 @@ func (s *Service) persistSnapshot(ctx context.Context, report *Report) error {
 	return tx.Commit()
 }
 
-func componentToEventType(component string) string {
+func componentToEventType(component, status string) string {
+	// Any component returning healthy after a non-healthy state is a
+	// recovery: service.healthy (info), regardless of component.
+	if status == "healthy" {
+		return "service.healthy"
+	}
 	switch {
 	case component == "disk":
 		return "host.disk_low"
