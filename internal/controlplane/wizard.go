@@ -64,7 +64,6 @@ type recoveryPending struct {
 	expires time.Time
 }
 
-
 // GenerateRecoveryKey creates a fresh 24-word phrase and holds the seed in
 // memory keyed by fingerprint (first 8 hex of SHA-256(seed)) for 15 minutes.
 // The phrase is shown once and never persisted until ConfirmRecoveryKey.
@@ -197,8 +196,6 @@ func (b *Backend) persistRecoveryKit(ctx context.Context, fingerprint string, se
 	return nil
 }
 
-
-
 // ---------------------------------------------------------------------------
 // Storage placement: candidate disks + media/data placement.
 // ---------------------------------------------------------------------------
@@ -273,6 +270,7 @@ func validBackupHost(s string) bool {
 // It supports two forms:
 //   - Hetzner Storage Box (recommended): kind=hetzner_storagebox, username, host, sub_account_password
 //   - Generic/Advanced: location, password
+//
 // For Hetzner it generates an ed25519 key, uploads the pubkey via SFTP (port 23, password auth),
 // records the host key, derives the restic password from the recovery phrase seed, and sets
 // location = sftp://<user>@<host>:23/./omahab/<instanceID>.
@@ -481,6 +479,7 @@ func (b *Backend) CreateBackupRepository(ctx context.Context, req apitypes.Creat
 func (b *Backend) DeleteBackupRepository(ctx context.Context, id string) error {
 	return b.backups.DeleteRepository(ctx, id)
 }
+
 // sanitizeSecretName maps arbitrary keys into the secrets name alphabet.
 func sanitizeSecretName(s string) string {
 	s = strings.TrimSpace(s)
@@ -613,9 +612,10 @@ func looksLikeCredentialObject(value string) bool {
 	return false
 }
 
-// enableBackupTimers turns on the daily backup + weekly verify timers.
+// enableBackupTimers turns on the daily backup, weekly verify and
+// weekly retention-prune timers.
 func (b *Backend) enableBackupTimers(ctx context.Context) {
-	for _, unit := range []string{"omahab-backup.timer", "omahab-verify.timer"} {
+	for _, unit := range []string{"omahab-backup.timer", "omahab-verify.timer", "omahab-backup-prune.timer"} {
 		if out, err := exec.CommandContext(ctx, "systemctl", "enable", "--now", unit).CombinedOutput(); err != nil {
 			_, _ = b.events.Publish(ctx, events.PublishInput{
 				Type:     "backups.timer_enable_failed",
@@ -625,7 +625,6 @@ func (b *Backend) enableBackupTimers(ctx context.Context) {
 		}
 	}
 }
-
 
 // storageEntry is the legacy v1 placement record (kept for migration in
 // storage.go).

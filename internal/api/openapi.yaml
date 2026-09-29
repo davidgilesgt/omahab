@@ -2438,6 +2438,8 @@ components:
         health: { $ref: '#/components/schemas/Health' }
         started_at: { type: string, format: date-time }
         now: { type: string, format: date-time }
+        update_available: { type: boolean, description: "True when the nightly check-update found a newer release." }
+        latest_version: { type: string, description: "The pending release version; empty when up to date." }
 
     Application:
       type: object

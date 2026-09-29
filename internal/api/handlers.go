@@ -618,6 +618,16 @@ func (s *Server) handleVerifyLatestBackup(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, bk)
 }
 
+func (s *Server) handlePruneBackups(w http.ResponseWriter, r *http.Request) {
+	force := r.URL.Query().Get("force") == "true"
+	res, err := s.backend.PruneBackups(r.Context(), force)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 // --- events ---
 
 func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {

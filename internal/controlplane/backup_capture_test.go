@@ -197,6 +197,14 @@ func (f *captureFakeRunner) Check(context.Context, backups.Repository, backups.C
 	return nil
 }
 
+func (f *captureFakeRunner) Forget(context.Context, backups.Repository, backups.Credentials, backups.ForgetRequest) (backups.ForgetResult, error) {
+	return backups.ForgetResult{}, nil
+}
+
+func (f *captureFakeRunner) Stats(context.Context, backups.Repository, backups.Credentials) (backups.RepoStats, error) {
+	return backups.RepoStats{}, nil
+}
+
 type captureFakeSecrets struct {
 	creds backups.Credentials
 }
@@ -277,7 +285,7 @@ func TestScopedBackupFailureRestoresRunningApps(t *testing.T) {
 	fr.backupErr = errors.New("restic backup failed: connection reset by peer")
 	fr.mu.Unlock()
 
-	_, err := b.CreateBackupScoped(ctx, repoID, []string{"app:immich"})
+	_, err := b.CreateBackupScoped(ctx, repoID, []string{"app:immich"}, false)
 	if err == nil || !strings.Contains(err.Error(), "connection reset") {
 		t.Fatalf("err = %v, want the injected restic failure", err)
 	}
@@ -298,7 +306,7 @@ func TestScopedBackupSucceedsWithSupportedLocation(t *testing.T) {
 	appID := mustInstallScopeApp(t, b, "immich")
 	repoID := mustConfigureScopedRepo(t, b)
 
-	got, err := b.CreateBackupScoped(ctx, repoID, []string{"app:immich"})
+	got, err := b.CreateBackupScoped(ctx, repoID, []string{"app:immich"}, false)
 	if err != nil {
 		t.Fatalf("backup: %v", err)
 	}
@@ -326,7 +334,7 @@ func TestScopedBackupPreflightFailureKeepsAppsRunning(t *testing.T) {
 	fr.snapshotsErr = errors.New("restic snapshots failed: permission denied")
 	fr.mu.Unlock()
 
-	_, err := b.CreateBackupScoped(ctx, repoID, []string{"app:immich"})
+	_, err := b.CreateBackupScoped(ctx, repoID, []string{"app:immich"}, false)
 	if err == nil || !strings.Contains(err.Error(), "unreachable") {
 		t.Fatalf("err = %v, want unreachable-repository preflight error", err)
 	}
@@ -368,7 +376,7 @@ func TestScopedBackupPartialQuiesceResumesStopped(t *testing.T) {
 	second := mustInstallScopeApp(t, b, "caddy")
 	repoID := mustConfigureScopedRepo(t, b)
 
-	_, err := b.CreateBackupScoped(ctx, repoID, []string{"app:immich", "app:caddy"})
+	_, err := b.CreateBackupScoped(ctx, repoID, []string{"app:immich", "app:caddy"}, false)
 	if err == nil || !strings.Contains(err.Error(), "unit timeout") {
 		t.Fatalf("err = %v, want the failed quiesce stop", err)
 	}
@@ -401,7 +409,7 @@ func TestScopedBackupResumeFailureReported(t *testing.T) {
 	appID := mustInstallScopeApp(t, b, "immich")
 	repoID := mustConfigureScopedRepo(t, b)
 
-	_, err := b.CreateBackupScoped(ctx, repoID, []string{"app:immich"})
+	_, err := b.CreateBackupScoped(ctx, repoID, []string{"app:immich"}, false)
 	if err == nil || !strings.Contains(err.Error(), "resume") {
 		t.Fatalf("err = %v, want reported resume failure", err)
 	}

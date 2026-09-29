@@ -497,6 +497,13 @@ func (panicRunner) Check(_ context.Context, _ backups.Repository, _ backups.Cred
 	panic("unreachable")
 }
 
+func (panicRunner) Forget(_ context.Context, _ backups.Repository, _ backups.Credentials, _ backups.ForgetRequest) (backups.ForgetResult, error) {
+	panic("unreachable")
+}
+func (panicRunner) Stats(_ context.Context, _ backups.Repository, _ backups.Credentials) (backups.RepoStats, error) {
+	panic("unreachable")
+}
+
 func TestCreateBackupRepositoryFailsClosedOnUploadError(t *testing.T) {
 	b, _ := newSetupBackend(t, nil)
 	ctx := context.Background()

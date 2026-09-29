@@ -82,6 +82,12 @@ func (b *Backend) exposeRoutes(ctx context.Context, routes map[string]string) er
 	if err := b.reconcileCaddySpec(ctx); err != nil {
 		return err
 	}
+	// Split-horizon: LAN clients resolving these hostnames through the
+	// household resolver must reach the host LAN IP. Best-effort — the
+	// periodic reconciler converges the zone too.
+	if err := b.reconcileTechnitiumZoneForSetup(ctx); err != nil {
+		log.Printf("setup exposure: technitium zone deferred: %s", err)
+	}
 	probe, wait, interval := b.httpsCheckSettings()
 	return waitForHTTPSRoutes(ctx, names, probe, wait, interval)
 }
@@ -110,6 +116,11 @@ func (b *Backend) exposeBundleRoute(ctx context.Context, bundle apps.Bundle, dom
 	}
 	if err := b.reconcileCaddySpec(ctx); err != nil {
 		log.Printf("setup core apps: incremental caddy reconcile deferred: %v", err)
+	}
+	// Split-horizon: publish the new hostname to the household resolver
+	// too (best-effort, same contract as above).
+	if err := b.reconcileTechnitiumZoneForSetup(ctx); err != nil {
+		log.Printf("setup core apps: technitium zone deferred: %s", err)
 	}
 }
 

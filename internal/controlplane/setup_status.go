@@ -618,11 +618,11 @@ func classifyCoreApp(st apps.Status, isNative bool) apitypes.SetupAppStatus {
 				as.Detail = "unhealthy"
 			}
 		default:
-			// Native bundles without an HTTP probe (e.g. embedding-worker,
-			// kind "none") report HealthUnknown via SystemdRunner.Check. The
-			// reconciler treats that as OK for native (requireRunningHealthy),
-			// so the status display must too — otherwise the setup screen can
-			// never go green for a healthy native service.
+			// Native bundles without an HTTP probe report HealthUnknown via
+			// SystemdRunner.Check. The reconciler treats that as OK for native
+			// (requireRunningHealthy), so the status display must too —
+			// otherwise the setup screen can never go green for a healthy
+			// native service.
 			if isNative {
 				as.Status = "running"
 				break

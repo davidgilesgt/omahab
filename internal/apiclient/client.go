@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/omahab/omahab/internal/apitypes"
+	"github.com/omahab/omahab/internal/backups"
 	"github.com/omahab/omahab/internal/domain"
 )
 
@@ -597,6 +598,18 @@ func (c *Client) VerifyLatestBackup(ctx context.Context) (*domain.Backup, error)
 		return nil, err
 	}
 	return &out, nil
+}
+
+func (c *Client) PruneBackups(ctx context.Context, force bool) (backups.RetentionResult, error) {
+	path := "/backups/prune"
+	if force {
+		path += "?force=true"
+	}
+	var out backups.RetentionResult
+	if err := c.post(ctx, path, map[string]any{}, &out); err != nil {
+		return backups.RetentionResult{}, err
+	}
+	return out, nil
 }
 
 // --- events ---

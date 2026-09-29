@@ -73,6 +73,9 @@ type Backend struct {
 	exposureMu    sync.Mutex
 	hermesTokenMu sync.Mutex
 	mcpServer     *mcp.Server
+	// updateTracker surfaces the nightly check-update marker in status and
+	// publishes one service.update_available event per new version.
+	updates *updateTracker
 
 	masterKey [32]byte
 	apiToken  string
@@ -447,6 +450,10 @@ func (b *Backend) initServices(ctx context.Context) error {
 		Hostname:   healthHost,
 		InstanceID: string(inst.ID),
 	})
+
+	// update-available tracking (marker written by the nightly
+	// `omahab system check-update` systemd timer)
+	b.updates = newUpdateTracker(updateAvailablePath, b.version)
 
 	// emailing with real DKIM verifier and alias handling
 	verifier := emailing.NewVerifier()
@@ -891,7 +898,16 @@ func (b *Backend) ensureProjectExposure(ctx context.Context, proj *projects.Proj
 	if hostname == "" {
 		return nil
 	}
-	return b.ensureExposureRecord(ctx, expSvc, hostname, "127.0.0.1:8080")
+	if err := b.ensureExposureRecord(ctx, expSvc, hostname, "127.0.0.1:8080"); err != nil {
+		return err
+	}
+	// Split-horizon: the new project hostname must also answer on the
+	// household resolver with the host LAN IP (best-effort; the periodic
+	// reconciler converges it too).
+	if err := b.reconcileTechnitiumZoneForSetup(ctx); err != nil {
+		log.Printf("projects: technitium zone deferred: %s", err)
+	}
+	return nil
 }
 
 func (b *Backend) removeProjectExposure(ctx context.Context, hostname string) error {
@@ -912,7 +928,16 @@ func (b *Backend) removeProjectExposure(ctx context.Context, hostname string) er
 		return err
 	}
 	_, err = expSvc.Apply(ctx, plan.ID)
-	return err
+	if err != nil {
+		return err
+	}
+	// Split-horizon: drop the retired hostname from the household
+	// resolver zone (best-effort; the periodic reconciler converges it
+	// too).
+	if zerr := b.reconcileTechnitiumZoneForSetup(ctx); zerr != nil {
+		log.Printf("projects: technitium zone deferred: %s", zerr)
+	}
+	return nil
 }
 
 // APIToken returns raw token (for server)

@@ -13,7 +13,7 @@ import (
 
 func isDeviceRelevantEvent(t string) bool {
 	switch t {
-	case "agent.awaiting_approval", "deployment.completed", "ci.failed", "backup.failed", "service.unhealthy", "syncthing.conflict", "environment.changed", "companion.revoked":
+	case "agent.awaiting_approval", "deployment.completed", "ci.failed", "backup.failed", "service.unhealthy", "service.healthy", "host.disk_low", "syncthing.conflict", "environment.changed", "companion.revoked":
 		return true
 	}
 	if strings.HasPrefix(t, "workspace.") {

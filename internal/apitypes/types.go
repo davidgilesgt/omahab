@@ -65,12 +65,12 @@ type SeedModelAliasesRequest struct {
 
 // ModelKey is metadata for a scoped LiteLLM virtual key (plaintext never returned except once on create).
 type ModelKey struct {
-	ID          domain.ID  `json:"id"`
-	Name        string     `json:"name"`
-	KeyPrefix   string     `json:"key_prefix"`
-	OwnerKind   string     `json:"owner_kind"`
-	OwnerID     string     `json:"owner_id"`
-	Scopes      []string   `json:"scopes"`
+	ID             domain.ID  `json:"id"`
+	Name           string     `json:"name"`
+	KeyPrefix      string     `json:"key_prefix"`
+	OwnerKind      string     `json:"owner_kind"`
+	OwnerID        string     `json:"owner_id"`
+	Scopes         []string   `json:"scopes"`
 	RPM            *int       `json:"rpm,omitempty"`
 	TPM            *int       `json:"tpm,omitempty"`
 	Concurrency    *int       `json:"concurrency,omitempty"`
@@ -131,11 +131,11 @@ type CompanionDevice struct {
 	AllowProviderOAuth bool       `json:"allow_provider_oauth"`
 	// Granted reports explicit owner consent to share tool-environment values
 	// with this device. Metadata only; values are never embedded here.
-	Granted            bool       `json:"granted"`
-	LastSeenAt         *time.Time `json:"last_seen_at,omitempty"`
-	RevokedAt          *time.Time `json:"revoked_at,omitempty"`
-	CreatedAt          time.Time  `json:"created_at"`
-	UpdatedAt          time.Time  `json:"updated_at"`
+	Granted    bool       `json:"granted"`
+	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
+	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
 }
 
 // CompanionEnrollment is a single-use enrollment code record.
@@ -453,6 +453,9 @@ type CreateBackupRequest struct {
 	Repository string `json:"repository,omitempty"`
 	// Scopes selects snapshot content; empty means all configured scopes.
 	Scopes []string `json:"scopes,omitempty"`
+	// Scheduled marks a timer-triggered run (the systemd backup timer
+	// sets it so run provenance and post-backup retention are correct).
+	Scheduled bool `json:"scheduled,omitempty"`
 }
 
 // RestoreBackupRequest stages or applies a snapshot. Scopes select manifest
@@ -464,6 +467,65 @@ type RestoreBackupRequest struct {
 	Mode    string   `json:"mode,omitempty"`
 	Confirm bool     `json:"confirm,omitempty"`
 }
+
+// RecoveryListRequest lists candidate snapshots for an offline
+// disaster-recovery restore. Phrase is the 24-word recovery phrase; it
+// derives the restic password for Hetzner-style repositories and is held
+// in memory only, never persisted or logged.
+type RecoveryListRequest struct {
+	Phrase   string `json:"phrase"`
+	Location string `json:"location"`
+	// Password is the restic repository password for generic locations;
+	// empty for phrase-derived (Hetzner) repositories.
+	Password string `json:"password,omitempty"`
+	// Latest caps the listing (default 10, max 50).
+	Latest int `json:"latest,omitempty"`
+	// Hetzner first-restore fields: upload the backup SSH key once on
+	// a fresh machine (same flow as setup); the password is never
+	// stored.
+	Username           string `json:"username,omitempty"`
+	Host               string `json:"host,omitempty"`
+	SubAccountPassword string `json:"sub_account_password,omitempty"`
+}
+
+// RecoverySnapshot is one candidate snapshot in a recovery listing.
+type RecoverySnapshot struct {
+	ID           string `json:"id"`
+	Time         string `json:"time,omitempty"`
+	Hostname     string `json:"hostname,omitempty"`
+	ServerConfig bool   `json:"server_config"`
+}
+
+type RecoverySnapshotList struct {
+	Snapshots []RecoverySnapshot `json:"snapshots"`
+}
+
+// RecoveryRestoreRequest stages (prepare) or applies an offline
+// server-config restore. SnapshotID selects a specific snapshot; empty
+// picks the latest verified server-config snapshot. IncludeApps defers
+// app payload restore to the existing app-scoped restore once the daemon
+// reconverges on the restored control DB.
+type RecoveryRestoreRequest struct {
+	Phrase      string   `json:"phrase"`
+	Location    string   `json:"location"`
+	Password    string   `json:"password,omitempty"`
+	SnapshotID  string   `json:"snapshot_id,omitempty"`
+	Scopes      []string `json:"scopes,omitempty"`
+	IncludeApps bool     `json:"include_apps,omitempty"`
+	// Hetzner first-restore fields: when the fresh machine has no
+	// backup SSH key yet, Username + Host + SubAccountPassword upload
+	// the generated key once (same SFTP:23 flow as setup) so restic
+	// can reach sftp repositories. The password is used once and never
+	// stored.
+	Username           string `json:"username,omitempty"`
+	Host               string `json:"host,omitempty"`
+	SubAccountPassword string `json:"sub_account_password,omitempty"`
+}
+
+// RecoveryRestoreStatus is the operation-backed progress of one offline
+// recovery restore (stage listing → staging → staged → unit-started →
+// swapping → completed).
+type RecoveryRestoreStatus = Operation
 
 type UpdateExposureRequest struct {
 	Exposure domain.Exposure `json:"exposure"`

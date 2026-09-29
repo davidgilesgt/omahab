@@ -152,8 +152,10 @@ func (b *Backend) GetBackup(ctx context.Context, id domain.ID) (domain.Backup, e
 func (b *Backend) CreateBackup(ctx context.Context, req apitypes.CreateBackupRequest) (domain.Backup, error) {
 	// Scoped snapshots default to all configured scopes: consistent dumps
 	// plus a structured manifest, taken while selected writers are
-	// stopped and resumed afterwards even on failure.
-	return b.CreateBackupScoped(ctx, strings.TrimSpace(req.Repository), req.Scopes)
+	// stopped and resumed afterwards even on failure. Scheduled marks a
+	// timer-triggered run: provenance is recorded and retention is
+	// considered after success.
+	return b.CreateBackupScoped(ctx, strings.TrimSpace(req.Repository), req.Scopes, req.Scheduled)
 }
 
 func (b *Backend) VerifyBackup(ctx context.Context, id domain.ID) (domain.Backup, error) {
@@ -176,6 +178,29 @@ func (b *Backend) VerifyBackup(ctx context.Context, id domain.ID) (domain.Backup
 		return domain.Backup{}, translateError(err)
 	}
 	return b.GetBackup(ctx, domain.ID(run.ID))
+}
+
+// PruneBackups applies the retention policy (restic forget --prune,
+// scope-grouped, newest verified snapshot protected) to every
+// configured repository. The weekly timer and post-backup passes call
+// it; manual invocation forces a pass regardless of the last run.
+func (b *Backend) PruneBackups(ctx context.Context, force bool) (backups.RetentionResult, error) {
+	if b.backups == nil {
+		return backups.RetentionResult{}, translateError(fmt.Errorf("%w: backups not configured", ErrNotConfigured))
+	}
+	repos, err := b.backups.Repositories(ctx)
+	if err != nil {
+		return backups.RetentionResult{}, translateError(err)
+	}
+	var last backups.RetentionResult
+	for _, repo := range repos {
+		res, err := b.backups.ApplyRetention(ctx, repo.ID, force)
+		if err != nil {
+			return last, translateError(err)
+		}
+		last = res
+	}
+	return last, nil
 }
 
 // Events

@@ -29,6 +29,12 @@ func (migNoopRunner) Snapshots(_ context.Context, _ backups.Repository, _ backup
 func (migNoopRunner) Check(_ context.Context, _ backups.Repository, _ backups.Credentials) error {
 	return nil
 }
+func (migNoopRunner) Forget(_ context.Context, _ backups.Repository, _ backups.Credentials, _ backups.ForgetRequest) (backups.ForgetResult, error) {
+	return backups.ForgetResult{}, nil
+}
+func (migNoopRunner) Stats(_ context.Context, _ backups.Repository, _ backups.Credentials) (backups.RepoStats, error) {
+	return backups.RepoStats{}, nil
+}
 
 func newMigrationBackend(t *testing.T) *Backend {
 	t.Helper()

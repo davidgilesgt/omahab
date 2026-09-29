@@ -98,6 +98,10 @@ func run() error {
 			}
 		}
 	}()
+	// Periodic host health: emit warning/error events (and recovery) without
+	// anyone opening the dashboard; update marker poll for the banner/event.
+	go backend.StartHealthEmitter(sigCtx, 5*time.Minute)
+	go backend.StartUpdatePoller(sigCtx, time.Minute)
 	go func() {
 		retry := func() {
 			ctx, cancel := context.WithTimeout(sigCtx, 45*time.Second)
@@ -118,6 +122,29 @@ func run() error {
 				return
 			case <-ticker.C:
 				retry()
+			}
+		}
+	}()
+	// Split-horizon DNS: converge the Technitium forwarder zone (app
+	// hostnames → host LAN IP) every minute. No-op unless Technitium is
+	// installed and exposure is configured; catches DHCP LAN IP changes
+	// and route churn between setup runs.
+	go func() {
+		reconcile := func() {
+			ctx, cancel := context.WithTimeout(sigCtx, 45*time.Second)
+			defer cancel()
+			if err := backend.ReconcileTechnitiumZone(ctx); err != nil {
+				logger.Error("technitium split-horizon reconcile failed", "error", err)
+			}
+		}
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-sigCtx.Done():
+				return
+			case <-ticker.C:
+				reconcile()
 			}
 		}
 	}()
@@ -147,12 +174,15 @@ func run() error {
 	// Build handler with static serving + API (single permanent listener on cfg.Listen).
 	handler := buildHandler(srv, logger)
 
+	// No WriteTimeout: it would kill long-lived SSE streams
+	// (/api/v1/events/stream) mid-flight every 60s with an incomplete
+	// chunked response. The API handlers bound their own work with
+	// context deadlines; idle keep-alives are bounded by IdleTimeout.
 	httpSrv := &http.Server{
-		Addr:         cfg.Listen,
-		Handler:      handler,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 60 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		Addr:        cfg.Listen,
+		Handler:     handler,
+		ReadTimeout: 10 * time.Second,
+		IdleTimeout: 120 * time.Second,
 	}
 
 	// Signal handling already prepared above

@@ -1786,13 +1786,14 @@ func newBackupCmd() *cobra.Command {
 		Short: "Trigger a backup",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			repo, _ := cmd.Flags().GetString("repository")
+			scheduled, _ := cmd.Flags().GetBool("scheduled")
 			ctx, cancel := newContext()
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
 			return handleFailure(err)
 		}
-			b, err := c.CreateBackup(ctx, apitypes.CreateBackupRequest{Repository: repo})
+			b, err := c.CreateBackup(ctx, apitypes.CreateBackupRequest{Repository: repo, Scheduled: scheduled})
 			if err != nil {
 			return handleFailure(err)
 		}
@@ -1803,10 +1804,43 @@ func newBackupCmd() *cobra.Command {
 			return nil
 		},
 	})
-	// add flag to create
+	// add flags to create
 	for _, c := range bk.Commands() {
 		if c.Use == "create" {
 			c.Flags().String("repository", "", "override repository")
+			c.Flags().Bool("scheduled", false, "mark as timer-triggered (used by the systemd backup timer)")
+		}
+	}
+	bk.AddCommand(&cobra.Command{
+		Use:   "prune",
+		Short: "Apply snapshot retention (restic forget --prune)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			force, _ := cmd.Flags().GetBool("force")
+			ctx, cancel := newContext()
+			defer cancel()
+			c, err := resolveClient()
+			if err != nil {
+				return handleFailure(err)
+			}
+			res, err := c.PruneBackups(ctx, force)
+			if err != nil {
+				return handleFailure(err)
+			}
+			if flagJSON {
+				return printJSON(res)
+			}
+			if res.Skipped != "" {
+				fmt.Printf("retention skipped: %s\n", res.Skipped)
+				return nil
+			}
+			fmt.Printf("retention applied: removed %d snapshots, repo size %d bytes, %d snapshots remain\n",
+				res.Removed, res.RepoSizeBytes, res.RepoSnapshotCount)
+			return nil
+		},
+	})
+	for _, c := range bk.Commands() {
+		if c.Use == "prune" {
+			c.Flags().Bool("force", false, "run even if the last retention ran less than a week ago")
 		}
 	}
 	// restore

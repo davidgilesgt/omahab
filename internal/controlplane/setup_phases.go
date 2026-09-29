@@ -128,6 +128,20 @@ func (b *Backend) caddyConfigPath() string {
 	return "/var/lib/omahab/caddy/caddy.json"
 }
 
+// omahabCaddyGID resolves the gid of the omahab-caddy group (the shared
+// group between root-owned caddy state and the caddy daemon user).
+// Returns -1 when the group is absent (tests, non-native placement).
+func omahabCaddyGID() int {
+	g, err := user.LookupGroup("omahab-caddy")
+	if err != nil {
+		return -1
+	}
+	if gid, err := strconv.Atoi(g.Gid); err == nil {
+		return gid
+	}
+	return -1
+}
+
 func (b *Backend) writeBootstrapCaddyJSON(ctx context.Context, dnsToken string) error {
 	caddyJSONPath := b.caddyConfigPath()
 	if fi, err := os.Stat(caddyJSONPath); err == nil && fi.IsDir() {
@@ -147,8 +161,8 @@ func (b *Backend) writeBootstrapCaddyJSON(ctx context.Context, dnsToken string) 
 	}
 	domain := strings.TrimSpace(inst.Domain)
 	var cfgBytes []byte
-	if strings.TrimSpace(dnsToken) != "" && domain != "" && domain != "example.com" && domain != "not-configured.invalid" {
-		rendered, err := edge.RenderConfig(domain, dnsToken, nil)
+	if domain != "" && domain != "example.com" && domain != "not-configured.invalid" {
+		rendered, err := edge.RenderConfig(domain, nil)
 		if err != nil {
 			return fmt.Errorf("render caddy config: %w", err)
 		}
@@ -156,9 +170,12 @@ func (b *Backend) writeBootstrapCaddyJSON(ctx context.Context, dnsToken string) 
 	} else {
 		cfgBytes = []byte(`{"apps":{"http":{"servers":{"main":{"listen":[":443",":80"],"routes":[]}}}}}`)
 	}
-	if err := os.WriteFile(caddyJSONPath, cfgBytes, 0600); err != nil {
+	// 0640 root:omahab-caddy: no secret inside anymore (token comes from
+	// caddy.env), but the caddy daemon (own user) must read its config file.
+	if err := os.WriteFile(caddyJSONPath, cfgBytes, 0o640); err != nil {
 		return fmt.Errorf("write %s: %w", caddyJSONPath, err)
 	}
+	_ = os.Chown(caddyJSONPath, 0, omahabCaddyGID())
 	return nil
 }
 
@@ -802,8 +819,10 @@ func (b *Backend) setupPhaseSecrets(ctx context.Context) error {
 		// (hindsight file secrets skipped above; broker holds them)
 		path := filepath.Join(dir, src)
 		if _, err := os.Stat(path); err == nil {
-			// Docker bind-mounts these into the container; PUID 1000 must read them.
-			_ = os.Chmod(path, 0o644)
+			// Native placement: secrets are root-only (services receive them
+			// via rendered appenv files, not direct reads). Converge legacy
+			// docker-era 0644 modes to 0600 on every materialization pass.
+			_ = os.Chmod(path, 0o600)
 			continue
 		}
 		var content string
@@ -825,10 +844,10 @@ func (b *Backend) setupPhaseSecrets(ctx context.Context) error {
 			}
 			if pwd == "" {
 				pwd = generateRandomBase64URL(32)
-				if err := os.WriteFile(pwdPath, []byte(pwd), 0o644); err != nil {
+				if err := os.WriteFile(pwdPath, []byte(pwd), 0o600); err != nil {
 					return fmt.Errorf("write litellm_db_password: %w", err)
 				}
-				_ = os.Chmod(pwdPath, 0o644)
+				_ = os.Chmod(pwdPath, 0o600)
 			}
 			content = fmt.Sprintf("postgresql://litellm:%s@127.0.0.1:5432/litellm", pwd)
 		case "woodpecker_db_url":
@@ -840,10 +859,10 @@ func (b *Backend) setupPhaseSecrets(ctx context.Context) error {
 			}
 			if pwd == "" {
 				pwd = generateRandomBase64URL(32)
-				if err := os.WriteFile(pwdPath, []byte(pwd), 0o644); err != nil {
+				if err := os.WriteFile(pwdPath, []byte(pwd), 0o600); err != nil {
 					return fmt.Errorf("write woodpecker_db_password: %w", err)
 				}
-				_ = os.Chmod(pwdPath, 0o644)
+				_ = os.Chmod(pwdPath, 0o600)
 			}
 			content = fmt.Sprintf("postgresql://woodpecker:%s@woodpecker-postgres:5432/woodpecker", pwd)
 		case "woodpecker_db_password", "woodpecker_grpc_secret", "woodpecker_agent_secret":
@@ -861,10 +880,10 @@ func (b *Backend) setupPhaseSecrets(ctx context.Context) error {
 				content = generateRandomBase64URL(32)
 			}
 		}
-		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 			return fmt.Errorf("write secret %s: %w", src, err)
 		}
-		_ = os.Chmod(path, 0o644)
+		_ = os.Chmod(path, 0o600)
 	}
 	// Mirror file-backed secrets into the broker: the render/OIDC phases
 	// project the native appenv from RevealByName (platform-app scope), which
@@ -902,7 +921,7 @@ func repairLitellmDBURLHost(dir string) {
 	if fixed == string(raw) {
 		return
 	}
-	if err := os.WriteFile(filepath.Join(strings.TrimSpace(dir), "litellm_db_url"), []byte(fixed), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(strings.TrimSpace(dir), "litellm_db_url"), []byte(fixed), 0o600); err != nil {
 		log.Printf("repair litellm_db_url host: %v", err)
 		return
 	}
@@ -911,8 +930,8 @@ func repairLitellmDBURLHost(dir string) {
 
 // atomicReplaceSecretFile atomically replaces a projected secret file in dir/name
 // with value. It writes to a temporary file in the same directory and renames,
-// ensuring the bind-mounted secret is never observed half-written. Mode 0644 is
-// enforced so the container's PUID 1000 can read it.
+// ensuring the projected secret is never observed half-written. Mode 0600 is
+// enforced (native placement: root-only; services read rendered appenv files).
 
 func atomicReplaceSecretFile(dir, name, value string) error {
 	dir = strings.TrimSpace(dir)
@@ -922,15 +941,15 @@ func atomicReplaceSecretFile(dir, name, value string) error {
 	}
 	path := filepath.Join(dir, name)
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(value), 0o644); err != nil {
+	if err := os.WriteFile(tmp, []byte(value), 0o600); err != nil {
 		return fmt.Errorf("write temp secret %s: %w", name, err)
 	}
-	_ = os.Chmod(tmp, 0o644)
+	_ = os.Chmod(tmp, 0o600)
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("replace secret %s: %w", name, err)
 	}
-	_ = os.Chmod(path, 0o644)
+	_ = os.Chmod(path, 0o600)
 	return nil
 }
 
@@ -944,8 +963,14 @@ func (b *Backend) appEnvDir() string {
 // writeAppEnv atomically writes /var/lib/omahab/appenv/<bundle>.env from
 // kv (sorted, KEY=VALUE lines). mode is 0640 with an owning user (native
 // services run as their own users), 0600 when root-only.
-
 func (b *Backend) writeAppEnv(bundleID string, kv map[string]string, ownerUser string) error {
+	return b.writeAppEnvGroup(bundleID, kv, ownerUser, "")
+}
+
+// writeAppEnvGroup is writeAppEnv with an optional owning group: the file is
+// chgrped to it and made 0640 root:<group> so members (e.g. the caddy daemon
+// user in omahab-caddy) can read it while others cannot.
+func (b *Backend) writeAppEnvGroup(bundleID string, kv map[string]string, ownerUser, ownerGroup string) error {
 	dir := b.appEnvDir()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("mkdir appenv: %w", err)
@@ -970,7 +995,7 @@ func (b *Backend) writeAppEnv(bundleID string, kv map[string]string, ownerUser s
 	}
 	tmpName := tmp.Name()
 	mode := os.FileMode(0o600)
-	if ownerUser != "" {
+	if ownerUser != "" || ownerGroup != "" {
 		mode = 0o640
 	}
 	if err := tmp.Chmod(mode); err != nil {
@@ -984,6 +1009,7 @@ func (b *Backend) writeAppEnv(bundleID string, kv map[string]string, ownerUser s
 		return err
 	}
 	if err := tmp.Close(); err != nil {
+		_ = tmp.Close()
 		_ = os.Remove(tmpName)
 		return err
 	}
@@ -993,6 +1019,12 @@ func (b *Backend) writeAppEnv(bundleID string, kv map[string]string, ownerUser s
 				if gid, e2 := strconv.Atoi(u.Gid); e2 == nil {
 					_ = os.Chown(tmpName, uid, gid)
 				}
+			}
+		}
+	} else if ownerGroup != "" {
+		if g, gerr := user.LookupGroup(ownerGroup); gerr == nil {
+			if gid, e := strconv.Atoi(g.Gid); e == nil {
+				_ = os.Chown(tmpName, 0, gid)
 			}
 		}
 	}
@@ -1209,6 +1241,13 @@ func (b *Backend) convergeTechnitiumOrDefer(ctx context.Context) error {
 		}
 		return fmt.Errorf("technitium setup: %w", err)
 	}
+	// Settings converged: also converge the split-horizon forwarder zone
+	// so LAN clients resolve app hostnames at the host LAN IP. Best-effort
+	// here — the exposure phase and periodic reconciler both converge it
+	// again with fresh hostnames once routes exist.
+	if err := b.reconcileTechnitiumZoneForSetup(ctx); err != nil {
+		log.Printf("setup core apps: technitium zone deferred: %s", health.RedactDetail(err.Error()))
+	}
 	return nil
 }
 
@@ -1256,12 +1295,23 @@ func (b *Backend) renderNativeAppEnv(ctx context.Context, dnsToken, domainName s
 		}
 		return ""
 	}
-	// Caddy: DNS-01 token for the cloudflare plugin.
+	// Caddy: DNS-01 token for the cloudflare plugin, consumed by the
+	// {env.CF_API_TOKEN} placeholder in the rendered JSON config. Owned by
+	// the omahab-caddy group (0640) so only root and the caddy daemon read it.
+	// Caddy reads its environment only at process start: restart it when
+	// the token changes so the placeholder never resolves to empty on a
+	// running daemon (upgrades from the inline-token config hit this).
 	if dnsToken != "" {
-		if err := b.writeAppEnv("caddy", map[string]string{
-			"CLOUDFLARE_API_TOKEN": dnsToken,
-		}, ""); err != nil {
+		prev, _ := b.readAppEnv("caddy")
+		if err := b.writeAppEnvGroup("caddy", map[string]string{
+			"CF_API_TOKEN": dnsToken,
+		}, "", "omahab-caddy"); err != nil {
 			return fmt.Errorf("caddy: %w", err)
+		}
+		if prev["CF_API_TOKEN"] != dnsToken {
+			if err := b.redeployBundle(ctx, "caddy"); err != nil {
+				return fmt.Errorf("caddy: restart for dns token: %w", err)
+			}
 		}
 	}
 	// Domain-dependent env renders only once a real domain exists.
@@ -1646,7 +1696,11 @@ func (b *Backend) ensureHermesDependentApp(ctx context.Context) error {
 		log.Printf("setup dependent_apps: hermes bundle not found, skipping")
 		return nil
 	}
-	if err := b.ensureHindsightDependentApp(ctx); err != nil {
+	// Hindsight memory gaps are operator prerequisites, never setup
+	// failures: publish the pending step and keep installing Hermes (its
+	// LiteLLM key, env wiring, and route), so ai.<domain> exists and
+	// memory activates on the next retry once the model lands.
+	if err := b.ensureHindsightDependentApp(ctx); err != nil && !errors.Is(err, errHermesDeferred) {
 		return err
 	}
 	if err := b.ensureHermesLiteLLMKey(ctx); err != nil {
@@ -1852,9 +1906,10 @@ func defaultInstallRequest(bundle apps.Bundle, domainName string) apps.InstallRe
 
 func isNativeBundle(bundle apps.Bundle) bool {
 	// Native bundles are those defined by the NixOS system closure (units declared
-	// in the curated catalog). Live 2026-09-08: embedding-worker has no HTTP
-	// probe (kind "none") and SystemdRunner.Check returns HealthUnknown; Unknown
-	// is treated as OK for native (see requireRunningHealthy). This also gates
+	// in the curated catalog). Bundles without an HTTP probe (command checks)
+	// make SystemdRunner.Check return HealthUnknown; Unknown is treated as OK
+	// for native (see requireRunningHealthy). The embedding-worker probes its
+	// Unix socket (unix:// path in the catalog health_check). This also gates
 	// the uninstall dead-end: native services cannot be uninstalled.
 	// Test hook: bundles with ID containing "non-native" are treated as
 	// container bundles even though they carry Units (needed to pass Bundle
@@ -2027,9 +2082,10 @@ func requireRunningHealthy(st apps.Status, isNative bool) error {
 	if st.Health == domain.HealthHealthy {
 		return nil
 	}
-	// Live 2026-09-08: native bundles with CheckKind "none" (e.g. embedding-worker)
-	// or command checks report HealthUnknown via SystemdRunner.Check (no container
-	// to exec, no HTTP probe). Unknown is treated as OK for native bundles.
+	// Native bundles with command checks report HealthUnknown via
+	// SystemdRunner.Check (no container to exec, no HTTP probe). Unknown is
+	// treated as OK for native bundles. The embedding-worker is probed over
+	// its Unix socket (unix:// catalog health_check) and reports real health.
 	if isNative && st.Health == domain.HealthUnknown {
 		return nil
 	}

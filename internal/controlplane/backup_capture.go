@@ -422,7 +422,7 @@ func (b *Backend) backupExcludes(ctx context.Context, sources []string) []string
 // fails the backup; a failed resume is reported alongside, never hidden,
 // so a failed backup always leaves applications in their pre-backup
 // running state or reports exactly which resume failed.
-func (b *Backend) CreateBackupScoped(ctx context.Context, repository string, scopes []string) (domain.Backup, error) {
+func (b *Backend) CreateBackupScoped(ctx context.Context, repository string, scopes []string, scheduled bool) (domain.Backup, error) {
 	if b.backups == nil {
 		return domain.Backup{}, translateError(fmt.Errorf("%w: backups not configured", ErrNotConfigured))
 	}
@@ -449,7 +449,7 @@ func (b *Backend) CreateBackupScoped(ctx context.Context, repository string, sco
 			}
 			return qerr
 		}
-		captured, opErr := b.runCaptureLocked(ctx, plan, resolved, repository)
+		captured, opErr := b.runCaptureLocked(ctx, plan, resolved, repository, scheduled)
 		if rerr := b.resumeCapture(ctx, plan); rerr != nil {
 			rerr = fmt.Errorf("backup resume: %w", translateError(rerr))
 			if opErr != nil {
@@ -472,7 +472,7 @@ func (b *Backend) CreateBackupScoped(ctx context.Context, repository string, sco
 // runCaptureLocked stages dumps and the manifest and runs the restic
 // capture. The caller owns quiesce/resume around it; every error is
 // already translated for API callers.
-func (b *Backend) runCaptureLocked(ctx context.Context, plan *capturePlan, resolved []string, repository string) (domain.Backup, error) {
+func (b *Backend) runCaptureLocked(ctx context.Context, plan *capturePlan, resolved []string, repository string, scheduled bool) (domain.Backup, error) {
 	staging, err := os.MkdirTemp(filepath.Join(b.cfg.StateDir, "dumps"), "run-")
 	if err != nil {
 		return domain.Backup{}, err
@@ -519,7 +519,7 @@ func (b *Backend) runCaptureLocked(ctx context.Context, plan *capturePlan, resol
 	sources := dedupePaths(append([]string{staging}, plan.sources...))
 	run, err := b.backups.RunBackup(ctx, backups.RunRequest{
 		RepositoryID: strings.TrimSpace(repository),
-		Trigger:      backups.TriggerManual,
+		Trigger:      triggerFor(scheduled),
 		Scopes:       resolved,
 		Paths:        sources,
 		Excludes:     b.backupExcludes(ctx, sources),
@@ -532,7 +532,21 @@ func (b *Backend) runCaptureLocked(ctx context.Context, plan *capturePlan, resol
 		return domain.Backup{}, err
 	}
 	success = true
+	// Retention is due at most weekly (the prune timer is the other
+	// trigger): a fresh install gets its first pass right after its
+	// first successful backup, steady state stays weekly.
+	if run.Trigger == backups.TriggerScheduled {
+		go b.backups.MaybeApplyRetention(context.WithoutCancel(ctx), run.RepositoryID)
+	}
 	return got, nil
+}
+
+// triggerFor maps the scheduled flag to the run trigger vocabulary.
+func triggerFor(scheduled bool) string {
+	if scheduled {
+		return backups.TriggerScheduled
+	}
+	return backups.TriggerManual
 }
 
 func (b *Backend) buildManifest(ctx context.Context, scopes []string, plan *capturePlan) (backups.SnapshotManifest, error) {

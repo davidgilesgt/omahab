@@ -35,12 +35,14 @@ func TestTechnitiumDNSEndpointsLANPlusLoopback(t *testing.T) {
 	}
 }
 
-func TestTechnitiumUpstreamIsQuad9DoH(t *testing.T) {
-	if technitiumUpstream != "https://dns.quad9.net/dns-query" {
-		t.Fatalf("upstream = %q", technitiumUpstream)
+func TestTechnitiumUpstreamIsQuad9DoHByIP(t *testing.T) {
+	// By IP, not hostname: the host resolver forwards through Technitium,
+	// so a hostname upstream would be a resolver bootstrap loop.
+	if technitiumUpstream != "https://9.9.9.9/dns-query" {
+		t.Fatalf("upstream = %q, want Quad9 DoH by IP", technitiumUpstream)
 	}
 	if technitiumWebPort != 5380 {
-		t.Fatalf("web port = %d, want 5380", technitiumWebPort)
+		t.Fatalf("web port = %d", technitiumWebPort)
 	}
 }
 
