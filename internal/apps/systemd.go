@@ -209,6 +209,10 @@ func (r *SystemdRunner) Check(ctx context.Context, app domain.Application, spec 
 		if p, ok := NativePort(app.BundleID); ok {
 			hc.Port = p
 		}
+		// Absolute URLs (unix socket probes) bypass the loopback-port shape.
+		if strings.Contains(hc.Path, "://") {
+			return probeHTTPURL(ctx, hc.Path)
+		}
 		result, err := probeHTTP(ctx, hc, hc.Port)
 		if err != nil || result != domain.HealthHealthy || app.BundleID != "woodpecker" {
 			return result, err

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -347,6 +348,12 @@ func validateHealthCheck(h HealthCheck, bundlePort int) (HealthCheck, []string) 
 		if h.Path == "" {
 			h.Path = "/"
 		}
+		// Absolute URLs are Unix-socket probes (e.g. the embedding worker's
+		// unix:///run/omahab-embedding/embedding.sock/health); they carry
+		// their own endpoint and bypass the port requirement.
+		if isAbsoluteProbeURL(h.Path) {
+			break
+		}
 		if !strings.HasPrefix(h.Path, "/") {
 			problems = append(problems, fmt.Sprintf("health check path %q must start with /", h.Path))
 		}
@@ -374,6 +381,13 @@ func validateHealthCheck(h HealthCheck, bundlePort int) (HealthCheck, []string) 
 		}
 	}
 	return h, problems
+}
+
+// isAbsoluteProbeURL reports whether a health check path is an absolute
+// URL (a Unix-socket probe such as unix:///run/…/embedding.sock/health).
+func isAbsoluteProbeURL(path string) bool {
+	u, err := url.Parse(path)
+	return err == nil && u.Scheme != "" && u.IsAbs()
 }
 
 // Catalog is the validated set of curated bundles. It is immutable once

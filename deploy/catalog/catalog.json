@@ -352,7 +352,8 @@
       "default_exposure": "private",
       "max_exposure": "private",
       "health_check": {
-        "kind": "none"
+        "kind": "http",
+        "path": "unix:///run/omahab-embedding/embedding.sock/health"
       },
       "startup_grace_seconds": 60,
       "oidc": {

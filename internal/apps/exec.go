@@ -5,10 +5,13 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/omahab/omahab/internal/domain"
 )
@@ -45,6 +48,41 @@ func probeHTTPWith(ctx context.Context, client *http.Client, hc HealthCheck) (do
 		return domain.HealthHealthy, nil
 	}
 	return domain.HealthUnhealthy, nil
+}
+
+// probeHTTPURL probes an absolute health URL. It exists for Unix-socket
+// probes (unix:// scheme served by native services such as the embedding
+// worker), which the loopback-port shape cannot express.
+func probeHTTPURL(ctx context.Context, rawURL string) (domain.Health, error) {
+	if u, err := url.Parse(rawURL); err == nil && u.Scheme == "unix" {
+		socketPath := strings.TrimSuffix(u.Path, "/health")
+		client := &http.Client{
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					var d net.Dialer
+					return d.DialContext(ctx, "unix", socketPath)
+				},
+			},
+			Timeout: 5 * time.Second,
+		}
+		checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		req, err := http.NewRequestWithContext(checkCtx, http.MethodGet, "http://unix/health", nil)
+		if err != nil {
+			return domain.HealthUnknown, fmt.Errorf("build health request: %w", err)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return domain.HealthUnhealthy, nil
+		}
+		defer resp.Body.Close()
+		_, _ = io.Copy(io.Discard, resp.Body)
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return domain.HealthHealthy, nil
+		}
+		return domain.HealthUnhealthy, nil
+	}
+	return probeHTTPWith(ctx, http.DefaultClient, HealthCheck{Kind: CheckHTTP, Path: rawURL, Port: 0})
 }
 
 // ExecInvoker is the production Invoker: it runs the command as a child

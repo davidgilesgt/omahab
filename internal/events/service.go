@@ -123,6 +123,17 @@ type PublishInput struct {
 	IdempotencyKey string
 }
 
+// routineTypes are routine lifecycle transitions that self-managing
+// reconcile loops produce on every cycle (app.started/app.stopped during
+// redeploy, service.healthy recoveries after restarts). They stay in the
+// durable history but are persisted pre-read so they never accumulate as
+// unread inbox noise; genuine failures (unhealthy, *_failed) remain unread.
+var routineTypes = map[string]bool{
+	"app.started":     true,
+	"app.stopped":     true,
+	"service.healthy": true,
+}
+
 // ListFilter controls filtered listing.
 type ListFilter struct {
 	Type     string
@@ -217,11 +228,19 @@ func (s *Service) Publish(ctx context.Context, in PublishInput) (*domain.Event, 
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
+	var readAt any
+	var readAtTime *time.Time
+	if routineTypes[t] {
+		// Routine lifecycle transitions land in history already acknowledged.
+		readAt = created
+		ts := parseTime(created)
+		readAtTime = &ts
+	}
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO events (id, type, severity, resource_id, message, data, idempotency_key, read_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO NOTHING`,
-		id, t, sev, rid, msg, dataJSON, nullableString(key), created)
+		id, t, sev, rid, msg, dataJSON, nullableString(key), readAt, created)
 	if err != nil {
 		_ = tx.Rollback()
 		if isUniqueViolation(err) && key != "" {
@@ -251,6 +270,7 @@ func (s *Service) Publish(ctx context.Context, in PublishInput) (*domain.Event, 
 		ResourceID: domain.ID(rid),
 		Message:    msg,
 		Data:       data,
+		ReadAt:     readAtTime,
 		CreatedAt:  parseTime(created),
 	}
 	s.broadcast(*ev)
