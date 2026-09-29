@@ -773,3 +773,42 @@ func TestFinalExposureIncludesInstalledWoodpeckerCI(t *testing.T) {
 		}
 	}
 }
+
+// A vanity record left pointing at a foreign/stale anchor (e.g. a retired
+// tailscale IP or a pre-existing CNAME from manual DNS editing) must be
+// replaced by the reconciler, not adopted: exposure.ensureRecord compares
+// content and rewrites drift.
+func TestExposeRoutesReplacesForeignAnchorContent(t *testing.T) {
+	ctx := context.Background()
+	b, _, dns := exposureTestBackend(t)
+
+	// Pre-seed a foreign A record at the private anchor the plan wants to
+	// own (a stale tailscale IP, simulating the live ai.<domain> case).
+	foreign, err := dns.CreateRecord(ctx, exposure.Record{
+		Name: "home.home.omahab.com", Type: "A", Content: "100.64.0.99", TTL: 300, Proxied: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.setupPhaseLoginExposure(ctx); err != nil {
+		t.Fatalf("login exposure: %v", err)
+	}
+	dns.mu.Lock()
+	defer dns.mu.Unlock()
+	var got *exposure.Record
+	for i := range dns.recs {
+		if dns.recs[i].Name == "home.home.omahab.com" {
+			got = &dns.recs[i]
+			break
+		}
+	}
+	if got == nil {
+		t.Fatal("home anchor record missing after exposure")
+	}
+	if got.ID == foreign && got.Content == "100.64.0.99" {
+		t.Fatalf("foreign record adopted unchanged: %+v", *got)
+	}
+	if got.Content != "100.75.94.122" {
+		t.Fatalf("content = %q, want instance tailscale IP", got.Content)
+	}
+}

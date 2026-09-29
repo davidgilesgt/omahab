@@ -12,6 +12,7 @@ import (
 
 	"github.com/omahab/omahab/internal/apps"
 	"github.com/omahab/omahab/internal/domain"
+	"github.com/omahab/omahab/internal/events"
 	"github.com/omahab/omahab/internal/health"
 	"github.com/omahab/omahab/internal/providers"
 	"github.com/omahab/omahab/internal/secrets"
@@ -35,6 +36,33 @@ var hindsightSecretNames = []string{
 	hindsightLLMKeyName,
 }
 
+// errHermesDeferred marks an operator-prerequisite gap (memory model,
+// embeddings worker, maintenance pause) that must not fail automatic setup:
+// Hermes still installs, memory wiring stays in its env, and the operator
+// action is published as a pending event.
+var errHermesDeferred = errors.New("hermes memory deferred: operator prerequisite missing")
+
+// deferHermesForOperator records the operator-owned pending step for
+// Hermes/Hindsight memory (mirroring the technitium_auth pattern) and
+// returns the deferral sentinel.
+func (b *Backend) deferHermesForOperator(ctx context.Context, code, detail string) error {
+	log.Printf("setup dependent_apps: %s", detail)
+	if b.events != nil {
+		_, _ = b.events.Publish(ctx, events.PublishInput{
+			Type:       "setup.step_failed",
+			Severity:   "warning",
+			ResourceID: "setup:hermes_memory",
+			Message:    "Hermes installed without memory; waiting on the AI providers step: " + detail,
+			Data: map[string]any{
+				"step":  "dependent_apps",
+				"error": detail,
+				"code":  code,
+				"owner": "operator",
+			},
+		})
+	}
+	return errHermesDeferred
+}
 func hindsightBundlePresent(bundles []apps.Bundle) bool {
 	for _, bd := range bundles {
 		if bd.ID == "hindsight" && bd.Default {
@@ -157,44 +185,44 @@ func (b *Backend) ensureHindsightLiteLLMKey(ctx context.Context) (string, error)
 
 func hindsightDesiredEnv(dbURL, llmKey, embedKey, apiKey string) map[string]string {
 	return map[string]string{
-		"HINDSIGHT_ENABLE_API":                        "true",
-		"HINDSIGHT_ENABLE_CP":                         "false",
-		"HINDSIGHT_API_HOST":                          "127.0.0.1",
-		"HINDSIGHT_API_PORT":                          "8888",
-		"HINDSIGHT_API_HEALTH_URL":                    "http://127.0.0.1:8888/health",
-		"HINDSIGHT_API_DATABASE_URL":                  dbURL,
-		"HINDSIGHT_API_VECTOR_EXTENSION":              "pgvector",
-		"HINDSIGHT_API_TEXT_SEARCH_EXTENSION":         "native",
-		"HINDSIGHT_API_LLM_PROVIDER":                  "openai",
-		"HINDSIGHT_API_LLM_BASE_URL":                  "http://127.0.0.1:4000/v1",
-		"HINDSIGHT_API_LLM_MODEL":                     "omahab/memory",
-		"HINDSIGHT_API_LLM_API_KEY":                   llmKey,
-		"HINDSIGHT_API_LLM_REASONING_EFFORT":          "none",
-		"HINDSIGHT_API_LLM_TEMPERATURE":               "none",
-		"HINDSIGHT_API_EMBEDDINGS_PROVIDER":           "openai",
-		"HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL":    "http://127.0.0.1:8484/api/v1/hindsight",
-		"HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL":       "omahab-embed-english",
-		"HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY":     embedKey,
-		"HINDSIGHT_API_EMBEDDINGS_OPENAI_BATCH_SIZE":  "1",
-		"HINDSIGHT_API_EMBEDDINGS_QUERY_PREFIX":       "search_query: ",
-		"HINDSIGHT_API_EMBEDDINGS_PASSAGE_PREFIX":     "search_document: ",
-		"HINDSIGHT_API_EMBEDDINGS_MAX_CONCURRENT_REQUESTS": "1",
-		"HINDSIGHT_API_RERANKER_PROVIDER":             "rrf",
-		"HINDSIGHT_API_ENABLE_RERANKING":              "false",
-		"HINDSIGHT_API_TENANT_EXTENSION":              "hindsight_api.extensions.builtin.tenant:ApiKeyTenantExtension",
-		"HINDSIGHT_API_TENANT_API_KEY":                apiKey,
-		"HINDSIGHT_API_WORKERS":                       "1",
-		"HINDSIGHT_API_WORKER_ID":                     "omahab-hindsight",
-		"HINDSIGHT_API_WORKER_MAX_SLOTS":              "2",
+		"HINDSIGHT_ENABLE_API":                              "true",
+		"HINDSIGHT_ENABLE_CP":                               "false",
+		"HINDSIGHT_API_HOST":                                "127.0.0.1",
+		"HINDSIGHT_API_PORT":                                "8888",
+		"HINDSIGHT_API_HEALTH_URL":                          "http://127.0.0.1:8888/health",
+		"HINDSIGHT_API_DATABASE_URL":                        dbURL,
+		"HINDSIGHT_API_VECTOR_EXTENSION":                    "pgvector",
+		"HINDSIGHT_API_TEXT_SEARCH_EXTENSION":               "native",
+		"HINDSIGHT_API_LLM_PROVIDER":                        "openai",
+		"HINDSIGHT_API_LLM_BASE_URL":                        "http://127.0.0.1:4000/v1",
+		"HINDSIGHT_API_LLM_MODEL":                           "omahab/memory",
+		"HINDSIGHT_API_LLM_API_KEY":                         llmKey,
+		"HINDSIGHT_API_LLM_REASONING_EFFORT":                "none",
+		"HINDSIGHT_API_LLM_TEMPERATURE":                     "none",
+		"HINDSIGHT_API_EMBEDDINGS_PROVIDER":                 "openai",
+		"HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL":          "http://127.0.0.1:8484/api/v1/hindsight",
+		"HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL":             "omahab-embed-english",
+		"HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY":           embedKey,
+		"HINDSIGHT_API_EMBEDDINGS_OPENAI_BATCH_SIZE":        "1",
+		"HINDSIGHT_API_EMBEDDINGS_QUERY_PREFIX":             "search_query: ",
+		"HINDSIGHT_API_EMBEDDINGS_PASSAGE_PREFIX":           "search_document: ",
+		"HINDSIGHT_API_EMBEDDINGS_MAX_CONCURRENT_REQUESTS":  "1",
+		"HINDSIGHT_API_RERANKER_PROVIDER":                   "rrf",
+		"HINDSIGHT_API_ENABLE_RERANKING":                    "false",
+		"HINDSIGHT_API_TENANT_EXTENSION":                    "hindsight_api.extensions.builtin.tenant:ApiKeyTenantExtension",
+		"HINDSIGHT_API_TENANT_API_KEY":                      apiKey,
+		"HINDSIGHT_API_WORKERS":                             "1",
+		"HINDSIGHT_API_WORKER_ID":                           "omahab-hindsight",
+		"HINDSIGHT_API_WORKER_MAX_SLOTS":                    "2",
 		"HINDSIGHT_API_WORKER_CONSOLIDATION_RESERVED_SLOTS": "1",
-		"HINDSIGHT_API_LLM_MAX_CONCURRENT":            "2",
-		"HINDSIGHT_API_RETAIN_MAX_CONCURRENT":         "1",
-		"HINDSIGHT_API_RETAIN_SUBBATCH_CONCURRENCY":   "1",
-		"HINDSIGHT_API_RECALL_MAX_CONCURRENT":         "1",
-		"HINDSIGHT_API_RECALL_CONNECTION_BUDGET":      "2",
-		"HINDSIGHT_API_DB_POOL_MIN_SIZE":              "1",
-		"HINDSIGHT_API_DB_POOL_MAX_SIZE":              "10",
-		"HINDSIGHT_API_LLM_TRACE_ENABLED":             "false",
+		"HINDSIGHT_API_LLM_MAX_CONCURRENT":                  "2",
+		"HINDSIGHT_API_RETAIN_MAX_CONCURRENT":               "1",
+		"HINDSIGHT_API_RETAIN_SUBBATCH_CONCURRENCY":         "1",
+		"HINDSIGHT_API_RECALL_MAX_CONCURRENT":               "1",
+		"HINDSIGHT_API_RECALL_CONNECTION_BUDGET":            "2",
+		"HINDSIGHT_API_DB_POOL_MIN_SIZE":                    "1",
+		"HINDSIGHT_API_DB_POOL_MAX_SIZE":                    "10",
+		"HINDSIGHT_API_LLM_TRACE_ENABLED":                   "false",
 	}
 }
 
@@ -285,20 +313,28 @@ func (b *Backend) ensureHindsightDependentApp(ctx context.Context) error {
 		}
 		return nil
 	}
+	// Operator-prerequisite gaps become deferrals (errHermesDeferred): the
+	// operator must configure the AI provider (or resume maintenance), and
+	// Hermes still installs now so ai.<domain> exists — memory wiring stays
+	// in the env and activates on the next retry once the model lands.
 	if m, err := apps.GetMaintenance(ctx, b.db, "hindsight"); err == nil {
 		log.Printf("setup: bundle %q paused for %s; skipping hindsight provisioning", "hindsight", m.Reason)
-		return fmt.Errorf("setup cannot activate memory during maintenance (hindsight paused)")
+		return b.deferHermesForOperator(ctx, "hindsight_maintenance",
+			"Hindsight is paused for maintenance ("+m.Reason+"); resume it, then retry automatic setup")
 	}
 	if m, err := apps.GetMaintenance(ctx, b.db, "hermes"); err == nil {
 		log.Printf("setup: bundle %q paused for %s; skipping hindsight provisioning", "hermes", m.Reason)
-		return fmt.Errorf("setup cannot activate memory during maintenance (hermes paused)")
+		return b.deferHermesForOperator(ctx, "hermes_maintenance",
+			"Hermes is paused for maintenance ("+m.Reason+"); resume it, then retry automatic setup")
 	}
 	if b.gateway == nil {
-		return fmt.Errorf("Hindsight requires omahab/memory. Configure this model in LiteLLM, then retry setup.")
+		return b.deferHermesForOperator(ctx, "memory_model_missing",
+			"Hindsight memory is waiting on the AI providers step: configure omahab/memory in LiteLLM, then retry automatic setup")
 	}
 	native, err := b.gateway.ListModels(ctx)
 	if err != nil {
-		return fmt.Errorf("Hindsight requires omahab/memory. Configure this model in LiteLLM, then retry setup.")
+		return b.deferHermesForOperator(ctx, "memory_model_missing",
+			"Hindsight memory is waiting on the AI providers step: configure omahab/memory in LiteLLM, then retry automatic setup")
 	}
 	foundMemory := false
 	foundMode := ""
@@ -316,14 +352,17 @@ func (b *Backend) ensureHindsightDependentApp(ctx context.Context) error {
 		break
 	}
 	if !foundMemory {
-		return fmt.Errorf("Hindsight requires omahab/memory. Configure this model in LiteLLM, then retry setup.")
+		return b.deferHermesForOperator(ctx, "memory_model_missing",
+			"Hindsight memory is waiting on the AI providers step: configure omahab/memory in LiteLLM, then retry automatic setup")
 	}
 	if foundMode != "" && foundMode != "chat" {
+		// A misconfigured model is a real error, not an operator step.
 		return fmt.Errorf("Hindsight requires omahab/memory in chat mode (found %s)", foundMode)
 	}
 	if err := b.checkHindsightEmbeddings(ctx); err != nil {
 		log.Printf("hindsight embedding readiness failed: %v", err)
-		return fmt.Errorf("Hindsight requires the shared Nomic worker: omahab-embed-english, 768 dimensions. Configure that worker, then retry setup.")
+		return b.deferHermesForOperator(ctx, "embeddings_not_ready",
+			"Hindsight memory is waiting on the AI providers step: configure the shared Nomic worker (omahab-embed-english, 768 dimensions), then retry automatic setup")
 	}
 	if err := b.ensureHindsightPostgresAuth(ctx); err != nil {
 		return err

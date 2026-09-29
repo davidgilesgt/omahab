@@ -1092,17 +1092,18 @@ func (b *Backend) ensureHermesForgejoToken(ctx context.Context, domain string) e
 		} else {
 			low := strings.ToLower(apiErr.Error())
 			if strings.Contains(low, "already exists") || strings.Contains(low, "duplicate") {
-				// Token already exists, list and reuse sha1
-				var list []struct {
-					Name string `json:"name"`
-					Sha1 string `json:"sha1"`
-				}
-				if _, lerr := b.forgejoAPIRequest(ctx, baseURL, adminToken, http.MethodGet, "/api/v1/users/omahab-bot/tokens", nil, &list); lerr == nil {
-					for _, t := range list {
-						if strings.TrimSpace(t.Name) == "hermes" && strings.TrimSpace(t.Sha1) != "" {
-							hermesToken = strings.TrimSpace(t.Sha1)
-							break
-						}
+				// Forgejo token names are unique per user and the sha1 is
+				// only shown at creation: a listed sha1 is unusable. Delete
+				// the existing named token and recreate it so a fresh value
+				// is returned and persisted. (Live 2026-09: every run logged
+				// "token name already exists" and reused nothing.)
+				_, _ = b.forgejoAPIRequest(ctx, baseURL, adminToken, http.MethodDelete, "/api/v1/users/omahab-bot/tokens/hermes", nil, nil)
+				_, apiErr2 := b.forgejoAPIRequest(ctx, baseURL, adminToken, http.MethodPost, "/api/v1/users/omahab-bot/tokens", body, &out)
+				if apiErr2 == nil {
+					if out.Token != "" {
+						hermesToken = strings.TrimSpace(out.Token)
+					} else if out.Sha1 != "" {
+						hermesToken = strings.TrimSpace(out.Sha1)
 					}
 				}
 			}

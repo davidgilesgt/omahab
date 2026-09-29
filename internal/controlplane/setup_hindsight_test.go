@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"github.com/omahab/omahab/internal/domain"
 	"github.com/omahab/omahab/internal/providers"
 )
+
 func hindsightTestCatalog(t *testing.T, b *Backend, runner *scriptedRunner, digest string) {
 	t.Helper()
 	hb := testSetupBundle("hindsight", digest, domain.ExposurePrivate, "", []string{"litellm", "embedding-worker"})
@@ -133,12 +135,13 @@ func TestHindsightMissingModelPreventsActivation(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := b.ensureHindsightDependentApp(ctx)
-	if err == nil || !strings.Contains(err.Error(), "Hindsight requires omahab/memory") {
-		t.Fatalf("err = %v, want missing-model message", err)
+	if !errors.Is(err, errHermesDeferred) {
+		t.Fatalf("err = %v, want operator-prerequisite deferral", err)
 	}
+	// The Hermes config must stay intact (memory wiring activates on retry).
 	after, _ := os.ReadFile(filepath.Join(hermesDir, "config.yaml"))
 	if string(after) != string(before) {
-		t.Fatalf("hermes config changed on failed setup: %q", after)
+		t.Fatalf("hermes config changed on deferred run: %q", after)
 	}
 }
 
@@ -167,8 +170,8 @@ func TestHindsightUnreadyNomicPreventsActivation(t *testing.T) {
 	b.SetHindsightEmbeddingSocketForTest(startHindsightWorkerFake(t, false))
 	stubPostgres(t)
 	err := b.ensureHindsightDependentApp(ctx)
-	if err == nil || !strings.Contains(err.Error(), "shared Nomic worker") {
-		t.Fatalf("err = %v, want Nomic message", err)
+	if !errors.Is(err, errHermesDeferred) {
+		t.Fatalf("err = %v, want operator-prerequisite deferral (embeddings not ready)", err)
 	}
 }
 
