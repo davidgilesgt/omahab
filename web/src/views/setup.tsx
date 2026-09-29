@@ -6,6 +6,7 @@ import { ErrorState, LoadingState } from "../components/ui";
 import { useToast } from "../components/toast";
 import { CopyButton, copyText } from "../components/copyButton";
 import { IndexSetupControl } from "../components/indexSetup";
+import { RestoreFromBackupControl } from "./restoreFromBackup";
 
 function authHeaders(): Record<string, string> {
   const t = sessionStorage.getItem("omahab.session") ?? "";
@@ -23,6 +24,25 @@ function sessionToken(): string {
 function withSessionToken(base: string): string {
   const t = sessionToken().trim();
   return t ? `${base}#token=${encodeURIComponent(t)}` : base;
+}
+
+// Long setup/banner details (multi-line reconcile errors) render verbatim by
+// default. Show the first line only; expand for the full text.
+function CollapsibleDetail({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  const trimmed = text.trim();
+  const firstLine = trimmed.split("\n", 1)[0] ?? trimmed;
+  const multi = trimmed.length > firstLine.length;
+  return (
+    <p style={{ overflowWrap: "anywhere", margin: 0 }}>
+      {open ? trimmed : firstLine}
+      {multi && (
+        <button type="button" className="text-button" style={{ marginLeft: 8 }} onClick={() => setOpen(!open)}>
+          {open ? "Show less" : "Show details"}
+        </button>
+      )}
+    </p>
+  );
 }
 
 
@@ -89,7 +109,7 @@ function tailnetErrorMessage(err: unknown): string {
   return "Tailnet path check failed";
 }
 
-type BoxId = "ssh" | "tailscale" | "domain" | "cloudflare" | "lan" | "admin" | "providers" | "knowledge" | "recovery" | "backups" | "storage" | "woodpecker";
+type BoxId = "ssh" | "tailscale" | "restore" | "domain" | "cloudflare" | "lan" | "dns" | "admin" | "providers" | "knowledge" | "recovery" | "backups" | "storage" | "woodpecker";
 
 const BLOCKING: BoxId[] = ["ssh", "tailscale", "domain", "cloudflare", "lan", "admin", "knowledge", "recovery", "backups"];
 
@@ -116,11 +136,10 @@ function ProvidersSetupBox({ status, isLoading, isError, error, onRetry }: { sta
   const seedDisabled = !selected || seed.isPending || status?.migration_complete === false;
   return (
     <div className="form-stack">
-      <p>Add a provider and model in LiteLLM, then refresh. Defaults share a credential; edit models and credentials in LiteLLM.</p>
-      <p>Hindsight is the default Hermes memory provider. Configure omahab/memory in LiteLLM, with Luna as the recommended model.</p>
-      <p>Reuse the configured Nomic worker; no external embedding credential is needed. Stored memories stay on this server. External model providers receive conversation content for processing.</p>
-      <p>Users with access to this shared Hermes environment can access its memories. Do not change the embedding model after memories exist without a data migration.</p>
-      <p>Use Refresh models, then Retry automatic setup. This indicator checks model routes; successful automatic setup also requires the ready Nomic worker.</p>
+      <p>Add one AI provider key in LiteLLM — the local model gateway. Open LiteLLM, add your provider (for example OpenAI or Anthropic), and pick a chat model. Everything else here is automatic.</p>
+      <p>Hermes is your household AI assistant. Hindsight is its long-term memory: conversations and documents it can recall later. Both run on this server.</p>
+      <p>You add the one API key. Omahab wires the rest: chat aliases, memory routes, and the local embedding worker that turns text into searchable vectors. No separate embedding key is needed. Memories stay on this server; your provider receives conversation content for processing.</p>
+      <p>External model providers process your requests. Do not change the embedding model after memories exist without a data migration.</p>
       <div className="setup-actions">
         {status?.management_url ? (
           <a className="button secondary" href={status.management_url} target="_blank" rel="noreferrer">Open LiteLLM</a>
@@ -132,7 +151,7 @@ function ProvidersSetupBox({ status, isLoading, isError, error, onRetry }: { sta
         </button>
       </div>
       {status?.migration_error ? (
-        <p className="inline-error" role="alert">{status.migration_error}</p>
+        <p className="inline-error" role="alert" style={{ overflowWrap: "anywhere" }}>{status.migration_error.split("\n", 1)[0]}</p>
       ) : null}
       {status && !status.migration_complete ? (
         <p className="muted">Migration is not complete — retry automatic setup, then seed.</p>
@@ -243,6 +262,7 @@ export function SetupPage() {
   });
   // SSH keys first: the installer seeds keys, add more here.
   const sshQuery = useQuery({ queryKey: ["system-ssh-keys"], queryFn: client.systemSSHKeys, retry: false });
+  const technitiumQuery = useQuery({ queryKey: ["technitium-setup"], queryFn: client.technitiumSetup, retry: false });
   // Optional provider onboarding reads native LiteLLM inventory. No polling:
   // explicit refresh plus a window-focus refetch for returning from LiteLLM.
   const modelsQuery = useQuery({ queryKey: ["setup", "models"], queryFn: client.modelSetup, staleTime: 30_000, retry: false });
@@ -715,9 +735,11 @@ export function SetupPage() {
   const doneMap: Record<BoxId, boolean> = {
     ssh: isOk("ssh_keys"),
     tailscale: tailscaleRunning || isOk("tailscale"),
+    restore: false,
     domain: domainValid && isOk("domain"),
     cloudflare: isOk("cloudflare_dns"),
     lan: lanClosed,
+    dns: false,
     admin: isOk("admin_passkeys"),
     providers: providersDone,
     knowledge: isOk("knowledge_index_setup"),
@@ -749,7 +771,7 @@ export function SetupPage() {
       {reconciliationCheck && (
         <div className="setup-notice" role={reconciliationCheck.status === "failed" ? "alert" : "status"}>
           <strong>{reconciliationCheck.label}</strong>
-          {reconciliationCheck.detail ? <p>{reconciliationCheck.detail}</p> : null}
+          {reconciliationCheck.detail ? <CollapsibleDetail text={reconciliationCheck.detail} /> : null}
           {reconciliationCheck.action ? <p>Action: {reconciliationCheck.action}</p> : null}
         </div>
       )}
@@ -829,6 +851,12 @@ export function SetupPage() {
             <p className="inline-error" role="alert">{tailscaleLoginMutation.error instanceof Error ? tailscaleLoginMutation.error.message : "Login failed"}</p>
           )}
         </Box>
+        {!doneMap.recovery && (
+          <Box title="Restore from backup (optional)" done={false} open={openId === "restore"} onToggle={() => toggle("restore")}>
+            <p>Replacing a lost or rebuilt server? Bring back its settings, accounts, and secrets from your off-site backup with the recovery phrase. New install? Skip this.</p>
+            <RestoreFromBackupControl />
+          </Box>
+        )}
 
         <Box title="Domain" done={doneMap.domain} open={openId === "domain"} onToggle={() => toggle("domain")}>
           <label className="field">
@@ -952,9 +980,29 @@ export function SetupPage() {
           )}
         </Box>
 
+        <Box title="Household DNS (optional)" done={false} open={openId === "dns"} onToggle={() => toggle("dns")}>
+          <p>
+            App addresses (like <span className="mono">https://photos.&lt;domain&gt;</span>) normally need Tailscale.
+            Point your household at this server's DNS and they work directly on the LAN, with ad and tracker blocking.
+          </p>
+          {technitiumQuery.data?.lan_addresses?.length ? (
+            <p>
+              In your router's DHCP settings, set the DNS server to{" "}
+              <strong className="mono">{technitiumQuery.data.lan_addresses.filter((a) => !a.includes(":")).join(" or ")}</strong>{" "}
+              <CopyButton text={technitiumQuery.data.lan_addresses.filter((a) => !a.includes(":"))[0] ?? ""} label="Copy address" />.
+            </p>
+          ) : (
+            <p className="muted">No LAN address detected yet — plug the server into your LAN or wait for DHCP.</p>
+          )}
+          <p>Keep a secondary DNS (your router, or 9.9.9.9) so a server outage never kills household internet, and reserve this server's IP in the router's DHCP settings.</p>
+          <p className="muted" style={{ fontSize: "0.85rem" }}>
+            Devices already on the LAN pick up the new DNS when they reconnect. Nothing changes for Tailscale access — the same addresses keep working from anywhere.
+          </p>
+        </Box>
+
         {identityApps.map((a) => (
           <Box key={`core-${a.bundle_id}`} title={`Login: ${a.bundle_id}`} done={a.status === "running"} open={coreOpen === a.bundle_id} onToggle={() => setCoreOpen(coreOpen === a.bundle_id ? null : a.bundle_id)}>
-            <p>Status: {a.status}{a.detail ? ` — ${a.detail}` : ""}</p>
+            <p>Status: {a.status}{a.detail ? <> — <CollapsibleDetail text={a.detail} /></> : ""}</p>
             <p>Required before admin creation — login cannot work until Caddy + Pocket ID are healthy.</p>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               <button className="button secondary" type="button" onClick={() => { void setupQuery.refetch(); }} disabled={setupQuery.isFetching}>
@@ -1016,6 +1064,8 @@ export function SetupPage() {
               Refresh
             </button>
           </div>
+
+          <p className="muted" style={{ fontSize: "0.85rem", marginTop: 8 }}>Register one passkey on your main device, then a second on a different device (phone or laptop). The second is your backup: with only one passkey, losing that device locks you out of the server.</p>
         </Box>
         <Box title="AI providers and Hermes memory" done={doneMap.providers} open={openId === "providers"} onToggle={() => toggle("providers")}>
           <ProvidersSetupBox status={modelsQuery.data} isLoading={modelsQuery.isLoading} isError={modelsQuery.isError} error={modelsQuery.error} onRetry={() => void modelsQuery.refetch()} />
@@ -1025,7 +1075,7 @@ export function SetupPage() {
         </Box>
         {otherApps.map((a) => (
           <Box key={`core-${a.bundle_id}`} title={a.bundle_id} done={a.status === "running"} open={coreOpen === a.bundle_id} onToggle={() => setCoreOpen(coreOpen === a.bundle_id ? null : a.bundle_id)}>
-            <p>Status: {a.status}{a.detail ? ` — ${a.detail}` : ""}</p>
+            <p>Status: {a.status}{a.detail ? <> — <CollapsibleDetail text={a.detail} /></> : ""}</p>
             <p>Independent step — enable whenever ready. Some apps need extra information to work correctly.</p>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               <button className="button secondary" type="button" onClick={() => { void setupQuery.refetch(); }} disabled={setupQuery.isFetching}>

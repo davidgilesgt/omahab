@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { QueryClient, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../auth";
 import { EventConsumerError } from "../api/client";
@@ -124,7 +124,7 @@ function tryPatchCache(ev: ControlEvent, queryClient: QueryClient): boolean {
 }
 
 
-export function useEventStream() {
+export function useEventStream(): { reconnecting: boolean } {
   const { client, token } = useAuth();
   const queryClient = useQueryClient();
   const toast = useToast();
@@ -134,6 +134,11 @@ export function useEventStream() {
   toastRef.current = toast;
   const authorized = token !== null;
   const lastIdRef = useRef<string | null>(null);
+  // Quiet reconnects: only surface a state after the stream has failed and
+  // stayed down for ~3 consecutive attempts. A transient drop (proxy idle
+  // timeout, laptop sleep) heals invisibly.
+  const [reconnecting, setReconnecting] = useState(false);
+  const failuresRef = useRef(0);
 
   useEffect(() => {
     if (!authorized) return;
@@ -154,6 +159,8 @@ export function useEventStream() {
             (ev) => {
               lastIdRef.current = ev.id;
               retryDelay = 1000;
+              failuresRef.current = 0;
+              setReconnecting(false);
               queryClient.setQueryData<ControlEvent[]>(["events"], (old) => {
                 if (!old) return [ev];
                 if (old.some((item) => item.id === ev.id)) return old;
@@ -177,6 +184,8 @@ export function useEventStream() {
           }
         }
         if (stopped || controller.signal.aborted) break;
+        failuresRef.current += 1;
+        if (failuresRef.current >= 3) setReconnecting(true);
         await new Promise<void>((resolve) => {
           retryTimer = window.setTimeout(resolve, retryDelay);
         });
@@ -192,4 +201,6 @@ export function useEventStream() {
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
     };
   }, [client, authorized, queryClient]);
+
+  return { reconnecting };
 }

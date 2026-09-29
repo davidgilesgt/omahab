@@ -12,6 +12,10 @@ export interface Status {
   health: Health;
   started_at: string;
   now: string;
+  /** True when the nightly check found a newer release. */
+  update_available?: boolean;
+  /** The newer release, empty when up to date. */
+  latest_version?: string;
 }
 
 export interface Maintenance {

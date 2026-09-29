@@ -65,6 +65,9 @@ export function OverviewPage() {
       {setup.data && setup.data.local_ready && setup.data.state !== "complete" && (
         <p className="setup-notice" role="status"><strong>Local control panel ready</strong> — <Link to={`${adminPrefix}/setup`}>Connect your services</Link></p>
       )}
+      {status.data.update_available && (
+        <p className="setup-notice" role="status"><strong>Update available</strong> — {status.data.version} → {status.data.latest_version || "newer release"}. Run <code className="mono">sudo omahab system upgrade</code> when convenient.</p>
+      )}
       <div className="metric-strip">
         <article><span>Control plane</span><strong><StatusPill value={status.data.health} /></strong><small>Version {status.data.version}</small></article>
         <article><span>Applications</span><strong>{applications.data?.length ?? "—"}</strong><small>{unhealthy.length ? `${unhealthy.length} need attention` : "No reported issues"}</small></article>
@@ -459,6 +462,7 @@ export function EventsPage() {
   const query = useQuery({ queryKey: ["events"], queryFn: client.events });
   const unreadTotal = useQuery({ queryKey: ["events", "unread-count"], queryFn: client.unreadEventCount });
   const ntfyQuery = useQuery({ queryKey: ["ntfy"], queryFn: client.ntfyConfig });
+  const instanceQuery = useQuery({ queryKey: ["instance"], queryFn: client.instance, retry: false });
   const read = useMutation({
     mutationFn: client.markEventRead,
     onSuccess: () => {
@@ -487,10 +491,15 @@ export function EventsPage() {
   const unreadCount = unreadTotal.data ?? 0;
   const ntfy = ntfyQuery.data;
   const topic = ntfy?.topic ?? "";
-  const ntfyUrl = topic ? `http://${typeof window !== "undefined" ? window.location.hostname : "omahab"}:2586/${topic}` : "";
+  const instanceDomain = (instanceQuery.data?.domain ?? "").trim().toLowerCase();
+  const domainReady = !!instanceDomain && instanceDomain !== "example.com" && instanceDomain !== "not-configured.invalid";
+  // ntfy listens on loopback only; the phone subscribes through the private
+  // Caddy route on the appliance domain, not a raw loopback host:port.
+  const ntfyBase = domainReady ? `https://ntfy.${instanceDomain}` : "";
+  const ntfyUrl = topic && ntfyBase ? `${ntfyBase}/${topic}` : "";
   return (
     <div className="page">
-      <PageHeader title="Events" description={`${unreadCount} unread total`} actions={<button className="button secondary" type="button" disabled={markAll.isPending || unreadCount === 0} onClick={() => markAll.mutate()}>{markAll.isPending ? "Marking…" : "Mark all read"}</button>} />
+      <PageHeader title="Inbox" description={`${unreadCount} unread total`} actions={<button className="button secondary" type="button" disabled={markAll.isPending || unreadCount === 0} onClick={() => markAll.mutate()}>{markAll.isPending ? "Marking…" : "Mark all read"}</button>} />
       <Section title="Phone notifications" description="Send warning and error notifications to your phone.">
         {ntfyQuery.isLoading ? <LoadingState label="Loading ntfy" /> : ntfyQuery.isError ? <ErrorState error={ntfyQuery.error} retry={() => void ntfyQuery.refetch()} /> : (
           <div style={{ display: "flex", gap: "1rem", alignItems: "flex-start", flexWrap: "wrap" }}>
@@ -502,16 +511,22 @@ export function EventsPage() {
               {ntfy?.enabled && topic ? (
                 <div style={{ marginTop: "0.75rem" }}>
                   <p style={{ margin: 0 }}>Topic: <code className="mono">{topic}</code> <CopyButton text={topic} label="Copy topic" /></p>
-                  <p className="muted" style={{ fontSize: "0.85rem", margin: "0.25rem 0" }}>Server posts to <code className="mono">http://127.0.0.1:2586/{topic}</code> for severities <code>warning|error</code>. Add this topic in the ntfy app (server URL <code>http://{typeof window !== "undefined" ? window.location.hostname : "host"}:2586</code>).</p>
-                  <p className="muted" style={{ fontSize: "0.85rem" }}>QR encodes the ntfy URL for quick phone pairing.</p>
-                  {topic && <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", marginTop: "0.5rem" }}><CopyButton text={ntfyUrl} label="Copy ntfy URL" /><a href={ntfyUrl} target="_blank" rel="noreferrer" className="button secondary">Open ntfy</a></div>}
+                  {domainReady ? (
+                    <>
+                      <p className="muted" style={{ fontSize: "0.85rem", margin: "0.25rem 0" }}>The server posts warnings and errors to <code className="mono">{ntfyUrl}</code>. Add this server URL and the topic in the ntfy app.</p>
+                      <p className="muted" style={{ fontSize: "0.85rem" }}>The QR code pairs the phone with the private ntfy route on your domain.</p>
+                      <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", marginTop: "0.5rem" }}><CopyButton text={ntfyUrl} label="Copy ntfy URL" /><a href={ntfyUrl} target="_blank" rel="noreferrer" className="button secondary">Open ntfy</a></div>
+                    </>
+                  ) : (
+                    <p className="muted" style={{ fontSize: "0.85rem", margin: "0.25rem 0" }}>Set your domain in setup first — phone push uses the private <code className="mono">https://ntfy.&lt;domain&gt;</code> route.</p>
+                  )}
                 </div>
               ) : (
-                <p className="muted" style={{ fontSize: "0.85rem", marginTop: "0.5rem" }}>Phone notifications are off. Enable to generate a random 24-char topic and start posting warnings/errors to the local ntfy.</p>
+                <p className="muted" style={{ fontSize: "0.85rem", marginTop: "0.5rem" }}>Phone notifications are off. Enable to generate a private topic and start posting warnings and errors to ntfy.</p>
               )}
               {toggleNtfy.error ? <p className="inline-error" role="alert">{toggleNtfy.error instanceof Error ? toggleNtfy.error.message : "Update failed"}</p> : null}
             </div>
-            {ntfy?.enabled && topic && (
+            {ntfy?.enabled && topic && ntfyUrl && (
               <div style={{ display: "grid", placeItems: "center", gap: "0.25rem" }}>
                 <QRCode value={ntfyUrl} label="ntfy topic QR" />
                 <small className="muted" style={{ display: "block", textAlign: "center" }}>Scan to subscribe</small>

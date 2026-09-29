@@ -27,7 +27,7 @@ const NAVIGATION: ReadonlyArray<readonly [string, string, LucideIcon, string]> =
   ["/projects", "Projects", Rocket, "ONCE projects"],
   ["/workspaces", "Workspaces", TerminalSquare, "Remote workspaces"],
   ["/backups", "Backups", Archive, "Backup status"],
-  ["/events", "Inbox", Inbox, "Event inbox"],
+  ["/inbox", "Inbox", Inbox, "Event inbox"],
   ["/sync", "Sync folders", FolderSync, "Syncthing folders"],
   ["/people", "People & access", Users, "Users and access"],
   ["/tool-environment", "Tool environment", Settings2, "Agent tool variables"],
@@ -75,7 +75,7 @@ export function AppShell({ children, basePath = "" }: { children: ReactNode; bas
       return [prefixed, label, Icon, title] as const;
     });
   }, [setupQuery.data, basePath]);
-  useEventStream();
+  const { reconnecting } = useEventStream();
   // Keep theme in sync without flash - useLayoutEffect would be ideal but useEffect is okay with inline script.
   // "system" (and no choice) leaves data-theme unset so CSS follows the OS;
   // any other value pins the matching palette (see styles.css).
@@ -137,7 +137,7 @@ export function AppShell({ children, basePath = "" }: { children: ReactNode; bas
             <NavLink key={to} to={to} end={to === "/" || to === `${basePath}/`} className={({ isActive }) => isActive ? "nav-link active" : "nav-link"} title={title}>
               <Icon size={18} strokeWidth={1.75} aria-hidden className="nav-icon" />
               <span>{label}</span>
-              {to.endsWith("/events") && unread > 0 && <span className="nav-badge" aria-label={`${unread} unread`}>{unread}</span>}
+              {to.endsWith("/inbox") && unread > 0 && <span className="nav-badge" aria-label={`${unread} unread`}>{unread}</span>}
             </NavLink>
           ))}
         </nav>
@@ -184,6 +184,7 @@ export function AppShell({ children, basePath = "" }: { children: ReactNode; bas
               </ul>
             )}
           </div>
+          {reconnecting && <span className="live-indicator" role="status" title="Live updates reconnecting">reconnecting…</span>}
           <ThemePicker value={theme} onChange={setTheme} />
         </header>
         <main id="main-content" tabIndex={-1}>{children}</main>

@@ -400,6 +400,9 @@ small { color: var(--ink-muted); font-size: 0.75rem; }
 .quick-nav { position: relative; width: min(22rem, 55vw); }
 .quick-nav input { width: 100%; padding-right: 4.5rem; }
 kbd { position: absolute; top: 50%; right: var(--space-2); padding: var(--space-1) var(--space-2); border: var(--border) solid var(--line); border-radius: var(--radius-sm); color: var(--ink-muted); font-family: var(--font-mono); font-size: 0.75rem; transform: translateY(-50%); }
+.live-indicator { color: var(--ink-muted); font-size: 0.8125rem; font-family: var(--font-mono); animation: pulse 1.5s ease-in-out infinite; }
+.live-indicator::before { content: "●"; margin-right: var(--space-2); color: var(--warning); }
+@keyframes pulse { 50% { opacity: 0.4; } }
 .theme-control select { border-color: transparent; background: transparent; color: var(--ink-muted); }
 #main-content { width: min(100%, var(--content-width)); margin-inline: auto; padding: 1.25rem; }
 .page { display: grid; gap: var(--space-4); min-width: 0; }

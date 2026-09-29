@@ -31,7 +31,8 @@ function DashboardRoutes() {
           <Route path="/applications" element={<ApplicationsPage />} />
           <Route path="/projects" element={<ProjectsPage />} />
           <Route path="/backups" element={<BackupsPage />} />
-          <Route path="/events" element={<EventsPage />} />
+          <Route path="/inbox" element={<EventsPage />} />
+          <Route path="/events" element={<Navigate to="/inbox" replace />} />
           <Route path="/sync" element={<SyncFoldersPage />} />
           <Route path="/workspaces" element={<WorkspacesPage />} />
           <Route path="/people" element={<PeoplePage />} />
@@ -56,7 +57,8 @@ function AdminDashboardRoutes() {
           <Route path="applications" element={<ApplicationsPage />} />
           <Route path="projects" element={<ProjectsPage />} />
           <Route path="backups" element={<BackupsPage />} />
-          <Route path="events" element={<EventsPage />} />
+          <Route path="inbox" element={<EventsPage />} />
+          <Route path="events" element={<Navigate to="/admin/inbox" replace />} />
           <Route path="sync" element={<SyncFoldersPage />} />
           <Route path="workspaces" element={<WorkspacesPage />} />
           <Route path="people" element={<PeoplePage />} />
@@ -79,6 +81,7 @@ function HomeHostRedirects() {
     "/applications",
     "/projects",
     "/backups",
+    "/inbox",
     "/events",
     "/sync",
     "/workspaces",
