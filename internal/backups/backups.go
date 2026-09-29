@@ -68,6 +68,7 @@ func DefaultPaths() []string {
 		"/srv/omahab/machine-backups",
 	}
 }
+
 // Config holds controller-level defaults.
 type Config struct {
 	// Paths are the host paths handed to restic on every backup run.
@@ -85,6 +86,9 @@ type Config struct {
 	RTO time.Duration
 	// VerifyInterval is how often a verified restore must be demonstrated.
 	VerifyInterval time.Duration
+	// Retention is the snapshot retention policy applied with
+	// restic forget --prune; zero fields fall back to defaults.
+	Retention RetentionPolicy
 }
 
 func (c Config) withDefaults() Config {
@@ -106,6 +110,7 @@ func (c Config) withDefaults() Config {
 	if c.VerifyInterval <= 0 {
 		c.VerifyInterval = DefaultVerifyInterval
 	}
+	c.Retention = c.Retention.withDefaults()
 	return c
 }
 

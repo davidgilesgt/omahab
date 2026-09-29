@@ -73,12 +73,22 @@ func (f *rtoFakeRunner) Init(_ context.Context, _ Repository, _ Credentials) err
 func (f *rtoFakeRunner) Backup(_ context.Context, _ Repository, _ Credentials, _ BackupRequest) (Snapshot, error) {
 	return Snapshot{}, nil
 }
-func (f *rtoFakeRunner) Restore(_ context.Context, _ Repository, _ Credentials, _, _ string) error { return nil }
+func (f *rtoFakeRunner) Restore(_ context.Context, _ Repository, _ Credentials, _, _ string) error {
+	return nil
+}
 func (f *rtoFakeRunner) Snapshots(_ context.Context, _ Repository, _ Credentials, _ int) ([]SnapshotListEntry, error) {
 	return nil, nil
 }
 
 func (f *rtoFakeRunner) Check(_ context.Context, _ Repository, _ Credentials) error { return nil }
+
+func (f *rtoFakeRunner) Forget(_ context.Context, _ Repository, _ Credentials, _ ForgetRequest) (ForgetResult, error) {
+	return ForgetResult{}, nil
+}
+
+func (f *rtoFakeRunner) Stats(_ context.Context, _ Repository, _ Credentials) (RepoStats, error) {
+	return RepoStats{}, nil
+}
 
 type rtoFakeSecretSource struct{}
 

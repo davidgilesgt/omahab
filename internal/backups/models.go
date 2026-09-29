@@ -257,10 +257,10 @@ type RunDetail struct {
 // never healthy without a recent successful backup within the recovery
 // point objective and a demonstrated verified restore.
 type StatusReport struct {
-	Health              domain.Health `json:"health"`
-	Reason              string        `json:"reason,omitempty"`
-	LastBackupAt        *time.Time    `json:"last_backup_at,omitempty"`
-	LastVerifiedAt      *time.Time    `json:"last_verified_at,omitempty"`
+	Health         domain.Health `json:"health"`
+	Reason         string        `json:"reason,omitempty"`
+	LastBackupAt   *time.Time    `json:"last_backup_at,omitempty"`
+	LastVerifiedAt *time.Time    `json:"last_verified_at,omitempty"`
 	// LastRestoreTestedAt is the last full application restore proof
 	// (disposable-ISO live restore), or nil when never tested. It is never
 	// inferred from extraction alone.
@@ -271,5 +271,7 @@ type StatusReport struct {
 	VerifyInterval      time.Duration `json:"verification_interval"`
 	VerificationOverdue bool          `json:"verification_overdue"`
 	ActiveRun           *Run          `json:"active_run,omitempty"`
-	Repositories        []Repository  `json:"repositories"`
+	// Retention is the read-only retention policy and last outcome.
+	Retention    RetentionStatus `json:"retention"`
+	Repositories []Repository    `json:"repositories"`
 }

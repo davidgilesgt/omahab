@@ -23,6 +23,10 @@ type fakeRunner struct {
 	backupFn     func(repo Repository, creds Credentials, req BackupRequest) (Snapshot, error)
 	restoreFn    func(repo Repository, creds Credentials, snapshotID, target string) error
 	snapshotsFn  func(repo Repository, creds Credentials, latest int) ([]SnapshotListEntry, error)
+	forgetFn     func(repo Repository, creds Credentials, req ForgetRequest) (ForgetResult, error)
+	statsFn      func(repo Repository, creds Credentials) (RepoStats, error)
+	forgetCalls  []ForgetRequest
+	statsCalls   []Repository
 	backupCalls  []BackupRequest
 	backupRepos  []Repository
 	backupCreds  []Credentials
@@ -56,6 +60,28 @@ func (f *fakeRunner) Snapshots(_ context.Context, repo Repository, creds Credent
 		return fn(repo, creds, latest)
 	}
 	return []SnapshotListEntry{{ID: "snap1", Time: "2026-09-01T00:00:00Z", Hostname: "omahab-host"}}, nil
+}
+
+func (f *fakeRunner) Forget(_ context.Context, repo Repository, creds Credentials, req ForgetRequest) (ForgetResult, error) {
+	f.mu.Lock()
+	f.forgetCalls = append(f.forgetCalls, req)
+	fn := f.forgetFn
+	f.mu.Unlock()
+	if fn != nil {
+		return fn(repo, creds, req)
+	}
+	return ForgetResult{}, nil
+}
+
+func (f *fakeRunner) Stats(_ context.Context, repo Repository, creds Credentials) (RepoStats, error) {
+	f.mu.Lock()
+	f.statsCalls = append(f.statsCalls, repo)
+	fn := f.statsFn
+	f.mu.Unlock()
+	if fn != nil {
+		return fn(repo, creds)
+	}
+	return RepoStats{TotalSize: 4096, TotalFiles: 10, Snapshots: 3}, nil
 }
 
 func (f *fakeRunner) Check(_ context.Context, _ Repository, _ Credentials) error {

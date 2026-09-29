@@ -139,5 +139,22 @@ func Migrations() []store.Migration {
 	checked_at TEXT NOT NULL
 )`,
 		},
+		{
+			// Retention state: the applied policy and the last outcome per
+			// repository, so the weekly prune timer and post-backup passes
+			// stay idempotent and the UI can show the policy read-only.
+			Name: "backups_0014_retention_state",
+			SQL: `CREATE TABLE IF NOT EXISTS backup_retention_state (
+	repository_id TEXT PRIMARY KEY REFERENCES backup_repositories(id) ON DELETE CASCADE,
+	policy_keep_daily INTEGER NOT NULL,
+	policy_keep_weekly INTEGER NOT NULL,
+	policy_keep_monthly INTEGER NOT NULL,
+	policy_keep_yearly INTEGER NOT NULL,
+	applied_at TEXT NOT NULL,
+	removed INTEGER NOT NULL DEFAULT 0,
+	repo_size_bytes INTEGER NOT NULL DEFAULT 0,
+	repo_snapshot_count INTEGER NOT NULL DEFAULT 0
+)`,
+		},
 	}
 }

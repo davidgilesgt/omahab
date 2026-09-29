@@ -58,6 +58,9 @@ func (s *Service) evaluateHealth(ctx context.Context, persist bool) (StatusRepor
 	if rep.LastRestoreTestedAt, err = s.lastRestoreTestedAt(ctx); err != nil {
 		return rep, err
 	}
+	if rep.Retention, err = s.Retention(ctx); err != nil {
+		return rep, err
+	}
 
 	switch {
 	case rep.LastBackupAt == nil:

@@ -74,10 +74,10 @@ const repositoryColumns = "id, label, location, secret_id, secret_version, attac
 
 func scanRepository(sc rowScanner) (Repository, error) {
 	var (
-		r       Repository
+		r        Repository
 		attached int
-		created string
-		updated string
+		created  string
+		updated  string
 	)
 	if err := sc.Scan(&r.ID, &r.Label, &r.Location, &r.SecretRef.ID, &r.SecretRef.Version, &attached, &created, &updated); err != nil {
 		return Repository{}, err
@@ -371,6 +371,103 @@ func (s *Service) markSnapshotVerified(ctx context.Context, repositoryID, snapsh
 		return fmt.Errorf("%w: snapshot %q", ErrNotFound, snapshotID)
 	}
 	return nil
+}
+
+// newestVerifiedSnapshot returns the id of the most recently verified
+// snapshot of a repository, or "" when none was ever verified.
+func (s *Service) newestVerifiedSnapshot(ctx context.Context, repositoryID string) (string, error) {
+	var id string
+	err := s.st.DB().QueryRowContext(ctx,
+		`SELECT id FROM backup_snapshots WHERE repository_id = ? AND verified_at IS NOT NULL
+		 ORDER BY verified_at DESC LIMIT 1`, repositoryID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+// deleteSnapshot drops one snapshot row from the control listing after
+// restic forgot it.
+func (s *Service) deleteSnapshot(ctx context.Context, repositoryID, snapshotID string) error {
+	_, err := s.st.DB().ExecContext(ctx,
+		"DELETE FROM backup_snapshots WHERE repository_id = ? AND id = ?", repositoryID, snapshotID)
+	return err
+}
+
+// --- retention state ---
+
+// retentionStateRow is the persisted last retention outcome.
+type retentionState struct {
+	Policy        RetentionPolicy
+	AppliedAt     *time.Time
+	Removed       int
+	RepoSizeBytes int64
+	SnapshotCount int
+}
+
+func (s *Service) lastRetentionAt(ctx context.Context, repositoryID string) (time.Time, bool, error) {
+	var applied string
+	err := s.st.DB().QueryRowContext(ctx,
+		"SELECT applied_at FROM backup_retention_state WHERE repository_id = ?", repositoryID).Scan(&applied)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	t, err := parseTime(applied)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	return t, true, nil
+}
+
+func (s *Service) saveRetentionState(ctx context.Context, repositoryID string, res RetentionResult) {
+	now := s.nowUTC()
+	_, err := s.st.DB().ExecContext(ctx, `INSERT INTO backup_retention_state
+	(repository_id, policy_keep_daily, policy_keep_weekly, policy_keep_monthly, policy_keep_yearly,
+	 applied_at, removed, repo_size_bytes, repo_snapshot_count)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(repository_id) DO UPDATE SET
+	 policy_keep_daily = excluded.policy_keep_daily,
+	 policy_keep_weekly = excluded.policy_keep_weekly,
+	 policy_keep_monthly = excluded.policy_keep_monthly,
+	 policy_keep_yearly = excluded.policy_keep_yearly,
+	 applied_at = excluded.applied_at,
+	 removed = excluded.removed,
+	 repo_size_bytes = excluded.repo_size_bytes,
+	 repo_snapshot_count = excluded.repo_snapshot_count`,
+		repositoryID, res.Policy.KeepDaily, res.Policy.KeepWeekly, res.Policy.KeepMonthly, res.Policy.KeepYearly,
+		fmtTime(now), res.Removed, res.RepoSizeBytes, res.RepoSnapshotCount)
+	if err != nil {
+		s.emit(ctx, EventBackupRetentionFailed, severityWarning, repositoryID,
+			fmt.Sprintf("persist retention state for repository %s: %v", repositoryID, err), nil)
+	}
+}
+
+func (s *Service) getRetentionState(ctx context.Context) (*retentionState, error) {
+	var pol RetentionPolicy
+	var removed, size, count int64
+	row := s.st.DB().QueryRowContext(ctx, `SELECT policy_keep_daily, policy_keep_weekly,
+	 policy_keep_monthly, policy_keep_yearly, applied_at, removed, repo_size_bytes, repo_snapshot_count
+	 FROM backup_retention_state ORDER BY applied_at DESC LIMIT 1`)
+	var appliedAt string
+	err := row.Scan(&pol.KeepDaily, &pol.KeepWeekly, &pol.KeepMonthly, &pol.KeepYearly,
+		&appliedAt, &removed, &size, &count)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	st := &retentionState{Policy: pol, Removed: int(removed), RepoSizeBytes: size, SnapshotCount: int(count)}
+	if t, err := parseTime(appliedAt); err == nil {
+		st.AppliedAt = &t
+	}
+	return st, nil
 }
 
 // --- hook results ---

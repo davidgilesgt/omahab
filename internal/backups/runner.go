@@ -32,8 +32,12 @@ type Runner interface {
 	Restore(ctx context.Context, repo Repository, creds Credentials, snapshotID, targetDir string) error
 	// Snapshots lists snapshots in repo as JSON (latest N).
 	Snapshots(ctx context.Context, repo Repository, creds Credentials, latest int) ([]SnapshotListEntry, error)
-	// Check runs restic integrity checking on the repository.
 	Check(ctx context.Context, repo Repository, creds Credentials) error
+	// Forget plans (dry-run) or applies a retention pass. See
+	// ForgetRequest.
+	Forget(ctx context.Context, repo Repository, creds Credentials, req ForgetRequest) (ForgetResult, error)
+	// Stats returns repository size statistics (restic stats).
+	Stats(ctx context.Context, repo Repository, creds Credentials) (RepoStats, error)
 }
 
 // SnapshotListEntry is the minimal snapshot info returned by restic snapshots --json.

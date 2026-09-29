@@ -51,7 +51,7 @@ func (s *Service) RunBackup(ctx context.Context, req RunRequest) (Run, error) {
 	snap, err := s.runner.Backup(ctx, repo, creds, BackupRequest{
 		Paths:    paths,
 		Host:     s.cfg.Host,
-		Tags:     backupTags,
+		Tags:     snapshotTags(req.Scopes),
 		Excludes: req.Excludes,
 	})
 	if err != nil {
@@ -226,4 +226,23 @@ func describeHookFailure(kind HookKind, h Hook, out HookOutcome, redactions []st
 		fmt.Fprintf(&msg, ": %s", truncate(redact(out.Output, redactions...), 200))
 	}
 	return fmt.Errorf("%s", msg.String())
+}
+
+// snapshotTags returns the tags stamped on every snapshot: the omahab
+// marker plus one scope:<name> tag per captured scope. Retention groups
+// by tags, so scope tags are what keeps server-config history
+// independent from chatty app scopes. Snapshots with no scopes (legacy
+// paths) carry only omahab and form their own group.
+func snapshotTags(scopes []string) []string {
+	tags := append([]string{}, backupTags...)
+	seen := map[string]bool{"omahab": true}
+	for _, s := range scopes {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] {
+			continue
+		}
+		tags = append(tags, "scope:"+s)
+		seen[s] = true
+	}
+	return tags
 }
