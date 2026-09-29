@@ -86,6 +86,7 @@ type Daemon struct {
 	projects   *ProjectStore
 	gitRunner  GitRunner
 	envManager *EnvironmentManager
+	notifier   *Notifier
 
 	socketPath string
 	listener   net.Listener
@@ -216,6 +217,7 @@ func NewDaemon(opts DaemonOpts) (*Daemon, error) {
 		projects:       opts.ProjectStore,
 		gitRunner:      opts.GitRunner,
 		envManager:     envMgr,
+		notifier:       NewNotifier(opts.Logger),
 		socketPath:     opts.Config.EffectiveSocketPath(),
 		syncInterval:   syncInt,
 		fetchInterval:  fetchInt,
@@ -897,6 +899,21 @@ func (d *Daemon) openOmahab() error {
 	return d.launcher.OpenURL(u)
 }
 
+// dashboardEventURL builds the dashboard deep link for an event. Returns
+// empty when no server URL is configured.
+func (d *Daemon) dashboardEventURL(ev domain.Event) string {
+	u := strings.TrimSpace(d.cfg.ServerURL)
+	if u == "" {
+		return ""
+	}
+	if ev.ID != "" {
+		u = strings.TrimRight(u, "/") + "/events?focus=" + url.QueryEscape(string(ev.ID))
+	} else {
+		u = strings.TrimRight(u, "/") + "/events"
+	}
+	return DashboardURLWithTheme(u)
+}
+
 func (d *Daemon) openWorkspaceInEditor(id string) error {
 	host := d.serverHost()
 	if host == "" {
@@ -1489,8 +1506,9 @@ func (d *Daemon) handleCompanionEvent(ev domain.Event) {
 		if strings.HasPrefix(ev.Type, "application.") || strings.HasPrefix(ev.Type, "exposure.") || ev.Type == "apps.changed" {
 			d.syncWebApps()
 		}
-		// C3: desktop notifications for the events that matter
-		if ShouldNotifyType(ev.Type) {
+		// Desktop alerts: warning/error severities (health, backups, TLS/DNS,
+		// update surfacing) plus the C3 info types.
+		if ShouldNotify(ev) {
 			_ = d.DaemonNotifyEvent(ev)
 		}
 		d.syncOnce()

@@ -5,14 +5,27 @@ package client
 import (
 	"log/slog"
 	"os/exec"
+	"strings"
 )
 
-// sendNotification on macOS uses terminal-notifier if available, falling back to osascript.
-// Stub: logs and best-effort posts via osascript display notification.
-func sendNotification(title, body string) error {
+// NotificationAction is an optional click-through action (unused on macOS,
+// which has no notify-send action concept).
+type NotificationAction struct {
+	Label string
+	URL   string
+}
+
+// sendNotification on macOS uses terminal-notifier if available, falling back
+// to osascript. Best-effort; click-through URL becomes the subtitle when
+// terminal-notifier is present (it opens the URL via -open when given).
+func sendNotification(title, body string, actions []NotificationAction) error {
 	// Try terminal-notifier first if installed (brew install terminal-notifier)
 	if _, err := exec.LookPath("terminal-notifier"); err == nil {
-		cmd := exec.Command("terminal-notifier", "-title", title, "-message", body, "-group", "omahab")
+		args := []string{"-title", title, "-message", body, "-group", "omahab"}
+		if len(actions) > 0 && strings.HasPrefix(actions[0].URL, "http") {
+			args = append(args, "-open", actions[0].URL)
+		}
+		cmd := exec.Command("terminal-notifier", args...)
 		if err := cmd.Run(); err == nil {
 			return nil
 		}

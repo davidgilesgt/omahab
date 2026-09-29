@@ -41,6 +41,32 @@ type SocketError struct {
 
 Legacy envelope `{"action": "...", "params": {...}}` is **not** supported. A legacy envelope has no `method` key, so `Method == ""` after decode and the daemon returns `unknown_method` (see Acceptance: `printf '{"action":"status"}' | socat ...` returns `unknown_method`).
 
+## Desktop alert notifications (laptop policy)
+
+The daemon turns companion-stream events into desktop notifications (Linux:
+`notify-send`; mako on Omarchy) with dedupe, rate limit, and reconnect
+safety. This is the default alerting path — phone push (ntfy) is opt-in.
+
+- **Trigger policy:** every event with severity `warning|error|critical|security`,
+  plus the info types `agent.awaiting_approval`, `backup.failed`, `ci.failed`,
+  `deployment.completed`. Everything else (info/success, e.g.
+  `service.update_available`) never pings the desktop.
+- **Dedupe:** same event ID never notifies twice (30 min TTL); an identical
+  type+message body with a fresh ID is suppressed for 10 min (SSE reconnect
+  replay protection).
+- **Rate limit:** at most 5 notifications per sliding minute.
+- **Stream:** the existing device-authenticated SSE
+  `GET /api/v1/companion/events/stream` (same as status sync); the daemon
+  replays from `lastID` after reconnecting with exponential backoff
+  (1s→30s), so no alert is lost and none is duplicated.
+- **Click-through:** the notification body ends with the dashboard deep link
+  `<server_url>/events?focus=<event_id>` when a server URL is configured.
+  `notify-send --action` would block the event loop, so the URL is carried
+  in the body instead.
+- **Toggles:** notifications are on by default; there is no per-type socket
+  method yet (the `Notifier.SetEnabled` seam exists for a future
+  `notifications.configure` method).
+
 ## Error codes
 
 - `bad_request` — missing/invalid params or invalid JSON.
