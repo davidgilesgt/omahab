@@ -316,6 +316,10 @@ in
         LimitNOFILE = 65536;
         LimitNPROC = 4096;
         TimeoutStopSec = 30;
+        # Control plane outranks its wards under memory pressure: it
+        # must survive to report and restart casualties (see the system
+        # resource-model block below).
+        OOMScoreAdjust = -900;
         KillMode = "mixed";
         StandardOutput = "journal";
         StandardError = "journal";
@@ -384,7 +388,7 @@ in
       serviceConfig = hardenBase // {
         Type = "oneshot";
         EnvironmentFile = "${stateDir}/backup.env";
-        ExecStart = "${cfg.package}/bin/omahab backup create";
+        ExecStart = "${cfg.package}/bin/omahab backup create --scheduled";
         User = "root";
         Group = "root";
         ReadWritePaths = [
@@ -432,6 +436,77 @@ in
       };
     };
 
+    systemd.services.omahab-backup-prune = {
+      description = "Omahab backup retention (restic forget --prune) — oneshot";
+      documentation = [ "https://github.com/davidgilesgt/omahab" ];
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
+      unitConfig = {
+        RequiresMountsFor = [ dataDir ];
+        ConditionPathExists = stateDir;
+      };
+      serviceConfig = hardenBase // {
+        Type = "oneshot";
+        EnvironmentFile = "${stateDir}/backup.env";
+        ExecStart = "${cfg.package}/bin/omahab backup prune";
+        User = "root";
+        Group = "root";
+        ReadWritePaths = [
+          stateDir
+          dataDir
+        ];
+        RestrictAddressFamilies = [
+          "AF_UNIX"
+          "AF_INET"
+          "AF_INET6"
+        ];
+        RestrictNamespaces = true;
+      };
+    };
+
+    # ------------------------------------------------------------------
+    # Offline disaster recovery (DESIGN §5.4, §24.6): the setup-UI
+    # "Restore from backup" flow stages + validates through the daemon,
+    # then triggers this unit. It stops omahabd, applies the staged
+    # server-config swap as root (`omahab recovery apply --staged <op>`),
+    # and restarts omahabd so setup reconverges apps.
+    # ------------------------------------------------------------------
+    systemd.services.omahab-restore = {
+      description = "Omahab disaster recovery restore (server-config swap)";
+      documentation = [ "https://github.com/davidgilesgt/omahab" ];
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
+      unitConfig = {
+        RequiresMountsFor = [ dataDir ];
+        ConditionPathExists = "${stateDir}/recovery-restore-staging";
+        # Never started at boot: only on demand from the panel/CLI.
+      };
+      serviceConfig = hardenBase // {
+        Type = "oneshot";
+        # The swap replaces the daemon's own database: stop omahabd
+        # first, and always restart it afterwards (even on failure) so
+        # the panel comes back with the journal state visible.
+        ExecStartPre = "/usr/bin/systemctl stop omahabd.service";
+        ExecStopPost = "/usr/bin/systemctl start omahabd.service";
+        ExecStart = "${cfg.package}/bin/omahab recovery apply --apply-staged";
+        User = "root";
+        Group = "root";
+        ReadWritePaths = [
+          stateDir
+          dataDir
+          "/run/omahab"
+        ];
+        ProtectKernelTunables = true;
+        ProtectControlGroups = true;
+        RestrictAddressFamilies = [
+          "AF_UNIX"
+          "AF_INET"
+          "AF_INET6"
+        ];
+        RestrictNamespaces = true;
+      };
+    };
+
     systemd.timers.omahab-backup = {
       description = "Omahab backup timer — daily";
       timerConfig = {
@@ -450,6 +525,17 @@ in
         RandomizedDelaySec = "6h";
         Persistent = true;
         Unit = "omahab-verify.service";
+      };
+      wantedBy = [ ]; # enabled at runtime by omahabd
+    };
+
+    systemd.timers.omahab-backup-prune = {
+      description = "Omahab backup retention timer — weekly";
+      timerConfig = {
+        OnCalendar = "weekly";
+        RandomizedDelaySec = "6h";
+        Persistent = true;
+        Unit = "omahab-backup-prune.service";
       };
       wantedBy = [ ]; # enabled at runtime by omahabd
     };
@@ -677,6 +763,20 @@ in
       {
         users = [ cfg.adminUser ];
         commands = [
+          # Sudo matches command paths literally, without resolving symlinks
+          # (live 2026-09: `sudo omahab workspace attach` resolved to
+          # /run/current-system/sw/bin/omahab and hit "a password is
+          # required" against these store-path rules). Client flows invoke
+          # the bare name through PATH, which sudo resolves via secure_path
+          # to the sw symlink — so both spellings must be allowed.
+          {
+            command = "/run/current-system/sw/bin/omahab runner attach *";
+            options = [ "NOPASSWD" ];
+          }
+          {
+            command = "/run/current-system/sw/bin/omahab workspace attach *";
+            options = [ "NOPASSWD" ];
+          }
           {
             command = "${cfg.package}/bin/omahab runner attach *";
             options = [ "NOPASSWD" ];
@@ -769,6 +869,17 @@ in
           tcp dport 8484 ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } accept comment "omahab dashboard LAN"
           ip6 saddr fc00::/7 tcp dport 8484 accept comment "omahab dashboard ULA"
           ip6 saddr fe80::/10 tcp dport 8484 accept comment "omahab dashboard link-local"
+          # Caddy serves the same app hostnames on the LAN: HTTPS with the
+          # public Cloudflare-issued certs. Split-horizon DNS (Technitium
+          # forwarder zone) points LAN clients at the host LAN IP, so 80/443
+          # must be admitted from RFC1918, ULA and link-local sources. The
+          # comments deliberately do not match lanRuleComments (internal/
+          # controlplane/network.go): Close LAN only removes the :8484
+          # dashboard rules, HTTPS stays reachable — the dashboard is
+          # token-gated either way.
+          tcp dport { 80, 443 } ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } accept comment "caddy https LAN"
+          ip6 saddr fc00::/7 tcp dport { 80, 443 } accept comment "caddy https ULA"
+          ip6 saddr fe80::/10 tcp dport { 80, 443 } accept comment "caddy https link-local"
           ''}
           # Household DNS (Technitium): LAN-only TCP+UDP 53, never a public
           # resolver. Tailnet and container interfaces are refused first;
@@ -813,9 +924,61 @@ in
       };
     };
 
-    # Tailscale
+    # Tailscale. accept-dns=false: with it enabled Tailscale registers
+    # itself as an *exclusive* resolvconf interface (/run/resolvconf/
+    # exclusive/<metric> tailscale, verified live), which makes openresolv
+    # suppress every other nameserver including the local Technitium
+    # prepend below. Household resolution must not depend on the tailnet
+    # resolver, so the host stops consuming MagicDNS resolv.conf state.
+    # extraSetFlags runs `tailscale set` via the tailscaled-set oneshot
+    # unit (pinned nixpkgs has no services.tailscale.acceptDns option).
     services.tailscale.enable = true;
+    services.tailscale.extraSetFlags = [ "--accept-dns=false" ];
 
+    # Host resolver: prepend local Technitium (127.0.0.1:53) so omahabd
+    # itself resolves the split-horizon LAN answers it publishes, and keep
+    # DHCP/router DNS as fallback. name_servers matches openresolv's
+    # local_nameservers pattern (127.*), which orders it first; without
+    # resolv_conf_local_only=NO openresolv would drop the non-local
+    # fallback servers whenever a local one answers. Technitium is a
+    # default catalog bundle, so 127.0.0.1 has a resolver from first
+    # setup on; before it lands, glibc falls through to the next
+    # nameserver after its per-attempt timeout (default 5s), so the host
+    # never hard-depends on Technitium. The Quad9 forwarder is configured
+    # by IP (technitiumUpstream) to avoid a resolver bootstrap loop.
+    networking.resolvconf.extraConfig = ''
+      name_servers='127.0.0.1'
+      resolv_conf_local_only=NO
+    '';
+
+    # ------------------------------------------------------------------
+    # System resource model (README "Hardware and the resource model"):
+    # knobs either scale at runtime (zram %, oomd pressure) or are set
+    # to appliance-appropriate absolutes. One generation must fit the
+    # old 4-vCPU/19 GiB box and a significantly larger Proxmox VM.
+    # ------------------------------------------------------------------
+    # zram swap: half of RAM as zstd-compressed swap, no disk device
+    # involved. Absorbs memory spikes (immich ML, paperless OCR) without
+    # touching the data disk; compressed pages make the effective
+    # headroom far larger than the raw 50%.
+    zramSwap = {
+      enable = true;
+      memoryPercent = 50;
+    };
+    # journald caps at 1 GiB total (upstream default is 10% of the fs,
+    # which on a 650 GiB data disk would silently grow without bound).
+    services.journald.extraConfig = "SystemMaxUse=1G";
+    # qemu-guest-agent: udev-activated by the org.qemu.guest_agent.0
+    # virtio port, so on bare metal the unit simply never starts. On the
+    # Proxmox VM it lets the host see the guest IP and issue clean
+    # shutdowns instead of hard power-off.
+    services.qemuGuest.enable = true;
+    # oomd: userspace OOM supervision on system.slice — kills under
+    # sustained memory pressure (80% for 10s by the NixOS defaults)
+    # before the kernel panics. App-level OOMScoreAdjust ordering
+    # (nix/apps.nix) decides the victims: postgres/omahabd are
+    # protected; ML and batch workers are preferred.
+    systemd.oomd.enableSystemSlice = true;
     # Release ref for `omahab system upgrade` (nixos-rebuild --flake).
     environment.etc."omahab-release".text = cfg.releaseRef;
 

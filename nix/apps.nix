@@ -108,6 +108,113 @@ let
     requires = storageDepsFor bundle;
     after = storageDepsFor bundle;
   };
+
+  # ----------------------------------------------------------------
+  # Runtime-derived resource values. One generation must fit the old
+  # 4-vCPU/19 GiB box and a significantly larger Proxmox VM, so worker
+  # counts are computed at unit start from nproc + /proc/meminfo instead
+  # of being hardcoded larger. Each consumer unit runs the script below
+  # as a root ExecStartPre ("+" prefix) that writes an EnvironmentFile
+  # under /run/omahab-resenv/; systemd reads env files right before
+  # ExecStart, and file values override the unit's static Environment=
+  # (verified: module-set defaults like MACHINE_LEARNING_WORKERS=1
+  # never win against the generated file). /run is tmpfs — values
+  # recompute on every boot/restart, so resizing the VM changes them
+  # without a rebuild.
+  # ----------------------------------------------------------------
+  # Worker-count rule (documented in README "Hardware and the resource
+  # model"): every app is capped at 4 workers regardless of core count —
+  # beyond that, per-worker memory (immich ML models, litellm DB
+  # connections) grows faster than latency shrinks on a homelab.
+  # Shell body shared by every consumer's root ExecStartPre. Unit PATH
+  # on NixOS carries only coreutils/findutils/gnugrep/gnused/systemd —
+  # no awk — so MemTotal is parsed with read+case. The script is run
+  # with the "+" prefix (root) and writes an env file with the caller's
+  # VAR=expression lines; every worker knob is computed from nproc with
+  # a cap of 4 (per-worker memory grows faster than latency shrinks
+  # beyond that on a homelab).
+  resourceEnvScript = bundle: vars:
+    pkgs.writeShellScript "omahab-resource-env-${bundle}" ''
+      set -eu
+      NPROC=$(nproc 2>/dev/null || echo 1)
+      MEM_KB=0
+      while read -r k v _; do
+        case "$k" in
+          MemTotal:) MEM_KB=$v; break ;;
+        esac
+      done < /proc/meminfo
+      MEM_MB=$(( MEM_KB / 1024 ))
+      install -d -m 0755 /run/omahab-resenv
+      {
+${concatStringsSep "\n" (map (v: "        ${v}") vars)}
+      } > /run/omahab-resenv/${bundle}.env
+      chmod 0644 /run/omahab-resenv/${bundle}.env
+    '';
+
+  # Env-gated units are enabled at build time (wantedBy multi-user) but
+  # gated by ConditionPathExists: systemd evaluates the condition once at
+  # start; if the env file is absent (pre-enrollment boot), the unit stays
+  # "inactive (condition failed)" and nothing retriggers it later — live
+  # 2026-09: woodpecker stayed down after omahabd rendered its env. A
+  # systemd .path unit watching the env file starts the service the
+  # moment the gate appears (and after any later re-render, since omahabd
+  # atomically replaces the file via rename).
+  envGatedBundles = [
+    "pocket-id"
+    "forgejo"
+    "woodpecker-server"
+    "woodpecker-agent-docker"
+    "immich-server"
+    "paperless-web"
+    "paperless-consumer"
+    "paperless-scheduler"
+    "paperless-task-queue"
+    "paperless-secret-key"
+    "karakeep-web"
+    "karakeep-workers"
+    "ntfy-sh"
+    "technitium-dns-server"
+    "litellm"
+    "docker-hermes"
+    "docker-hindsight"
+  ];
+  envPathUnits = builtins.listToAttrs (
+    map (
+      unit:
+      let bundle = envBundleForUnit.${unit}; in
+      {
+        name = "omahab-env-${unit}";
+        value = {
+          description = "Start ${unit} when its ${bundle} env gate appears";
+          wantedBy = [ "multi-user.target" ];
+          pathConfig = {
+            PathExists = "${appEnv}/${bundle}.env";
+            Unit = "${unit}.service";
+          };
+        };
+      }
+    ) envGatedBundles
+  );
+  # Map unit name -> bundle env file that gates it (per gate "bundle" above).
+  envBundleForUnit = {
+    "pocket-id" = "pocket-id";
+    "forgejo" = "forgejo";
+    "woodpecker-server" = "woodpecker";
+    "woodpecker-agent-docker" = "woodpecker";
+    "immich-server" = "immich";
+    "paperless-web" = "paperless-ngx";
+    "paperless-consumer" = "paperless-ngx";
+    "paperless-scheduler" = "paperless-ngx";
+    "paperless-task-queue" = "paperless-ngx";
+    "paperless-secret-key" = "paperless-ngx";
+    "karakeep-web" = "karakeep";
+    "karakeep-workers" = "karakeep";
+    "ntfy-sh" = "ntfy";
+    "technitium-dns-server" = "technitium";
+    "litellm" = "litellm";
+    "docker-hermes" = "hermes";
+    "docker-hindsight" = "hindsight";
+  };
 in
 {
   config = mkIf cfg.enable {
@@ -222,6 +329,9 @@ in
         requires = [ "omahab-caddy-init.service" ];
         serviceConfig = {
           EnvironmentFile = [ "-${appEnv}/caddy.env" ];
+          # Front door: protected in OOM ordering so the proxy (and its
+          # admin-API config surface) survives pressure events.
+          OOMScoreAdjust = -500;
         };
       }
     ];
@@ -305,6 +415,18 @@ in
           PrivateUsers = mkForce false;
           StateDirectory = "woodpecker-agent-docker";
           StateDirectoryMode = "0700";
+          # Per-agent workflow concurrency = clamp(nproc/2, 1, 4)
+          # (WOODPECKER_MAX_WORKFLOWS, upstream default 1). Each workflow
+          # runs a podman build on this host: half the cores, capped.
+          # Runtime-derived; see resourceEnvScript.
+          ExecStartPre = [
+            "+${
+              resourceEnvScript "woodpecker-agent-docker" [
+                "W=$(( NPROC / 2 )); [ $W -lt 1 ] && W=1; [ $W -gt 4 ] && W=4 || true; echo \"WOODPECKER_MAX_WORKFLOWS=$W\""
+              ]
+            }"
+          ];
+          EnvironmentFile = [ "/run/omahab-resenv/woodpecker-agent-docker.env" ];
         };
       }
     ];
@@ -335,6 +457,24 @@ in
       environment.IMMICH_CONFIG_FILE = "${dataDir}/apps/immich/immich.json";
       serviceConfig.BindReadOnlyPaths = [ "${dataDir}/apps/immich/immich.json" ];
     } // (gate "immich");
+    # Immich ML workers = clamp(nproc/2, 1, 4) (MACHINE_LEARNING_WORKERS;
+    # module default 1, each worker loads its own model copy). Runtime-
+    # derived; see resourceEnvScript. The nixpkgs unit sets
+    # MACHINE_LEARNING_WORKERS="1" as static Environment= — the generated
+    # EnvironmentFile wins (read later). ML is a bursty, restartable
+    # workload: raise it as an OOM candidate so the killer takes it (and
+    # systemd restarts it) instead of postgres/caddy/omahabd.
+    systemd.services.immich-machine-learning.serviceConfig = {
+      ExecStartPre = [
+        "+${
+          resourceEnvScript "immich-machine-learning" [
+            "W=$(( NPROC / 2 )); [ $W -lt 1 ] && W=1; [ $W -gt 4 ] && W=4 || true; echo \"MACHINE_LEARNING_WORKERS=$W\""
+          ]
+        }"
+      ];
+      EnvironmentFile = [ "/run/omahab-resenv/immich-machine-learning.env" ];
+      OOMScoreAdjust = 600;
+    };
 
     # ----------------------------------------------------------------
     # Paperless-ngx — documents. Domain-gated (PAPERLESS_URL + OIDC JSON).
@@ -347,16 +487,57 @@ in
       environmentFile = "${appEnv}/paperless-ngx.env";
     };
     systemd.services."paperless-secret-key" = gate "paperless-ngx";
-    systemd.services.paperless-web = gate "paperless-ngx";
+    # Runtime-derived workers (see resourceEnvScript in the let block):
+    # celery concurrency = clamp(nproc-1, 1, 4) — leave one core for the
+    # web UI and OCR; paperless derives THREADS_PER_WORKER itself as
+    # floor(cores/workers), so only the worker count is raised. Web
+    # workers = clamp(nproc/4, 1, 4) (granian --workers, default 1).
+    systemd.services.paperless-web = mkMerge [
+      (gate "paperless-ngx")
+      {
+        serviceConfig = {
+          ExecStartPre = [
+            "+${
+              resourceEnvScript "paperless-web" [
+                "W=$(( NPROC / 4 )); [ $W -lt 1 ] && W=1; [ $W -gt 4 ] && W=4 || true; echo \"GRANIAN_WORKERS=$W\""
+              ]
+            }"
+          ];
+          EnvironmentFile = [ "/run/omahab-resenv/paperless-web.env" ];
+          OOMScoreAdjust = 250;
+        };
+      }
+    ];
     systemd.services.paperless-consumer = gate "paperless-ngx";
     systemd.services.paperless-scheduler = gate "paperless-ngx";
-    systemd.services."paperless-task-queue" = gate "paperless-ngx";
+    systemd.services."paperless-task-queue" = mkMerge [
+      (gate "paperless-ngx")
+      {
+        serviceConfig = {
+          ExecStartPre = [
+            "+${
+              resourceEnvScript "paperless-task-queue" [
+                "W=$(( NPROC > 1 ? NPROC - 1 : 1 )); [ $W -gt 4 ] && W=4 || true; echo \"PAPERLESS_TASK_WORKERS=$W\""
+              ]
+            }"
+          ];
+          EnvironmentFile = [ "/run/omahab-resenv/paperless-task-queue.env" ];
+          # Kernel OOM killer prefers bursty workers over the DB.
+          OOMScoreAdjust = 500;
+        };
+      }
+    ];
     # Gotenberg defaults to :3000, colliding with Forgejo (catalog probe,
     # native ports, and the omahabd fallback URL all expect Forgejo on 3000;
     # the loser serves nothing while systemd reports active). Paperless
     # derives PAPERLESS_TIKA_GOTENBERG_ENDPOINT from this port, so the move
     # follows automatically.
     services.gotenberg.port = 3001;
+    # OOM victim ordering for paperless's converter pair: tika (JVM)
+    # and gotenberg (Chromium/LibreOffice workers) are bursty and
+    # stateless — preferred victims ahead of every datastore/proxy.
+    systemd.services.tika.serviceConfig.OOMScoreAdjust = 600;
+    systemd.services.gotenberg.serviceConfig.OOMScoreAdjust = 600;
 
     # ----------------------------------------------------------------
     # Appliance scope: no shell-driven reconfiguration on the box (managed
@@ -404,9 +585,25 @@ in
     systemd.services.karakeep-web = {
       partOf = lib.mkForce [ ];
     } // gate "karakeep";
-    systemd.services.karakeep-workers = {
-      partOf = lib.mkForce [ ];
-    } // gate "karakeep";
+    # Crawler concurrency = clamp(nproc/2, 1, 4) (CRAWLER_NUM_WORKERS,
+    # upstream default 1). Runtime-derived; see resourceEnvScript.
+    systemd.services.karakeep-workers = mkMerge [
+      {
+        partOf = lib.mkForce [ ];
+        serviceConfig = {
+          ExecStartPre = [
+            "+${
+              resourceEnvScript "karakeep-workers" [
+                "W=$(( NPROC / 2 )); [ $W -lt 1 ] && W=1; [ $W -gt 4 ] && W=4 || true; echo \"CRAWLER_NUM_WORKERS=$W\""
+              ]
+            }"
+          ];
+          EnvironmentFile = [ "/run/omahab-resenv/karakeep-workers.env" ];
+          OOMScoreAdjust = 500;
+        };
+      }
+      (gate "karakeep")
+    ];
     # Remove obsolete PartOf (phantom aggregate).
     systemd.services.karakeep-init.partOf = lib.mkForce [ ];
     systemd.services.karakeep-browser.partOf = lib.mkForce [ ];
@@ -599,6 +796,20 @@ in
           Group = "litellm";
           SupplementaryGroups = [ "litellm-cfg" ];
           ReadOnlyPaths = [ litellmConfigDir ];
+          # Uvicorn workers = clamp(nproc/2, 1, 4) (litellm --num_workers
+          # reads the NUM_WORKERS env var at CLI parse; module default 1).
+          # Each worker holds its own DB connection pool — cap at 4.
+          # Runtime-derived; see resourceEnvScript. Also: the module's
+          # ExecStartPre list merges (lists concatenate), so the
+          # tokenizer-cache seed still runs.
+          ExecStartPre = [
+            "+${
+              resourceEnvScript "litellm" [
+                "W=$(( NPROC / 2 )); [ $W -lt 1 ] && W=1; [ $W -gt 4 ] && W=4 || true; echo \"NUM_WORKERS=$W\""
+              ]
+            }"
+          ];
+          EnvironmentFile = [ "/run/omahab-resenv/litellm.env" ];
           ExecStart = mkForce (
             let l = config.services.litellm; in
             # --use_prisma_db_push: without it the gateway takes the
@@ -802,7 +1013,72 @@ in
           ensureDBOwnership = true;
         }
       ];
+      # RAM-proportional memory tuning is computed at runtime (see
+      # omahab-postgres-tuning.service below) and included via
+      # include_if_exists: the build-time `postgres -C` config check
+      # would follow a normal include and fail on machines without the
+      # runtime file, so the directive itself parses (it is a valid
+      # setting) while the included file only needs to exist on the
+      # installed host.
+      settings.include_if_exists = "/etc/postgresql-omahab/tuning.conf";
     };
+    # Writes /etc/postgresql-omahab/tuning.conf from /proc/meminfo before
+    # postgres starts: shared_buffers = clamp(25% RAM, 128MB, 8GB),
+    # effective_cache_size = clamp(50% RAM, 256MB, 16GB) (planner
+    # hint, no allocation), maintenance_work_mem = clamp(5% RAM, 64MB,
+    # 512MB), work_mem = 8MB fixed (per-sort per-connection; bounded
+    # worst case with homelab connection counts). Values recompute at
+    # each boot, so the same generation fits a 19 GiB box and a larger
+    # Proxmox VM. Rewriting the same content does not restart postgres:
+    # the file is not store-tracked (no restart trigger).
+    systemd.services.omahab-postgres-tuning = {
+      description = "Omahab PostgreSQL memory tuning";
+      before = [ "postgresql.service" ];
+      partOf = [ "postgresql.service" ];
+      wantedBy = [ "multi-user.target" ];
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = pkgs.writeShellScript "omahab-postgres-tuning" ''
+          set -eu
+          # Unit PATH carries no awk (NixOS default PATH is
+          # coreutils/findutils/gnugrep/gnused/systemd only).
+          MEM_KB=0
+          while read -r k v _; do
+            case "$k" in
+              MemTotal:) MEM_KB=$v; break ;;
+            esac
+          done < /proc/meminfo
+          MEM_MB=$(( MEM_KB / 1024 ))
+          # clamp(v, lo, hi) with integer math
+          clamp() {
+            v=$1; lo=$2; hi=$3
+            [ "$v" -lt "$lo" ] && v=$lo
+            [ "$v" -gt "$hi" ] && v=$hi
+            echo "$v"
+          }
+          SHARED=$(( MEM_MB / 4 ))
+          SHARED=$(clamp "$SHARED" 128 8192)
+          ECS=$(( MEM_MB / 2 ))
+          ECS=$(clamp "$ECS" 256 16384)
+          MAINT=$(( MEM_MB / 20 ))
+          MAINT=$(clamp "$MAINT" 64 512)
+          install -d -m 0755 /etc/postgresql-omahab
+          tmp=$(mktemp /etc/postgresql-omahab/tuning.conf.XXXXXX)
+          {
+            echo "# Generated by omahab-postgres-tuning.service — do not edit."
+            echo "shared_buffers = ''${SHARED}MB"
+            echo "effective_cache_size = ''${ECS}MB"
+            echo "maintenance_work_mem = ''${MAINT}MB"
+            echo "work_mem = 8MB"
+          } > "$tmp"
+          chmod 0644 "$tmp"
+          chown root:postgres "$tmp"
+          mv -f "$tmp" /etc/postgresql-omahab/tuning.conf
+        '';
+      };
+    };
+    # Kernel OOM killer never takes postgres first.
+    systemd.services.postgresql.serviceConfig.OOMScoreAdjust = -900;
     # ----------------------------------------------------------------
     # Redis for LiteLLM cache.
     # ----------------------------------------------------------------
@@ -834,5 +1110,22 @@ in
     # service start, hence restart on credential change).
     systemd.services.restic-rest-server.unitConfig.ConditionPathExists = "/var/lib/omahab/machine-backups.htpasswd";
     systemd.services.restic-rest-server.serviceConfig.LoadCredential = [ "htpasswd:/var/lib/omahab/machine-backups.htpasswd" ];
+    # The htpasswd is created only at companion enrollment (after boot), so
+    # the same condition-never-rechecked gap as the env-gated units applies:
+    # a path unit starts the server the moment the first companion enrolls.
+    # Its not-running state before any companion is a clean skip, never a
+    # degraded state.
+    # Env-gate activation: start gated services when their env file appears,
+    # plus the companion-enrollment gate for the restic REST server.
+    systemd.paths = envPathUnits // {
+      "restic-rest-server-htpasswd" = {
+        description = "Start restic-rest-server when companion htpasswd appears";
+        wantedBy = [ "multi-user.target" ];
+        pathConfig = {
+          PathExists = "/var/lib/omahab/machine-backups.htpasswd";
+          Unit = "restic-rest-server.service";
+        };
+      };
+    };
   };
 }
