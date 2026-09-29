@@ -9,10 +9,9 @@ import (
 )
 
 func TestRenderConfig_ListenAndCloudflareIssuer(t *testing.T) {
-	token := "test-token-abc123"
 	domain := "example.com"
 	routes := []exposure.Route{{Hostname: "id.example.com", Upstream: "http://pocket-id:8080"}}
-	b, err := RenderConfig(domain, token, routes)
+	b, err := RenderConfig(domain, routes)
 	if err != nil {
 		t.Fatalf("RenderConfig failed: %v", err)
 	}
@@ -98,8 +97,12 @@ func TestRenderConfig_ListenAndCloudflareIssuer(t *testing.T) {
 	if provider["name"] != "cloudflare" {
 		t.Fatalf("provider name != cloudflare: %v", provider["name"])
 	}
-	if provider["api_token"] != token {
-		t.Fatalf("api_token mismatch: got %v want %v", provider["api_token"], token)
+	if provider["api_token"] != "{env.CF_API_TOKEN}" {
+		t.Fatalf("api_token must be the env placeholder, got %v", provider["api_token"])
+	}
+	// The rendered config must never contain a literal secret.
+	if strings.Contains(string(b), "test-token") {
+		t.Fatalf("rendered config contains a literal token: %s", b)
 	}
 	// Ensure listen appears in JSON string as specified
 	js := string(b)
@@ -108,22 +111,8 @@ func TestRenderConfig_ListenAndCloudflareIssuer(t *testing.T) {
 	}
 }
 
-func TestRenderConfig_RejectsEmptyToken(t *testing.T) {
-	_, err := RenderConfig("example.com", "", nil)
-	if err == nil {
-		t.Fatalf("expected error for empty token")
-	}
-	if !strings.Contains(err.Error(), "dns token is required") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	_, err = RenderConfig("example.com", "   ", nil)
-	if err == nil {
-		t.Fatalf("expected error for whitespace token")
-	}
-}
-
 func TestRenderConfig_SyncthingHostRewrite(t *testing.T) {
-	b, err := RenderConfig("example.com", "tok", []exposure.Route{
+	b, err := RenderConfig("example.com", []exposure.Route{
 		{Hostname: "sync.example.com", Upstream: "http://127.0.0.1:8384"},
 		{Hostname: "id.example.com", Upstream: "http://127.0.0.1:1411"},
 	})

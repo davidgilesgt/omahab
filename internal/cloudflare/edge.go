@@ -435,24 +435,11 @@ func (c *edgeClient) deleteRouteViaConfigWithRoutes(ctx context.Context, existin
 }
 
 func (c *edgeClient) applyRoutes(ctx context.Context, routes []exposure.Route) error {
-	// Render Caddy JSON
-	cfgBytes, err := edge.RenderConfig(c.domain, c.dnsToken, routes)
+	// Render Caddy JSON (the DNS-01 token lives in caddy's environment, not
+	// in the config; see edge.RenderConfig).
+	cfgBytes, err := edge.RenderConfig(c.domain, routes)
 	if err != nil {
-		// If token/domain missing for test, allow empty token fallback for rendering in tests where token not set but we still need to POST
-		// For testability, if dnsToken empty, use placeholder "test-token"
-		if strings.Contains(err.Error(), "dns token is required") {
-			// In test mode, use dummy token if not set
-			placeholder := c.dnsToken
-			if placeholder == "" {
-				placeholder = "test-token"
-			}
-			cfgBytes, err = edge.RenderConfig("example.test", placeholder, routes)
-			if err != nil {
-				return err
-			}
-		} else {
-			return err
-		}
+		return err
 	}
 	// Write to configPath with 0600
 	dir := filepath.Dir(c.configPath)

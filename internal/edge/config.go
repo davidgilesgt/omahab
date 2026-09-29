@@ -8,17 +8,16 @@ import (
 	"github.com/omahab/omahab/internal/exposure"
 )
 
-// RenderConfig produces the full Caddy JSON configuration for the given domain,
-// DNS token, and routes. The token is embedded directly (0600 on host, ro in
-// container) as required by the catalog note — never via Docker labels.
-// It generates apps.http.servers.main listening on :443 (+ :80) with one route
+// RenderConfig produces the full Caddy JSON configuration for the given domain
+// and routes. The Cloudflare DNS-01 token is never embedded: the config uses
+// the {env.CF_API_TOKEN} placeholder resolved by caddy at provision time from
+// its unit's EnvironmentFile, so config dumps (admin API /config/, the JSON
+// file itself, logs) never contain the secret. It generates
+// apps.http.servers.main listening on :443 (+ :80) with one route
 // per entry (@id "omahab-"+hostname, reverse_proxy to upstream) and a single
 // TLS automation policy using Cloudflare DNS-01.
-func RenderConfig(domain string, dnsToken string, routes []exposure.Route) ([]byte, error) {
+func RenderConfig(domain string, routes []exposure.Route) ([]byte, error) {
 	_ = domain // reserved for future default hostname; routes already carry FQDNs
-	if strings.TrimSpace(dnsToken) == "" {
-		return nil, fmt.Errorf("edge: dns token is required for Caddy TLS automation")
-	}
 	// Build Caddy routes
 	caddyRoutes := make([]any, 0, len(routes))
 	for _, r := range routes {
@@ -56,8 +55,8 @@ func RenderConfig(domain string, dnsToken string, routes []exposure.Route) ([]by
 			}
 		}
 		entry := map[string]any{
-			"@id":  "omahab-" + hostname,
-			"match": []any{map[string]any{"host": []string{hostname}}},
+			"@id":    "omahab-" + hostname,
+			"match":  []any{map[string]any{"host": []string{hostname}}},
 			"handle": []any{handler},
 		}
 		caddyRoutes = append(caddyRoutes, entry)
@@ -89,7 +88,7 @@ func RenderConfig(domain string, dnsToken string, routes []exposure.Route) ([]by
 										"dns": map[string]any{
 											"provider": map[string]any{
 												"name":      "cloudflare",
-												"api_token": dnsToken,
+												"api_token": "{env.CF_API_TOKEN}",
 											},
 										},
 									},

@@ -20,7 +20,7 @@ func TestEdgeListRoutes_FileFallback(t *testing.T) {
 	token := "test-token"
 	domain := "example.test"
 	initialRoute := exposure.Route{Hostname: "id.example.test", Upstream: "http://pocket-id:8080"}
-	cfgBytes, err := edge.RenderConfig(domain, token, []exposure.Route{initialRoute})
+	cfgBytes, err := edge.RenderConfig(domain, []exposure.Route{initialRoute})
 	if err != nil {
 		t.Fatalf("RenderConfig: %v", err)
 	}
