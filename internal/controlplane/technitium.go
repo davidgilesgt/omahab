@@ -32,7 +32,12 @@ var errTechnitiumAuthRequired = errors.New("technitium auth required: operator c
 
 const technitiumStateDir = "/var/lib/technitium-dns-server"
 const technitiumWebPort = 5380
-const technitiumUpstream = "https://dns.quad9.net/dns-query"
+
+// technitiumUpstream is Quad9 DoH by IP: the host resolver forwards through
+// Technitium (127.0.0.1) once household DNS is active, so a hostname here
+// would need the resolver to bootstrap the resolver. Quad9's certificate
+// covers 9.9.9.9.
+const technitiumUpstream = "https://9.9.9.9/dns-query"
 
 var technitiumBaseURL = "http://127.0.0.1:5380"
 
