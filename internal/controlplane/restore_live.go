@@ -75,7 +75,7 @@ func (b *Backend) runLiveRestore(opID string) {
 		for _, s := range scopes {
 			if s == backups.ScopeServerConfig {
 				return failRestoreOp(b.cfg.StateDir, &j,
-					"server-config restore requires the offline recovery executor (`omahab recovery apply`); live restore refuses it")
+					"server-config restore runs offline via `sudo omahab recovery apply` (or the setup-UI restore flow); live restore refuses it")
 			}
 		}
 		plan, err := b.planLiveRestore(ctx, manifest, scopes, staged)

@@ -15,7 +15,7 @@ import (
 
 	"github.com/omahab/omahab/internal/secrets"
 )
-//
+
 // The phrase unlocks the master-key recovery kit and phrase-derived
 // repositories; it does not unlock an unencrypted disk, replace SSH/passkeys,
 // or supply cloud account access. A phrase alone never authenticates: a valid
@@ -41,8 +41,14 @@ func seedFingerprint(seed [32]byte) string {
 }
 
 func readRecoveryKit(stateDir string) (recoveryKitFile, []byte, error) {
+	return readRecoveryKitFile(filepath.Join(stateDir, "recovery.kit"))
+}
+
+// readRecoveryKitFile loads and decodes a kit at an explicit path; the
+// offline recovery executor reads the staged copy from a snapshot.
+func readRecoveryKitFile(path string) (recoveryKitFile, []byte, error) {
 	var kit recoveryKitFile
-	raw, err := os.ReadFile(filepath.Join(stateDir, "recovery.kit"))
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return kit, nil, err
 	}

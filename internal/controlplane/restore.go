@@ -127,7 +127,7 @@ func (b *Backend) RestoreBackup(ctx context.Context, id domain.ID, req apitypes.
 		}
 		for _, sc := range scopes {
 			if sc == backups.ScopeServerConfig {
-				return domain.Backup{}, translateError(fmt.Errorf("%w: server-config restore requires the offline recovery executor (`omahab recovery apply`); live restore refuses it", store.ErrValidation))
+				return domain.Backup{}, translateError(fmt.Errorf("%w: server-config restore runs offline via `sudo omahab recovery apply` (or the setup-UI restore flow); live restore refuses it", store.ErrValidation))
 			}
 		}
 		return b.startLiveRestore(ctx, j)

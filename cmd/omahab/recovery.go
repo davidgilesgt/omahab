@@ -31,7 +31,7 @@ derived from the phrase. Keep the phrase offline (Bitwarden, 1Password, paper).`
 	}
 	cmd.AddCommand(newRecoveryShowFingerprintCmd())
 	cmd.AddCommand(newRecoveryUnlockCmd())
-	cmd.AddCommand(newRecoveryRotateCmd())
+	cmd.AddCommand(newRecoveryApplyCmd())
 	return cmd
 }
 
