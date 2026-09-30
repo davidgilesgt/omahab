@@ -592,7 +592,7 @@ func (b *Backend) buildManifest(ctx context.Context, scopes []string, plan *capt
 			FlakeLockSHA256: strings.TrimSpace(os.Getenv("OMAHAB_FLAKE_LOCK_SHA256")),
 			BundlesRepoRev:  bundlesRepoRev(ctx),
 		},
-		Scopes:  plan.scopeRecords(ctx, scopes, bundleByID, staging),
+		Scopes:  plan.scopeRecords(ctx, scopes, bundleByID, staging, b.customBundlesRepo()),
 		Omitted: plan.omitted,
 	}
 	if sf, _, err := loadStorageFile(storageJSONPath(b.cfg.StateDir)); err == nil {

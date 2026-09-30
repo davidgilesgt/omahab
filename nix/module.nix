@@ -47,6 +47,9 @@ let
     ) (builtins.attrNames entries);
   # Custom bundle ids from the `bundles` flake input (null = standalone
   # module use without the input). Same layout as the curated tree.
+  # Directories carrying the `disabled` marker (the loader's
+  # SetDisabled contract, internal/bundles) are excluded so a bundle
+  # that fails to build is never imported again.
   customBundleDirs =
     if bundles == null then [ ]
     else
@@ -54,7 +57,10 @@ let
         entries = builtins.readDir bundles;
       in
       builtins.filter (
-        d: entries.${d} == "directory" && builtins.pathExists (bundles + "/${d}/module.nix")
+        d:
+        entries.${d} == "directory"
+        && builtins.pathExists (bundles + "/${d}/module.nix")
+        && !builtins.pathExists (bundles + "/${d}/disabled")
       ) (builtins.attrNames entries);
   stateDir = "/var/lib/omahab";
   dataDir = "/srv/omahab";

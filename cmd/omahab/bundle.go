@@ -304,19 +304,39 @@ func writeBundleApplyOutcome(stateDir, opID, status, detail string) error {
 	return os.WriteFile(filepath.Join(dir, "outcome.json"), append(raw, '\n'), 0o600)
 }
 
+// panelAPIBase is the loopback panel API base URL probes use; overridable
+// in tests.
+var panelAPIBase = "http://127.0.0.1:8484"
+
 // probeCustomBundleHealth runs one bundle health check via the omahabd
 // API surface on the loopback panel (single probe, no grace: the unit
-// already started during switch).
+// already started during switch). The response is the applications list
+// envelope ({"items":[...]}); a malformed body, an empty result, or any
+// application not reporting health "healthy" fails the probe so the
+// apply health-gate rolls the generation back.
 func probeCustomBundleHealth(ctx context.Context, id string) error {
 	out, err := exec.Command("curl", "-sf", "-m", "10",
-		fmt.Sprintf("http://127.0.0.1:8484/api/v1/applications?bundle=%s", id)).Output()
+		fmt.Sprintf("%s/api/v1/applications?bundle=%s", panelAPIBase, id)).Output()
 	if err != nil {
 		return fmt.Errorf("probe bundle %q: %w", id, err)
 	}
 	var probe struct {
-		Status string `json:"status"`
+		Items []struct {
+			BundleID string `json:"bundle_id"`
+			Health   string `json:"health"`
+		} `json:"items"`
 	}
-	_ = json.Unmarshal(out, &probe)
+	if err := json.Unmarshal(out, &probe); err != nil {
+		return fmt.Errorf("probe bundle %q: decode applications response: %w", id, err)
+	}
+	if len(probe.Items) == 0 {
+		return fmt.Errorf("probe bundle %q: no application found for bundle", id)
+	}
+	for _, app := range probe.Items {
+		if strings.TrimSpace(app.Health) != "healthy" {
+			return fmt.Errorf("probe bundle %q: application %q reports health %q", id, app.BundleID, app.Health)
+		}
+	}
 	return nil
 }
 

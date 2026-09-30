@@ -18,7 +18,7 @@ import (
 // scopeRecords turns the resolved scope set into v2 manifest scope
 // records: paths, staged artifacts with sha256 hashes, bundle identity
 // for app scopes, and the server-config requirement on every app scope.
-func (p *capturePlan) scopeRecords(ctx context.Context, scopes []string, bundleByID map[string]apps.Bundle, staging string) []backups.ManifestScope {
+func (p *capturePlan) scopeRecords(ctx context.Context, scopes []string, bundleByID map[string]apps.Bundle, staging, customRepo string) []backups.ManifestScope {
 	var out []backups.ManifestScope
 	for _, name := range scopes {
 		rec := backups.ManifestScope{Name: name}
@@ -63,7 +63,7 @@ func (p *capturePlan) scopeRecords(ctx context.Context, scopes []string, bundleB
 					rec.Artifacts = nil
 				}
 				rec.SecretNames = bd.SecretSources
-				rec.Bundle = bundleRecord(bd, staging)
+				rec.Bundle = bundleRecord(bd, staging, customRepo)
 			}
 		}
 		out = append(out, rec)
@@ -153,15 +153,18 @@ func isDataScope(name string) bool {
 
 // bundleRecord records where an app scope's definition lives. Custom
 // bundles carry their definition files inside the snapshot at
-// bundles/<id>/; catalog bundles need none.
-func bundleRecord(bd apps.Bundle, staging string) *backups.ManifestBundle {
+// bundles/<id>/; catalog bundles need none. The repo argument is the
+// custom-bundles repo backing the capture (empty when none exists).
+func bundleRecord(bd apps.Bundle, staging, repo string) *backups.ManifestBundle {
 	def := filepath.Join(staging, "bundles", bd.ID)
 	if _, err := os.Stat(def); err != nil {
 		return &backups.ManifestBundle{ID: bd.ID, Source: string(bundles.SourceCatalog)}
 	}
 	rev := ""
-	if out, err := exec.Command("git", "-C", bundles.RepoPath, "rev-parse", "HEAD").Output(); err == nil {
-		rev = strings.TrimSpace(string(out))
+	if repo != "" {
+		if out, err := exec.Command("git", "-C", repo, "rev-parse", "HEAD").Output(); err == nil {
+			rev = strings.TrimSpace(string(out))
+		}
 	}
 	return &backups.ManifestBundle{
 		ID:             bd.ID,
@@ -175,16 +178,13 @@ func bundleRecord(bd apps.Bundle, staging string) *backups.ManifestBundle {
 // app bundle in the plan into staging bundles/<id>/ via git archive at
 // the repo HEAD. Catalog bundles contribute nothing.
 func (b *Backend) stageCustomBundleDefinitions(ctx context.Context, plan *capturePlan, staging string) error {
-	if !bundles.RepoExists() {
+	repo := b.customBundlesRepo()
+	if repo == "" {
 		return nil
 	}
 	custom := map[string]bool{}
-	if b.apps != nil {
-		for _, bd := range b.apps.CatalogBundles() {
-			if src, ok := bundleSourceByID(bd.ID); ok && src == string(bundles.SourceCustom) {
-				custom[bd.ID] = true
-			}
-		}
+	for _, id := range b.customBundleIDs(ctx) {
+		custom[id] = true
 	}
 	for _, bd := range plan.bundles {
 		if !custom[bd.ID] {
@@ -194,8 +194,10 @@ func (b *Backend) stageCustomBundleDefinitions(ctx context.Context, plan *captur
 		if err := os.MkdirAll(dest, 0o700); err != nil {
 			return err
 		}
-		// git archive HEAD bundles/<id>/ | tar -x -C <dest>
-		archive := exec.CommandContext(ctx, "git", "-C", bundles.RepoPath, "archive", "--format=tar", "HEAD", "bundles/"+bd.ID)
+		// git archive HEAD:<id>/ | tar -x -C <dest>: HEAD:<id>/ holds
+		// the bundle's committed files without the leading directory,
+		// so extraction lands the definition in staging/bundles/<id>.
+		archive := exec.CommandContext(ctx, "git", "-C", repo, "archive", "--format=tar", "HEAD:"+bd.ID+"/")
 		extract := exec.CommandContext(ctx, "tar", "-x", "-C", dest)
 		pipe, err := extract.StdinPipe()
 		if err != nil {
@@ -247,9 +249,49 @@ func joinErrors(errs ...error) error {
 	return fmt.Errorf("%s", msg.String())
 }
 
+// customBundlesRepo reports the custom-bundles repo directory backing
+// capture staging: the configured custom bundles dir when present, else
+// the fixed on-disk location when it exists.
+func (b *Backend) customBundlesRepo() string {
+	if dir := strings.TrimSpace(b.cfg.CustomBundlesDir); dir != "" {
+		if _, err := os.Stat(dir); err == nil {
+			return dir
+		}
+		return ""
+	}
+	if bundles.RepoExists() {
+		return bundles.RepoPath
+	}
+	return ""
+}
+
+// customBundleIDs lists the bundle ids the merged catalog assigns to the
+// custom repo (disabled bundles are excluded by LoadMerged), so captures
+// archive exactly the definitions the runtime serves.
+func (b *Backend) customBundleIDs(ctx context.Context) []string {
+	m, err := bundles.LoadMerged(ctx, b.cfg.CatalogPath, b.customBundlesRepo())
+	if err != nil {
+		return nil
+	}
+	var ids []string
+	for _, bdl := range m.Bundles() {
+		if bdl.Source == bundles.SourceCustom {
+			ids = append(ids, bdl.Bundle.ID)
+		}
+	}
+	return ids
+}
+
 // bundleSourceByID reports the loader-assigned source of a bundle id by
-// consulting the merged catalog when available; catalog entries that are
-// absent from the custom repo are curated.
-func bundleSourceByID(id string) (string, bool) {
+// consulting the merged catalog; ids absent from the merged view report
+// catalog (they are curated or unknown to the custom repo).
+func (b *Backend) bundleSourceByID(ctx context.Context, id string) (string, bool) {
+	m, err := bundles.LoadMerged(ctx, b.cfg.CatalogPath, b.customBundlesRepo())
+	if err != nil {
+		return "", false
+	}
+	if bdl, ok := m.Get(id); ok {
+		return string(bdl.Source), true
+	}
 	return string(bundles.SourceCatalog), false
 }

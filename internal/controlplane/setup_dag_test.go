@@ -3,6 +3,8 @@ package controlplane
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -145,6 +147,59 @@ func TestSetupDAGWaitingPropagatesBlocked(t *testing.T) {
 			if len(n.BlockedBy) == 0 || !strings.Contains(strings.Join(n.BlockedBy, ","), "preconditions") {
 				t.Fatalf("tunnel blocked_by = %v, want it to contain preconditions", n.BlockedBy)
 			}
+		}
+	}
+}
+
+// TestSetupDAGStorageBlocksCoreApps pins the storage edge: core_apps
+// (and every per-bundle install node behind it) must never run before
+// storage converged the bind mounts, so apps cannot initialize data on
+// the root filesystem below a missing external volume.
+func TestSetupDAGStorageBlocksCoreApps(t *testing.T) {
+	ctx := context.Background()
+	runner := &failingRunner{health: domain.HealthHealthy}
+	b := newDAGRunBackend(t, runner)
+	if _, err := b.secrets.Put(ctx, "platform-app", "cloudflare_dns", "dns-token"); err != nil {
+		t.Fatal(err)
+	}
+	// An active placement for a disk that is not present makes the
+	// storage node fail closed (missing-disk refusal). The native
+	// layout makes caddy:state a known volume so the placement is
+	// validated instead of silently skipped.
+	layout := fmt.Sprintf(`{"caddy":{"data":[{"name":"state","path":%q}],"databases":[],"quiesce_units":[]}}`,
+		filepath.Join(b.cfg.DataDir, "apps", "caddy"))
+	lf := filepath.Join(b.cfg.StateDir, "layout.json")
+	if err := os.WriteFile(lf, []byte(layout), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b.cfg.NativeLayoutPath = lf
+	uuid := "11111111-2222-3333-4444-555555555555"
+	sf := fmt.Sprintf(`{"version":2,"placements":[{"volume":"caddy:state","fs_uuid":%q}]}`, uuid)
+	if err := os.WriteFile(filepath.Join(b.cfg.StateDir, "storage.json"), []byte(sf), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.RunSetupReconciler(ctx); err != nil {
+		t.Fatalf("RunSetupReconciler: %v", err)
+	}
+	states := b.setupNodeStates(ctx)
+	if states["storage"] != setupNodeFailed {
+		t.Fatalf("storage = %q, want failed (states: %v)", states["storage"], states)
+	}
+	if states["core_apps"] != setupNodeBlocked {
+		t.Fatalf("core_apps = %q, want blocked behind storage (states: %v)", states["core_apps"], states)
+	}
+	for _, n := range b.setupNodesList(ctx) {
+		if n.ID == "core_apps" {
+			blocked := strings.Join(n.BlockedBy, ",")
+			if !strings.Contains(blocked, "storage") {
+				t.Fatalf("core_apps blocked_by = %v, want it to contain storage", n.BlockedBy)
+			}
+		}
+	}
+	// No app unit was deployed while storage was failing.
+	for _, id := range runner.deploys {
+		if id != "" {
+			t.Fatalf("deploy ran before storage converged: %v", runner.deploys)
 		}
 	}
 }

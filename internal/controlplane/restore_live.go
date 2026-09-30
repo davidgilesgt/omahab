@@ -217,6 +217,10 @@ type livePlan struct {
 	stagedFiles map[string]string
 	// databases maps db name -> staged pgdump path.
 	databases map[string]string
+	// databaseHashes maps db name -> the manifest-recorded SHA-256 of
+	// its dump; restoreSelectedDatabases re-verifies each dump against
+	// it right before pg_restore.
+	databaseHashes map[string]string
 	// safety holds pre-restore file copies: dest -> safety copy.
 	safetyFiles map[string]string
 	// safetyDBs holds pre-restore pg dumps: db -> safety dump.
@@ -232,12 +236,13 @@ type livePlan struct {
 
 func (b *Backend) planLiveRestore(ctx context.Context, manifest backups.SnapshotManifest, scopes []string, staged string) (*livePlan, error) {
 	plan := &livePlan{
-		stagedFiles: map[string]string{},
-		databases:   map[string]string{},
-		safetyFiles: map[string]string{},
-		safetyDBs:   map[string]string{},
-		manifest:    manifest,
-		staged:      staged,
+		stagedFiles:    map[string]string{},
+		databases:      map[string]string{},
+		databaseHashes: map[string]string{},
+		safetyFiles:    map[string]string{},
+		safetyDBs:      map[string]string{},
+		manifest:       manifest,
+		staged:         staged,
 	}
 	byScope := map[string]backups.ManifestScope{}
 	for _, s := range manifest.Scopes {
@@ -329,7 +334,26 @@ func (b *Backend) planLiveRestore(ctx context.Context, manifest backups.Snapshot
 			if dump == "" {
 				return nil, fmt.Errorf("%w: staged dump missing for database %q", store.ErrValidation, db.Name)
 			}
+			// The v2 manifest's integrity contract covers database
+			// dumps too: the manifest-declared file must name the
+			// located dump (which findStagedDump bounded inside the
+			// staged tree) and its content hash must match the
+			// recorded SHA-256 before anything live changes. A dump
+			// the manifest does not vouch for fails the restore here.
+			if filepath.Base(dump) != filepath.Base(filepath.FromSlash(db.File)) {
+				return nil, fmt.Errorf("%w: database %q: manifest declares dump %q but staged dump is %q",
+					store.ErrValidation, db.Name, db.File, filepath.Base(dump))
+			}
+			got, err := backups.SHA256File(dump)
+			if err != nil {
+				return nil, fmt.Errorf("%w: database %q: hash staged dump: %v", store.ErrValidation, db.Name, err)
+			}
+			if !strings.EqualFold(got, strings.TrimSpace(db.SHA256)) {
+				return nil, fmt.Errorf("%w: database %q: staged dump sha256 mismatch (staged %s, manifest %s)",
+					store.ErrValidation, db.Name, got, db.SHA256)
+			}
 			plan.databases[db.Name] = dump
+			plan.databaseHashes[db.Name] = strings.TrimSpace(db.SHA256)
 		}
 		if scope.Bundle != nil && scope.Bundle.Source == "custom" {
 			plan.customBundles = append(plan.customBundles, scope.Bundle)
@@ -489,8 +513,21 @@ func promoteStagedFiles(plan *livePlan, staged string) error {
 }
 
 func restoreSelectedDatabases(ctx context.Context, plan *livePlan, staged string) error {
-	_ = staged
 	for dbName, dump := range plan.databases {
+		// Re-verify the staged dump against the manifest hash right
+		// before pg_restore: plan and restore can be separated by the
+		// bundle-apply switch (which restarts the daemon), so the dump
+		// is never trusted from plan time alone.
+		if want, ok := plan.databaseHashes[dbName]; ok {
+			got, err := backups.SHA256File(dump)
+			if err != nil {
+				return fmt.Errorf("database %q: hash staged dump: %w", dbName, err)
+			}
+			if !strings.EqualFold(got, want) {
+				return fmt.Errorf("database %q: staged dump sha256 mismatch (staged %s, manifest %s); refusing pg_restore",
+					dbName, got, want)
+			}
+		}
 		out, err := exec.CommandContext(ctx, "pg_restore", "--clean", "--if-exists", "--exit-on-error",
 			"--dbname="+dbName, dump).CombinedOutput()
 		if err != nil {

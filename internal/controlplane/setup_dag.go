@@ -161,9 +161,11 @@ func (b *Backend) setupNodeStates(ctx context.Context) map[string]string {
 //	tunnel → exposure
 //	  tunnel provisions cloudflared; exposure publishes public routes
 //	  through it.
-//	secrets → core_apps
+//	secrets, storage → core_apps
 //	  the per-bundle native units gate on the appenv files that secrets
-//	  (renderNativeAppEnv inside the shared core_apps node) materializes.
+//	  (renderNativeAppEnv inside the shared core_apps node) materializes,
+//	  and they write into the bind mounts storage provisioned — apps
+//	  never start before their volumes exist.
 //	core_apps → core_apps:<bundle> (per default bundle)
 //	  the shared node does the idempotent bootstrap (caddy JSON, docker
 //	  network, immich stub, appenv render); every per-bundle install node
@@ -257,7 +259,10 @@ func (b *Backend) buildSetupDAG(ctx context.Context) (*flow.Workflow, []*setupNo
 	coreApps := newNode("core_apps", func(ctx context.Context) error {
 		return b.setupCoreAppsShared(ctx)
 	})
-	w.Add(flow.Step(coreApps).DependsOn(secrets))
+	// storage must converge before any app node: the per-bundle native
+	// units write into bind-mounted volumes, so an app can never
+	// initialize data on the root filesystem below a missing mount.
+	w.Add(flow.Step(coreApps).DependsOn(secrets, storage))
 
 	coreByID := map[string]*setupNode{}
 	var coreNodes []*setupNode

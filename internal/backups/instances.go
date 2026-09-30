@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -50,6 +51,11 @@ type InstanceDirLister interface {
 // repository root.
 const manifestDumpPath = "/" + backupStagingDir + "/" + manifestFileName
 
+// instanceDirRe accepts exactly one safe path component: an alphanumeric
+// first character, then alphanumerics, dots, underscores, or dashes.
+// Slash/dotdot traversal can never name a different repository.
+var instanceDirRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
 // JoinInstanceLocation appends one instance directory to a root location:
 // sftp URLs join the path component (port and credentials preserved),
 // local paths append below the root. The result is the exact repository
@@ -60,7 +66,7 @@ func JoinInstanceLocation(root, instanceID string) (string, error) {
 	if root == "" {
 		return "", fmt.Errorf("%w: repository root location is required", ErrInvalid)
 	}
-	if instanceID == "" || strings.HasPrefix(instanceID, ".") || strings.HasPrefix(instanceID, "/") {
+	if !instanceDirRe.MatchString(instanceID) {
 		return "", fmt.Errorf("%w: invalid instance directory %q", ErrInvalid, instanceID)
 	}
 	if strings.HasPrefix(strings.ToLower(root), "sftp://") {
@@ -111,7 +117,10 @@ func ListInstances(ctx context.Context, d InstanceDirLister, runner Runner, repo
 	seen := map[string]bool{}
 	for _, id := range dirs {
 		id = strings.TrimSpace(id)
-		if id == "" || seen[id] {
+		// Enumerated names must be single safe path components; a
+		// hostile listing can never redirect the probe at another
+		// repository.
+		if !instanceDirRe.MatchString(id) || seen[id] {
 			continue
 		}
 		seen[id] = true

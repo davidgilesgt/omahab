@@ -12,15 +12,16 @@ import (
 
 	_ "modernc.org/sqlite"
 )
+
 // StagingReport is the isolated validation outcome for one extracted tree.
 type StagingReport struct {
 	// Manifest is the validated v2 manifest read from the fixed staging
 	// path. Present only when the tree carries one.
-	Manifest *SnapshotManifest `json:"-"`
+	Manifest      *SnapshotManifest `json:"-"`
 	SQLiteChecked int
-	SQLiteOK int
-	PGChecked int
-	PGOK int
+	SQLiteOK      int
+	PGChecked     int
+	PGOK          int
 	Files         int64
 	Bytes         int64
 }
@@ -111,25 +112,39 @@ func ReadStagedManifest(target string) (SnapshotManifest, error) {
 
 // verifyManifestArtifacts checks every recorded artifact hash against
 // the staged content. Artifact paths are relative to the manifest's
-// directory and are refused when they escape the staging tree.
+// directory and are refused when they escape the staging tree. Database
+// dumps get the same treatment through verifyStagedManifestFile.
 func verifyManifestArtifacts(target string, m SnapshotManifest) error {
 	for _, scope := range m.Scopes {
-		base := filepath.Join(target, backupStagingDir)
 		for _, a := range scope.Artifacts {
-			path := filepath.Join(base, filepath.FromSlash(a.File))
-			if !strings.HasPrefix(filepath.Clean(path), filepath.Clean(base)+string(filepath.Separator)) &&
-				filepath.Clean(path) != filepath.Clean(base) {
-				return fmt.Errorf("%w: scope %s artifact %q escapes staging", ErrInvalid, scope.Name, a.File)
-			}
-			got, err := SHA256File(path)
-			if err != nil {
-				return fmt.Errorf("%w: scope %s artifact %s: %v", ErrInvalid, scope.Name, a.File, err)
-			}
-			if !strings.EqualFold(got, a.SHA256) {
-				return fmt.Errorf("%w: scope %s artifact %s sha256 mismatch: staged %s, manifest %s",
-					ErrInvalid, scope.Name, a.File, got, a.SHA256)
+			if err := verifyStagedManifestFile(target, scope.Name, "artifact", a.File, a.SHA256); err != nil {
+				return err
 			}
 		}
+		for _, d := range scope.Databases {
+			if err := verifyStagedManifestFile(target, scope.Name, "database", d.File, d.SHA256); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// verifyStagedManifestFile is the scope-aware core of the hash check;
+func verifyStagedManifestFile(target, scope, kind, file, sha string) error {
+	base := filepath.Join(target, backupStagingDir)
+	path := filepath.Join(base, filepath.FromSlash(file))
+	if !strings.HasPrefix(filepath.Clean(path), filepath.Clean(base)+string(filepath.Separator)) &&
+		filepath.Clean(path) != filepath.Clean(base) {
+		return fmt.Errorf("%w: scope %s %s %q escapes staging", ErrInvalid, scope, kind, file)
+	}
+	got, err := SHA256File(path)
+	if err != nil {
+		return fmt.Errorf("%w: scope %s %s %s: %v", ErrInvalid, scope, kind, file, err)
+	}
+	if !strings.EqualFold(got, sha) {
+		return fmt.Errorf("%w: scope %s %s %s sha256 mismatch: staged %s, manifest %s",
+			ErrInvalid, scope, kind, file, got, sha)
 	}
 	return nil
 }
@@ -282,4 +297,3 @@ func checkPGDumps(ctx context.Context, dumps []string) (checked, ok int, skipped
 	}
 	return checked, ok, "", nil
 }
-

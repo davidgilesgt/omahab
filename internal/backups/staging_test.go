@@ -3,6 +3,7 @@ package backups
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,6 +90,57 @@ func TestValidateStagingRejectsArtifactSHA256Mismatch(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("mismatch must name %s: %v", want, err)
 		}
+	}
+}
+
+// TestValidateStagingRejectsDatabaseSHA256Mismatch pins the v2 integrity
+// contract for database dumps: scope.Databases hashes are verified against
+// the staged content exactly like artifacts.
+func TestValidateStagingRejectsDatabaseSHA256Mismatch(t *testing.T) {
+	dir := t.TempDir()
+	staging := filepath.Join(dir, backupStagingDir)
+	stagedServerConfigTree(t, dir)
+	dump := filepath.Join(staging, "immich.pgdump")
+	if err := os.WriteFile(dump, []byte("pgdump-bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Rebuild the manifest with a database record vouching for different
+	// content than what was staged.
+	raw, err := os.ReadFile(filepath.Join(staging, manifestFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m SnapshotManifest
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	m.Scopes[0].Databases = []ManifestDatabase{{
+		Name: "immich", File: "immich.pgdump", SHA256: strings.Repeat("c", 64),
+	}}
+	if err := WriteManifest(staging, m); err != nil {
+		t.Fatal(err)
+	}
+	_, err = ValidateStaging(context.Background(), dir)
+	if err == nil {
+		t.Fatal("expected database sha256 mismatch rejection")
+	}
+	for _, want := range []string{"database", "immich.pgdump", "mismatch"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("mismatch must name %s: %v", want, err)
+		}
+	}
+	// The matching hash must pass (dump validation itself is skipped
+	// when pg binaries are absent, but the hash check runs).
+	sum, err := SHA256File(dump)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Scopes[0].Databases[0].SHA256 = sum
+	if err := WriteManifest(staging, m); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ValidateStaging(context.Background(), dir); err != nil {
+		t.Fatalf("matching database hash must validate: %v", err)
 	}
 }
 
