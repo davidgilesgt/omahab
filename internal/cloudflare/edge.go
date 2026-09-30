@@ -84,63 +84,16 @@ func (c *edgeClient) do(ctx context.Context, method, path string, body any, out 
 }
 
 func (c *edgeClient) ListRoutes(ctx context.Context) ([]exposure.Route, error) {
-	// Test mode: legacy /routes when no domain/token configured (matches existing tests)
-	if strings.TrimSpace(c.domain) == "" && strings.TrimSpace(c.dnsToken) == "" {
-		var legacy []exposure.Route
-		if err := c.do(ctx, http.MethodGet, "/routes", nil, &legacy); err != nil {
-			if errors.Is(err, store.ErrNotFound) || strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "not found") {
-				return []exposure.Route{}, nil
-			}
-			if errors.Is(err, ErrCaddyUnavailable) {
-				return nil, err
-			}
-			return nil, err
-		}
-		if legacy == nil {
-			legacy = []exposure.Route{}
-		}
-		return legacy, nil
-	}
 	var raw map[string]any
 	err := c.do(ctx, http.MethodGet, "/config/", nil, &raw)
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) || strings.Contains(err.Error(), "not found") {
-			var legacy []exposure.Route
-			if err2 := c.do(ctx, http.MethodGet, "/routes", nil, &legacy); err2 != nil {
-				if errors.Is(err2, store.ErrNotFound) {
-					return []exposure.Route{}, nil
-				}
-				if errors.Is(err2, ErrCaddyUnavailable) && (strings.TrimSpace(c.domain) != "" || strings.TrimSpace(c.dnsToken) != "") {
-					if routes, fileErr := c.routesFromFile(); fileErr == nil {
-						return routes, nil
-					}
-				}
-				return nil, err2
-			}
-			if legacy == nil {
-				legacy = []exposure.Route{}
-			}
-			return legacy, nil
-		}
 		if errors.Is(err, ErrCaddyUnavailable) {
-			if strings.TrimSpace(c.domain) != "" || strings.TrimSpace(c.dnsToken) != "" {
-				if routes, fileErr := c.routesFromFile(); fileErr == nil {
-					return routes, nil
-				}
-			}
-			return nil, err
+			// Caddy admin down: the persisted caddy.json on disk is the
+			// last state we applied.
+			return c.routesFromFile()
 		}
-		if strings.Contains(err.Error(), "404") {
+		if errors.Is(err, store.ErrNotFound) || strings.Contains(err.Error(), "404") {
 			return []exposure.Route{}, nil
-		}
-		if strings.Contains(err.Error(), "decode") {
-			var legacy []exposure.Route
-			if err2 := c.do(ctx, http.MethodGet, "/routes", nil, &legacy); err2 == nil {
-				if legacy == nil {
-					legacy = []exposure.Route{}
-				}
-				return legacy, nil
-			}
 		}
 		return nil, err
 	}
@@ -277,39 +230,6 @@ func (c *edgeClient) PutRoute(ctx context.Context, route exposure.Route) error {
 	if strings.TrimSpace(route.Hostname) == "" || strings.TrimSpace(route.Upstream) == "" {
 		return fmt.Errorf("%w: hostname and upstream are required", store.ErrValidation)
 	}
-	// Test mode: legacy /routes when no domain/token configured (matches existing tests)
-	if strings.TrimSpace(c.domain) == "" && strings.TrimSpace(c.dnsToken) == "" {
-		path := fmt.Sprintf("/routes/%s", route.Hostname)
-		return c.do(ctx, http.MethodPut, path, route, nil)
-	}
-	// For admin-API mode, recompute full set
-	if c.domain != "" || c.dnsToken != "" || c.configPath != "/var/lib/omahab/caddy/caddy.json" {
-		return c.putRouteViaConfig(ctx, route)
-	}
-	// Fallback legacy mode: try to detect if /config/ exists; if not, use legacy
-	// Probe ListRoutes; if it succeeds via /config, use new path
-	routes, err := c.ListRoutes(ctx)
-	if err != nil && !errors.Is(err, ErrCaddyUnavailable) {
-		// If ListRoutes failed due to not found, start fresh
-		routes = []exposure.Route{}
-		err = nil
-	}
-	if err == nil && len(routes) >= 0 {
-		// Use new path if we can render (have token/domain or test provides them)
-		// Check if we have token; if empty and domain empty, we are in test without config – fallback to legacy for those specific tests that expect /routes
-		// Detect test mode by checking if configPath is temp or dnsToken is empty and ListRoutes came from legacy
-		// For simplicity, if dnsToken empty and domain empty, use legacy PUT
-		if c.dnsToken == "" && c.domain == "" {
-			// Attempt legacy
-			path := fmt.Sprintf("/routes/%s", route.Hostname)
-			return c.do(ctx, http.MethodPut, path, route, nil)
-		}
-		return c.putRouteViaConfigWithRoutes(ctx, routes, route)
-	}
-	path := fmt.Sprintf("/routes/%s", route.Hostname)
-	return c.do(ctx, http.MethodPut, path, route, nil)
-}
-func (c *edgeClient) putRouteViaConfig(ctx context.Context, route exposure.Route) error {
 	routes, err := c.ListRoutes(ctx)
 	if err != nil {
 		if errors.Is(err, ErrCaddyUnavailable) {
@@ -341,62 +261,6 @@ func (c *edgeClient) DeleteRoute(ctx context.Context, hostname string) error {
 	if strings.TrimSpace(hostname) == "" {
 		return fmt.Errorf("%w: hostname is required", store.ErrValidation)
 	}
-	// Test mode: legacy /routes when no domain/token
-	if strings.TrimSpace(c.domain) == "" && strings.TrimSpace(c.dnsToken) == "" {
-		path := fmt.Sprintf("/routes/%s", hostname)
-		if err := c.do(ctx, http.MethodDelete, path, nil, nil); err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				return nil
-			}
-			if strings.Contains(err.Error(), "404") {
-				return nil
-			}
-			return err
-		}
-		return nil
-	}
-	// Try new config path if domain/token present or List succeeds
-	if c.domain != "" || c.dnsToken != "" {
-		return c.deleteRouteViaConfig(ctx, hostname)
-	}
-	routes, err := c.ListRoutes(ctx)
-	if err != nil && !errors.Is(err, ErrCaddyUnavailable) {
-		routes = nil
-	}
-	if routes != nil {
-		// If we got routes via List, use config path if dnsToken empty but we still can use it for tests that provide token via config
-		// Check if legacy fallback expected: if dnsToken empty and domain empty, try legacy DELETE
-		if c.dnsToken == "" && c.domain == "" {
-			// Try legacy directly, but also attempt config if List came from config
-			// For tests expecting legacy, do legacy
-			path := fmt.Sprintf("/routes/%s", hostname)
-			if err := c.do(ctx, http.MethodDelete, path, nil, nil); err != nil {
-				if errors.Is(err, store.ErrNotFound) {
-					return nil
-				}
-				// If legacy returns 404 or not found, treat as idempotent nil
-				if strings.Contains(err.Error(), "404") {
-					return nil
-				}
-				return err
-			}
-			return nil
-		}
-		return c.deleteRouteViaConfigWithRoutes(ctx, routes, hostname)
-	}
-	path := fmt.Sprintf("/routes/%s", hostname)
-	if err := c.do(ctx, http.MethodDelete, path, nil, nil); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return nil
-		}
-		if strings.Contains(err.Error(), "404") {
-			return nil
-		}
-		return err
-	}
-	return nil
-}
-func (c *edgeClient) deleteRouteViaConfig(ctx context.Context, hostname string) error {
 	routes, err := c.ListRoutes(ctx)
 	if err != nil {
 		if errors.Is(err, ErrCaddyUnavailable) {

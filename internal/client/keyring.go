@@ -90,9 +90,6 @@ func isNotFound(err error) bool {
 	return strings.Contains(msg, "not found") || strings.Contains(msg, "no such") || err == keyring.ErrNotFound
 }
 
-// isSecretServiceUnavailable kept for backwards compat; delegates to isKeyringUnavailable.
-func isSecretServiceUnavailable(err error) bool { return isKeyringUnavailable(err) }
-
 var _ CredentialStore = (*KeyringStore)(nil)
 
 // CredentialDeviceAccount is the keyring account for the companion device token.

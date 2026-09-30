@@ -292,8 +292,6 @@ type darwinShellInclude struct{}
 func (d *darwinShellInclude) EnsureShellInclude() error {
 	envFile := EnvironmentFilePath()
 	includeLine := fmt.Sprintf(`[ -f "%s" ] && set -a && . "%s" && set +a # omahab-agent-tools`, envFile, envFile)
-	// Legacy fixed path line for compatibility
-	legacy := `[ -f "$HOME/.config/omahab/agent-tools.env" ] && set -a && . "$HOME/.config/omahab/agent-tools.env" && set +a # omahab-agent-tools`
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		home = os.Getenv("HOME")
@@ -334,12 +332,7 @@ func (d *darwinShellInclude) EnsureShellInclude() error {
 			fishLine := fmt.Sprintf("test -f %s; and set -a; and source %s; and set +a # omahab-agent-tools\n", envFile, envFile)
 			_, _ = f.WriteString(fishLine)
 		} else {
-			// Prefer legacy line if envFile is the default darwin path
-			line := includeLine
-			if envFile == filepath.Join(home, ".config", "omahab", "agent-tools.env") {
-				line = legacy
-			}
-			_, _ = f.WriteString(line + "\n")
+			_, _ = f.WriteString(includeLine + "\n")
 		}
 		_ = f.Close()
 	}
@@ -503,6 +496,7 @@ func parseFileAssignments(data []byte) map[string]string {
 	}
 	return out
 }
+
 // fetchBundle performs GET /api/v1/companion/environment with If-None-Match and device-token auth.
 // Returns bundle, ETag, notModified, error. Never includes values in errors.
 func (m *EnvironmentManager) fetchBundle(ctx context.Context, ifNoneMatch string) (*EnvironmentBundle, string, bool, error) {
@@ -804,4 +798,3 @@ func parseEnvFileKeys(path string) []string {
 	sort.Strings(keys)
 	return keys
 }
-

@@ -15,6 +15,7 @@ import (
 
 	"github.com/omahab/omahab/internal/domain"
 )
+
 var (
 	ErrInstanceMismatch = errors.New("server instance mismatch")
 	ErrPublicFallback   = errors.New("public fallback rejected")
@@ -342,15 +343,6 @@ func (c *RemoteClient) EnrollCompanion(ctx context.Context, code string) (*Enrol
 	return &resp, nil
 }
 
-// EnrollCompanionToken is a convenience wrapper that returns only the token string (legacy).
-func (c *RemoteClient) EnrollCompanionToken(ctx context.Context, code string) (string, error) {
-	res, err := c.EnrollCompanion(ctx, code)
-	if err != nil {
-		return "", err
-	}
-	return res.Token, nil
-}
-
 // UpdateDeviceInfo reports device identity fields via PUT /api/v1/companion/devices/me (device auth).
 func (c *RemoteClient) UpdateDeviceInfo(ctx context.Context, info DeviceHeartbeatInfo) error {
 	auth, err := c.deviceAuthHeader()
@@ -523,11 +515,11 @@ func (c *RemoteClient) CreateCompanionSyncFolder(ctx context.Context, name, loca
 		return nil, ErrNotAuthenticated
 	}
 	body := map[string]any{
-		"name":           name,
-		"local_path":     localPath,
-		"share_with_ai":  shareWithAI,
-		"device_id":      deviceID,
-		"device_name":    deviceName,
+		"name":          name,
+		"local_path":    localPath,
+		"share_with_ai": shareWithAI,
+		"device_id":     deviceID,
+		"device_name":   deviceName,
 	}
 	b, _ := json.Marshal(body)
 	var out domain.SyncFolder

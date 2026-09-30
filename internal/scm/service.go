@@ -951,50 +951,6 @@ func (s *Service) deprovision(ctx context.Context, projectID domain.ID, preserve
 	return nil
 }
 
-// ReconcileLegacySentinels repairs rows created by the old no-op clients.
-// It identifies only the sentinel clone prefix https://git.example.invalid/,
-// deletes its synthetic CI row, marks the repository integration error,
-// and rewrites the sentinel to git.<domain>. Non-sentinel rows are untouched.
-func (s *Service) ReconcileLegacySentinels(ctx context.Context, domainName string) error {
-	if strings.TrimSpace(domainName) == "" {
-		return nil
-	}
-	domainName = strings.TrimSpace(strings.ToLower(domainName))
-	gitHost := "git." + domainName
-	rows, err := s.db.QueryContext(ctx, `SELECT id, project_id, clone_url FROM scm_repositories WHERE clone_url LIKE 'https://git.example.invalid/%'`)
-	if err != nil {
-		return fmt.Errorf("query sentinel repos: %w", err)
-	}
-	defer rows.Close()
-	type sentinel struct {
-		id        string
-		projectID string
-		cloneURL  string
-	}
-	var sentinels []sentinel
-	for rows.Next() {
-		var id, pid, curl string
-		if err := rows.Scan(&id, &pid, &curl); err != nil {
-			return err
-		}
-		sentinels = append(sentinels, sentinel{id: id, projectID: pid, cloneURL: curl})
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, ss := range sentinels {
-		_, _ = s.db.ExecContext(ctx, `DELETE FROM scm_ci_repos WHERE repository_id=?`, ss.id)
-		_, _ = s.db.ExecContext(ctx, `UPDATE scm_repositories SET observed_state='error', observed_detail='legacy sentinel requires reprovisioning', updated_at=? WHERE id=?`, time.Now().UTC().Format(time.RFC3339Nano), ss.id)
-		_, _ = s.db.ExecContext(ctx, `UPDATE projects SET repository_url = REPLACE(repository_url, 'https://git.example.invalid', 'https://`+gitHost+`') WHERE id=? AND repository_url LIKE 'https://git.example.invalid%'`, ss.projectID)
-		newClone := strings.Replace(ss.cloneURL, "https://git.example.invalid", "https://"+gitHost, 1)
-		if newClone != ss.cloneURL {
-			_, _ = s.db.ExecContext(ctx, `UPDATE scm_repositories SET clone_url=?, updated_at=? WHERE id=?`, newClone, time.Now().UTC().Format(time.RFC3339Nano), ss.id)
-		}
-	}
-	_, _ = s.db.ExecContext(ctx, `UPDATE projects SET repository_url = REPLACE(repository_url, 'https://git.example.invalid', 'https://`+gitHost+`') WHERE repository_url LIKE 'https://git.example.invalid%'`)
-	return nil
-}
-
 // Status returns the combined desired/observed SCM state for a project.
 func (s *Service) Status(ctx context.Context, projectID domain.ID) (*Status, error) {
 	if strings.TrimSpace(string(projectID)) == "" {

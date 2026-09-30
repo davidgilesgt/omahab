@@ -44,7 +44,6 @@ type SocketError struct {
 	Message string `json:"message"`
 }
 
-
 // DaemonStatus is the payload returned by the "status" action and used by the
 // Omarchy shell plugin (Quickshell QML).
 type DaemonStatus struct {
@@ -73,6 +72,7 @@ type DaemonStatus struct {
 	BackupLastSnapshot *time.Time `json:"backup_last_snapshot,omitempty"`
 	BackupError        string     `json:"backup_error,omitempty"`
 }
+
 // Daemon is the user-level omahab-clientd. It owns the Unix socket, background
 // status/event sync, project fetch state, and launch delegation.
 type Daemon struct {
@@ -708,9 +708,6 @@ func (d *Daemon) dispatchSocket(req SocketRequest) SocketResponse {
 		return SocketResponse{ID: req.ID, Result: list}
 	case "workspace.create":
 		projectSlug, _ := req.Params["project_slug"].(string)
-		if projectSlug == "" {
-			projectSlug, _ = req.Params["slug"].(string)
-		}
 		title, _ := req.Params["title"].(string)
 		instructions, _ := req.Params["instructions"].(string)
 		if projectSlug == "" || title == "" {
@@ -921,14 +918,8 @@ func (d *Daemon) openWorkspaceInEditor(id string) error {
 	}
 	// Ensure SSH config entry exists for ws-<id> (best-effort)
 	_ = ensureWorkspaceSSHConfig(host, id)
-	// EDITOR_REMOTE is the primary knob per spec; fallback to OMAHAB_EDITOR then EDITOR for compat.
+	// EDITOR_REMOTE is the editor knob per spec.
 	editor := strings.TrimSpace(os.Getenv("EDITOR_REMOTE"))
-	if editor == "" {
-		editor = strings.TrimSpace(os.Getenv("OMAHAB_EDITOR"))
-	}
-	if editor == "" {
-		editor = strings.TrimSpace(os.Getenv("EDITOR"))
-	}
 	// Detect preferred editor command structure
 	if editor == "" || strings.Contains(strings.ToLower(editor), "code") {
 		// VS Code remote: code --remote ssh-remote+ws-<id> /workspace
@@ -1200,7 +1191,7 @@ func ensureLocalSyncthingFolder(apiKey, wireID, folderName, localPath, deviceID 
 		_ = deleteSyncthingFolder(client, apiKey, oldIDs[0])
 	}
 	b, _ := json.Marshal(payload)
-	req, err := http.NewRequest("POST", syncthingLocalBase + "/rest/config/folders", strings.NewReader(string(b)))
+	req, err := http.NewRequest("POST", syncthingLocalBase+"/rest/config/folders", strings.NewReader(string(b)))
 	if err != nil {
 		return nil // best-effort
 	}
@@ -1239,7 +1230,7 @@ func syncthingAuthed(client *http.Client, apiKey, method, url string, body []byt
 
 // samePathFolderIDs lists folder IDs configured at localPath excluding keep.
 func samePathFolderIDs(client *http.Client, apiKey, localPath, keep string) ([]string, error) {
-	resp, err := syncthingAuthed(client, apiKey, "GET", syncthingLocalBase + "/rest/config/folders", nil)
+	resp, err := syncthingAuthed(client, apiKey, "GET", syncthingLocalBase+"/rest/config/folders", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1272,7 +1263,7 @@ func samePathFolderIDs(client *http.Client, apiKey, localPath, keep string) ([]s
 
 // pauseSyncthingFolder pauses a folder (type sendonly... no: paused=true).
 func pauseSyncthingFolder(client *http.Client, apiKey, id string) error {
-	resp, err := syncthingAuthed(client, apiKey, "GET", syncthingLocalBase + "/rest/config/folders/" + id, nil)
+	resp, err := syncthingAuthed(client, apiKey, "GET", syncthingLocalBase+"/rest/config/folders/"+id, nil)
 	if err != nil {
 		return err
 	}
@@ -1290,7 +1281,7 @@ func pauseSyncthingFolder(client *http.Client, apiKey, id string) error {
 	}
 	folder["paused"] = true
 	updated, _ := json.Marshal(folder)
-	presp, err := syncthingAuthed(client, apiKey, "POST", syncthingLocalBase + "/rest/config/folders", updated)
+	presp, err := syncthingAuthed(client, apiKey, "POST", syncthingLocalBase+"/rest/config/folders", updated)
 	if err != nil {
 		return err
 	}
@@ -1300,7 +1291,7 @@ func pauseSyncthingFolder(client *http.Client, apiKey, id string) error {
 }
 
 func deleteSyncthingFolder(client *http.Client, apiKey, id string) error {
-	resp, err := syncthingAuthed(client, apiKey, "DELETE", syncthingLocalBase + "/rest/config/folders/" + id, nil)
+	resp, err := syncthingAuthed(client, apiKey, "DELETE", syncthingLocalBase+"/rest/config/folders/"+id, nil)
 	if err != nil {
 		return err
 	}

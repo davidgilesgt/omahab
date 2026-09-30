@@ -14,11 +14,7 @@ func formatTime(t time.Time) string {
 }
 
 func parseTime(s string) (time.Time, error) {
-	// Accept both the fixed 9-digit format and RFC3339Nano for compat.
-	if t, err := time.Parse(timeFormat, s); err == nil {
-		return t, nil
-	}
-	return time.Parse(time.RFC3339Nano, s)
+	return time.Parse(timeFormat, s)
 }
 
 // Contract is the default ONCE project runtime contract (design §6.2):

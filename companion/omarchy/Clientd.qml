@@ -220,12 +220,9 @@ Item {
     reconnectTimer.restart()
   }
 
-  function responseItems(result, legacyKey) {
+  function responseItems(result) {
     if (result instanceof Array) return result
-    if (result && typeof result === "object") {
-      if (result.items instanceof Array) return result.items
-      if (result[legacyKey] instanceof Array) return result[legacyKey]
-    }
+    if (result && typeof result === "object" && result.items instanceof Array) return result.items
     return null
   }
 
@@ -291,7 +288,7 @@ Item {
       if (response.error) {
         workspaces = []
       } else {
-        var items = responseItems(response.result, "workspaces")
+        var items = responseItems(response.result)
         if (items === null) failCurrent("invalid_clientd_response")
         else workspaces = items
       }
@@ -299,7 +296,7 @@ Item {
       if (response.error) {
         projects = []
       } else {
-        var projects2 = responseItems(response.result, "projects")
+        var projects2 = responseItems(response.result)
         if (projects2 === null) failCurrent("invalid_clientd_response")
         else projects = projects2
       }
@@ -308,13 +305,9 @@ Item {
         backupError = String(response.error.message || response.error.code || "backup status failed")
       } else {
         var br = response.result || {}
-        var snap = br.last_snapshot || br.backup_last_snapshot || br.lastSnapshot || ""
-        var bErr = br.error || br.backup_error || br.backupError || ""
-        if (snap && typeof snap === "object" && snap !== null) {
-          snap = snap.last_snapshot || snap.time || ""
-        }
+        var snap = br.last_snapshot || ""
         backupLastSnapshot = snap ? String(snap) : ""
-        backupError = String(bErr || "")
+        backupError = String(br.error || "")
       }
     } else {
       actionBusy = false
@@ -349,52 +342,25 @@ Item {
     hasStatus = true
     lastErrorCode = ""
     serverOnline = status.online === true
-    activeRunners = boundedCount(status.active_runners !== undefined ? status.active_runners : status.activeRunners)
+    activeRunners = boundedCount(status.active_runners)
     waitingAgents = boundedCount(status.waiting_agents !== undefined
       ? status.waiting_agents
-      : (status.waitingAgents !== undefined ? status.waitingAgents : countUnreadEvents(status.events, "agent.awaiting_approval")))
+      : countUnreadEvents(status.events, "agent.awaiting_approval"))
     syncConflicts = boundedCount(status.sync_conflicts !== undefined
       ? status.sync_conflicts
-      : (status.syncConflicts !== undefined ? status.syncConflicts : countUnreadEvents(status.events, "syncthing.conflict")))
+      : countUnreadEvents(status.events, "syncthing.conflict"))
     unreadEvents = boundedCount(status.unread_events !== undefined
       ? status.unread_events
-      : (status.unreadEvents !== undefined ? status.unreadEvents
-        : (status.unread_count !== undefined ? status.unread_count : countUnreadEvents(status.events, ""))))
-    checkedAt = String(status.checked_at || status.checkedAt || status.last_sync_at || status.environment_synced_at || "")
+      : (status.unread_count !== undefined ? status.unread_count : countUnreadEvents(status.events, "")))
+    checkedAt = String(status.last_sync_at || status.environment_synced_at || "")
     problemCount = String(status.error || "") === "" ? 0 : 1
-    environmentRevision = boundedCount(status.environment_revision !== undefined ? status.environment_revision : status.environmentRevision)
-    environmentVariableCount = boundedCount(status.environment_variable_count !== undefined ? status.environment_variable_count : status.environmentVariableCount)
-    environmentSyncedAt = String(status.environment_synced_at !== undefined ? status.environment_synced_at : (status.environmentSyncedAt || status.checked_at || ""))
-    environmentError = String(status.environment_error !== undefined ? status.environment_error : (status.environmentError || ""))
-    var xaiFlag = status.xai_oauth_active !== undefined ? status.xai_oauth_active
-      : status.has_xai_oauth_session !== undefined ? status.has_xai_oauth_session
-      : status.xaiOAuthActive !== undefined ? status.xaiOAuthActive
-      : status.companion_has_xai_oauth !== undefined ? status.companion_has_xai_oauth
-      : false
-    if (!xaiFlag && status.oauth_sessions instanceof Array) {
-      for (var i = 0; i < status.oauth_sessions.length; i++) {
-        var s = status.oauth_sessions[i] || {}
-        if (String(s.provider || "") === "xai" && String(s.status || "") === "pending" && s.assigned_to_device === true) {
-          xaiFlag = true
-          break
-        }
-        if (String(s.provider || "") === "xai" && String(s.flow || "") === "loopback" && String(s.status || "") === "pending") {
-          xaiFlag = true
-          break
-        }
-      }
-    }
-    if (!xaiFlag && String(status.oauth_pending_provider || "") === "xai") xaiFlag = true
-    hasXaiOAuthSession = xaiFlag === true
-    var bSnap = status.backup_last_snapshot !== undefined ? status.backup_last_snapshot
-      : status.backupLastSnapshot !== undefined ? status.backupLastSnapshot
-      : status.backup_lastSnapshot !== undefined ? status.backup_lastSnapshot
-      : ""
-    backupLastSnapshot = bSnap ? String(bSnap) : ""
-    var bErr = status.backup_error !== undefined ? status.backup_error
-      : status.backupError !== undefined ? status.backupError
-      : ""
-    backupError = String(bErr || "")
+    environmentRevision = boundedCount(status.environment_revision)
+    environmentVariableCount = boundedCount(status.environment_variable_count)
+    environmentSyncedAt = String(status.environment_synced_at || "")
+    environmentError = String(status.environment_error || "")
+    hasXaiOAuthSession = status.has_xai_oauth_session === true
+    backupLastSnapshot = status.backup_last_snapshot ? String(status.backup_last_snapshot) : ""
+    backupError = String(status.backup_error || "")
   }
   function applyActionResult(action, label, data) {
     if (action === "diagnose") {

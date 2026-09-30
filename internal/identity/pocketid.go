@@ -326,8 +326,6 @@ type pocketOIDCCreateRequest struct {
 	CallbackURLsSnake []string `json:"callback_urls"`
 	IsPublic          bool     `json:"isPublic"`
 	IsPublicSnake     bool     `json:"is_public"`
-	PKCEEnabled       bool     `json:"pkceEnabled"`
-	PKCEEnabledSnake  bool     `json:"pkce_enabled"`
 }
 
 type pocketOIDCNarrowCreateRequest struct {
@@ -339,7 +337,6 @@ type pocketOIDCPublicNarrowCreateRequest struct {
 	Name         string   `json:"name"`
 	CallbackURLs []string `json:"callback_urls"`
 	IsPublic     bool     `json:"isPublic"`
-	PKCEEnabled  bool     `json:"pkceEnabled"`
 }
 
 // pocketOIDCSecretResponse decodes the minted secret under any of the
@@ -1114,7 +1111,8 @@ func (c *PocketIDClient) CreateOIDCClientSecret(ctx context.Context, clientID st
 }
 
 // EnsureOIDCPublicClient ensures a public/PKCE OIDC client (no secret) exists for the given name and callbacks.
-// It POSTs /api/oidc/clients with isPublic=true (and pkceEnabled=true for compatibility) and never mints a secret.
+// It POSTs /api/oidc/clients with isPublic=true (pocket-id forces PKCE on
+// for public clients server-side) and never mints a secret.
 // Existing confidential clients with the same name are reused as public (upserted) without minting.
 func (c *PocketIDClient) EnsureOIDCPublicClient(ctx context.Context, name string, callbackURLs []string) (string, error) {
 	name = strings.TrimSpace(name)
@@ -1148,14 +1146,14 @@ func (c *PocketIDClient) EnsureOIDCPublicClient(ctx context.Context, name string
 	}
 	payload := pocketOIDCCreateRequest{
 		Name: name, CallbackUrls: callbackURLs, CallbackURLs: callbackURLs, CallbackURLsSnake: callbackURLs,
-		IsPublic: true, IsPublicSnake: true, PKCEEnabled: true, PKCEEnabledSnake: true,
+		IsPublic: true, IsPublicSnake: true,
 	}
 	var created pocketOidcClientDetailDto
 	err := c.doJSON(ctx, http.MethodPost, "/api/oidc/clients", payload, &created)
 	if err != nil {
 		if errors.Is(err, store.ErrValidation) {
 			var created2 pocketOidcClientDetailDto
-			if err2 := c.doJSON(ctx, http.MethodPost, "/api/oidc/clients", pocketOIDCPublicNarrowCreateRequest{Name: name, CallbackURLs: callbackURLs, IsPublic: true, PKCEEnabled: true}, &created2); err2 == nil {
+			if err2 := c.doJSON(ctx, http.MethodPost, "/api/oidc/clients", pocketOIDCPublicNarrowCreateRequest{Name: name, CallbackURLs: callbackURLs, IsPublic: true}, &created2); err2 == nil {
 				created = created2
 				err = nil
 			}

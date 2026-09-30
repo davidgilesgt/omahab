@@ -93,7 +93,7 @@ Socket aliases from pre-A1 (`hermes.open`, `project_clone`, `runner.*`, `env.syn
 | `project.clone` | `{"slug"?: string, "project_id"?: string, "dir"?: string}`<br>`slug` may be project ID or slug; `project_id` is an explicit fallback. `dir` defaults to `~/projects/<slug>` (lowercase; matches `omahab project clone --dir` default). | `{"project_id": string, "slug": string, "dir": string, "clone_url": string}` | `bad_request` (slug required), `not_found`, `conflict` (dest exists), `internal` (not connected, no repo URL, `git clone` failed, terminal failed) | Resolves project via `GET /api/v1/companion/projects` (device token), `git clone <repository_url> <dir>`, `Upsert`s `ProjectStore`, then `OpenTerminal(dir)`. Requires device enrollment (`oma_dev_`). Uses `HOME` for default dir. |
 | `project.open` | `{"slug": string}` or `{"project_id": string}` | `{"project_id": string, "dir": string}` | `bad_request`, `internal` | Opens project dir in terminal. Resolves `LocalPath` from `ProjectStore`, else `~/projects/<slug>`. |
 | `workspace.list` | `{}` | `[]Workspace` (`domain.Workspace`) | `internal` (not connected) | Proxies `GET /api/v1/companion/workspaces` (device auth). |
-| `workspace.create` | `{"project_slug": string, "title": string, "instructions"?: string}`<br>`project_slug` also accepts `slug` alias for compat. | `Workspace` | `bad_request`, `internal` | Creates via `POST /api/v1/companion/workspaces` (device auth), then if `running|pending` opens `ssh -t omahab@<host> sudo omahab workspace attach <id>` in terminal. `host` from `ServerURL`. |
+| `workspace.create` | `{"project_slug": string, "title": string, "instructions"?: string}` | `Workspace` | `bad_request`, `internal` | Creates via `POST /api/v1/companion/workspaces` (device auth), then if `running|pending` opens `ssh -t omahab@<host> sudo omahab workspace attach <id>` in terminal. `host` from `ServerURL`. |
 | `workspace.attach` | `{"id": string}` or `{"workspace_id": string}` or `{"dir": string, "local_path"?: string}` | `{"workspace_id": string, "result":"terminal opened"}` | `internal` | If `id` present, `ssh -t omahab@<host> sudo omahab workspace attach <id>`; else `OpenTerminal(dir \| "." )`. `workspace` is canonical on the socket; `runner` remains a hidden CLI alias on the server. |
 | `workspace.stop` | `{"id": string}` or `{"workspace_id": string}` | `{"workspace_id": string, "result":"stopped"}` | `bad_request`, `internal` | Calls `POST /api/v1/companion/workspaces/{id}/stop` (device auth, reuses `workspaces.Service.Stop`). |
 | `environment.sync` | `{}` | `{"result":"environment synced","detail":"Applied to new apps; restart existing apps"}` | `internal` | `EnvironmentManager.Sync` — fetches `GET /api/v1/companion/environment` (If-None-Match), atomic `0600`, D-Bus `SetEnvironment`. |
@@ -136,7 +136,7 @@ Socket aliases from pre-A1 (`hermes.open`, `project_clone`, `runner.*`, `env.syn
 }
 ```
 
-Field names are `snake_case` as stored; QML also handles `camelCase` aliases for backwards compat but new clients should use `snake_case`.
+Field names are `snake_case` as stored.
 
 ## Examples
 

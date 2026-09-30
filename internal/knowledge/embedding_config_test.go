@@ -110,9 +110,6 @@ func TestEmbeddingWorkerConfigFullTextMemoryEnglish(t *testing.T) {
 	if alias, err := ChoiceModelAlias("full_text"); err != nil || alias != "" {
 		t.Fatalf("full-text document alias = %q, err = %v", alias, err)
 	}
-	if alias, err := ChoiceModelAlias("fulltext"); err != nil || alias != "" {
-		t.Fatalf("legacy fulltext document alias = %q, err = %v", alias, err)
-	}
 	got, err := ChoiceModelAliases("full_text")
 	if err != nil || len(got) != 1 || got[0] != "omahab-embed-english" {
 		t.Fatalf("full-text required models = %v, err = %v", got, err)

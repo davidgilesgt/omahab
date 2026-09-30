@@ -816,8 +816,8 @@ func (s *Service) SetSummarizationConsent(ctx context.Context, principal, provid
 }
 
 // GetIndexSetupChoice returns the persisted semantic index setup choice.
-// Valid choices are "english", "worldwide", "full_text" (and "fulltext" alias).
-// Empty means no choice stored yet.
+// Valid choices are "english", "worldwide", "full_text". Empty means no
+// choice stored yet.
 func (s *Service) GetIndexSetupChoice(ctx context.Context) (string, error) {
 	if s.db == nil {
 		return "", nil
@@ -837,12 +837,9 @@ func (s *Service) GetIndexSetupChoice(ctx context.Context) (string, error) {
 func (s *Service) SetIndexSetupChoice(ctx context.Context, choice string) error {
 	normalized := strings.TrimSpace(strings.ToLower(choice))
 	switch normalized {
-	case "english", "worldwide", "full_text", "fulltext":
-		if normalized == "fulltext" {
-			normalized = "full_text"
-		}
+	case "english", "worldwide", "full_text":
 	default:
-		return validation(fmt.Sprintf("choice must be english, worldwide, or fulltext (got %q)", choice))
+		return validation(fmt.Sprintf("choice must be english, worldwide, or full_text (got %q)", choice))
 	}
 	if s.db == nil {
 		return fmt.Errorf("knowledge store not available")

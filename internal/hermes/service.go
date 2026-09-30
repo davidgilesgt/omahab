@@ -98,10 +98,9 @@ func (s *Service) RemoteConnectionInfo(ctx context.Context, profileID string) (*
 	if profileID == "" {
 		return nil, fmt.Errorf("%w: profile id required", ErrValidation)
 	}
-	// Try persisted row by id (new schema) or profile_id (legacy, for migration grace period).
+	// Persisted row keyed by id.
 	var rc RemoteConnection
 	var createdAt, updatedAt string
-	// Try new schema (id)
 	err := s.db.QueryRowContext(ctx,
 		`SELECT id, server_url, hermes_url, instance_id, oidc_issuer, created_at, updated_at FROM hermes_remote_connections WHERE id = ?`, profileID).
 		Scan(&rc.ID, &rc.ServerURL, &rc.HermesURL, &rc.InstanceID, &rc.OIDCIssuer, &createdAt, &updatedAt)
@@ -115,25 +114,7 @@ func (s *Service) RemoteConnectionInfo(ctx context.Context, profileID string) (*
 		return &rc, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		// If column mismatch (legacy schema), fallback to profile_id query
-		if strings.Contains(err.Error(), "no such column") || strings.Contains(err.Error(), "has no column") {
-			err2 := s.db.QueryRowContext(ctx,
-				`SELECT id, profile_id, server_url, hermes_url, instance_id, oidc_issuer, created_at, updated_at FROM hermes_remote_connections WHERE profile_id = ?`, profileID).
-				Scan(&rc.ID, &rc.ProfileID, &rc.ServerURL, &rc.HermesURL, &rc.InstanceID, &rc.OIDCIssuer, &createdAt, &updatedAt)
-			if err2 == nil {
-				ca, _ := time.Parse(time.RFC3339Nano, createdAt)
-				ua, _ := time.Parse(time.RFC3339Nano, updatedAt)
-				rc.CreatedAt = ca
-				rc.UpdatedAt = ua
-				rc.GeneratedAt = ua
-				return &rc, nil
-			}
-			if !errors.Is(err2, sql.ErrNoRows) {
-				return nil, fmt.Errorf("get remote connection: %w", err2)
-			}
-		} else {
-			return nil, fmt.Errorf("get remote connection: %w", err)
-		}
+		return nil, fmt.Errorf("get remote connection: %w", err)
 	}
 	// Synthesize from defaults without cookies or safeStorage.
 	serverURL := s.serverURL
@@ -195,10 +176,6 @@ func (s *Service) UpsertRemoteConnection(ctx context.Context, profileID, serverU
 		}, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		// Grace fallback for legacy schema with profile_id
-		if strings.Contains(err.Error(), "no such column") {
-			return s.upsertLegacy(ctx, profileID, serverURL, hermesURL, instanceID, oidcIssuer, now, nowStr)
-		}
 		return nil, fmt.Errorf("lookup remote connection: %w", err)
 	}
 	// Insert new row with id = profileID (preserves stable lookup)
@@ -206,47 +183,11 @@ func (s *Service) UpsertRemoteConnection(ctx context.Context, profileID, serverU
 		`INSERT INTO hermes_remote_connections (id, server_url, hermes_url, instance_id, oidc_issuer, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		profileID, serverURL, hermesURL, instanceID, oidcIssuer, nowStr, nowStr)
 	if err != nil {
-		// If table still has legacy schema (profile_id column not null), fallback
-		if strings.Contains(err.Error(), "has no column") || strings.Contains(err.Error(), "no column") || strings.Contains(err.Error(), "table hermes_remote_connections has") {
-			return s.upsertLegacy(ctx, profileID, serverURL, hermesURL, instanceID, oidcIssuer, now, nowStr)
-		}
 		return nil, fmt.Errorf("insert remote connection: %w", err)
 	}
 	_ = s.emit(ctx, "hermes.remote_connection.upserted", "info", domain.ID(profileID), "remote connection metadata upserted", map[string]any{"server_url": serverURL})
 	return &RemoteConnection{
 		ID: profileID, ProfileID: profileID, ServerURL: serverURL, HermesURL: hermesURL,
-		InstanceID: instanceID, OIDCIssuer: oidcIssuer, CreatedAt: now, UpdatedAt: now, GeneratedAt: now,
-	}, nil
-}
-
-func (s *Service) upsertLegacy(ctx context.Context, profileID, serverURL, hermesURL, instanceID, oidcIssuer string, now time.Time, nowStr string) (*RemoteConnection, error) {
-	var existingID string
-	err := s.db.QueryRowContext(ctx, `SELECT id FROM hermes_remote_connections WHERE profile_id = ?`, profileID).Scan(&existingID)
-	if err == nil {
-		_, err = s.db.ExecContext(ctx,
-			`UPDATE hermes_remote_connections SET server_url = ?, hermes_url = ?, instance_id = ?, oidc_issuer = ?, updated_at = ? WHERE profile_id = ?`,
-			serverURL, hermesURL, instanceID, oidcIssuer, nowStr, profileID)
-		if err != nil {
-			return nil, fmt.Errorf("update remote connection: %w", err)
-		}
-		return &RemoteConnection{
-			ID: existingID, ProfileID: profileID, ServerURL: serverURL, HermesURL: hermesURL,
-			InstanceID: instanceID, OIDCIssuer: oidcIssuer, CreatedAt: now, UpdatedAt: now, GeneratedAt: now,
-		}, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("lookup remote connection legacy: %w", err)
-	}
-	id := store.NewID()
-	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO hermes_remote_connections (id, profile_id, server_url, hermes_url, instance_id, oidc_issuer, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, profileID, serverURL, hermesURL, instanceID, oidcIssuer, nowStr, nowStr)
-	if err != nil {
-		return nil, fmt.Errorf("insert remote connection legacy: %w", err)
-	}
-	_ = s.emit(ctx, "hermes.remote_connection.upserted", "info", domain.ID(profileID), "remote connection metadata upserted", map[string]any{"server_url": serverURL})
-	return &RemoteConnection{
-		ID: id, ProfileID: profileID, ServerURL: serverURL, HermesURL: hermesURL,
 		InstanceID: instanceID, OIDCIssuer: oidcIssuer, CreatedAt: now, UpdatedAt: now, GeneratedAt: now,
 	}, nil
 }

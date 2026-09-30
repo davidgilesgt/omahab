@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/omahab/omahab/internal/exposure"
@@ -184,7 +187,7 @@ func TestDNSClient(t *testing.T) {
 					}
 					w.Header().Set("Content-Type", "application/json")
 					json.NewEncoder(w).Encode(map[string]any{
-						"result": map[string]any{"id": "new-id", "name": "ai.example.com", "type": "CNAME", "content": "ai.home.example.com"},
+						"result":  map[string]any{"id": "new-id", "name": "ai.example.com", "type": "CNAME", "content": "ai.home.example.com"},
 						"success": true, "errors": []any{}, "messages": []any{},
 					})
 				}
@@ -394,63 +397,103 @@ func TestAccessClient(t *testing.T) {
 	})
 }
 
+// fakeCaddyAdmin is an in-memory Caddy admin API stand-in. It serves GET
+// /config/ with the current rendered config and accepts POST /load to
+// replace it, mirroring the real admin endpoints the edge client uses.
+type fakeCaddyAdmin struct {
+	mu    sync.Mutex
+	cfg   []byte
+	loads int
+}
+
+func (f *fakeCaddyAdmin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	switch {
+	case r.Method == http.MethodGet && r.URL.Path == "/config/":
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(f.cfg)
+	case r.Method == http.MethodPost && r.URL.Path == "/load":
+		b, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		f.cfg = b
+		f.loads++
+		w.WriteHeader(http.StatusOK)
+	default:
+		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
+func (f *fakeCaddyAdmin) loadCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.loads
+}
+
 func TestEdgeClient(t *testing.T) {
-	t.Run("ListRoutes", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodGet || r.URL.Path != "/routes" {
-				t.Errorf("ListRoutes: %s %s", r.Method, r.URL.Path)
-			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode([]exposure.Route{{Hostname: "ai.example.com", Upstream: "http://127.0.0.1:3000"}})
-		}))
-		defer srv.Close()
-		clients, _ := NewClients(Options{CaddyAddr: srv.URL})
+	newSrv := func(t *testing.T) (*fakeCaddyAdmin, exposure.Clients) {
+		t.Helper()
+		fake := &fakeCaddyAdmin{}
+		srv := httptest.NewServer(fake)
+		t.Cleanup(srv.Close)
+		clients, err := NewClients(Options{
+			CaddyAddr:       srv.URL,
+			Domain:          "example.com",
+			DNSToken:        "test-token",
+			CaddyConfigPath: filepath.Join(t.TempDir(), "caddy.json"),
+		})
+		if err != nil {
+			t.Fatalf("NewClients: %v", err)
+		}
+		return fake, clients
+	}
+	t.Run("ListRoutesEmpty", func(t *testing.T) {
+		fake, clients := newSrv(t)
+		fake.mu.Lock()
+		fake.cfg = []byte(`{}`)
+		fake.mu.Unlock()
 		routes, err := clients.Edge.ListRoutes(context.Background())
 		if err != nil {
 			t.Fatalf("ListRoutes: %v", err)
 		}
-		if len(routes) != 1 || routes[0].Hostname != "ai.example.com" {
+		if len(routes) != 0 {
 			t.Fatalf("unexpected routes %+v", routes)
 		}
 	})
 	t.Run("PutRoute", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodPut || r.URL.Path != "/routes/ai.example.com" {
-				t.Errorf("PutRoute: %s %s", r.Method, r.URL.Path)
-			}
-			var body exposure.Route
-			json.NewDecoder(r.Body).Decode(&body)
-			if body.Upstream != "http://127.0.0.1:3000" {
-				t.Errorf("body mismatch %+v", body)
-			}
-			w.WriteHeader(204)
-		}))
-		defer srv.Close()
-		clients, _ := NewClients(Options{CaddyAddr: srv.URL})
+		_, clients := newSrv(t)
 		if err := clients.Edge.PutRoute(context.Background(), exposure.Route{Hostname: "ai.example.com", Upstream: "http://127.0.0.1:3000"}); err != nil {
 			t.Fatalf("PutRoute: %v", err)
 		}
+		routes, err := clients.Edge.ListRoutes(context.Background())
+		if err != nil {
+			t.Fatalf("ListRoutes: %v", err)
+		}
+		if len(routes) != 1 || routes[0].Hostname != "ai.example.com" || routes[0].Upstream != "http://127.0.0.1:3000" {
+			t.Fatalf("unexpected routes %+v", routes)
+		}
 	})
 	t.Run("DeleteRoute", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodDelete || r.URL.Path != "/routes/ai.example.com" {
-				t.Errorf("DeleteRoute: %s %s", r.Method, r.URL.Path)
-			}
-			w.WriteHeader(204)
-		}))
-		defer srv.Close()
-		clients, _ := NewClients(Options{CaddyAddr: srv.URL})
+		_, clients := newSrv(t)
+		if err := clients.Edge.PutRoute(context.Background(), exposure.Route{Hostname: "ai.example.com", Upstream: "http://127.0.0.1:3000"}); err != nil {
+			t.Fatalf("PutRoute: %v", err)
+		}
 		if err := clients.Edge.DeleteRoute(context.Background(), "ai.example.com"); err != nil {
 			t.Fatalf("DeleteRoute: %v", err)
 		}
+		routes, err := clients.Edge.ListRoutes(context.Background())
+		if err != nil {
+			t.Fatalf("ListRoutes: %v", err)
+		}
+		if len(routes) != 0 {
+			t.Fatalf("unexpected routes after delete: %+v", routes)
+		}
 	})
 	t.Run("DeleteRouteNotFoundIdempotent", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(404)
-			w.Write([]byte("not found"))
-		}))
-		defer srv.Close()
-		clients, _ := NewClients(Options{CaddyAddr: srv.URL})
+		_, clients := newSrv(t)
 		if err := clients.Edge.DeleteRoute(context.Background(), "missing.example.com"); err != nil {
 			t.Fatalf("DeleteRoute 404 should be nil, got %v", err)
 		}
@@ -497,7 +540,7 @@ func TestEmailClient_EnsureAndDelete(t *testing.T) {
 					"result": []map[string]any{{
 						"id": "rule-1", "name": "omahab-ai", "enabled": true,
 						"matchers": []map[string]any{{"field": "to", "type": "literal", "value": "ai@example.com"}},
-						"actions": []map[string]any{{"type": "forward", "value": []string{"ingest@example.net"}}},
+						"actions":  []map[string]any{{"type": "forward", "value": []string{"ingest@example.net"}}},
 					}},
 					"success": true,
 				})
@@ -520,7 +563,7 @@ func TestEmailClient_EnsureAndDelete(t *testing.T) {
 					"result": []map[string]any{{
 						"id": "rule-1", "name": "omahab-ai", "enabled": true,
 						"matchers": []map[string]any{{"field": "to", "type": "literal", "value": "ai@example.com"}},
-						"actions": []map[string]any{{"type": "forward", "value": []string{"old@example.net"}}},
+						"actions":  []map[string]any{{"type": "forward", "value": []string{"old@example.net"}}},
 					}},
 					"success": true,
 				})
@@ -549,9 +592,9 @@ func TestEmailClient_EnsureAndDelete(t *testing.T) {
 				w.Header().Set("Content-Type", "application/json")
 				json.NewEncoder(w).Encode(map[string]any{
 					"result": []map[string]any{{
-						"id": "rule-1",
+						"id":       "rule-1",
 						"matchers": []map[string]any{{"field": "to", "type": "literal", "value": "ai@example.com"}},
-						"actions": []map[string]any{{"type": "forward", "value": []string{"ingest@example.net"}}},
+						"actions":  []map[string]any{{"type": "forward", "value": []string{"ingest@example.net"}}},
 					}},
 					"success": true,
 				})

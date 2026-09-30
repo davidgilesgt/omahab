@@ -54,23 +54,14 @@ func MCPConfigPath() string {
 // mcpConfigFile is the on-disk shape for omp's MCP client.
 // It follows the common mcpServers envelope used by Claude/omp clients:
 // {"mcpServers":{"omahab":{"url":"https://.../api/v1/companion/mcp","headers":{"Authorization":"Bearer ..."}}}}
-// For forward-compat we also write a flat "servers" array, so either envelope is discoverable.
 type mcpConfigFile struct {
 	MCPServers map[string]mcpServerEntry `json:"mcpServers,omitempty"`
-	Servers    []mcpServerEntryFlat      `json:"servers,omitempty"`
 }
 
 type mcpServerEntry struct {
 	URL     string            `json:"url"`
 	Headers map[string]string `json:"headers,omitempty"`
 	Type    string            `json:"type,omitempty"`
-}
-
-type mcpServerEntryFlat struct {
-	Name string            `json:"name"`
-	URL  string            `json:"url"`
-	Type string            `json:"type,omitempty"`
-	Auth map[string]string `json:"headers,omitempty"`
 }
 
 // EnsureMCPConfig writes the omp MCP client config and ensures OMAHAB_MCP_URL
@@ -102,16 +93,6 @@ func EnsureMCPConfig(serverURL, token string) error {
 				URL:  mcpURL,
 				Type: "http",
 				Headers: map[string]string{
-					"Authorization": "Bearer " + token,
-				},
-			},
-		},
-		Servers: []mcpServerEntryFlat{
-			{
-				Name: "omahab",
-				URL:  mcpURL,
-				Type: "http",
-				Auth: map[string]string{
 					"Authorization": "Bearer " + token,
 				},
 			},

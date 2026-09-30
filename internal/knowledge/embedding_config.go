@@ -83,11 +83,7 @@ func ChoiceModelAliases(choice string) ([]string, error) {
 }
 
 func normalizedChoice(choice string) string {
-	n := strings.TrimSpace(strings.ToLower(choice))
-	if n == "fulltext" {
-		n = "full_text"
-	}
-	return n
+	return strings.TrimSpace(strings.ToLower(choice))
 }
 
 // EmbeddingWorkerConfigForChoice renders pinned_models.json bytes for the

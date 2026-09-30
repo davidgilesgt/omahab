@@ -98,8 +98,6 @@ func (e *OnceLifecycleEvent) UnmarshalJSON(data []byte) error {
 		if err := json.Unmarshal(aux.Timestamp, &tsStr); err == nil {
 			if t, err := time.Parse(time.RFC3339Nano, tsStr); err == nil {
 				e.Timestamp = t.UTC()
-			} else if t, err := time.Parse(time.RFC3339, tsStr); err == nil {
-				e.Timestamp = t.UTC()
 			}
 		} else {
 			var ts time.Time
