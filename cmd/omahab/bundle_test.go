@@ -4,27 +4,41 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
 // probeCustomBundleHealth must gate the apply on a genuinely healthy
-// application: HTTP 200 alone (unhealthy status, malformed JSON, or no
-// application at all) must fail the probe so the generation rolls back.
+// application of that bundle, authenticated with the panel token: an
+// unhealthy/degraded app, a malformed body, or no app for the bundle must
+// fail the probe so the generation rolls back. Other bundles are ignored.
 func TestProbeCustomBundleHealth(t *testing.T) {
 	cases := []struct {
 		name    string
 		body    string
 		wantErr bool
 	}{
-		{"healthy", `{"items":[{"id":"app_1","bundle_id":"demo","health":"healthy","desired_state":"running","observed_state":"running"}]}`, false},
-		{"unhealthy", `{"items":[{"id":"app_1","bundle_id":"demo","health":"unhealthy","desired_state":"running","observed_state":"running"}]}`, true},
-		{"degraded", `{"items":[{"id":"app_1","bundle_id":"demo","health":"degraded","desired_state":"running","observed_state":"running"}]}`, true},
+		{"healthy", `{"items":[{"id":"app_1","bundle_id":"demo","health":"healthy"},{"id":"app_2","bundle_id":"other","health":"unhealthy"}]}`, false},
+		{"unhealthy", `{"items":[{"id":"app_1","bundle_id":"demo","health":"unhealthy"}]}`, true},
+		{"degraded", `{"items":[{"id":"app_1","bundle_id":"demo","health":"degraded"}]}`, true},
 		{"malformed", `{"items":[not json`, true},
-		{"empty list", `{"items":[]}`, true},
+		{"other bundle only", `{"items":[{"id":"app_2","bundle_id":"other","health":"healthy"}]}`, true},
 	}
+	tokenFile := filepath.Join(t.TempDir(), "api.token")
+	if err := os.WriteFile(tokenFile, []byte("abcd1234\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldTok := panelTokenPath
+	panelTokenPath = tokenFile
+	defer func() { panelTokenPath = oldTok }()
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") != "Bearer abcd1234" {
+					http.Error(w, "unauthorized", http.StatusUnauthorized)
+					return
+				}
 				if r.URL.Path != "/api/v1/applications" {
 					http.NotFound(w, r)
 					return

@@ -8,11 +8,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/omahab/omahab/internal/apiclient"
 	"github.com/omahab/omahab/internal/apps"
 	"github.com/omahab/omahab/internal/bundles"
+	"github.com/omahab/omahab/internal/domain"
 )
 
 // bundleRepoPath is overridable in tests.
@@ -304,38 +307,41 @@ func writeBundleApplyOutcome(stateDir, opID, status, detail string) error {
 	return os.WriteFile(filepath.Join(dir, "outcome.json"), append(raw, '\n'), 0o600)
 }
 
-// panelAPIBase is the loopback panel API base URL probes use; overridable
-// in tests.
-var panelAPIBase = "http://127.0.0.1:8484"
+// panelAPIBase and panelTokenPath locate the loopback panel API; overridable
+// in tests. The apply unit runs as root and reads the root-only token.
+var (
+	panelAPIBase   = "http://127.0.0.1:8484"
+	panelTokenPath = apiTokenPath
+)
 
 // probeCustomBundleHealth runs one bundle health check via the omahabd
 // API surface on the loopback panel (single probe, no grace: the unit
-// already started during switch). The response is the applications list
-// envelope ({"items":[...]}); a malformed body, an empty result, or any
-// application not reporting health "healthy" fails the probe so the
-// apply health-gate rolls the generation back.
+// already started during switch). A request/decode failure, no application
+// for the bundle, or any of its applications not reporting health "healthy"
+// fails the probe so the apply health-gate rolls the generation back.
 func probeCustomBundleHealth(ctx context.Context, id string) error {
-	out, err := exec.Command("curl", "-sf", "-m", "10",
-		fmt.Sprintf("%s/api/v1/applications?bundle=%s", panelAPIBase, id)).Output()
+	raw, err := os.ReadFile(panelTokenPath)
+	if err != nil {
+		return fmt.Errorf("probe bundle %q: read panel token: %w", id, err)
+	}
+	c := apiclient.New(panelAPIBase, strings.TrimSpace(string(raw)))
+	c.HTTPClient.Timeout = 10 * time.Second
+	all, err := c.ListApplications(ctx)
 	if err != nil {
 		return fmt.Errorf("probe bundle %q: %w", id, err)
 	}
-	var probe struct {
-		Items []struct {
-			BundleID string `json:"bundle_id"`
-			Health   string `json:"health"`
-		} `json:"items"`
-	}
-	if err := json.Unmarshal(out, &probe); err != nil {
-		return fmt.Errorf("probe bundle %q: decode applications response: %w", id, err)
-	}
-	if len(probe.Items) == 0 {
-		return fmt.Errorf("probe bundle %q: no application found for bundle", id)
-	}
-	for _, app := range probe.Items {
-		if strings.TrimSpace(app.Health) != "healthy" {
-			return fmt.Errorf("probe bundle %q: application %q reports health %q", id, app.BundleID, app.Health)
+	found := false
+	for _, app := range all {
+		if app.BundleID != id {
+			continue
 		}
+		found = true
+		if app.Health != domain.HealthHealthy {
+			return fmt.Errorf("probe bundle %q: application %q reports health %q", id, app.ID, app.Health)
+		}
+	}
+	if !found {
+		return fmt.Errorf("probe bundle %q: no application found for bundle", id)
 	}
 	return nil
 }
