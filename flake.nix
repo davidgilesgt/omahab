@@ -1,15 +1,23 @@
 {
   description = "Omahab appliance";
-
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    # Custom bundles on the machine: /var/lib/omahab/bundles is a git repo
+    # with the same bundles/<id>/{bundle.json,module.nix} layout as the
+    # curated tree. The default points at the in-repo empty dir so the
+    # locked flake stays self-contained; `omahab bundle apply` and
+    # `omahab system upgrade` pass
+    # --override-input bundles git+file:///var/lib/omahab/bundles so only
+    # committed custom bundles are built.
+    bundles.url = "path:./bundles-custom-empty";
+    bundles.flake = false;
   };
 
   # Systems we build for. (Inlined instead of flake-utils' eachSystem so
   # installs fetch one fewer flake input from GitHub in the guest.
   # Semantics match eachSystem exactly: per-system results are merged
   # transposed, so self.packages.x86_64-linux etc. keep working.)
-  outputs = { self, nixpkgs }:
+  outputs = { self, nixpkgs, bundles }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
       eachSystem = nixpkgs.lib.foldl' (
@@ -27,6 +35,12 @@
         pkgs = import nixpkgs { inherit system; };
         lib = pkgs.lib;
         version = lib.strings.trim (builtins.readFile ./version);
+        # Every curated bundles/<id>/bundle.json, in one flat list for the
+        # assembled catalog (order comes from listFilesRecursive; the Go
+        # loader and consumers key by id, never by file order).
+        catalogBundleFiles = builtins.filter (lib.hasSuffix "bundle.json") (
+          lib.filesystem.listFilesRecursive ./bundles
+        );
         # Single ldflags set used for all Go binaries — main.version for CLI/server
         # plus internal/client.Version for daemon self-update comparison.
         ldflagsBase = [
@@ -44,9 +58,9 @@
           # full Go rebuild in the guest). Go only reads these paths.
           src = lib.fileset.toSource {
             root = ./.;
-            fileset = lib.fileset.unions [ ./go.mod ./go.sum ./cmd ./internal ./workers/embedding/pinned_models.json.example ./deploy/catalog/catalog.json ];
+            fileset = lib.fileset.unions [ ./go.mod ./go.sum ./cmd ./internal ./workers/embedding/pinned_models.json.example ./bundles ];
           };
-          vendorHash = "sha256-FUZb9WWkYKQR+ZIxNvUmjJMw07LOZw66EhO7Z3XSdVo=";
+          vendorHash = "sha256-sSlXgeiKW3rbFTQRtYd5IBXVQdvYeAM35DeYoDptDO0=";
           subPackages = [
             "cmd/omahab"
             "cmd/omahabd"
@@ -99,9 +113,15 @@ EOF
           pythonImportsCheck = [ "workers.embedding" ];
           doCheck = false;
         };
-        omahab-catalog = pkgs.runCommand "omahab-catalog" { } ''
+        # Catalog assembled from the per-bundle sources of truth: each
+        # bundles/<id>/bundle.json is one catalog Bundle object (same schema
+        # as the former deploy/catalog/catalog.json entries). The assembled
+        # catalog.json keeps OMAHAB_CATALOG and nix/module.nix's native merge
+        # working unchanged. `bundles-custom-empty` provides the runtime
+        # override target for custom bundles; the curated set lives in-tree.
+        omahab-catalog = pkgs.runCommand "omahab-catalog" { nativeBuildInputs = [ pkgs.jq ]; } ''
           mkdir -p $out
-          cp ${./deploy/catalog/catalog.json} $out/catalog.json
+          ${pkgs.jq}/bin/jq -s '{bundles: .}' ${lib.concatStringsSep " " (map (p: "${p}") catalogBundleFiles)} > $out/catalog.json
         '';
         # Provider-auth helper: runs the pinned LiteLLM ChatGPT/xAI
         # authenticators (same interpreter+packages as the native gateway via
@@ -142,7 +162,7 @@ EOF
             root = ./.;
             fileset = lib.fileset.unions [ ./go.mod ./go.sum ./cmd ./internal ];
           };
-          vendorHash = "sha256-FUZb9WWkYKQR+ZIxNvUmjJMw07LOZw66EhO7Z3XSdVo=";
+          vendorHash = "sha256-sSlXgeiKW3rbFTQRtYd5IBXVQdvYeAM35DeYoDptDO0=";
           subPackages = [ "cmd/omahab-clientd" ];
           env.CGO_ENABLED = "0";
           # NOTE: env.GOOS/env.GOARCH do NOT work here — nixpkgs' go setup-hook
@@ -227,7 +247,8 @@ EOF
             checkPhase = "go vet ./...";
             installPhase = "touch $out";
           });
-          go-test = omahab.overrideAttrs (_: {
+          go-test = omahab.overrideAttrs (old: {
+            nativeCheckInputs = (old.nativeCheckInputs or [ ]) ++ [ pkgs.git ];
             name = "go-test";
             doCheck = true;
             checkPhase = "go test ./...";
@@ -256,7 +277,7 @@ EOF
       };
       nixosConfigurations.omahab-vm = nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";
-        specialArgs = { inherit self; };
+        specialArgs = { inherit self nixpkgs bundles; };
         modules = [
           "${nixpkgs}/nixos/modules/virtualisation/qemu-vm.nix"
           self.nixosModules.omahab
@@ -270,7 +291,7 @@ EOF
       # nixos-install --flake ...#omahab-installed.
       nixosConfigurations.omahab-installed = nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";
-        specialArgs = { inherit self; };
+        specialArgs = { inherit self nixpkgs bundles; };
         modules = [
           self.nixosModules.omahab
           ./nix/installed-hardware.nix

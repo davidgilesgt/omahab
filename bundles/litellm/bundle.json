@@ -1,0 +1,39 @@
+{
+  "id": "litellm",
+  "name": "LiteLLM Model Gateway",
+  "port": 4000,
+  "default_exposure": "private",
+  "max_exposure": "private",
+  "health_check": {
+    "kind": "http",
+    "path": "/health/liveliness",
+    "port": 4000
+  },
+  "startup_grace_seconds": 180,
+  "oidc": {
+    "supported": true,
+    "mode": "native",
+    "provider": "pocket-id"
+  },
+  "resources": {
+    "memory_mb": 512
+  },
+  "default": true,
+  "route": "models",
+  "app_path": "/ui",
+  "dependencies": [
+    "caddy"
+  ],
+  "secret_sources": [
+    "litellm_master_key",
+    "litellm_db_url",
+    "litellm_db_password",
+    "litellm_salt_key"
+  ],
+  "units": [
+    "litellm.service"
+  ],
+  "groups": [
+    "admins"
+  ]
+}

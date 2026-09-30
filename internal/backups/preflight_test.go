@@ -141,7 +141,7 @@ func TestRunBackupPreflightsMissingRepo(t *testing.T) {
 		initialized = true
 		return nil
 	}
-	run, err := svc.RunBackup(ctx, RunRequest{RepositoryID: repo.ID})
+	run, err := svc.RunBackup(ctx, RunRequest{RepositoryID: repo.ID, Scopes: []string{ScopeServerConfig}, Paths: []string{"/var/lib/omahab/backup-staging"}})
 	if err != nil {
 		t.Fatalf("backup: %v", err)
 	}

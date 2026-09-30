@@ -1,7 +1,8 @@
+import { Link, useLocation } from "react-router-dom";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../auth";
-import type { ModelSetupStatus, Secret, SetupStatus } from "../api/types";
+import type { ModelSetupStatus, Secret, SetupNodeStatus, SetupStatus } from "../api/types";
 import { ErrorState, LoadingState } from "../components/ui";
 import { useToast } from "../components/toast";
 import { CopyButton, copyText } from "../components/copyButton";
@@ -45,7 +46,27 @@ function CollapsibleDetail({ text }: { text: string }) {
   );
 }
 
-
+// SetupNodeList renders the automatic-setup DAG nodes with their state and
+// blocked-by provenance. Shown inside the automatic reconciliation notice.
+function SetupNodeList({ nodes }: { nodes: SetupNodeStatus[] }) {
+  if (nodes.length === 0) return null;
+  return (
+    <ul className="setup-node-list" style={{ listStyle: "none", padding: 0, margin: "8px 0 0", display: "grid", gap: 4 }}>
+      {nodes.map((n) => (
+        <li key={n.id} className="setup-node" data-state={n.state} style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "baseline" }}>
+          <span className="setup-tag" data-tone={n.state === "succeeded" ? "done" : n.state === "running" || n.state === "pending" ? "pending" : "todo"}>
+            {n.state}
+          </span>
+          <span className="mono" style={{ overflowWrap: "anywhere" }}>{n.id}</span>
+          {n.state === "blocked" && n.blocked_by.length > 0 && (
+            <span className="muted">blocked by {n.blocked_by.join(", ")}</span>
+          )}
+          {n.error ? <CollapsibleDetail text={n.error} /> : null}
+        </li>
+      ))}
+    </ul>
+  );
+}
 interface TailscaleStatus {
   running: boolean;
   ip: string;
@@ -109,9 +130,13 @@ function tailnetErrorMessage(err: unknown): string {
   return "Tailnet path check failed";
 }
 
-type BoxId = "ssh" | "tailscale" | "restore" | "domain" | "cloudflare" | "lan" | "dns" | "admin" | "providers" | "knowledge" | "recovery" | "backups" | "storage" | "woodpecker";
+type BoxId = "backups" | "ssh" | "tailscale" | "domain" | "cloudflare" | "lan" | "dns" | "admin" | "providers" | "knowledge" | "storage" | "woodpecker";
 
-const BLOCKING: BoxId[] = ["ssh", "tailscale", "domain", "cloudflare", "lan", "admin", "knowledge", "recovery", "backups"];
+// Backups lead the checklist (DESIGN §5.4): restore-from-backup or
+// start-new with a recovery phrase plus repository. The merged first box
+// covers recovery_key + backups_configured + restore; the old separate
+// recovery/backups boxes are gone.
+const BLOCKING: BoxId[] = ["backups", "ssh", "tailscale", "domain", "cloudflare", "lan", "admin", "knowledge"];
 
 const REQUIRED_CHAT_ALIASES = ["omahab/fast", "omahab/balanced", "omahab/reasoning"];
 const REQUIRED_MEMORY_ALIAS = "omahab/memory";
@@ -133,7 +158,7 @@ function ProvidersSetupBox({ status, isLoading, isError, error, onRetry }: { sta
   const deployments = status?.deployments ?? [];
   const aliases = status?.aliases ?? [];
   const selected = deployments.some((d) => d.id === selectedId) ? selectedId : "";
-  const seedDisabled = !selected || seed.isPending || status?.migration_complete === false;
+  const seedDisabled = !selected || seed.isPending;
   return (
     <div className="form-stack">
       <p>Add one AI provider key in LiteLLM — the local model gateway. Open LiteLLM, add your provider (for example OpenAI or Anthropic), and pick a chat model. Everything else here is automatic.</p>
@@ -150,12 +175,6 @@ function ProvidersSetupBox({ status, isLoading, isError, error, onRetry }: { sta
           Refresh models
         </button>
       </div>
-      {status?.migration_error ? (
-        <p className="inline-error" role="alert" style={{ overflowWrap: "anywhere" }}>{status.migration_error.split("\n", 1)[0]}</p>
-      ) : null}
-      {status && !status.migration_complete ? (
-        <p className="muted">Migration is not complete — retry automatic setup, then seed.</p>
-      ) : null}
       {isLoading ? (
         <p>Loading models…</p>
       ) : isError ? (
@@ -228,6 +247,8 @@ export function SetupPage() {
   const { client } = useAuth();
   const toast = useToast();
   const queryClient = useQueryClient();
+  const { pathname } = useLocation();
+  const adminPrefix = pathname.startsWith("/admin") ? "/admin" : "";
 
   const setupQuery = useQuery({
     queryKey: ["setup"],
@@ -709,8 +730,6 @@ export function SetupPage() {
   const hasUsers = (usersQuery.data?.length ?? 0) > 0;
   const instanceDomain = instanceQuery.data?.domain ?? "";
   const domainValid = !!instanceDomain && instanceDomain !== "example.com" && instanceDomain !== "not-configured.invalid";
-  const sshHost = instanceDomain || (typeof window !== "undefined" ? window.location.hostname : "your-server");
-  const recoveryEmail = usersQuery.data?.[0]?.email ?? inviteEmail ?? "admin@example.com";
 
   const adminCheck = checkById("admin_passkeys");
   const reconciliationCheck = checkById("automatic_reconciliation");
@@ -732,10 +751,17 @@ export function SetupPage() {
   const lanClosed = networkQuery.data?.lan_closed === true;
   const modelAliases = modelsQuery.data?.aliases ?? [];
   const providersDone = REQUIRED_CHAT_ALIASES.every((name) => modelAliases.some((a) => a.name === name && a.configured)) && modelAliases.some((a) => a.name === REQUIRED_MEMORY_ALIAS && a.configured);
+  // The merged first box is done when either the new-server path finished
+  // (phrase confirmed + repository configured) or a restore completed (the
+  // restored kit flips recovery_key, and the repository is attached).
+  const restoreCheck = checkById("restore");
+  const restoreDone = restoreCheck?.status === "ok";
+  const restoreFailed = restoreCheck?.status === "failed";
+  const restoreInProgress = restoreCheck?.status === "pending" && (restoreCheck.detail?.includes("in progress") ?? false);
   const doneMap: Record<BoxId, boolean> = {
+    backups: (isOk("recovery_key") && isOk("backups_configured")) || restoreDone,
     ssh: isOk("ssh_keys"),
     tailscale: tailscaleRunning || isOk("tailscale"),
-    restore: false,
     domain: domainValid && isOk("domain"),
     cloudflare: isOk("cloudflare_dns"),
     lan: lanClosed,
@@ -743,8 +769,6 @@ export function SetupPage() {
     admin: isOk("admin_passkeys"),
     providers: providersDone,
     knowledge: isOk("knowledge_index_setup"),
-    recovery: isOk("recovery_key"),
-    backups: isOk("backups_configured"),
     storage: isOk("storage_configured"),
     woodpecker: woodpeckerCheck?.status === "ok",
   };
@@ -773,10 +797,172 @@ export function SetupPage() {
           <strong>{reconciliationCheck.label}</strong>
           {reconciliationCheck.detail ? <CollapsibleDetail text={reconciliationCheck.detail} /> : null}
           {reconciliationCheck.action ? <p>Action: {reconciliationCheck.action}</p> : null}
+          <SetupNodeList nodes={setup.nodes ?? []} />
         </div>
       )}
       <hr className="setup-divider" />
       <div className="setup-accordion">
+        <Box title="Backups" done={doneMap.backups} open={openId === "backups"} onToggle={() => toggle("backups")}>
+          {restoreDone ? (
+            <p>
+              Server restored from backup{restoreCheck?.detail ? <> — {restoreCheck.detail}</> : null}. The
+ repository stays attached so backups continue into the same instance path; manage repositories on the{" "}
+              <Link to={`${adminPrefix}/backups`}>Backups page</Link> or check the recovery flow from there.
+            </p>
+          ) : (
+            <>
+              <p>
+                Do you have a recovery phrase from an earlier Omahab server?
+              </p>
+              <p className="muted">
+                <strong>Yes</strong> — restore that server below: accounts, secrets, and settings come back
+ from its backup, and this machine continues into the same instance path. <strong>No</strong> — start
+ fresh: generate a recovery phrase and connect the backup repository.
+              </p>
+              {restoreFailed && (
+                <p className="inline-error" role="alert">{restoreCheck?.detail ?? "The last restore failed"}</p>
+              )}
+              {restoreInProgress && (
+                <p className="muted">{restoreCheck?.detail}</p>
+              )}
+              {!restoreInProgress && (
+                <>
+                  <h3>Yes — restore an earlier server</h3>
+                  <RestoreFromBackupControl onStartNew={() => setOpenOverride("backups")} />
+                  <hr className="setup-divider" />
+                  <h3>No — start fresh</h3>
+                  {!recovery ? (
+                    <div className="form-stack">
+                      {confirmedFp && <p>Kit stored on the server (fingerprint {confirmedFp}). Generating again replaces it.</p>}
+                      <button className="button primary" type="button" onClick={() => void recoveryGenerateMutation.mutate()} disabled={recoveryGenerateMutation.isPending}>
+                        {recoveryGenerateMutation.isPending ? "Generating…" : confirmedFp ? "Generate a new phrase" : "Generate recovery phrase"}
+                      </button>
+                      {recoveryGenerateMutation.isError && (
+                        <p className="inline-error" role="alert">{recoveryGenerateMutation.error instanceof Error ? recoveryGenerateMutation.error.message : "Generation failed"}</p>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="form-stack">
+                      <div className="recovery-grid">
+                        {recovery.phrase.map((w, i) => (
+                          <div key={i}>
+                            <span>{i + 1}.</span>
+                            <span>{w}</span>
+                          </div>
+                        ))}
+                      </div>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                        <CopyButton text={recovery.phrase.join(" ")} label="Copy phrase" />
+                        <span style={{ opacity: 0.7, fontSize: "0.85em" }}>Fingerprint: {recovery.fingerprint}</span>
+                      </div>
+                      <p style={{ opacity: 0.9 }}>This phrase unlocks your backups and this server if everything else is lost. Store it offline (Bitwarden, 1Password, paper). Omahab cannot show it again.</p>
+                      <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        <input type="checkbox" checked={recoveryAck} onChange={(e) => setRecoveryAck(e.target.checked)} />
+                        I saved this in my password manager
+                      </label>
+                      {recoveryAck && (
+                        <>
+                          <div>
+                            <button className="button secondary" type="button" onClick={() => void copyCheckCode()}>
+                              Copy check code
+                            </button>
+                            <p style={{ opacity: 0.8, fontSize: "0.9em" }}>Copies a short check code (this overwrites the phrase in your clipboard), then enter it below to verify. Copy is optional.</p>
+                          </div>
+                          {copyFailed && (
+                            <p className="inline-error" role="alert">Copy failed. Enter the fingerprint manually.</p>
+                          )}
+                          <label className="field">
+                            <span>Enter the check code</span>
+                            <input value={pasteInput} onChange={(e) => setPasteInput(e.target.value)} placeholder={recovery.fingerprint} autoComplete="off" />
+                          </label>
+                          {pasteInput.trim() !== "" && !pasteOk && (
+                            <p className="inline-error" role="alert">Does not match — enter the code shown as the fingerprint.</p>
+                          )}
+                          <div style={{ display: "flex", gap: 8 }}>
+                            <button className="button secondary" type="button" onClick={() => { setRecoveryAck(false); setPasteInput(""); setCodeCopied(false); setCopyFailed(false); }}>
+                              Back
+                            </button>
+                            <button
+                              className="button primary"
+                              type="button"
+                              onClick={() => void recoveryConfirmMutation.mutate()}
+                              disabled={recoveryConfirmMutation.isPending || !pasteOk}
+                            >
+                              {recoveryConfirmMutation.isPending ? "Confirming…" : "Confirm and store kit"}
+                            </button>
+                          </div>
+                        </>
+                      )}
+                      {recoveryConfirmMutation.isError && (
+                        <p className="inline-error" role="alert">{recoveryConfirmMutation.error instanceof Error ? recoveryConfirmMutation.error.message : "Confirm failed"}</p>
+                      )}
+                    </div>
+                  )}
+                  {isOk("recovery_key") && (
+                    <div className="form-stack">
+                      <h3 style={{ marginTop: 8 }}>Connect the backup repository</h3>
+                      <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+                        <button type="button" className={`button ${repoKind === "hetzner_storagebox" ? "primary" : "ghost"}`} onClick={() => setRepoKind("hetzner_storagebox")}>Hetzner Storage Box</button>
+                        <button type="button" className={`button ${repoKind === "generic" ? "primary" : "ghost"}`} onClick={() => setRepoKind("generic")}>Advanced (restic URL)</button>
+                      </div>
+                      <label className="field">
+                        <span>Label</span>
+                        <input value={repoLabel} onChange={(e) => setRepoLabel(e.target.value)} placeholder="primary" />
+                      </label>
+                      {repoKind === "hetzner_storagebox" ? (
+                        <>
+                          <label className="field">
+                            <span>Username (u123456)</span>
+                            <input value={repoUsername} onChange={(e) => setRepoUsername(e.target.value)} placeholder="u123456" autoComplete="off" />
+                          </label>
+                          <label className="field">
+                            <span>Host (u123456.your-storagebox.de)</span>
+                            <input value={repoHost} onChange={(e) => setRepoHost(e.target.value)} placeholder="u123456.your-storagebox.de" autoComplete="off" />
+                          </label>
+                          <label className="field">
+                            <span>Sub-account password (used once to upload SSH key)</span>
+                            <input type="password" value={repoSubPass} onChange={(e) => setRepoSubPass(e.target.value)} autoComplete="new-password" />
+                          </label>
+                        </>
+                      ) : (
+                        <>
+                          <label className="field">
+                            <span>Location (restic URL)</span>
+                            <input value={repoLocation} onChange={(e) => setRepoLocation(e.target.value)} placeholder="sftp:user@host:restic-repo" className="mono" />
+                          </label>
+                          <label className="field">
+                            <span>Repository password</span>
+                            <input type="password" value={repoPassword} onChange={(e) => setRepoPassword(e.target.value)} autoComplete="new-password" />
+                          </label>
+                        </>
+                      )}
+                      <button
+                        className="button primary"
+                        type="button"
+                        onClick={() => void repoMutation.mutate()}
+                        disabled={
+                          repoMutation.isPending ||
+                          !repoLabel.trim() ||
+                          (repoKind === "hetzner_storagebox"
+                            ? !repoUsername.trim() || !repoHost.trim() || !repoSubPass
+                            : !repoLocation.trim() || !repoPassword)
+                        }
+                      >
+                        {repoMutation.isPending ? "Configuring…" : "Add repository"}
+                      </button>
+                      {repoMutation.isError && (
+                        <p className="inline-error" role="alert">{repoMutation.error instanceof Error ? repoMutation.error.message : "Configure failed"}</p>
+                      )}
+                      <p className="muted" style={{ fontSize: "0.85rem" }}>
+                        The first backup and verify run in the background once the repository is ready.
+                      </p>
+                    </div>
+                  )}
+                </>
+              )}
+            </>
+          )}
+        </Box>
         <Box title="SSH keys" done={doneMap.ssh} open={openId === "ssh"} onToggle={() => toggle("ssh")}>
           <p>The installer seeded keys for the administrator. Add more here if needed.</p>
           {sshQuery.isLoading ? (
@@ -851,12 +1037,6 @@ export function SetupPage() {
             <p className="inline-error" role="alert">{tailscaleLoginMutation.error instanceof Error ? tailscaleLoginMutation.error.message : "Login failed"}</p>
           )}
         </Box>
-        {!doneMap.recovery && (
-          <Box title="Restore from backup (optional)" done={false} open={openId === "restore"} onToggle={() => toggle("restore")}>
-            <p>Replacing a lost or rebuilt server? Bring back its settings, accounts, and secrets from your off-site backup with the recovery phrase. New install? Skip this.</p>
-            <RestoreFromBackupControl />
-          </Box>
-        )}
 
         <Box title="Domain" done={doneMap.domain} open={openId === "domain"} onToggle={() => toggle("domain")}>
           <label className="field">
@@ -1088,138 +1268,6 @@ export function SetupPage() {
           </Box>
         ))}
 
-        <Box title="Recovery phrase" done={doneMap.recovery} open={openId === "recovery"} onToggle={() => toggle("recovery")}>
-          {!recovery ? (
-            <div className="form-stack">
-              {confirmedFp && <p>Kit stored on the server (fingerprint {confirmedFp}). Generating again replaces it.</p>}
-              <button className="button primary" type="button" onClick={() => void recoveryGenerateMutation.mutate()} disabled={recoveryGenerateMutation.isPending}>
-                {recoveryGenerateMutation.isPending ? "Generating…" : confirmedFp ? "Generate a new phrase" : "Generate recovery phrase"}
-              </button>
-              {recoveryGenerateMutation.isError && (
-                <p className="inline-error" role="alert">{recoveryGenerateMutation.error instanceof Error ? recoveryGenerateMutation.error.message : "Generation failed"}</p>
-              )}
-            </div>
-          ) : (
-            <div className="form-stack">
-              <div className="recovery-grid">
-                {recovery.phrase.map((w, i) => (
-                  <div key={i}>
-                    <span>{i + 1}.</span>
-                    <span>{w}</span>
-                  </div>
-                ))}
-              </div>
-              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                <CopyButton text={recovery.phrase.join(" ")} label="Copy phrase" />
-                <span style={{ opacity: 0.7, fontSize: "0.85em" }}>Fingerprint: {recovery.fingerprint}</span>
-              </div>
-              <p style={{ opacity: 0.9 }}>This phrase unlocks your backups and this server if everything else is lost. Store it offline (Bitwarden, 1Password, paper). Omahab cannot show it again.</p>
-              <p className="muted">It encrypts the backup password and the secret store — not the disk itself. Disk encryption is a separate doctor check.</p>
-              <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <input type="checkbox" checked={recoveryAck} onChange={(e) => setRecoveryAck(e.target.checked)} />
-                I saved this in my password manager
-              </label>
-              {recoveryAck && (
-                <>
-                  <div>
-                    <button className="button secondary" type="button" onClick={() => void copyCheckCode()}>
-                      Copy check code
-                    </button>
-                    <p style={{ opacity: 0.8, fontSize: "0.9em" }}>Copies a short check code (this overwrites the phrase in your clipboard), then enter it below to verify. Copy is optional.</p>
-                  </div>
-                  {copyFailed && (
-                    <p className="inline-error" role="alert">Copy failed. Enter the fingerprint manually.</p>
-                  )}
-                  <label className="field">
-                    <span>Enter the check code</span>
-                    <input value={pasteInput} onChange={(e) => setPasteInput(e.target.value)} placeholder={recovery.fingerprint} autoComplete="off" />
-                  </label>
-                  {pasteInput.trim() !== "" && !pasteOk && (
-                    <p className="inline-error" role="alert">Does not match — enter the code shown as the fingerprint.</p>
-                  )}
-                  <div style={{ display: "flex", gap: 8 }}>
-                    <button className="button secondary" type="button" onClick={() => { setRecoveryAck(false); setPasteInput(""); setCodeCopied(false); setCopyFailed(false); }}>
-                      Back
-                    </button>
-                    <button
-                      className="button primary"
-                      type="button"
-                      onClick={() => void recoveryConfirmMutation.mutate()}
-                      disabled={recoveryConfirmMutation.isPending || !pasteOk}
-                    >
-                      {recoveryConfirmMutation.isPending ? "Confirming…" : "Confirm and store kit"}
-                    </button>
-                  </div>
-                </>
-              )}
-              {recoveryConfirmMutation.isError && (
-                <p className="inline-error" role="alert">{recoveryConfirmMutation.error instanceof Error ? recoveryConfirmMutation.error.message : "Confirm failed"}</p>
-              )}
-            </div>
-          )}
-        </Box>
-
-        <Box title="Backups" done={doneMap.backups} open={openId === "backups"} onToggle={() => toggle("backups")}>
-          <div className="form-stack">
-            <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
-              <button type="button" className={`button ${repoKind === "hetzner_storagebox" ? "primary" : "ghost"}`} onClick={() => setRepoKind("hetzner_storagebox")}>Hetzner Storage Box</button>
-              <button type="button" className={`button ${repoKind === "generic" ? "primary" : "ghost"}`} onClick={() => setRepoKind("generic")}>Advanced (restic URL)</button>
-            </div>
-            <label className="field">
-              <span>Label</span>
-              <input value={repoLabel} onChange={(e) => setRepoLabel(e.target.value)} placeholder="primary" />
-            </label>
-            {repoKind === "hetzner_storagebox" ? (
-              <>
-                <label className="field">
-                  <span>Username (u123456)</span>
-                  <input value={repoUsername} onChange={(e) => setRepoUsername(e.target.value)} placeholder="u123456" autoComplete="off" />
-                </label>
-                <label className="field">
-                  <span>Host (u123456.your-storagebox.de)</span>
-                  <input value={repoHost} onChange={(e) => setRepoHost(e.target.value)} placeholder="u123456.your-storagebox.de" autoComplete="off" />
-                </label>
-                <label className="field">
-                  <span>Sub-account password (used once to upload SSH key)</span>
-                  <input type="password" value={repoSubPass} onChange={(e) => setRepoSubPass(e.target.value)} autoComplete="new-password" />
-                </label>
-              </>
-            ) : (
-              <>
-                <label className="field">
-                  <span>Location (restic URL)</span>
-                  <input value={repoLocation} onChange={(e) => setRepoLocation(e.target.value)} placeholder="sftp:user@host:restic-repo" className="mono" />
-                </label>
-                <label className="field">
-                  <span>Repository password</span>
-                  <input type="password" value={repoPassword} onChange={(e) => setRepoPassword(e.target.value)} autoComplete="new-password" />
-                </label>
-              </>
-            )}
-            <button
-              className="button primary"
-              type="button"
-              onClick={() => void repoMutation.mutate()}
-              disabled={
-                repoMutation.isPending ||
-                !repoLabel.trim() ||
-                (repoKind === "hetzner_storagebox"
-                  ? !repoUsername.trim() || !repoHost.trim() || !repoSubPass
-                  : !repoLocation.trim() || !repoPassword)
-              }
-            >
-              {repoMutation.isPending ? "Configuring…" : "Add repository"}
-            </button>
-            {repoMutation.isError && (
-              <p className="inline-error" role="alert">{repoMutation.error instanceof Error ? repoMutation.error.message : "Configure failed"}</p>
-            )}
-            <p>Run on the server as root to test recovery for {recoveryEmail}:</p>
-            <div className="code-strip">
-              <code>ssh {sshHost} sudo omahab identity recover {recoveryEmail}</code>
-              <CopyButton text={`ssh ${sshHost} sudo omahab identity recover ${recoveryEmail}`} label="Copy" />
-            </div>
-          </div>
-        </Box>
 
         <Box title="Storage (optional)" done={doneMap.storage} open={openId === "storage"} onToggle={() => toggle("storage")}>
           <div className="code-strip">

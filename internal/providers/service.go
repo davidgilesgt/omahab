@@ -23,9 +23,6 @@ var (
 	ErrUnsupportedCredentialType = errors.New("provider: unsupported credential type")
 	ErrEntitlement               = errors.New("provider: entitlement failure")
 	ErrTokenInvalid              = errors.New("provider: token invalid or corrupted")
-	ErrVirtualKeyInvalid         = errors.New("provider: virtual key invalid")
-	ErrVirtualKeyExpired         = errors.New("provider: virtual key expired")
-	ErrVirtualKeyRevoked         = errors.New("provider: virtual key revoked")
 )
 // Provider constants — only these are sanctioned.
 const (
@@ -297,8 +294,6 @@ type Alias struct {
 
 // VirtualKey is the persisted metadata for a scoped virtual key.
 // The plaintext token is never persisted; only its hash is stored.
-// Deprecated: ValidateVirtualKey is audit-only; LiteLLM is authoritative for request authentication.
-// This struct retains hash/prefix for audit correlation, plus gateway linkage and ownership metadata.
 type VirtualKey struct {
 	ID               domain.ID  `json:"id"`
 	Name             string     `json:"name"`
@@ -1131,36 +1126,13 @@ func (s *Service) ResolveAlias(ctx context.Context, name string) (*Credential, s
 
 // --- Virtual key methods ---
 
-// LegacyVirtualKeyPrefix is the retired local-only token prefix. Tokens with
-// this prefix were minted locally and never accepted by the LiteLLM gateway,
-// which requires the sk- prefix. New issuance never mints this prefix;
-// existing rows are revoked by migration providers-008 and must be reissued
-// through the gateway. Use IsLegacyVirtualKeyToken to detect stored secrets
-// that still carry an unusable token.
-const LegacyVirtualKeyPrefix = "omk_"
-
 // GatewayVirtualKeyPrefix is the LiteLLM-accepted bearer prefix. Issued
 // product keys MUST carry this prefix; the gateway rejects anything else.
 const GatewayVirtualKeyPrefix = "sk-"
 
-// IsLegacyVirtualKeyToken reports whether a stored secret still carries a
-// retired omk_ token that the gateway will reject. Callers (setup ensure
-// paths for hermes/hindsight/karakeep, device provisioning) must reissue
-// through Service.IssueVirtualKey when this returns true.
-func IsLegacyVirtualKeyToken(token string) bool {
-	return strings.HasPrefix(strings.TrimSpace(token), LegacyVirtualKeyPrefix)
-}
-
-// IsLegacyVirtualKeyPrefix reports whether a persisted key_prefix belongs to
-// the retired omk_ lineage.
-func IsLegacyVirtualKeyPrefix(prefix string) bool {
-	return strings.HasPrefix(strings.TrimSpace(prefix), LegacyVirtualKeyPrefix)
-}
-
 // IssueVirtualKey issues a scoped virtual key through the LiteLLM gateway and
 // returns the gateway-accepted bearer plaintext exactly once. Only the SHA256
-// hash of that gateway plaintext is persisted, so local ValidateVirtualKey
-// correlates the same token the gateway authenticates. Scopes must be known
+// hash of that gateway plaintext is persisted. Scopes must be known
 // aliases when non-empty and are forwarded as the gateway models allowlist,
 // so out-of-scope use fails at the gateway and locally via Allows.
 // Owner and limit fields are optional but validated when present.
@@ -1255,12 +1227,10 @@ func (s *Service) IssueVirtualKey(ctx context.Context, in IssueVirtualKeyInput) 
 	if in.BudgetDuration != nil && in.BudgetAmount == nil {
 		return nil, fmt.Errorf("%w: budget_amount is required when budget_duration is set", ErrValidation)
 	}
-
 	// The product token MUST be the LiteLLM-accepted bearer. Issue in the
 	// gateway first; the gateway returns the sk- plaintext exactly once plus
 	// its row ID. The product persists only the hash of that same plaintext,
-	// so local ValidateVirtualKey correlates the token the gateway
-	// authenticates, and scopes travel as the gateway models allowlist.
+	// and scopes travel as the gateway models allowlist.
 	if s.vkGateway == nil {
 		return nil, fmt.Errorf("%w: virtual key gateway not configured", ErrValidation)
 	}
@@ -1289,9 +1259,6 @@ func (s *Service) IssueVirtualKey(ctx context.Context, in IssueVirtualKeyInput) 
 	}
 	if !strings.HasPrefix(token, GatewayVirtualKeyPrefix) {
 		return nil, fmt.Errorf("%w: gateway returned non-sk virtual key prefix", ErrValidation)
-	}
-	if IsLegacyVirtualKeyToken(token) {
-		return nil, fmt.Errorf("%w: gateway returned retired omk_ prefix", ErrValidation)
 	}
 	gatewayKeyIDStr := strings.TrimSpace(issued.KeyID)
 	if gatewayKeyIDStr == "" {
@@ -1462,63 +1429,6 @@ func (s *Service) RevokeVirtualKey(ctx context.Context, id domain.ID) error {
 	return nil
 }
 
-// CleanupLegacyGatewayOrphans revokes pre-fix gateway rows whose bearer
-// plaintext was discarded at issuance (omk_ lineage: the product minted a
-// local-only omk_ token and kept only the gateway key ID, so the gateway
-// holds usable sk- rows with scopes/budget that nobody can present).
-//
-// It queries legacy rows REGARDLESS of revoked_at: migration
-// providers-008 revokes local omk_ rows before setup ensure callers run, so
-// filtering on revoked_at would miss every orphan. For each legacy row that
-// carries a gateway_key_id it revokes that exact stored handle plus the
-// row's alias; rows without a gateway_key_id never created a gateway row
-// and are skipped. Owner-agnostic: covers hermes, harness (user model keys,
-// hindsight, karakeep) and device rows alike.
-//
-// It performs no local writes and deletes no rows, so unrelated gateway
-// keys are never touched. Idempotent: gateway revoke is best-effort per
-// row and already-absent gateway rows count as cleaned. Returns the number
-// of gateway handles revoked; the first gateway error is returned alongside
-// the count so callers can log it without failing setup.
-func (s *Service) CleanupLegacyGatewayOrphans(ctx context.Context) (int, error) {
-	if s.vkGateway == nil {
-		return 0, nil
-	}
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT name, gateway_key_id FROM provider_virtual_keys WHERE key_prefix LIKE 'omk_%' AND gateway_key_id IS NOT NULL AND gateway_key_id != ''`)
-	if err != nil {
-		return 0, fmt.Errorf("list legacy virtual keys: %w", err)
-	}
-	defer rows.Close()
-	cleaned := 0
-	var firstErr error
-	for rows.Next() {
-		var name, gatewayKeyID string
-		if err := rows.Scan(&name, &gatewayKeyID); err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("scan legacy virtual key: %w", err)
-			}
-			continue
-		}
-		name = strings.TrimSpace(name)
-		gatewayKeyID = strings.TrimSpace(gatewayKeyID)
-		if gatewayKeyID == "" {
-			continue
-		}
-		if err := s.vkGateway.RevokeVirtualKey(ctx, gatewayKeyID, name); err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("revoke legacy gateway key %q: %w", name, err)
-			}
-			continue
-		}
-		cleaned++
-	}
-	if err := rows.Err(); err != nil && firstErr == nil {
-		firstErr = fmt.Errorf("iterate legacy virtual keys: %w", err)
-	}
-	return cleaned, firstErr
-}
-
 // GatewayRevokeVirtualKey revokes a virtual key's stored gateway handle
 // (+alias) and reports the gateway result for durable retry queues
 // (companion device revoke). It performs no local writes: revoked_at is
@@ -1600,56 +1510,6 @@ func (s *Service) DeleteVirtualKey(ctx context.Context, id domain.ID) error {
 		CreatedAt:  s.nowUTC(),
 	})
 	return nil
-}
-
-// ValidateVirtualKey validates a presented virtual-key token (hash check, expiry, revocation).
-// It does not mark the key as consumed; virtual keys are reusable until revoked/expired.
-//
-// Deprecated: This method is retained for audit correlation and tests only.
-// LiteLLM is authoritative for request authentication; do NOT use this as the
-// request auth path in production. Caller should authenticate via the gateway.
-func (s *Service) ValidateVirtualKey(ctx context.Context, token string) (*VirtualKey, error) {
-	token = strings.TrimSpace(token)
-	if token == "" {
-		return nil, ErrVirtualKeyInvalid
-	}
-	hash := hashToken(token)
-	if hash == "" {
-		return nil, ErrVirtualKeyInvalid
-	}
-	var (
-		id, name, keyPrefix, scopesStr       string
-		gatewayKeyID, ownerKind, ownerID     sql.NullString
-		rpmLimit, tpmLimit, concurrencyLimit sql.NullInt64
-		budgetAmount                         sql.NullFloat64
-		budgetDuration                       sql.NullString
-		expiresAt, revokedAt                 sql.NullString
-		createdAt, updatedAt                 string
-	)
-	err := s.db.QueryRowContext(ctx,
-		`SELECT id, name, key_prefix, scopes, gateway_key_id, owner_kind, owner_id, rpm_limit, tpm_limit, concurrency_limit, budget_amount, budget_duration, expires_at, revoked_at, created_at, updated_at FROM provider_virtual_keys WHERE key_hash = ?`, hash).
-		Scan(&id, &name, &keyPrefix, &scopesStr, &gatewayKeyID, &ownerKind, &ownerID, &rpmLimit, &tpmLimit, &concurrencyLimit, &budgetAmount, &budgetDuration, &expiresAt, &revokedAt, &createdAt, &updatedAt)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrVirtualKeyInvalid
-		}
-		return nil, fmt.Errorf("lookup virtual key: %w", err)
-	}
-	if revokedAt.Valid {
-		return nil, ErrVirtualKeyRevoked
-	}
-	if expiresAt.Valid {
-		exp, _ := time.Parse(time.RFC3339Nano, expiresAt.String)
-		if s.nowUTC().After(exp) {
-			return nil, ErrVirtualKeyExpired
-		}
-	}
-	// Re-parse for VirtualKey struct.
-	vk, err := scanVirtualKeyFromValuesExtended(id, name, keyPrefix, scopesStr, gatewayKeyID, ownerKind, ownerID, rpmLimit, tpmLimit, concurrencyLimit, budgetAmount, budgetDuration, expiresAt, revokedAt, createdAt, updatedAt)
-	if err != nil {
-		return nil, err
-	}
-	return vk, nil
 }
 
 // Allows checks whether a virtual key is allowed to use a given alias.
@@ -1781,10 +1641,6 @@ func scanVirtualKey(row vkScanner) (*VirtualKey, error) {
 		return nil, fmt.Errorf("scan virtual key: %w", err)
 	}
 	return scanVirtualKeyFromValuesExtended(id, name, keyPrefix, scopesStr, gatewayKeyID, ownerKind, ownerID, rpmLimit, tpmLimit, concurrencyLimit, budgetAmount, budgetDuration, expiresAt, revokedAt, createdAt, updatedAt)
-}
-
-func scanVirtualKeyFromValues(id, name, keyPrefix, scopesStr string, expiresAt, revokedAt sql.NullString, createdAt, updatedAt string) (*VirtualKey, error) {
-	return scanVirtualKeyFromValuesExtended(id, name, keyPrefix, scopesStr, sql.NullString{}, sql.NullString{}, sql.NullString{}, sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, sql.NullFloat64{}, sql.NullString{}, expiresAt, revokedAt, createdAt, updatedAt)
 }
 
 func scanVirtualKeyFromValuesExtended(id, name, keyPrefix, scopesStr string, gatewayKeyID, ownerKind, ownerID sql.NullString, rpmLimit, tpmLimit, concurrencyLimit sql.NullInt64, budgetAmount sql.NullFloat64, budgetDuration sql.NullString, expiresAt, revokedAt sql.NullString, createdAt, updatedAt string) (*VirtualKey, error) {

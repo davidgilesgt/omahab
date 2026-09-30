@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -160,6 +161,10 @@ type captureFakeRunner struct {
 	initErr        error
 	backupErr      error
 	backupCalls    int
+	lastBackup     backups.BackupRequest
+	// backupHook runs inside Backup so tests can snapshot staged files
+	// exactly when restic would capture them.
+	backupHook func(req backups.BackupRequest)
 }
 
 func (f *captureFakeRunner) Init(context.Context, backups.Repository, backups.Credentials) error {
@@ -171,10 +176,16 @@ func (f *captureFakeRunner) Init(context.Context, backups.Repository, backups.Cr
 
 func (f *captureFakeRunner) Backup(_ context.Context, _ backups.Repository, _ backups.Credentials, req backups.BackupRequest) (backups.Snapshot, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.backupCalls++
-	if f.backupErr != nil {
-		return backups.Snapshot{}, f.backupErr
+	f.lastBackup = req
+	hook := f.backupHook
+	err := f.backupErr
+	f.mu.Unlock()
+	if hook != nil {
+		hook(req)
+	}
+	if err != nil {
+		return backups.Snapshot{}, err
 	}
 	return backups.Snapshot{ID: "snap-scoped-test", Paths: req.Paths}, nil
 }
@@ -415,5 +426,89 @@ func TestScopedBackupResumeFailureReported(t *testing.T) {
 	}
 	if got := scopedAppObserved(t, b, appID); got == apps.ObservedRunning {
 		t.Fatalf("app observed = running despite failed resume; state must stay honest")
+	}
+}
+
+// TestFirstBackupAfterRepositoryCreateRunsScopedCapture pins the wizard's
+// mode=create contract: the first backup runs the scoped capture path and
+// its snapshot's staged manifest is v2 with the server-config scope and
+// sha256-hashed artifacts.
+func TestFirstBackupAfterRepositoryCreateRunsScopedCapture(t *testing.T) {
+	b, fr := scopedBackupTestBackend(t, storageTestRunner{})
+	ctx := context.Background()
+	mustInstallScopeApp(t, b, "immich")
+	repoID := mustConfigureScopedRepo(t, b)
+
+	var manifestCopy string
+	fr.mu.Lock()
+	fr.backupHook = func(req backups.BackupRequest) {
+		// Snapshot what restic would capture: the manifest staged
+		// in the fixed backup-staging directory.
+		raw, err := os.ReadFile(filepath.Join(b.cfg.StateDir, "backup-staging", "manifest.json"))
+		if err == nil {
+			manifestCopy = string(raw)
+		}
+	}
+	fr.mu.Unlock()
+
+	got, err := b.CreateBackupScoped(ctx, repoID, []string{"server-config"}, false)
+	if err != nil {
+		t.Fatalf("first backup: %v", err)
+	}
+	if got.ID == "" {
+		t.Fatal("backup returned empty record")
+	}
+	fr.mu.Lock()
+	defer fr.mu.Unlock()
+	if fr.backupCalls != 1 {
+		t.Fatalf("backup calls = %d, want 1", fr.backupCalls)
+	}
+	req := fr.lastBackup
+	// The restic request tags the snapshot with its scope.
+	foundScopeTag := false
+	for _, tag := range req.Tags {
+		if tag == "scope:"+backups.ScopeServerConfig {
+			foundScopeTag = true
+		}
+	}
+	if !foundScopeTag {
+		t.Fatalf("capture tags = %v, want a scope:server-config tag", req.Tags)
+	}
+	// The fixed staging path is among the captured paths.
+	staging := filepath.Join(b.cfg.StateDir, "backup-staging")
+	foundStaging := false
+	for _, p := range req.Paths {
+		if p == staging {
+			foundStaging = true
+		}
+	}
+	if !foundStaging {
+		t.Fatalf("capture paths %v lack the fixed staging path %s", req.Paths, staging)
+	}
+	// The staged manifest is v2 and carries the server-config scope
+	// with sha256-hashed artifacts.
+	if manifestCopy == "" {
+		t.Fatal("capture did not stage a manifest at backup-staging/manifest.json")
+	}
+	m, err := backups.ReadManifest(filepath.Join(b.cfg.StateDir, "backup-staging"))
+	if err == nil {
+		// Staging is removed on success; fall back to the copied bytes.
+	} else if jsonErr := json.Unmarshal([]byte(manifestCopy), &m); jsonErr != nil {
+		t.Fatalf("parse staged manifest: %v", jsonErr)
+	}
+	if m.FormatVersion != backups.ManifestFormatVersion {
+		t.Fatalf("manifest format_version = %d, want %d", m.FormatVersion, backups.ManifestFormatVersion)
+	}
+	scope, ok := m.Scope(backups.ScopeServerConfig)
+	if !ok {
+		t.Fatalf("manifest scopes %v lack server-config", m.ScopeNames())
+	}
+	if len(scope.Artifacts) == 0 {
+		t.Fatal("server-config scope has no sha256-hashed artifacts")
+	}
+	for _, a := range scope.Artifacts {
+		if len(a.SHA256) != 64 {
+			t.Fatalf("artifact %s lacks a sha256 hash: %+v", a.File, a)
+		}
 	}
 }

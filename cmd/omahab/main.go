@@ -8,16 +8,16 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/url"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/spf13/cobra"
 	"github.com/charmbracelet/x/term"
+	"github.com/spf13/cobra"
 	goterm "golang.org/x/term"
 
 	"github.com/omahab/omahab/internal/apiclient"
@@ -109,7 +109,7 @@ Use --server to target a different control plane (env OMAHAB_SERVER, then ~/.con
 	root.AddCommand(newInstallCmd())
 	root.AddCommand(newSetupCmd())
 	root.AddCommand(newSystemCmd())
-	root.AddCommand(newWorkspaceCmd()) // alias
+	root.AddCommand(newBundleCmd())
 	root.AddCommand(newIdentityCmd())
 	root.AddCommand(newRecoveryCmd())
 	root.AddCommand(newHermesCmd())
@@ -156,28 +156,6 @@ func needForceGuard(isDestructiveOrPublic bool) error {
 
 func cobraFlagBool(name string) (bool, bool) { return false, false }
 
-func tokenFromClientJSON() string {
-	p, err := apiclient.DefaultClientConfigPath()
-	if err != nil {
-		return ""
-	}
-	b, err := os.ReadFile(p)
-	if err != nil {
-		return ""
-	}
-	if len(strings.TrimSpace(string(b))) == 0 {
-		return ""
-	}
-	var raw map[string]any
-	if err := json.Unmarshal(b, &raw); err != nil {
-		return ""
-	}
-	if tok, ok := raw["token"].(string); ok {
-		return strings.TrimSpace(tok)
-	}
-	return ""
-}
-
 func resolveClient() (*apiclient.Client, error) {
 	cfg, err := apiclient.LoadClientConfig("")
 	if err != nil {
@@ -194,12 +172,6 @@ func resolveClient() (*apiclient.Client, error) {
 	// Matches FileCredentialStore: $XDG_CONFIG_HOME/omahab/token else $HOME/.config/omahab/token.
 	// See console.go readAdminToken for full candidate list.
 	if tok, _ := (apiclient.FileCredentialStore{}).Token(); strings.TrimSpace(tok) != "" {
-		c := apiclient.New(server, tok)
-		c.HTTPClient.Timeout = flagTimeout
-		return c, nil
-	}
-	if tok := tokenFromClientJSON(); tok != "" {
-		// Legacy fallback: token stored in client.json by older login
 		c := apiclient.New(server, tok)
 		c.HTTPClient.Timeout = flagTimeout
 		return c, nil
@@ -376,9 +348,6 @@ func runWelcome(w io.Writer) error {
 	} else if tok, _ := (apiclient.FileCredentialStore{}).Token(); strings.TrimSpace(tok) != "" {
 		tokenStatus = "set (via ~/.config/omahab/token)"
 		hint = ""
-	} else if tok := tokenFromClientJSON(); tok != "" {
-		tokenStatus = "set (via ~/.config/omahab/client.json)"
-		hint = ""
 	}
 	if flagJSON {
 		return printJSON(map[string]any{
@@ -478,16 +447,16 @@ func renderWelcomeKV(w io.Writer, width int, server, serverSource, tokenStatus, 
 }
 
 type welcomeSnapshot struct {
-	LANIP          string
-	MDNSURL        string
-	DashboardURL   string
-	Server         string
-	IsRemote       bool
-	ServiceActive  string
-	ServiceResult  string
-	ServiceErr     error
-	UpOK           bool
-	UpErr          error
+	LANIP         string
+	MDNSURL       string
+	DashboardURL  string
+	Server        string
+	IsRemote      bool
+	ServiceActive string
+	ServiceResult string
+	ServiceErr    error
+	UpOK          bool
+	UpErr         error
 }
 
 func gatherWelcomeSnapshot(server string) welcomeSnapshot {
@@ -601,7 +570,7 @@ func newLoginCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "login",
 		Short: "Authenticate with the control plane",
-	Long: `Prompt for the 8-character panel token (input hidden), verify it, and save credentials.
+		Long: `Prompt for the 8-character panel token (input hidden), verify it, and save credentials.
 
 The token is shown on the server console and stored with 0600 permissions to
 ~/.config/omahab/token (XDG-aware: $XDG_CONFIG_HOME/omahab/token else
@@ -645,8 +614,8 @@ token is needed. Use --server to set the control plane URL
 			if _, err := c.Status(ctx); err != nil {
 				return handleFailure(fmt.Errorf("verify token: %w", err))
 			}
-			// Save to XDG-aware token file (~/.config/omahab/token) — primary store.
-			// Also update legacy client.json for backwards compat (server only, token kept in file).
+			// Save the bearer token to the XDG-aware token file (~/.config/omahab/token).
+			// client.json keeps only the server entry (used by ResolveServer precedence).
 			fileStore := apiclient.FileCredentialStore{}
 			if err := fileStore.SetToken(tok); err != nil {
 				return handleFailure(fmt.Errorf("save token to %s: %w", "~/.config/omahab/token", err))
@@ -851,12 +820,12 @@ func newStatusCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			st, err := c.Status(ctx)
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			humanStatus(st)
 			return nil
 		},
@@ -873,13 +842,13 @@ func newUpCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			// Force no token for up? client already handles stripping auth for /up path
 			out, err := c.Up(ctx)
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			if flagJSON {
 				return printJSON(out)
 			}
@@ -905,12 +874,12 @@ func newDoctorCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			res, err := c.Doctor(ctx)
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			if flagJSON {
 				return printJSON(res)
 			}
@@ -953,12 +922,12 @@ func newAppCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			items, err := c.ListApplications(ctx)
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			humanListApps(items)
 			return nil
 		},
@@ -972,12 +941,12 @@ func newAppCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			a, err := c.GetApplication(ctx, args[0])
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			if flagJSON {
 				return printJSON(a)
 			}
@@ -1003,18 +972,18 @@ func newAppCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := needForceGuard(false); err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			ctx, cancel := newContext()
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			res, err := c.RestartApplication(ctx, args[0])
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			if flagJSON {
 				return printJSON(res)
 			}
@@ -1215,12 +1184,12 @@ func newProjectCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			items, err := c.ListProjects(ctx)
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			humanListProjects(items)
 			return nil
 		},
@@ -1239,12 +1208,12 @@ func newProjectCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			p, err := c.CreateProject(ctx, apiclient.CreateProjectRequest{Name: createName, Slug: createSlug, Kind: createKind})
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			if flagJSON {
 				return printJSON(p)
 			}
@@ -1267,12 +1236,12 @@ func newProjectCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			p, err := c.GetProject(ctx, args[0])
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			if flagJSON {
 				return printJSON(p)
 			}
@@ -1297,7 +1266,7 @@ func newProjectCmd() *cobra.Command {
 			if isNonInteractive() && !force && !flagForce {
 				err := errors.New("refusing to delete project without --force in --non-interactive mode")
 				return handleFailure(err)
-}
+			}
 			if !force && !flagForce && !flagJSON {
 				if !confirmPrompt(fmt.Sprintf("delete project %q?", args[0])) {
 					fmt.Println("aborted")
@@ -1308,11 +1277,11 @@ func newProjectCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			if err := c.DeleteProject(ctx, args[0]); err != nil {
 				return handleFailure(err)
-}
+			}
 			if flagJSON {
 				return printJSON(map[string]string{"deleted": args[0]})
 			}
@@ -1379,12 +1348,12 @@ func newProjectCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			rs, err := c.ListReleases(ctx, args[0])
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			if flagJSON {
 				return printJSON(map[string]any{"items": rs})
 			}
@@ -1418,12 +1387,12 @@ func newProjectCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			rel, err := c.CreateRelease(ctx, args[0], apitypes.CreateReleaseRequest{Commit: deployCommit, Digest: deployDigest})
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			if flagJSON {
 				return printJSON(rel)
 			}
@@ -1445,17 +1414,17 @@ func newProjectCmd() *cobra.Command {
 			if isNonInteractive() && !force && !flagForce {
 				err := errors.New("refusing rollback without --force in --non-interactive mode")
 				return handleFailure(err)
-}
+			}
 			ctx, cancel := newContext()
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			rel, err := c.RollbackRelease(ctx, args[0], args[1])
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			if flagJSON {
 				return printJSON(rel)
 			}
@@ -1475,12 +1444,12 @@ func newProjectCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			p, err := c.GetProject(ctx, args[0])
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			// Prefer clientd if available
 			cd := clientd()
 			if cd.Available(ctx) {
@@ -1520,12 +1489,12 @@ func newProjectCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			p, err := c.GetProject(ctx, args[0])
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			cd := clientd()
 			if cd.Available(ctx) {
 				if err := cd.Call(ctx, "project.open", map[string]any{"slug": p.Slug}, nil); err != nil {
@@ -1574,8 +1543,8 @@ Changing to shared/public is a public-route change; inspectable and reversible.`
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			// Dispatch to typed helpers when possible
 			var out any
 			var reqErr error
@@ -1587,8 +1556,8 @@ Changing to shared/public is a public-route change; inspectable and reversible.`
 				out, reqErr = c.GetExposure(ctx, target)
 			}
 			if reqErr != nil {
-			return handleFailure(reqErr)
-		}
+				return handleFailure(reqErr)
+			}
 			if flagJSON {
 				return printJSON(out)
 			}
@@ -1631,7 +1600,7 @@ Changing to shared/public is a public-route change; inspectable and reversible.`
 				if !f {
 					err := errors.New("making a service public requires --force in --non-interactive mode")
 					return handleFailure(err)
-}
+				}
 			}
 			target, _ := cmd.Flags().GetString("target")
 			appID, _ := cmd.Flags().GetString("app")
@@ -1657,8 +1626,8 @@ Changing to shared/public is a public-route change; inspectable and reversible.`
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			// Prefer typed helpers
 			var out *apiclient.ExposureResponse
 			var reqErr error
@@ -1670,8 +1639,8 @@ Changing to shared/public is a public-route change; inspectable and reversible.`
 				out, reqErr = c.SetExposure(ctx, apiclient.ExposureRequest{Target: target, Exposure: domain.Exposure(exposure), Hostname: hostname})
 			}
 			if reqErr != nil {
-			return handleFailure(reqErr)
-		}
+				return handleFailure(reqErr)
+			}
 			if flagJSON {
 				return printJSON(out)
 			}
@@ -1699,12 +1668,12 @@ Changing to shared/public is a public-route change; inspectable and reversible.`
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			items, err := c.ListExposures(ctx)
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			if flagJSON {
 				return printJSON(map[string]any{"items": items})
 			}
@@ -1736,12 +1705,12 @@ func newBackupCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			items, err := c.ListBackups(ctx)
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			humanListBackups(items)
 			return nil
 		},
@@ -1755,12 +1724,12 @@ func newBackupCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			b, err := c.GetBackup(ctx, args[0])
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			if flagJSON {
 				return printJSON(b)
 			}
@@ -1791,12 +1760,12 @@ func newBackupCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			b, err := c.CreateBackup(ctx, apitypes.CreateBackupRequest{Repository: repo, Scheduled: scheduled})
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			if flagJSON {
 				return printJSON(b)
 			}
@@ -1903,8 +1872,8 @@ func newBackupCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			var b *domain.Backup
 			if len(args) == 0 {
 				b, err = c.VerifyLatestBackup(ctx)
@@ -1912,8 +1881,8 @@ func newBackupCmd() *cobra.Command {
 				b, err = c.VerifyBackup(ctx, args[0])
 			}
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			if flagJSON {
 				return printJSON(b)
 			}
@@ -1942,12 +1911,12 @@ func newEventCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			events, err := c.ListEvents(ctx, apiclient.EventListParams{Limit: limit, UnreadOnly: unread, Type: typ})
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			humanListEvents(events)
 			return nil
 		},
@@ -1968,12 +1937,12 @@ func newEventCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			e, err := c.GetEvent(ctx, args[0])
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			if flagJSON {
 				return printJSON(e)
 			}
@@ -2001,8 +1970,8 @@ func newEventCmd() *cobra.Command {
 			// Handle SIGINT gracefully? Simple.
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			ch := make(chan domain.Event, 16)
 			go func() {
 				if err := c.WatchEvents(ctx, ch); err != nil && !errors.Is(err, context.Canceled) {
@@ -2033,11 +2002,11 @@ func newEventCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			if err := c.AckEvent(ctx, args[0]); err != nil {
 				return handleFailure(err)
-}
+			}
 			if flagJSON {
 				return printJSON(map[string]string{"acked": args[0]})
 			}
@@ -2062,12 +2031,12 @@ func newSyncCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			items, err := c.ListSyncFolders(ctx)
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			humanListSync(items)
 			return nil
 		},
@@ -2081,12 +2050,12 @@ func newSyncCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			f, err := c.GetSyncFolder(ctx, args[0])
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			if flagJSON {
 				return printJSON(f)
 			}
@@ -2112,8 +2081,8 @@ func newSyncCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			// Try server first
 			f, err := c.CreateSyncFolder(ctx, apitypes.CreateSyncFolderRequest{Name: addName, ServerPath: addPath, ShareWithAI: addShare})
 			if err != nil {
@@ -2141,7 +2110,7 @@ func newSyncCmd() *cobra.Command {
 			if isNonInteractive() && !force && !flagForce {
 				err := errors.New("removing sync folder requires --force in --non-interactive mode")
 				return handleFailure(err)
-}
+			}
 			if !force && !flagForce && !flagJSON {
 				if !confirmPrompt(fmt.Sprintf("remove sync folder %q?", args[0])) {
 					fmt.Println("aborted")
@@ -2152,11 +2121,11 @@ func newSyncCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			if err := c.DeleteSyncFolder(ctx, args[0]); err != nil {
 				return handleFailure(err)
-}
+			}
 			if flagJSON {
 				return printJSON(map[string]string{"deleted": args[0]})
 			}
@@ -2186,12 +2155,12 @@ func newRunnerCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			items, err := c.ListWorkspaces(ctx)
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			// Filter by --project if given
 			projFilter, _ := cmd.Flags().GetString("project")
 			if projFilter != "" {
@@ -2221,12 +2190,12 @@ func newRunnerCmd() *cobra.Command {
 			defer cancel()
 			cl, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			w, err := cl.GetWorkspace(ctx, args[0])
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			if flagJSON {
 				return printJSON(w)
 			}
@@ -2244,7 +2213,7 @@ func newRunnerCmd() *cobra.Command {
 		},
 	})
 	// create
-	var createProject, createTitle, createInstructions, createBranch, createAgent, createDevcontainer string
+	var createProject, createTitle, createInstructions, createAgent, createDevcontainer string
 	createCmd := &cobra.Command{
 		Use:   "create",
 		Short: "Create a runner/workspace",
@@ -2252,7 +2221,7 @@ func newRunnerCmd() *cobra.Command {
 			if strings.TrimSpace(createProject) == "" {
 				return errors.New("--project is required")
 			}
-			if strings.TrimSpace(createTitle) == "" && strings.TrimSpace(createBranch) == "" {
+			if strings.TrimSpace(createTitle) == "" {
 				return errors.New("--title is required")
 			}
 			ctx, cancel := newContext()
@@ -2265,12 +2234,8 @@ func newRunnerCmd() *cobra.Command {
 				ProjectID:          createProject,
 				Title:              createTitle,
 				Instructions:       createInstructions,
-				Branch:             createBranch,
 				Agent:              createAgent,
 				DevcontainerSource: createDevcontainer,
-			}
-			if req.Title == "" && req.Branch != "" {
-				req.Title = req.Branch
 			}
 			w, err := c.CreateWorkspace(ctx, req)
 			if err != nil {
@@ -2286,8 +2251,6 @@ func newRunnerCmd() *cobra.Command {
 	createCmd.Flags().StringVar(&createProject, "project", "", "project id or slug (required)")
 	createCmd.Flags().StringVar(&createTitle, "title", "", "workspace title (required, used for branch ws/<slug>-XXXX)")
 	createCmd.Flags().StringVar(&createInstructions, "instructions", "", "task instructions (optional, written to .omahab/TASK.md)")
-	createCmd.Flags().StringVar(&createBranch, "branch", "", "git branch (deprecated, use --title)")
-	_ = createCmd.Flags().MarkHidden("branch")
 	createCmd.Flags().StringVar(&createAgent, "agent", "", "coding agent (omp only)")
 	createCmd.Flags().StringVar(&createDevcontainer, "devcontainer", "", "devcontainer source (default or devcontainer)")
 	runner.AddCommand(createCmd)
@@ -2423,9 +2386,9 @@ func newRunnerCmd() *cobra.Command {
 	})
 	// ssh-proxy: stdio proxy for ssh ProxyCommand (internal, used by clientd ensureWorkspaceSSHConfig)
 	runner.AddCommand(&cobra.Command{
-		Use:   "ssh-proxy <id>",
-		Short: "Proxy stdio to workspace via devpod ssh --stdio (internal)",
-		Args:  cobra.ExactArgs(1),
+		Use:    "ssh-proxy <id>",
+		Short:  "Proxy stdio to workspace via devpod ssh --stdio (internal)",
+		Args:   cobra.ExactArgs(1),
 		Hidden: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id := strings.TrimSpace(args[0])
@@ -2477,17 +2440,6 @@ func newRunnerCmd() *cobra.Command {
 	return runner
 }
 
-func newWorkspaceCmd() *cobra.Command {
-	// Hidden alias for backward compatibility: runner -> workspace
-	ws := newRunnerCmd()
-	ws.Use = "runner"
-	ws.Aliases = []string{"runners"}
-	ws.Short = "Manage remote runners (workspaces) (hidden alias for workspace)"
-	ws.Long = "Hidden alias for workspace. Use workspace instead."
-	ws.Hidden = true
-	return ws
-}
-
 func newIdentityCmd() *cobra.Command {
 	id := &cobra.Command{
 		Use:   "identity",
@@ -2508,12 +2460,12 @@ Requires local root or sudo on the server (enforced server-side).`,
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			res, err := c.RecoverIdentity(ctx, email)
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			if flagJSON {
 				return printJSON(res)
 			}
@@ -2545,8 +2497,8 @@ Requires local root or sudo on the server (enforced server-side).`,
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			// Try generic endpoint via raw GET using client's private? Use workaround: direct http
 			// Instead, attempt via api client helper if available: not yet; do raw.
 			// Reconstruct URL for /users
@@ -2561,8 +2513,8 @@ Requires local root or sudo on the server (enforced server-side).`,
 			req.Header.Set("Accept", "application/json")
 			resp, err := c.HTTPClient.Do(req)
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			defer resp.Body.Close()
 			if resp.StatusCode >= 400 {
 				body, _ := io.ReadAll(resp.Body)
@@ -2676,12 +2628,12 @@ func newSecretsCmd() *cobra.Command {
 			defer cancel()
 			c, err := resolveClient()
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			items, err := c.ListSecrets(ctx)
 			if err != nil {
-			return handleFailure(err)
-		}
+				return handleFailure(err)
+			}
 			if flagJSON {
 				return printJSON(map[string]any{"items": items})
 			}

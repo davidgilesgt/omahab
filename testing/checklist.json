@@ -197,12 +197,13 @@
     {
       "id": "setup.seq.ssh",
       "area": "setup",
-      "title": "Complete setup SSH keys step",
+      "title": "Complete setup SSH keys step (after Backups)",
       "covers": [
         "manual:setup-seq-ssh"
       ],
       "sources": [
         "web/src/views/setup.tsx",
+        "internal/controlplane/setup_status.go",
         "internal/api/server.go"
       ],
       "requires": [
@@ -210,10 +211,12 @@
       ],
       "steps": [
         "Open the setup flow at /setup.",
+        "Confirm the Backups step comes first and SSH keys second.",
         "Complete the SSH keys step with generated test values.",
         "Confirm the checklist marks it done."
       ],
       "expected": [
+        "The Backups box is the first checklist step; SSH keys follows it.",
         "The SSH keys step completes without errors.",
         "The setup state persists after reload."
       ],
@@ -266,6 +269,7 @@
       ],
       "steps": [
         "Open the setup flow at /setup.",
+        "Confirm the Domain step comes after Backups, SSH keys, and Tailscale.",
         "Complete the Domain step with generated test values.",
         "Confirm the checklist marks it done."
       ],
@@ -421,25 +425,33 @@
     {
       "id": "setup.seq.recovery",
       "area": "setup",
-      "title": "Complete setup Recovery step",
+      "title": "Complete the first Backups step: restore from an earlier server",
       "covers": [
-        "manual:setup-seq-recovery"
+        "manual:setup-seq-backups-restore"
       ],
       "sources": [
         "web/src/views/setup.tsx",
-        "internal/api/server.go"
+        "web/src/views/restoreFromBackup.tsx",
+        "internal/controlplane/recovery_restore.go"
       ],
       "requires": [
         "enrolled"
       ],
       "steps": [
-        "Open the setup flow at /setup.",
-        "Complete the Recovery step with generated test values.",
-        "Confirm the checklist marks it done."
+        "Open the setup flow at /setup on a machine with an earlier server's backup repository.",
+        "Confirm the first checklist step is Backups and asks about a recovery phrase from an earlier server.",
+        "Choose restore: enter the 24-word phrase and the Hetzner credentials (or generic repository).",
+        "Pick the earlier instance from the list (exact location comes from the server), then a snapshot.",
+        "Choose restore-everything or some apps (server-config is always included), then stage and apply the restore.",
+        "After the server restarts, reopen the panel."
       ],
       "expected": [
-        "The Recovery step completes without errors.",
-        "The setup state persists after reload."
+        "The Backups box is the first step, before SSH keys, Tailscale, and Domain.",
+        "Instances list shows earlier servers with the server-returned location; none is built client-side.",
+        "Snapshot pick offers full or app-scoped restore; server-config is always included and shown as such.",
+        "The restore check reaches completed and the Backups box is done without the separate recovery/backups steps.",
+        "A verify runs after the restore and recovery_tested reflects it.",
+        "A release-ref mismatch between the snapshot and the running system is surfaced clearly."
       ],
       "evidence_types": [
         "BROWSER",
@@ -449,25 +461,29 @@
     {
       "id": "setup.seq.backups",
       "area": "setup",
-      "title": "Complete setup Backups step",
+      "title": "Complete the first Backups step: start fresh",
       "covers": [
-        "manual:setup-seq-backups"
+        "manual:setup-seq-backups-new"
       ],
       "sources": [
         "web/src/views/setup.tsx",
-        "internal/api/server.go"
+        "web/src/views/restoreFromBackup.tsx",
+        "internal/controlplane/wizard.go"
       ],
       "requires": [
         "enrolled"
       ],
       "steps": [
-        "Open the setup flow at /setup.",
-        "Complete the Backups step with generated test values.",
-        "Confirm the checklist marks it done."
+        "Open the setup flow at /setup on a fresh install.",
+        "Confirm the first checklist step is Backups and asks about a recovery phrase from an earlier server.",
+        "Choose start fresh: generate the 24-word phrase, confirm the saved-ack ritual, then connect the Hetzner Storage Box (or a generic restic URL).",
+        "Confirm the checklist marks the step done."
       ],
       "expected": [
-        "The Backups step completes without errors.",
-        "The setup state persists after reload."
+        "The phrase ritual and the repository form live in the same first Backups box.",
+        "After the repository initializes, recovery_key and backups_configured are ok and the box is done.",
+        "The old separate Recovery phrase and Backups boxes no longer appear.",
+        "The first backup and verify run in the background after repository creation."
       ],
       "evidence_types": [
         "BROWSER",
@@ -513,7 +529,7 @@
         "web/src/views/setup.tsx",
         "internal/api/server.go",
         "internal/apps/systemd.go",
-        "nix/apps.nix",
+        "bundles/woodpecker/module.nix",
         "nix/module.nix"
       ],
       "requires": [
@@ -719,7 +735,7 @@
         "manual:gated-start"
       ],
       "sources": [
-        "nix/apps.nix",
+        "nix/bundle-lib.nix",
         "internal/controlplane/setup_phases.go"
       ],
       "requires": [
@@ -742,27 +758,30 @@
     {
       "id": "setup.restore.box",
       "area": "setup",
-      "title": "Offer restore from backup before the domain step",
+      "title": "Offer restore from backup as the FIRST setup step",
       "covers": [
-        "manual:restore-box",
+        "manual:restore-first",
         "ui:/setup"
       ],
       "sources": [
         "web/src/views/setup.tsx",
-        "web/src/views/restoreFromBackup.tsx"
+        "web/src/views/restoreFromBackup.tsx",
+        "internal/controlplane/setup_status.go"
       ],
       "requires": [
         "enrolled"
       ],
       "steps": [
         "Open the setup flow on a fresh install with no recovery phrase.",
-        "Check the box position against the Domain step.",
-        "Complete the recovery step and reopen the flow."
+        "Check the box position against SSH keys and Domain.",
+        "Watch the restore state through a staged restore.",
+        "Complete the recovery step on a different fresh install and reopen the flow."
       ],
       "expected": [
-        "The optional restore box appears above the Domain step.",
-        "The box disappears once the recovery step is done.",
-        "A new install can skip the box with no penalty."
+        "The Backups box is the first checklist step, before SSH keys, Tailscale, and Domain.",
+        "The box stays available regardless of the recovery_key state (no doneMap.recovery gate).",
+        "The restore check reports not_started, in_progress, completed, or failed and the box's done state follows it or recovery_key+backups_configured.",
+        "A new install can choose start-new with no penalty; the box is done once the phrase and repository are configured."
       ],
       "evidence_types": [
         "BROWSER"
@@ -5852,8 +5871,10 @@
       "title": "Stage and apply a restore through the API",
       "covers": [
         "manual:recovery-restore-api",
+        "api:POST /api/v1/recovery/instances",
         "api:POST /api/v1/recovery/restore/snapshots",
         "api:POST /api/v1/recovery/restore",
+        "api:POST /api/v1/recovery/restore/skip",
         "api:POST /api/v1/recovery/restore/{id}/apply",
         "api:GET /api/v1/recovery/restore/{id}"
       ],
@@ -5867,13 +5888,133 @@
       ],
       "steps": [
         "Call every restore route without the panel token.",
-        "List snapshots with valid recovery material.",
-        "Stage a restore, poll the operation, and apply it."
+        "List instances with valid recovery material, then snapshots for one instance location.",
+        "Stage a restore (full and app-scoped), poll the operation, and apply it.",
+        "Call the skip route on a fresh instance and read the setup checklist."
       ],
       "expected": [
         "Unauthorized calls receive 401 with no data.",
-        "Listing marks server-state snapshots and validates the phrase.",
-        "Staging answers with an operation, and apply starts the restore unit."
+        "Instance listing returns exact server-side locations; a wrong phrase marks subdirectories locked, not an error.",
+        "Snapshot listing marks server-state snapshots and carries scope tags for the picker.",
+        "Staging answers with an operation (preview warns on release-ref mismatch), and apply starts the restore unit.",
+        "Skip marks the restore check skipped and the checklist stops offering a restore."
+      ],
+      "evidence_types": [
+        "LIVE_API",
+        "UNIT"
+      ]
+    },
+    {
+      "id": "recovery.instances",
+      "area": "lifecycle",
+      "title": "Discover earlier server instances for first restore",
+      "covers": [
+        "manual:recovery-instances",
+        "api:POST /api/v1/recovery/instances"
+      ],
+      "sources": [
+        "internal/controlplane/recovery_restore.go",
+        "internal/backups/instances.go",
+        "internal/controlplane/hetzner.go"
+      ],
+      "requires": [
+        "recovery-material"
+      ],
+      "steps": [
+        "From a fresh appliance, call the instance-discovery route with the Hetzner credentials and the 24-word phrase of the earlier server.",
+        "Repeat with a phrase belonging to a different backup account.",
+        "Inspect the API shape of one returned instance entry."
+      ],
+      "expected": [
+        "The listing returns every earlier instance directory under ./omahab/ with the exact server-side location, newest snapshot time, and domain from the manifest.",
+        "An instance whose repository the phrase cannot open reports locked instead of failing the listing.",
+        "The client never builds sftp URLs; locations come from the server."
+      ],
+      "evidence_types": [
+        "LIVE_API",
+        "UNIT"
+      ]
+    },
+    {
+      "id": "recovery.skip",
+      "area": "lifecycle",
+      "title": "Record the explicit start-new choice",
+      "covers": [
+        "manual:recovery-skip",
+        "api:POST /api/v1/recovery/restore/skip"
+      ],
+      "sources": [
+        "internal/controlplane/recovery_restore.go",
+        "internal/controlplane/setup_status.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "On a fresh instance, call the skip route once and read the setup checklist.",
+        "Reload the setup status after a daemon restart."
+      ],
+      "expected": [
+        "The restore check reports skipped (new server, no restore) and the checklist stops offering a restore.",
+        "The posture survives the daemon restart; staging trees and journals are untouched by skipping."
+      ],
+      "evidence_types": [
+        "LIVE_API",
+        "UNIT"
+      ]
+    },
+    {
+      "id": "backups.restore-contract",
+      "area": "lifecycle",
+      "title": "Enforce the v2 restore contract",
+      "covers": [
+        "manual:backups-restore-contract"
+      ],
+      "sources": [
+        "internal/backups/pgverify.go",
+        "internal/backups/staging_test.go",
+        "internal/controlplane/restore_live.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Take a scoped backup, then tamper with one staged artifact (e.g. storage.json) before validation and attempt a restore.",
+        "Capture a snapshot on a newer PostgreSQL major than the running cluster and attempt a live restore of that app scope.",
+        "Attempt scope selection against a tree with no v2 manifest."
+      ],
+      "expected": [
+        "The artifact sha256 mismatch is refused during staging validation, naming the scope and file, before any live path changes.",
+        "The PostgreSQL-major mismatch is refused with both versions named; no pg_restore runs.",
+        "Pre-v2 trees are refused: scope selection is never guessed from a directory listing."
+      ],
+      "evidence_types": [
+        "UNIT",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "backups.first-scoped",
+      "area": "lifecycle",
+      "title": "Run the first backup as a scoped capture",
+      "covers": [
+        "manual:backups-first-scoped"
+      ],
+      "sources": [
+        "internal/controlplane/wizard.go",
+        "internal/controlplane/backup_capture.go",
+        "internal/controlplane/backup_capture_manifest.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Create a repository through the wizard (mode create) and wait for the background first backup.",
+        "Inspect the snapshot's staged manifest."
+      ],
+      "expected": [
+        "The first backup runs the scoped capture path: writers stop and resume, and the snapshot completes.",
+        "The staged manifest is format_version 2 and carries the server-config scope with sha256-hashed artifacts."
       ],
       "evidence_types": [
         "LIVE_API",
@@ -6229,8 +6370,8 @@
         "app:caddy"
       ],
       "sources": [
-        "deploy/catalog/catalog.json",
-        "nix/apps.nix",
+        "bundles/caddy/bundle.json",
+        "bundles/caddy/module.nix",
         "internal/api/server.go"
       ],
       "requires": [
@@ -6258,8 +6399,8 @@
         "app:pocket-id"
       ],
       "sources": [
-        "deploy/catalog/catalog.json",
-        "nix/apps.nix",
+        "bundles/pocket-id/bundle.json",
+        "bundles/pocket-id/module.nix",
         "internal/api/server.go"
       ],
       "requires": [
@@ -6287,8 +6428,8 @@
         "app:forgejo"
       ],
       "sources": [
-        "deploy/catalog/catalog.json",
-        "nix/apps.nix",
+        "bundles/forgejo/bundle.json",
+        "bundles/forgejo/module.nix",
         "internal/controlplane/forgejo_bootstrap.go",
         "internal/api/server.go"
       ],
@@ -6320,8 +6461,8 @@
         "app:woodpecker"
       ],
       "sources": [
-        "deploy/catalog/catalog.json",
-        "nix/apps.nix",
+        "bundles/woodpecker/bundle.json",
+        "bundles/woodpecker/module.nix",
         "nix/module.nix",
         "internal/apps/systemd.go",
         "internal/api/server.go"
@@ -6357,8 +6498,8 @@
         "app:immich"
       ],
       "sources": [
-        "deploy/catalog/catalog.json",
-        "nix/apps.nix",
+        "bundles/immich/bundle.json",
+        "bundles/immich/module.nix",
         "internal/api/server.go"
       ],
       "requires": [
@@ -6386,8 +6527,8 @@
         "app:paperless-ngx"
       ],
       "sources": [
-        "deploy/catalog/catalog.json",
-        "nix/apps.nix",
+        "bundles/paperless-ngx/bundle.json",
+        "bundles/paperless-ngx/module.nix",
         "internal/api/server.go"
       ],
       "requires": [
@@ -6418,8 +6559,8 @@
         "app:karakeep"
       ],
       "sources": [
-        "deploy/catalog/catalog.json",
-        "nix/apps.nix",
+        "bundles/karakeep/bundle.json",
+        "bundles/karakeep/module.nix",
         "internal/api/server.go"
       ],
       "requires": [
@@ -6447,8 +6588,8 @@
         "app:syncthing"
       ],
       "sources": [
-        "deploy/catalog/catalog.json",
-        "nix/apps.nix",
+        "bundles/syncthing/bundle.json",
+        "bundles/syncthing/module.nix",
         "internal/api/server.go"
       ],
       "requires": [
@@ -6476,8 +6617,8 @@
         "app:litellm"
       ],
       "sources": [
-        "deploy/catalog/catalog.json",
-        "nix/apps.nix",
+        "bundles/litellm/bundle.json",
+        "bundles/litellm/module.nix",
         "internal/providers/litellm.go",
         "internal/controlplane/setup_models.go",
         "internal/controlplane/setup_oidc.go"
@@ -6512,8 +6653,8 @@
         "app:embedding-worker"
       ],
       "sources": [
-        "deploy/catalog/catalog.json",
-        "nix/apps.nix",
+        "bundles/embedding-worker/bundle.json",
+        "bundles/embedding-worker/module.nix",
         "internal/apps/systemd.go",
         "internal/api/server.go"
       ],
@@ -6544,8 +6685,8 @@
         "app:ntfy"
       ],
       "sources": [
-        "deploy/catalog/catalog.json",
-        "nix/apps.nix",
+        "bundles/ntfy/bundle.json",
+        "bundles/ntfy/module.nix",
         "internal/api/server.go"
       ],
       "requires": [
@@ -6573,8 +6714,8 @@
         "app:hermes"
       ],
       "sources": [
-        "deploy/catalog/catalog.json",
-        "nix/apps.nix",
+        "bundles/hermes/bundle.json",
+        "bundles/hermes/module.nix",
         "internal/api/server.go"
       ],
       "requires": [
@@ -6600,8 +6741,8 @@
         "app:hindsight"
       ],
       "sources": [
-        "deploy/catalog/catalog.json",
-        "nix/apps.nix",
+        "bundles/hindsight/bundle.json",
+        "bundles/hindsight/module.nix",
         "internal/api/server.go"
       ],
       "requires": [
@@ -6629,8 +6770,8 @@
         "app:restic-server"
       ],
       "sources": [
-        "deploy/catalog/catalog.json",
-        "nix/apps.nix",
+        "bundles/restic-server/bundle.json",
+        "bundles/restic-server/module.nix",
         "internal/api/server.go"
       ],
       "requires": [
@@ -6659,8 +6800,8 @@
         "app:jellyfin"
       ],
       "sources": [
-        "deploy/catalog/catalog.json",
-        "nix/apps.nix",
+        "bundles/jellyfin/bundle.json",
+        "bundles/jellyfin/module.nix",
         "internal/controlplane/jellyfin.go",
         "internal/api/server.go"
       ],
@@ -6689,8 +6830,8 @@
         "app:technitium"
       ],
       "sources": [
-        "deploy/catalog/catalog.json",
-        "nix/apps.nix",
+        "bundles/technitium/bundle.json",
+        "bundles/technitium/module.nix",
         "internal/api/server.go"
       ],
       "requires": [
@@ -6806,8 +6947,13 @@
         "manual:svc-data"
       ],
       "sources": [
-        "deploy/catalog/catalog.json",
-        "nix/apps.nix"
+        "bundles/karakeep/bundle.json",
+        "bundles/karakeep/module.nix",
+        "bundles/immich/module.nix",
+        "bundles/paperless-ngx/module.nix",
+        "nix/app-data.nix",
+        "nix/apps.nix",
+        "internal/apps/systemd.go"
       ],
       "requires": [
         "enrolled"
@@ -6913,7 +7059,10 @@
         "manual:worker-scaling"
       ],
       "sources": [
-        "nix/apps.nix"
+        "bundles/immich/module.nix",
+        "bundles/karakeep/module.nix",
+        "bundles/litellm/module.nix",
+        "nix/bundle-lib.nix"
       ],
       "requires": [
         "enrolled"
@@ -6939,6 +7088,7 @@
         "ui:/",
         "ui:/setup",
         "ui:/applications",
+        "ui:/bundles",
         "ui:/projects",
         "ui:/backups",
         "ui:/events",
@@ -6977,6 +7127,7 @@
       "covers": [
         "ui:setup",
         "ui:applications",
+        "ui:bundles",
         "ui:projects",
         "ui:backups",
         "ui:events",
@@ -7886,6 +8037,229 @@
         "On bare metal the agent does not start."
       ],
       "evidence_types": [
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "bundles.ui.panel",
+      "area": "dashboard",
+      "title": "Manage bundles from the panel page",
+      "covers": [
+        "manual:bundles-panel",
+        "ui:/bundles",
+        "ui:bundles"
+      ],
+      "sources": [
+        "web/src/views/bundles.tsx",
+        "web/src/components/shell.tsx",
+        "internal/api/server.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Open Bundles in the sidebar and inspect the merged list.",
+        "Add a custom bundle from the page (bundle.json + module.nix).",
+        "Disable, re-enable, and remove it again from the page.",
+        "Start an apply from the page and watch the operation poll to completion.",
+        "Open the same page under /admin/bundles."
+      ],
+      "expected": [
+        "Curated rows show source catalog and custom rows source custom with dirty and disabled state.",
+        "Invalid input (bad JSON, curated port, missing module.nix) is rejected with actionable messages.",
+        "Apply returns 202 and the page shows running then a final status.",
+        "The remove confirm dialog requires an explicit confirmation."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "cov.api.bundles",
+      "area": "coverage",
+      "title": "Cover custom bundle routes",
+      "covers": [
+        "api:GET /api/v1/bundles",
+        "api:POST /api/v1/bundles",
+        "api:DELETE /api/v1/bundles/{id}",
+        "api:POST /api/v1/bundles/{id}/disable",
+        "api:POST /api/v1/bundles/{id}/enable",
+        "api:POST /api/v1/bundles/apply",
+        "api:GET /api/v1/bundles/apply/{id}"
+      ],
+      "sources": [
+        "internal/api/server.go",
+        "internal/api/bundles.go",
+        "internal/controlplane/bundles_ops.go",
+        "internal/api/openapi.yaml"
+      ],
+      "requires": [],
+      "steps": [
+        "Exercise the bundle routes through authenticated API calls.",
+        "Verify success, validation, permission, and missing-state paths.",
+        "Start an apply and poll its operation to a terminal status."
+      ],
+      "expected": [
+        "Responses match the OpenAPI contract.",
+        "Errors are stable JSON envelopes.",
+        "Unauthorized callers receive 401 without bundle data."
+      ],
+      "evidence_types": [
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "bundles.cli.crud",
+      "area": "cli",
+      "title": "Manage custom bundles from the CLI",
+      "covers": [
+        "manual:bundles-cli"
+      ],
+      "sources": [
+        "cmd/omahab/bundle.go",
+        "internal/bundles/repo.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Run omahab bundle list and confirm curated plus custom entries with sources.",
+        "Stage a bundle directory and run omahab bundle add <dir>.",
+        "Run omahab bundle remove <id>.",
+        "Run omahab bundle status and omahab bundle list --json.",
+        "Edit a committed file over SSH without committing and run list and status again."
+      ],
+      "expected": [
+        "add validates ids, ports, and the module.nix sibling before writing.",
+        "add and remove commit their change; status reports clean afterwards.",
+        "Uncommitted SSH edits are reported as dirty and never appear in list."
+      ],
+      "evidence_types": [
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "bundles.apply.disable-retry",
+      "area": "lifecycle",
+      "title": "Disable a failing custom bundle and retry once",
+      "covers": [
+        "manual:bundles-apply-fail"
+      ],
+      "sources": [
+        "internal/bundles/apply.go",
+        "internal/bundles/repo.go",
+        "internal/events/service.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Add a custom bundle whose module.nix fails to evaluate.",
+        "Run omahab bundle apply.",
+        "Inspect the repo, the events feed, and the final build result."
+      ],
+      "expected": [
+        "The failure is attributed to the bundle by id.",
+        "A bundles/<id>/disabled marker is committed and a bundle.disabled error event names the bundle.",
+        "The build is retried exactly once without the bundle and then completes.",
+        "The panel lists the bundle as disabled and can re-enable it."
+      ],
+      "evidence_types": [
+        "LIVE_CLI",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "bundles.apply.rollback",
+      "area": "lifecycle",
+      "title": "Roll back when a custom bundle breaks health",
+      "covers": [
+        "manual:bundles-apply-health"
+      ],
+      "sources": [
+        "internal/bundles/apply.go",
+        "cmd/omahab/bundle.go",
+        "cmd/omahab/system.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Add a custom bundle that builds but whose health_check never answers.",
+        "Run omahab bundle apply.",
+        "Watch the switch, the health gate, and the outcome.",
+        "Confirm the previous generation is serving again afterwards."
+      ],
+      "expected": [
+        "The switch completes and the panel /up gate passes.",
+        "The bundle health probe fails, the apply reports unhealthy, and the previous generation is restored.",
+        "The bundle list and event feed report the failed apply."
+      ],
+      "evidence_types": [
+        "LIVE_CLI",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "bundles.backup.restore",
+      "area": "lifecycle",
+      "title": "Back up and restore a custom bundle",
+      "covers": [
+        "manual:bundles-backup"
+      ],
+      "sources": [
+        "internal/controlplane/backup_capture_manifest.go",
+        "internal/backups/manifest.go",
+        "internal/controlplane/restore_live.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Add a custom bundle, apply it, and write data through it.",
+        "Run a backup that includes the bundle's app scope.",
+        "Inspect the snapshot manifest for the scope.",
+        "Remove the bundle from the repo and apply the removal.",
+        "Restore the snapshot with that app scope selected."
+      ],
+      "expected": [
+        "The app scope carries both the bundle definition (bundles/<id>/ at the repo revision) and its data volumes.",
+        "The restore re-creates the bundle definition in the repo and restores its data.",
+        "The bundle returns healthy after the restore without manual file copying."
+      ],
+      "evidence_types": [
+        "LIVE_API",
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "bundles.uncommitted.not-built",
+      "area": "lifecycle",
+      "title": "Never build uncommitted bundle files",
+      "covers": [
+        "manual:bundles-head-only"
+      ],
+      "sources": [
+        "internal/bundles/bundles.go",
+        "internal/bundles/repo.go",
+        "internal/bundles/apply.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Edit a committed custom bundle's module.nix over SSH and do not commit.",
+        "Start an apply from the panel.",
+        "Inspect which files the rebuild evaluated and the repo state afterwards."
+      ],
+      "expected": [
+        "The apply commits staged changes first, then builds exactly the committed tree.",
+        "The edited content is absent from the switched generation until committed.",
+        "SSH-edited uncommitted files never reach the build."
+      ],
+      "evidence_types": [
+        "LIVE_API",
         "LIVE_CLI"
       ]
     }

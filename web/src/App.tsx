@@ -11,6 +11,7 @@ import { DoctorPage } from "./views/doctor";
 import { HomePage } from "./views/home";
 import { WelcomePage } from "./views/welcome";
 import { SetupPage } from "./views/setup";
+import { BundlesPage } from "./views/bundles";
 
 function isHomeHost(): boolean {
   if (typeof window === "undefined") return false;
@@ -29,6 +30,7 @@ function DashboardRoutes() {
           <Route path="/" element={<OverviewPage />} />
           <Route path="/setup" element={<SetupPage />} />
           <Route path="/applications" element={<ApplicationsPage />} />
+          <Route path="/bundles" element={<BundlesPage />} />
           <Route path="/projects" element={<ProjectsPage />} />
           <Route path="/backups" element={<BackupsPage />} />
           <Route path="/inbox" element={<EventsPage />} />
@@ -55,6 +57,7 @@ function AdminDashboardRoutes() {
           <Route index element={<OverviewPage />} />
           <Route path="setup" element={<SetupPage />} />
           <Route path="applications" element={<ApplicationsPage />} />
+          <Route path="bundles" element={<BundlesPage />} />
           <Route path="projects" element={<ProjectsPage />} />
           <Route path="backups" element={<BackupsPage />} />
           <Route path="inbox" element={<EventsPage />} />
@@ -79,6 +82,7 @@ function HomeHostRedirects() {
   const dashboardPaths = [
     "/setup",
     "/applications",
+    "/bundles",
     "/projects",
     "/backups",
     "/inbox",

@@ -1,0 +1,44 @@
+{
+  "id": "paperless-ngx",
+  "name": "Paperless-ngx",
+  "port": 28981,
+  "default_exposure": "private",
+  "max_exposure": "shared",
+  "health_check": {
+    "kind": "http",
+    "path": "/api/",
+    "port": 28981
+  },
+  "startup_grace_seconds": 300,
+  "oidc": {
+    "supported": true,
+    "mode": "native",
+    "provider": "pocket-id"
+  },
+  "resources": {
+    "memory_mb": 2048
+  },
+  "default": true,
+  "route": "archive",
+  "app_path": "/",
+  "dependencies": [
+    "caddy",
+    "pocket-id"
+  ],
+  "secret_sources": [
+    "paperless_db_password",
+    "paperless_secret_key"
+  ],
+  "units": [
+    "paperless-web.service",
+    "paperless-consumer.service",
+    "paperless-scheduler.service",
+    "paperless-task-queue.service",
+    "tika.service",
+    "gotenberg.service"
+  ],
+  "groups": [
+    "members",
+    "admins"
+  ]
+}

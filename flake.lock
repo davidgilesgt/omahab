@@ -1,5 +1,17 @@
 {
   "nodes": {
+    "bundles": {
+      "flake": false,
+      "locked": {
+        "path": "./bundles-custom-empty",
+        "type": "path"
+      },
+      "original": {
+        "path": "./bundles-custom-empty",
+        "type": "path"
+      },
+      "parent": []
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1788179007,
@@ -18,6 +30,7 @@
     },
     "root": {
       "inputs": {
+        "bundles": "bundles",
         "nixpkgs": "nixpkgs"
       }
     }

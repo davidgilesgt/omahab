@@ -2,11 +2,11 @@ package identity
 
 import "github.com/omahab/omahab/internal/store"
 
-// Migrations returns the SQLite migrations owned by the identity controller.
+// Migrations returns the schema owned by the identity controller.
 func Migrations() []store.Migration {
 	return []store.Migration{
 		{
-			Name: "identity-001-recoveries",
+			Name: "identity-001-baseline",
 			SQL: `
 CREATE TABLE IF NOT EXISTS identity_recoveries (
 	id TEXT PRIMARY KEY,
@@ -19,11 +19,7 @@ CREATE TABLE IF NOT EXISTS identity_recoveries (
 );
 CREATE INDEX IF NOT EXISTS idx_identity_recoveries_email ON identity_recoveries(email);
 CREATE INDEX IF NOT EXISTS idx_identity_recoveries_expires_at ON identity_recoveries(expires_at);
-`,
-		},
-		{
-			Name: "identity-002-security_events",
-			SQL: `
+
 CREATE TABLE IF NOT EXISTS identity_security_events (
 	id TEXT PRIMARY KEY,
 	type TEXT NOT NULL,
@@ -33,11 +29,7 @@ CREATE TABLE IF NOT EXISTS identity_security_events (
 );
 CREATE INDEX IF NOT EXISTS idx_identity_security_events_email ON identity_security_events(email);
 CREATE INDEX IF NOT EXISTS idx_identity_security_events_created_at ON identity_security_events(created_at);
-`,
-		},
-		{
-			Name: "identity-003-invitations",
-			SQL: `
+
 -- Single-active enrollment invitations: every IssueUserEnrollment supersedes
 -- prior rows for the user so only the latest link is current. revoked tracks
 -- whether the previous Pocket ID one-time token was confirmed consumed via

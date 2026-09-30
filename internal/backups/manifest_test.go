@@ -9,18 +9,37 @@ import (
 
 func testManifest() SnapshotManifest {
 	return SnapshotManifest{
-		FormatVersion: 1,
-		InstanceID:    "inst-1",
-		Domain:        "omahab.com",
-		ReleaseRef:    "v1",
-		Scopes:        []string{ScopeServerConfig, AppScope("immich")},
-		Applications: []ManifestApp{{
-			BundleID:  "immich",
-			Version:   "v1",
-			Volumes:   []ManifestDisk{{Volume: "immich:state", Path: "/srv/omahab/apps/immich"}},
-			Databases: []string{"immich"},
-			Secrets:   []string{"immich_db_password"},
-		}},
+		FormatVersion: ManifestFormatVersion,
+		Instance:      ManifestInstance{ID: "inst-1", Domain: "omahab.com", Placement: "vps"},
+		System: ManifestSystem{
+			ReleaseRef:     "v1",
+			NixpkgsRev:     "34ab99075ac4f7e40cf037eef32cb1c360bb85e9",
+			BundlesRepoRev: "abcdef123456",
+		},
+		Scopes: []ManifestScope{
+			{
+				Name:     ScopeServerConfig,
+				Requires: nil,
+				Artifacts: []ManifestArtifact{
+					{File: "control.db", SHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Kind: ArtifactSQLiteDump},
+					{File: "storage.json", SHA256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Kind: ArtifactFile},
+				},
+			},
+			{
+				Name:     AppScope("immich"),
+				Requires: []string{ScopeServerConfig},
+				Bundle: &ManifestBundle{
+					ID:             "immich",
+					Source:         "catalog",
+					DefinitionPath: "",
+					DefinitionRev:  "",
+				},
+				AppVersion:  "1.0.0",
+				Volumes:     []ManifestDisk{{Volume: "immich:state", Path: "/srv/omahab/apps/immich"}},
+				Databases:   []ManifestDatabase{{Name: "immich", File: "immich.pgdump", SHA256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}},
+				SecretNames: []string{"immich_db_password"},
+			},
+		},
 	}
 }
 
@@ -34,8 +53,12 @@ func TestManifestRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	if got.InstanceID != "inst-1" || len(got.Applications) != 1 || got.Applications[0].BundleID != "immich" {
+	if got.Instance.ID != "inst-1" || len(got.Scopes) != 2 {
 		t.Fatalf("manifest = %+v", got)
+	}
+	app, ok := got.Scope(AppScope("immich"))
+	if !ok || app.Bundle == nil || app.Bundle.ID != "immich" {
+		t.Fatalf("app scope missing bundle: %+v", got.Scopes)
 	}
 	if got.CreatedAt == "" {
 		t.Fatal("created_at must be stamped")
@@ -53,7 +76,7 @@ func TestManifestRejectsUnknownVersion(t *testing.T) {
 
 func TestManifestRejectsUnknownFields(t *testing.T) {
 	dir := t.TempDir()
-	raw := `{"format_version":1,"instance_id":"i","domain":"d","release_ref":"r","created_at":"t","scopes":["server-config"],"applications":[],"evil":"x"}`
+	raw := `{"format_version":2,"instance":{"id":"i","domain":"d","placement":"vps"},"system":{},"created_at":"t","scopes":[],"evil":"x"}`
 	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}

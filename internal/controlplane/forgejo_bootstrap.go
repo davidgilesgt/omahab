@@ -70,10 +70,8 @@ func redactForgejoError(err error) error {
 	return errors.New(redacted)
 }
 
-// runForgejoAdminCommand executes `forgejo admin <args>`. It uses the
-// native NixOS service when present and falls back to Docker only when the
-// native binary or account is absent.
-// It uses b.forgejoExec if set (for tests).
+// runForgejoAdminCommand executes `forgejo admin <args>` via the native
+// NixOS service. It uses b.forgejoExec if set (for tests).
 func (b *Backend) runForgejoAdminCommand(ctx context.Context, args ...string) (string, error) {
 	if b.forgejoExec != nil {
 		return b.forgejoExec(ctx, args...)
@@ -85,43 +83,11 @@ func (b *Backend) runForgejoAdminCommand(ctx context.Context, args ...string) (s
 	if forgejoTokenNameConflict(nativeErr) {
 		return "", errForgejoTokenNameConflict
 	}
-	if !errors.Is(nativeErr, errNativeForgejoUnavailable) {
-		return "", fmt.Errorf("forgejo admin native: %w", redactForgejoError(nativeErr))
+	if errors.Is(nativeErr, errNativeForgejoUnavailable) {
+		return "", fmt.Errorf("forgejo admin unavailable (native): %s",
+			strings.TrimSpace(redactForgejoError(nativeErr).Error()))
 	}
-	// Compose fallback for legacy deployments without a native Forgejo
-	// binary or service account.
-	containerID, cerr := b.findForgejoContainerID(ctx)
-	if cerr != nil {
-		return "", fmt.Errorf("forgejo admin unavailable (native: %s; container lookup: %s)",
-			strings.TrimSpace(redactForgejoError(nativeErr).Error()), strings.TrimSpace(redactForgejoError(cerr).Error()))
-	}
-	fullArgs := append([]string{"exec", containerID, "forgejo", "admin"}, args...)
-	cmd := exec.CommandContext(ctx, "docker", fullArgs...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	out := strings.TrimSpace(stdout.String())
-	errOut := strings.TrimSpace(stderr.String())
-	combined := strings.TrimSpace(out + "\n" + errOut)
-	if err != nil {
-		if combined == "" {
-			combined = err.Error()
-		}
-		if forgejoTokenNameConflict(errors.New(combined)) {
-			return "", errForgejoTokenNameConflict
-		}
-		redacted := health.RedactDetail(combined)
-		// Also redact args that contain secrets if they appear in the combined output (some CLIs echo args)
-		if redacted == "[REDACTED]" {
-			return "", fmt.Errorf("forgejo admin %s: %w", redactArgsForLog(args), errors.New("[REDACTED]"))
-		}
-		return "", fmt.Errorf("forgejo admin %s: %s", redactArgsForLog(args), redacted)
-	}
-	if out == "" && errOut != "" {
-		out = errOut
-	}
-	return strings.TrimSpace(out), nil
+	return "", fmt.Errorf("forgejo admin native: %w", redactForgejoError(nativeErr))
 }
 
 // runNativeForgejoAdmin runs `forgejo admin <args>` as the Forgejo service
@@ -318,52 +284,6 @@ func redactArgsForLog(args []string) string {
 		}
 	}
 	return strings.Join(out, " ")
-}
-
-func (b *Backend) findForgejoContainerID(ctx context.Context) (string, error) {
-	// Attempt 1: label filter
-	cmd := exec.CommandContext(ctx, "docker", "ps", "-q", "--filter", "label=com.docker.compose.project=omahab-forgejo", "--filter", "label=com.docker.compose.service=forgejo")
-	out, err := cmd.Output()
-	if err == nil {
-		id := strings.TrimSpace(string(out))
-		if id != "" {
-			fields := strings.Fields(id)
-			if len(fields) > 0 && strings.TrimSpace(fields[0]) != "" {
-				return strings.TrimSpace(fields[0]), nil
-			}
-		}
-	}
-	// Attempt 2: name filter
-	cmd2 := exec.CommandContext(ctx, "docker", "ps", "-q", "--filter", "name=forgejo")
-	out2, err2 := cmd2.Output()
-	if err2 == nil {
-		id2 := strings.TrimSpace(string(out2))
-		if id2 != "" {
-			fields := strings.Fields(id2)
-			if len(fields) > 0 && strings.TrimSpace(fields[0]) != "" {
-				return strings.TrimSpace(fields[0]), nil
-			}
-		}
-	}
-	// Attempt 3: fallback to known container name
-	cmd3 := exec.CommandContext(ctx, "docker", "inspect", "--format", "{{.Id}}", "omahab-forgejo-forgejo-1")
-	out3, err3 := cmd3.CombinedOutput()
-	if err3 == nil && strings.TrimSpace(string(out3)) != "" {
-		return "omahab-forgejo-forgejo-1", nil
-	}
-	// Attempt 4: try docker ps format
-	cmd4 := exec.CommandContext(ctx, "docker", "ps", "--format", "{{.Names}}")
-	out4, err4 := cmd4.Output()
-	if err4 == nil {
-		names := strings.Split(strings.TrimSpace(string(out4)), "\n")
-		for _, n := range names {
-			n = strings.TrimSpace(n)
-			if strings.Contains(strings.ToLower(n), "forgejo") {
-				return n, nil
-			}
-		}
-	}
-	return "", fmt.Errorf("forgejo container not found")
 }
 
 // validateForgejoToken checks that the given token can authenticate to Forgejo API.

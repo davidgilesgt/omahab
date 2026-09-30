@@ -219,47 +219,6 @@ func (b *Backend) reserveSetup() bool {
 	return true
 }
 
-func (b *Backend) runReservedSetup(ctx context.Context) error {
-	defer func() {
-		b.setupMu.Lock()
-		b.setupRunning = false
-		b.setupLastRun = time.Now().UTC()
-		b.setupMu.Unlock()
-	}()
-
-	type phase struct {
-		name string
-		run  func(context.Context) error
-	}
-	phases := []phase{
-		{"preconditions", b.setupPhasePreconditions},
-		{"tunnel", b.setupPhaseTunnel},
-		{"secrets", b.setupPhaseSecrets},
-		{"storage", b.setupPhaseStorage},
-		{"core_apps", b.setupPhaseCoreApps},
-		{"oidc", b.setupPhaseOIDC},
-		{"login_exposure", b.setupPhaseLoginExposure},
-		{"dependent_apps", b.setupPhaseDependentApps},
-		{"exposure", b.setupPhaseExposure},
-	}
-	for _, p := range phases {
-		if err := p.run(ctx); err != nil {
-			if errors.Is(err, errWaitingForEnrollment) {
-				b.setupMu.Lock()
-				b.setupLastErr = ""
-				b.setupMu.Unlock()
-				return nil
-			}
-			b.setupMu.Lock()
-			b.setupLastErr = health.RedactDetail(err.Error())
-			b.setupMu.Unlock()
-			b.emitSetupFailed(ctx, p.name, err)
-			return nil
-		}
-	}
-	return b.finishSetupSuccess(ctx)
-}
-
 func (b *Backend) finishSetupSuccess(ctx context.Context) error {
 	if b.events != nil {
 		if err := b.events.MarkAllReadByType(ctx, "setup.step_failed"); err != nil {
@@ -1093,119 +1052,6 @@ func generateRandomBase64URL(nBytes int) string {
 	return s
 }
 
-// Phase 4: Core apps
-
-func (b *Backend) setupPhaseCoreApps(ctx context.Context) error {
-	if b.apps == nil {
-		return fmt.Errorf("apps not configured")
-	}
-	dnsToken := ""
-	if b.secrets != nil {
-		if v, err := b.secrets.RevealByName(ctx, "platform-app", "cloudflare_dns"); err == nil {
-			dnsToken = strings.TrimSpace(v)
-		}
-		if dnsToken == "" {
-			if v, err := b.secrets.RevealByName(ctx, "platform-app", "cloudflare_token_dns"); err == nil {
-				dnsToken = strings.TrimSpace(v)
-			}
-		}
-	}
-	if dnsToken == "" {
-		dnsToken = strings.TrimSpace(os.Getenv("OMAHAB_CF_TOKEN_DNS"))
-	}
-	if dnsToken == "" {
-		dnsToken = strings.TrimSpace(os.Getenv("OMAHAB_CF_API_TOKEN"))
-	}
-	_ = b.writeBootstrapCaddyJSON(ctx, dnsToken)
-	if err := b.ensureOmahabNetwork(ctx); err != nil {
-		return err
-	}
-	if err := ensureImmichConfigStub(immichConfigPath(b.cfg.DataDir)); err != nil {
-		return fmt.Errorf("immich config stub: %w", err)
-	}
-
-	domainName := ""
-	if inst, err := b.store.Instance(ctx); err == nil {
-		domainName = strings.TrimSpace(inst.Domain)
-	}
-	// Render env files for native bundles whose units gate on them.
-	if err := b.renderNativeAppEnv(ctx, dnsToken, domainName); err != nil {
-		return fmt.Errorf("render native appenv: %w", err)
-	}
-	bundles := b.apps.CatalogBundles()
-	defaultBundles := []apps.Bundle{}
-	for _, bd := range bundles {
-		if bd.Default {
-			defaultBundles = append(defaultBundles, bd)
-		}
-	}
-	if len(defaultBundles) == 0 {
-		if _, err := os.Stat(b.cfg.CatalogPath); err != nil {
-			return fmt.Errorf("runtime catalog missing at %s", b.cfg.CatalogPath)
-		}
-		return nil
-	}
-	// Defer woodpecker, hermes, and hindsight to dependent_apps phase after OIDC:
-	// woodpecker needs the Forgejo OAuth app, hermes needs the OIDC
-	// client_id plus the LiteLLM virtual key in its env, hindsight needs
-	// LiteLLM models and the shared embedding worker before Hermes activates it.
-	coreBundles := make([]apps.Bundle, 0, len(defaultBundles))
-	for _, bd := range defaultBundles {
-		if bd.ID == "woodpecker" || bd.ID == "hermes" || bd.ID == "hindsight" {
-			continue
-		}
-		coreBundles = append(coreBundles, bd)
-	}
-	if len(coreBundles) == 0 {
-		return nil
-	}
-	sorted, err := topoSortBundles(coreBundles)
-	if err != nil {
-		return fmt.Errorf("topo sort: %w", err)
-	}
-	login, rest := partitionLoginBundles(sorted)
-	ordered := make([]apps.Bundle, 0, len(sorted))
-	ordered = append(ordered, login...)
-	ordered = append(ordered, rest...)
-	for _, bd := range ordered {
-		if bd.ID == "litellm" {
-			// TCP md5 auth: the NixOS module creates the role with no password,
-			// and the gateway connects over 127.0.0.1:5432. Sync before the
-			// first install, otherwise the healthy-wait fails here and the
-			// OIDC-phase resync is never reached. Mirrors woodpecker.
-			if err := b.ensureLitellmPostgresAuth(ctx); err != nil {
-				return fmt.Errorf("litellm postgres auth: %w", err)
-			}
-		}
-		if err := b.ensureDefaultApp(ctx, bd, domainName); err != nil {
-			return fmt.Errorf("%s: %w", bd.ID, err)
-		}
-		log.Printf("setup core apps: %s running and healthy", bd.ID)
-		// Incremental exposure: publish this app's route now so it
-		// becomes usable as it lands (best-effort; final exposure
-		// verifies everything).
-		b.exposeBundleRoute(ctx, bd, domainName)
-	}
-	// Syncthing owns its API key in config.xml; import it now that the
-	// service has started so the syncer client can authenticate.
-	// Best-effort: never fails setup.
-	b.importSyncthingAPIKey(ctx)
-	// Technitium DNS: refuse port-53 conflicts with an actionable message,
-	// then converge via API (Quad9 DoH forwarders, blocklists, loopback web
-	// 127.0.0.1:5380, LAN :53 binds, private-only recursion, default admin
-	// rotation shown once via API). Missing operator-owned console
-	// credentials only defer household DNS convergence (actionable pending
-	// step); every other setup phase still runs.
-	if err := b.convergeTechnitiumOrDefer(ctx); err != nil {
-		return err
-	}
-	// Default sync folders: obsidian vault (AI-shared notes source) and
-	// drops inbox (unshared; the smart router fans out to Paperless/Immich).
-	// Best-effort: never fails setup.
-	b.ensureDefaultSyncFolders(ctx)
-	return nil
-}
-
 // convergeTechnitiumOrDefer converges Technitium when installed. Port-53
 // conflicts and real convergence errors still fail the phase. Missing
 // operator-owned console credentials (errTechnitiumAuthRequired) only defer:
@@ -1335,10 +1181,8 @@ func (b *Backend) renderNativeAppEnv(ctx context.Context, dnsToken, domainName s
 	// LiteLLM env converges read-modify-write: fresh platform vars overlay the
 	// existing file, everything else (OIDC, virtual-key-agnostic settings)
 	// survives. Native DB ownership uses STORE_MODEL_IN_DB=True with a static
-	// empty-model bootstrap (see nix/apps.nix + writeStaticBootstrapYAML);
-	// models/credentials live in LiteLLM's database, never in YAML or
-	// OMAHAB_PROVIDER_* projections. Legacy provider rows are recovery
-	// material only and are never reprojected here.
+	// empty-model bootstrap (see nix/apps.nix); models and credentials live in
+	// LiteLLM's database, never in YAML or OMAHAB_PROVIDER_* projections.
 	existing, err := b.readAppEnv("litellm")
 	if err != nil {
 		return fmt.Errorf("litellm: %w", err)
@@ -1357,17 +1201,13 @@ func (b *Backend) renderNativeAppEnv(ctx context.Context, dnsToken, domainName s
 	if salt := b.ensureLitellmSalt(ctx, existing); salt != "" {
 		existing["LITELLM_SALT_KEY"] = salt
 	}
-	// One-time retirement owns OMAHAB_PROVIDER_* removal at cutover. Here we
-	// only carry existing entries pre-cutover (old YAML still serves) and
-	// prune them once native ownership is established, never reintroducing
-	// broker recovery material into steady-state env.
+	// Retired OMAHAB_PROVIDER_* key projections must never reach the gateway
+	// environment: models/credentials live only in LiteLLM's database.
 	providerKeysPruned := false
-	if ph := b.handoffPhase(ctx); ph == handoffPhaseComplete || ph == handoffPhaseCutover {
-		for k := range existing {
-			if strings.HasPrefix(k, providers.ProviderEnvVarPrefix) {
-				delete(existing, k)
-				providerKeysPruned = true
-			}
+	for k := range existing {
+		if strings.HasPrefix(k, providers.ProviderEnvVarPrefix) {
+			delete(existing, k)
+			providerKeysPruned = true
 		}
 	}
 	if pruneLitellmEnv(existing) {
@@ -1422,8 +1262,6 @@ func pruneLitellmEnv(existing map[string]string) bool {
 	}
 	return pruned
 }
-
-// Phase 5b: Dependent apps — Woodpecker and Hermes after OIDC
 
 // embeddingWorkerConfigPath is the worker's pinned-models config, defaulting
 // to the canonical knowledge.EmbeddingWorkerConfigPath (mirrors the unit's
@@ -1495,182 +1333,6 @@ func (b *Backend) ensureEmbeddingWorkerConfig(ctx context.Context) error {
 		log.Printf("setup dependent_apps: embedding worker restarted for full-text only")
 	} else {
 		log.Printf("setup dependent_apps: embedding worker restarted with model %s", alias)
-	}
-	return nil
-}
-
-func (b *Backend) setupPhaseDependentApps(ctx context.Context) error {
-	if b.apps == nil {
-		return fmt.Errorf("apps not configured")
-	}
-	// One-time LiteLLM ownership handoff after DB/env readiness (core_apps +
-	// OIDC) and before dependent model-key configuration (Hermes/Karakeep).
-	// Resume-safe; retries re-enter here via the setup retry path.
-	if err := b.runProviderHandoff(ctx); err != nil {
-		return err
-	}
-	// Retry a deferred scm bind: Forgejo/Woodpecker credentials land as
-	// those apps come up. Single guarded transition (nil → set), so no
-	// lock: readers already tolerate nil, and success ends retries.
-	// Log-only on repeat deferral (startup already published the notice);
-	// never fails the phase.
-	if b.scm == nil {
-		if err := b.bindSCM(ctx); err != nil {
-			log.Printf("setup dependent_apps: scm rebind deferred: %v", err)
-		}
-	}
-	// Revoke pre-fix gateway orphans for harness-issued user keys, which have
-	// no setup ensure of their own (per-owner ensures only reissue their own
-	// secrets). Best-effort and idempotent; never fails setup.
-	if b.providers != nil {
-		if n, cerr := b.providers.CleanupLegacyGatewayOrphans(ctx); cerr != nil {
-			log.Printf("setup dependent_apps: legacy gateway orphan cleanup: %v", cerr)
-		} else if n > 0 {
-			log.Printf("setup dependent_apps: revoked %d legacy gateway orphan keys", n)
-		}
-	}
-	// The embedding worker boots model-less; Hindsight (below, via Hermes)
-	// needs the pinned model serving before it activates. Converge the
-	// operator's document-search choice first.
-	if err := b.ensureEmbeddingWorkerConfig(ctx); err != nil {
-		return err
-	}
-	var woodpeckerBundle *apps.Bundle
-	woodpeckerSkipped := false
-	for _, bd := range b.apps.CatalogBundles() {
-		if bd.ID == "woodpecker" {
-			if !bd.Default {
-				log.Printf("setup dependent_apps: woodpecker not default, skipping")
-				woodpeckerSkipped = true
-				break
-			}
-			c := bd
-			woodpeckerBundle = &c
-			break
-		}
-	}
-	if woodpeckerBundle == nil {
-		if !woodpeckerSkipped {
-			log.Printf("setup dependent_apps: woodpecker bundle not found, skipping")
-		}
-		// Woodpecker skipped, but hermes still needs its key + install.
-		if err := b.ensureHermesDependentApp(ctx); err != nil {
-			return err
-		}
-		return b.ensureKarakeepLiteLLMKey(ctx)
-	}
-	dir := filepath.Join(b.cfg.StateDir, "secrets")
-	if strings.TrimSpace(b.cfg.StateDir) == "" {
-		dir = "/var/lib/omahab/secrets"
-	}
-	// Check OAuth secret files before installing. The canonical paths per spec are
-	// /var/lib/omahab/secrets/woodpecker_forgejo_client_id and client_secret.
-	// When StateDir is customized, also accept that location but fail closed if
-	// neither location provides a non-empty value.
-	candidates := [][]string{
-		{filepath.Join(dir, "woodpecker_forgejo_client_id"), filepath.Join(dir, "woodpecker_forgejo_client_secret")},
-	}
-	if dir != "/var/lib/omahab/secrets" {
-		candidates = append(candidates, []string{
-			"/var/lib/omahab/secrets/woodpecker_forgejo_client_id",
-			"/var/lib/omahab/secrets/woodpecker_forgejo_client_secret",
-		})
-	}
-	var found bool
-	var missingMsg string
-	for _, pair := range candidates {
-		idPath, secretPath := pair[0], pair[1]
-		idData, idErr := os.ReadFile(idPath)
-		if idErr != nil {
-			missingMsg = fmt.Sprintf("woodpecker OAuth client ID missing at %s: %v", idPath, idErr)
-			continue
-		}
-		secretData, secErr := os.ReadFile(secretPath)
-		if secErr != nil {
-			missingMsg = fmt.Sprintf("woodpecker OAuth client secret missing at %s: %v", secretPath, secErr)
-			continue
-		}
-		if strings.TrimSpace(string(idData)) == "" {
-			missingMsg = fmt.Sprintf("woodpecker OAuth client ID empty at %s", idPath)
-			continue
-		}
-		if strings.TrimSpace(string(secretData)) == "" {
-			missingMsg = fmt.Sprintf("woodpecker OAuth client secret empty at %s", secretPath)
-			continue
-		}
-		found = true
-		break
-	}
-	if !found {
-		if missingMsg == "" {
-			missingMsg = "woodpecker OAuth secrets missing"
-		}
-		return fmt.Errorf("dependent_apps: %s", missingMsg)
-	}
-	domainName := ""
-	if inst, err := b.store.Instance(ctx); err == nil {
-		domainName = strings.TrimSpace(inst.Domain)
-	}
-	if err := b.ensureOmahabNetwork(ctx); err != nil {
-		return err
-	}
-	// Sync the postgres role password before install: the native server needs
-	// TCP scram auth (DynamicUser rules out socket peer auth).
-	if err := b.ensureWoodpeckerPostgresAuth(ctx); err != nil {
-		return fmt.Errorf("woodpecker postgres auth: %w", err)
-	}
-	if err := b.ensureDefaultApp(ctx, *woodpeckerBundle, domainName); err != nil {
-		return fmt.Errorf("woodpecker: %w", err)
-	}
-	log.Printf("setup dependent_apps: woodpecker installed, waiting for health")
-	list, err := b.apps.List(ctx)
-	if err != nil {
-		return fmt.Errorf("list apps: %w", err)
-	}
-	var appID domain.ID
-	var ok bool
-	for _, st := range list {
-		if st.BundleID == "woodpecker" {
-			appID = st.ID
-			ok = true
-			break
-		}
-	}
-	if !ok {
-		return fmt.Errorf("woodpecker app not found after install")
-	}
-	if err := b.waitAppHealthy(ctx, appID, 120*time.Second); err != nil {
-		return fmt.Errorf("woodpecker server health: %w", err)
-	}
-	// Native bundles have no compose containers: the label-based check below
-	// can never succeed. Gate on the bundle's systemd units instead.
-	if isNativeBundle(*woodpeckerBundle) {
-		if err := b.waitNativeUnitsActive(ctx, woodpeckerBundle.Units, 90*time.Second); err != nil {
-			return fmt.Errorf("woodpecker agent health: %w", err)
-		}
-	} else if err := b.waitWoodpeckerContainersHealthy(ctx, 90*time.Second); err != nil {
-		if isDockerNotAvailable(err) {
-			log.Printf("setup dependent_apps: docker not available for container health, assuming healthy: %s", health.RedactDetail(err.Error()))
-		} else {
-			return fmt.Errorf("woodpecker agent health: %w", err)
-		}
-	}
-	log.Printf("setup dependent_apps: woodpecker server and agent healthy")
-	// Publish the ci.<domain> route now so the edge serves it (and its
-	// certificate) as soon as the app is healthy; the final exposure phase
-	// verifies everything. Best-effort: exposeBundleRoute only logs.
-	b.exposeBundleRoute(ctx, *woodpeckerBundle, domainName)
-	// Hermes needs a real LiteLLM virtual key (OwnerKindHermes) issued
-	// once LiteLLM is healthy; it replaces the placeholder secret file.
-	// Afterwards the hermes bundle is installed/started now that the OIDC
-	// client_id and LiteLLM key exist in its env.
-	if err := b.ensureHermesDependentApp(ctx); err != nil {
-		return err
-	}
-	// Karakeep AI is additive (bookmarks work without it), but a broken render
-	// must fail loudly like the hermes key above — never run silently AI-less.
-	if err := b.ensureKarakeepLiteLLMKey(ctx); err != nil {
-		return fmt.Errorf("karakeep litellm key: %w", err)
 	}
 	return nil
 }
@@ -2051,30 +1713,6 @@ func (b *Backend) waitForHealthy(ctx context.Context, id domain.ID, bundle apps.
 	return requireRunningHealthy(st, isNativeBundle(bundle))
 }
 
-// loginBundleIDs are the bundles the login path needs: admin enrollment,
-// the id route, and every OIDC dependent hang off Caddy + Pocket ID.
-var loginBundleIDs = map[string]bool{"caddy": true, "pocket-id": true}
-
-// partitionLoginBundles orders core bundles so the login path installs
-// first. Pocket ID should be the #2 install right after Caddy; letting
-// media servers and their cold starts go first delays login and lets
-// their startup races fail the batch before Pocket ID ever installs. The
-// input is already topo-sorted, so both partitions keep dependency order;
-// Caddy is pinned ahead of Pocket ID explicitly.
-func partitionLoginBundles(sorted []apps.Bundle) (login, rest []apps.Bundle) {
-	for _, bd := range sorted {
-		if loginBundleIDs[bd.ID] {
-			login = append(login, bd)
-		} else {
-			rest = append(rest, bd)
-		}
-	}
-	sort.SliceStable(login, func(i, j int) bool {
-		return login[i].ID == "caddy" && login[j].ID != "caddy"
-	})
-	return login, rest
-}
-
 func requireRunningHealthy(st apps.Status, isNative bool) error {
 	if st.ObservedState != apps.ObservedRunning {
 		return fmt.Errorf("app %s is %s, want running", st.BundleID, st.ObservedState)
@@ -2308,5 +1946,3 @@ func topoSortBundles(bundles []apps.Bundle) ([]apps.Bundle, error) {
 	}
 	return sorted, nil
 }
-
-// Phase 5: OIDC prerequisites

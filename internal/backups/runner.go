@@ -245,6 +245,18 @@ func (c *CommandRunner) Restore(ctx context.Context, repo Repository, creds Cred
 	return err
 }
 
+// Dump writes one file from a snapshot to stdout and returns it. The
+// snapshot id and the in-repository path are the only arguments; every
+// credential stays in the child environment and stderr is redacted like
+// every other restic invocation.
+func (c *CommandRunner) Dump(ctx context.Context, repo Repository, creds Credentials, snapshotID, path string) ([]byte, error) {
+	if strings.TrimSpace(snapshotID) == "" || strings.TrimSpace(path) == "" {
+		return nil, fmt.Errorf("%w: snapshot id and path are required", ErrInvalid)
+	}
+	args := withSFTP(repo, []string{"dump", snapshotID, path})
+	return c.exec(ctx, args, c.env(repo, creds), creds)
+}
+
 func (c *CommandRunner) Snapshots(ctx context.Context, repo Repository, creds Credentials, latest int) ([]SnapshotListEntry, error) {
 	args := []string{"snapshots", "--json"}
 	if latest > 0 {

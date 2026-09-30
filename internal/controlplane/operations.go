@@ -17,6 +17,7 @@ func execCommand(name string, args ...string) (string, error) {
 	out, err := exec.Command(name, args...).CombinedOutput()
 	return string(out), err
 }
+
 // current journal stage, never from arbitrary journal paths.
 const (
 	OpPending   = "pending"
@@ -86,7 +87,7 @@ func syncWriteFile(path string, data []byte, mode os.FileMode) error {
 
 // loadOperation searches storage and restore journals for an operation ID.
 func loadOperation(stateDir, id string) (Operation, error) {
-	for _, kind := range []string{"storage", "restore"} {
+	for _, kind := range []string{"storage", "restore", bundleApplyJournalKind} {
 		raw, err := os.ReadFile(operationJournalPath(stateDir, kind, id))
 		if err != nil {
 			continue
@@ -133,11 +134,26 @@ func loadStorageJournal(stateDir, id string) (storageJournal, error) {
 	return j, nil
 }
 
-// GetOperation returns the shared progress record for polling.
+// GetOperation returns the shared progress record for polling. Bundle
+// apply journals converge from the CLI outcome marker when the daemon
+// restarted mid-apply (the switch inside the apply restarts omahabd).
 func (b *Backend) GetOperation(ctx context.Context, id string) (Operation, error) {
 	op, err := loadOperation(b.cfg.StateDir, strings.TrimSpace(id))
 	if err != nil {
 		return Operation{}, err
+	}
+	if op.Kind == bundleApplyJournalKind && op.Status == OpRunning {
+		if done, status, detail := readBundleApplyOutcome(b.cfg.StateDir, op.ID); done {
+			op.Status = status
+			op.Error = detail
+			_ = writeOperationJournal(b.cfg.StateDir, op)
+			if op.Status == OpCompleted {
+				// The switch installed a new merged view; reload it so
+				// new/removed/disabled custom bundles show without a
+				// daemon restart.
+				_ = b.reloadMergedCatalog(ctx)
+			}
+		}
 	}
 	return op, nil
 }
@@ -301,9 +317,6 @@ func resumeBindMount(known map[string]string, p StoragePlacement) error {
 	}
 	uuid := strings.TrimSpace(*p.FSUUID)
 	src := managedSubdir(uuid, p.Volume)
-	if p.Legacy {
-		src = filepath.Join(diskMountpoint(uuid), "media")
-	}
 	out, err := execCommand("mount", "--bind", src, cp)
 	if err != nil {
 		return fmt.Errorf("bind %q -> %q: %v: %s", src, cp, err, strings.TrimSpace(out))
@@ -318,4 +331,3 @@ func restartStorageUnit(volume string) error {
 	}
 	return nil
 }
-

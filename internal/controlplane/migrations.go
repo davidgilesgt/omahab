@@ -3,8 +3,8 @@ package controlplane
 import (
 	"github.com/omahab/omahab/internal/apps"
 	"github.com/omahab/omahab/internal/backups"
-	"github.com/omahab/omahab/internal/emailing"
 	"github.com/omahab/omahab/internal/companion"
+	"github.com/omahab/omahab/internal/emailing"
 	"github.com/omahab/omahab/internal/events"
 	"github.com/omahab/omahab/internal/exposure"
 	"github.com/omahab/omahab/internal/health"
@@ -61,7 +61,7 @@ func AllMigrations() []store.Migration {
 	out = append(out, emailing.Migrations()...)
 	// companion (devices + enrollments + env meta) — migration IDs keep environments-001 strings
 	out = append(out, companion.Migrations()...)
-	// controlplane glue (users, release tokens)
+	// controlplane glue (users, release tokens, setup nodes)
 	out = append(out, glueMigrations()...)
 	return out
 }
@@ -69,7 +69,10 @@ func AllMigrations() []store.Migration {
 func glueMigrations() []store.Migration {
 	return []store.Migration{
 		{
-			Name: "controlplane-001-users",
+			// Baseline for the control-plane glue schema: users (with the
+			// pocket user linkage), project release tokens, and the
+			// persistent setup DAG state.
+			Name: "controlplane-001-baseline",
 			SQL: `
 CREATE TABLE IF NOT EXISTS controlplane_users (
     id TEXT PRIMARY KEY,
@@ -79,14 +82,11 @@ CREATE TABLE IF NOT EXISTS controlplane_users (
     disabled INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    pocket_user_id TEXT NOT NULL DEFAULT '',
     UNIQUE(email)
 ) STRICT;
 CREATE INDEX IF NOT EXISTS idx_controlplane_users_email ON controlplane_users(email);
-`,
-		},
-		{
-			Name: "controlplane-002-release_tokens",
-			SQL: `
+
 CREATE TABLE IF NOT EXISTS project_release_tokens (
     project_id TEXT PRIMARY KEY,
     token_hash TEXT NOT NULL,
@@ -94,22 +94,16 @@ CREATE TABLE IF NOT EXISTS project_release_tokens (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 ) STRICT;
-`,
-		},
-		{
-			Name: "controlplane-003-email_listing_cache",
-			SQL: `
--- email listing cache is covered by emailing migrations; this placeholder ensures deterministic naming for future extensions
-CREATE TABLE IF NOT EXISTS controlplane_meta (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL
+
+CREATE TABLE IF NOT EXISTS setup_nodes (
+    id TEXT PRIMARY KEY,
+    state TEXT NOT NULL DEFAULT 'pending',
+    blocked_by_json TEXT NOT NULL DEFAULT '[]',
+    error TEXT NOT NULL DEFAULT '',
+    owner TEXT NOT NULL DEFAULT 'system',
+    code TEXT NOT NULL DEFAULT 'automatic',
+    updated_at TEXT NOT NULL
 ) STRICT;
-`,
-		},
-		{
-			Name: "controlplane-004-pocket-user-id",
-			SQL: `
-ALTER TABLE controlplane_users ADD COLUMN pocket_user_id TEXT NOT NULL DEFAULT '';
 `,
 		},
 	}

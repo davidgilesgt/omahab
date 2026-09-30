@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -359,4 +361,152 @@ func pinHostKey(path, host string, key ssh.PublicKey) error {
 		return fmt.Errorf("chmod known_hosts: %w", err)
 	}
 	return nil
+}
+
+// sftpInstanceLister enumerates instance directories on a backup account
+// over SFTP on port 23, reusing the backup SSH key and pinned host key
+// that the key upload established. It implements
+// backups.InstanceDirLister.
+type sftpInstanceLister struct {
+	// stateDir is the daemon state dir holding backup_ssh/.
+	stateDir string
+	// dial opens the TCP connection; production passes a net.Dialer's
+	// DialContext, tests inject the fixture.
+	dial sshDialFunc
+}
+
+// ListInstanceDirs returns the subdirectory names of dir on the backup
+// account host. Only directories are returned; the account home itself
+// (".", "..", dotfiles like .ssh) never surfaces.
+func (l sftpInstanceLister) ListInstanceDirs(ctx context.Context, location string) ([]string, error) {
+	u, err := url.Parse(strings.TrimSpace(location))
+	if err != nil || u.Host == "" {
+		return nil, fmt.Errorf("invalid backup location %q", location)
+	}
+	user := ""
+	if u.User != nil {
+		user = u.User.Username()
+	}
+	host := u.Hostname()
+	if user == "" {
+		return nil, fmt.Errorf("backup location %q has no username for sftp listing", location)
+	}
+	if !validSSHFragment(user) || !validSSHFragment(host) {
+		return nil, fmt.Errorf("backup location %q has unsafe ssh fragments", location)
+	}
+	port := u.Port()
+	if port == "" {
+		port = backupSSHPort
+	}
+	dir := strings.TrimSuffix(path.Clean("/"+u.Path), "/")
+	if dir == "" || dir == "/" {
+		return nil, fmt.Errorf("backup location %q has no directory to list", location)
+	}
+
+	knownHosts := filepath.Join(l.stateDir, "backup_ssh", "known_hosts")
+	pinned, err := loadPinnedHostKey(knownHosts, host)
+	if err != nil {
+		return nil, err
+	}
+	callback := func(_ string, _ net.Addr, key ssh.PublicKey) error {
+		if pinned != nil && !samePublicKey(pinned, key) {
+			return fmt.Errorf("backup host key for %s changed: pinned key no longer matches", host)
+		}
+		return nil
+	}
+	cfg := &ssh.ClientConfig{
+		User: user,
+		Auth: []ssh.AuthMethod{
+			// The backup key the wizard/upload flow enrolled; a
+			// missing key is a hard error, never a silent skip.
+			publicKeyFileAuth(filepath.Join(l.stateDir, "backup_ssh", "id_ed25519")),
+		},
+		HostKeyCallback: callback,
+	}
+	addr := net.JoinHostPort(host, port)
+	dialCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	d := l.dial
+	if d == nil {
+		var nd net.Dialer
+		d = nd.DialContext
+	}
+	conn, err := d(dialCtx, "tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("dial backup host %s: %w", addr, err)
+	}
+	if deadline, ok := dialCtx.Deadline(); ok {
+		if err := conn.SetDeadline(deadline); err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("set backup handshake deadline: %w", err)
+		}
+	}
+	sshConn, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("backup ssh handshake: %w", err)
+	}
+	client := ssh.NewClient(sshConn, chans, reqs)
+	defer func() { _ = client.Close() }()
+	sftpClient, err := sftp.NewClient(client)
+	if err != nil {
+		return nil, fmt.Errorf("open backup sftp: %w", err)
+	}
+	defer func() { _ = sftpClient.Close() }()
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		return nil, fmt.Errorf("clear backup session deadline: %w", err)
+	}
+	entries, err := sftpClient.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("list %s on backup host: %w", dir, err)
+	}
+	var out []string
+	for _, e := range entries {
+		name := e.Name()
+		if !e.IsDir() || name == "" || strings.HasPrefix(name, ".") {
+			continue
+		}
+		out = append(out, name)
+	}
+	return out, nil
+}
+
+// validSSHFragment rejects shell metacharacters and leading dashes in
+// user/host fragments so unvalidated location text can never inject ssh
+// options.
+func validSSHFragment(s string) bool {
+	if s == "" || strings.HasPrefix(s, "-") {
+		return false
+	}
+	for _, r := range s {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' ||
+			r == '.' || r == '_' || r == '-' || r == '@' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// publicKeyFileAuth builds an ssh.AuthMethod from a private key file,
+// failing closed when the key cannot be read or parsed.
+func publicKeyFileAuth(keyPath string) ssh.AuthMethod {
+	signer := func() ssh.Signer {
+		data, err := os.ReadFile(keyPath)
+		if err != nil {
+			return nil
+		}
+		s, err := ssh.ParsePrivateKey(data)
+		if err != nil {
+			return nil
+		}
+		return s
+	}
+	return ssh.PublicKeysCallback(func() ([]ssh.Signer, error) {
+		s := signer()
+		if s == nil {
+			return nil, fmt.Errorf("backup ssh key %s unavailable", keyPath)
+		}
+		return []ssh.Signer{s}, nil
+	})
 }

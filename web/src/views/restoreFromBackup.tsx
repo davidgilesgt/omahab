@@ -1,30 +1,31 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../auth";
 import { useToast } from "../components/toast";
 import { CopyButton } from "../components/copyButton";
+import type { RecoveryInstance, RecoverySnapshot } from "../api/types";
 
-// Disaster-recovery restore on the first-run setup checklist (DESIGN
-// §5.4, §24.6): walk the admin through the recovery phrase plus the
-// backup repository, stage a validated server-config restore through the
-// daemon, then trigger the omahab-restore systemd unit which stops
-// omahabd, swaps state atomically as root, and restarts omahabd. The
-// phrase lives in component state only and is sent once per call over the
-// panel-token-authenticated API.
-
-interface RecoverySnapshot {
-  id: string;
-  time?: string;
-  hostname?: string;
-  server_config: boolean;
-}
+// The FIRST setup step (DESIGN §5.3/§5.4): "Do you have a recovery phrase
+// from an earlier Omahab server?" NO walks the new-server path (phrase
+// ritual lives in setup.tsx; this control only configures the repository);
+// YES walks instance discovery -> snapshot pick -> full or scoped restore
+// through the staged omahab-restore path. The phrase lives in component
+// state only and is sent once per call over the panel-token API.
+//
+// Security: before Tailscale the panel is plain HTTP on the LAN, so the
+// Hetzner sub-account password crosses the LAN in cleartext. The SSH
+// alternative is shown alongside. Locations are never built client-side:
+// the server returns the exact resolvable location for each instance.
 
 interface OperationStatus {
   id: string;
   status: string;
   stage: string;
   error?: string;
+  preview?: string;
 }
+
+type RestoreChoice = "everything" | "some";
 
 function authHeaders(token: string): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {};
@@ -41,8 +42,8 @@ async function postJSON<T>(path: string, token: string, body: unknown): Promise<
   return data;
 }
 
-export function RestoreFromBackupControl() {
-  const { token: authToken } = useAuth();
+export function RestoreFromBackupControl({ onStartNew }: { onStartNew: () => void }) {
+  const { client, token: authToken } = useAuth();
   const toast = useToast();
   const queryClient = useQueryClient();
   const [phrase, setPhrase] = useState("");
@@ -52,41 +53,58 @@ export function RestoreFromBackupControl() {
   const [subPass, setSubPass] = useState("");
   const [location, setLocation] = useState("");
   const [password, setPassword] = useState("");
+  const [instances, setInstances] = useState<RecoveryInstance[] | null>(null);
+  const [instanceLocation, setInstanceLocation] = useState("");
   const [snapshots, setSnapshots] = useState<RecoverySnapshot[] | null>(null);
   const [chosen, setChosen] = useState<string>("");
+  const [choice, setChoice] = useState<RestoreChoice>("everything");
+  const [appPicks, setAppPicks] = useState<string[]>([]);
   const [operation, setOperation] = useState<OperationStatus | null>(null);
   const [applyStarted, setApplyStarted] = useState(false);
 
   const token = authToken ?? "";
   const phraseWords = phrase.trim().split(/\s+/).filter(Boolean);
   const phraseOk = phraseWords.length === 24;
-  const repoLocation =
-    repoKind === "hetzner_storagebox"
-      ? `sftp://${username.trim()}@${host.trim()}:23/./omahab`
-      : location.trim();
   const repoReady =
     repoKind === "hetzner_storagebox"
-      ? !!username.trim() && !!host.trim() && !!subPass
+      ? !!username.trim() && !!host.trim()
       : !!location.trim() && !!password;
 
-  // Hetzner fields ride along on list and prepare: the daemon uploads the
-  // generated backup SSH key once (same flow as setup) so restic can reach
-  // the Storage Box from this fresh machine. Nothing is stored.
-  const repoBody = (): Record<string, string> => {
-    const body: Record<string, string> = { phrase: phrase.trim(), location: repoLocation };
-    if (repoKind === "generic") {
-      body.password = password;
-    } else {
-      body.username = username.trim();
-      body.host = host.trim();
-      body.sub_account_password = subPass;
-    }
-    return body;
-  };
+  // The chosen snapshot drives the app-scope picker; server-config is always
+  // restored and never appears as an optional checkbox.
+  const chosenSnapshot = useMemo(
+    () => snapshots?.find((s) => s.id === chosen) ?? null,
+    [snapshots, chosen],
+  );
+  const appScopes = useMemo(
+    () => (chosenSnapshot?.scopes ?? []).filter((s) => s.startsWith("app:")),
+    [chosenSnapshot],
+  );
 
-  const listMutation = useMutation({
+  const instanceBody = () =>
+    repoKind === "hetzner_storagebox"
+      ? { phrase: phrase.trim(), username: username.trim(), host: host.trim(), sub_account_password: subPass }
+      : { phrase: phrase.trim(), location: location.trim(), password };
+
+  // List earlier instances under ./omahab on the Storage Box (or the
+  // generic repo's parent). The server returns the exact location per
+  // instance; nothing is assembled client-side.
+  const instancesMutation = useMutation({
+    mutationFn: async () => client.listRecoveryInstances(instanceBody()),
+    onSuccess: (data) => {
+      setInstances(data.instances ?? []);
+      const usable = (data.instances ?? []).find((i) => !i.locked);
+      if (usable) setInstanceLocation(usable.location);
+      toast.success(`${data.instances?.length ?? 0} earlier server(s) found`);
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Listing failed"),
+  });
+
+  const snapshotsMutation = useMutation({
     mutationFn: async () => {
-      const body = repoBody();
+      if (!instanceLocation) throw new Error("Pick an earlier server first");
+      const body: Record<string, unknown> = { phrase: phrase.trim(), location: instanceLocation };
+      if (repoKind === "generic") body.password = password;
       return postJSON<{ snapshots: RecoverySnapshot[] }>("/api/v1/recovery/restore/snapshots", token, body);
     },
     onSuccess: (data) => {
@@ -100,8 +118,17 @@ export function RestoreFromBackupControl() {
 
   const prepareMutation = useMutation({
     mutationFn: async () => {
-      const body = repoBody();
-      if (chosen) body.snapshot_id = chosen;
+      const body: Record<string, unknown> = {
+        phrase: phrase.trim(),
+        location: instanceLocation,
+        snapshot_id: chosen,
+      };
+      if (repoKind === "generic") body.password = password;
+      if (choice === "some") {
+        body.scopes = ["server-config", ...appPicks];
+      } else {
+        body.include_apps = true;
+      }
       return postJSON<OperationStatus>("/api/v1/recovery/restore", token, body);
     },
     onSuccess: (op) => {
@@ -129,17 +156,33 @@ export function RestoreFromBackupControl() {
     onError: (err) => toast.error(err instanceof Error ? err.message : "Apply failed"),
   });
 
+  // "Start new instead": record the choice server-side so the checklist
+  // stops offering a restore, then hand the operator to the new-server
+  // path (phrase + repository) inside the same first step.
+  const skipMutation = useMutation({
+    mutationFn: () => client.skipRecoveryRestore(),
+    onSuccess: () => {
+      toast.success("Starting fresh — set up the recovery phrase and backups below");
+      setInstances(null);
+      setSnapshots(null);
+      setInstanceLocation("");
+      void queryClient.invalidateQueries({ queryKey: ["setup"] });
+      onStartNew();
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Could not record the choice"),
+  });
+
   if (applyStarted) {
     return (
       <div className="form-stack">
         <p>
-          Server-config restore is running in the <span className="mono">omahab-restore</span> system unit: omahabd
+          Restore is running in the <span className="mono">omahab-restore</span> system unit: omahabd
           stops, the validated state is swapped in atomically (rollback copy kept), and omahabd restarts.
         </p>
         <p className="muted">
-          This page will lose the connection briefly. After the restart, reopen the panel — the checklist
-          reconverges apps from the restored state; remaining app data restores through the normal per-app
-          restore.
+          This page will lose the connection briefly. After the restart, reopen the panel — the
+          checklist reconverges apps from the restored state; remaining app data restores through the
+          normal per-app restore.
         </p>
         <p>
           Progress: <span className="mono">{operation?.stage ?? "unit-started"}</span>
@@ -155,6 +198,9 @@ export function RestoreFromBackupControl() {
           Snapshot staged and validated (<span className="mono">{operation.stage}</span>). Applying stops and
           restarts this server now.
         </p>
+        {operation.preview && (
+          <p className="inline-error" role="alert">{operation.preview}</p>
+        )}
         <button className="button danger" type="button" onClick={() => void applyMutation.mutate()} disabled={applyMutation.isPending}>
           {applyMutation.isPending ? "Applying…" : "Apply restore and restart"}
         </button>
@@ -168,10 +214,15 @@ export function RestoreFromBackupControl() {
   return (
     <div className="form-stack">
       <p className="muted">
-        Rebuild this server from an off-site backup: enter the 24-word recovery phrase and the backup
-        repository. The system lists snapshots, restores the control plane (accounts, secrets, configuration),
-        and restarts. Photos and app data restore per-app afterwards.
+        Rebuild an earlier Omahab server from its off-site backup: enter the 24-word recovery phrase and
+        the backup account, pick the server instance and snapshot, then restore. Server configuration
+        (accounts, secrets, settings) always restores; app data can follow in full or per-app.
       </p>
+      <div className="setup-notice" role="note">
+        <strong>Heads-up before Tailscale is up:</strong> this panel travels over plain HTTP on your LAN,
+        so the Hetzner sub-account password you type here crosses the LAN unencrypted. If that matters,
+        SSH in and run the same flow on the server instead (commands below).
+      </div>
       <label className="field">
         <span>Recovery phrase (24 words)</span>
         <textarea
@@ -221,17 +272,47 @@ export function RestoreFromBackupControl() {
       <button
         className="button secondary"
         type="button"
-        onClick={() => void listMutation.mutate()}
-        disabled={listMutation.isPending || !phraseOk || !repoLocation}
+        onClick={() => void instancesMutation.mutate()}
+        disabled={instancesMutation.isPending || !phraseOk || !repoReady}
       >
-        {listMutation.isPending ? "Listing…" : "List snapshots"}
+        {instancesMutation.isPending ? "Finding earlier servers…" : "Find earlier servers"}
       </button>
-      {listMutation.isError && (
-        <p className="inline-error" role="alert">{listMutation.error instanceof Error ? listMutation.error.message : "Listing failed"}</p>
+      {instancesMutation.isError && (
+        <p className="inline-error" role="alert">{instancesMutation.error instanceof Error ? instancesMutation.error.message : "Listing failed"}</p>
+      )}
+      {instances && (
+        instances.length === 0 ? (
+          <p className="muted">No earlier servers found — check the phrase and account, or start new below.</p>
+        ) : (
+          <label className="field">
+            <span>Earlier server instance</span>
+            <select value={instanceLocation} onChange={(e) => { setInstanceLocation(e.target.value); setSnapshots(null); }}>
+              <option value="">Pick an instance…</option>
+              {instances.map((i) => (
+                <option key={i.instance_id} value={i.location} disabled={i.locked}>
+                  {i.instance_id}{i.domain ? ` (${i.domain})` : ""}{i.latest_snapshot_time ? ` · ${i.latest_snapshot_time}` : ""}{i.locked ? " · locked (wrong phrase for this one)" : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+        )
+      )}
+      {instanceLocation && !snapshots && (
+        <button
+          className="button secondary"
+          type="button"
+          onClick={() => void snapshotsMutation.mutate()}
+          disabled={snapshotsMutation.isPending || !phraseOk}
+        >
+          {snapshotsMutation.isPending ? "Listing…" : "List snapshots"}
+        </button>
+      )}
+      {snapshotsMutation.isError && (
+        <p className="inline-error" role="alert">{snapshotsMutation.error instanceof Error ? snapshotsMutation.error.message : "Listing failed"}</p>
       )}
       {snapshots && (
         snapshots.length === 0 ? (
-          <p className="muted">No snapshots found — check the phrase and repository.</p>
+          <p className="muted">No snapshots found in this instance — pick another or start new.</p>
         ) : (
           <label className="field">
             <span>Snapshot to restore</span>
@@ -245,31 +326,81 @@ export function RestoreFromBackupControl() {
           </label>
         )
       )}
-      {snapshots && snapshots.some((s) => s.server_config) && (
-        <>
+      {chosenSnapshot && (
+        <div className="form-stack">
+          <span>What to restore</span>
+          <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <input type="radio" name="restore-choice" checked={choice === "everything"} onChange={() => setChoice("everything")} />
+            Restore everything — server configuration plus all app data from this snapshot
+          </label>
+          {appScopes.length > 0 && (
+            <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input type="radio" name="restore-choice" checked={choice === "some"} onChange={() => { setChoice("some"); setAppPicks([]); }} />
+              Restore some apps
+            </label>
+          )}
+          {choice === "some" && (
+            <div className="form-stack" style={{ paddingLeft: 8 }}>
+              <p className="muted" style={{ margin: 0 }}>
+                Server configuration is always included — app data needs it (secrets, accounts, routes).
+              </p>
+              {appScopes.map((scope) => {
+                const id = scope.slice("app:".length);
+                return (
+                  <label key={scope} style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <input
+                      type="checkbox"
+                      checked={appPicks.includes(scope)}
+                      onChange={(e) =>
+                        setAppPicks(e.target.checked ? [...appPicks, scope] : appPicks.filter((s) => s !== scope))
+                      }
+                    />
+                    {id}
+                  </label>
+                );
+              })}
+            </div>
+          )}
           <button
             className="button primary"
             type="button"
             onClick={() => void prepareMutation.mutate()}
-            disabled={prepareMutation.isPending || !chosen}
+            disabled={prepareMutation.isPending || !chosen || (choice === "some" && appScopes.length === 0)}
           >
             {prepareMutation.isPending ? "Staging…" : "Stage validated restore"}
           </button>
           {prepareMutation.isError && (
             <p className="inline-error" role="alert">{prepareMutation.error instanceof Error ? prepareMutation.error.message : "Staging failed"}</p>
           )}
-        </>
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <button
+          className="button ghost"
+          type="button"
+          onClick={() => void skipMutation.mutate()}
+          disabled={skipMutation.isPending}
+        >
+          {skipMutation.isPending ? "Starting…" : "Start new instead"}
+        </button>
+      </div>
+      {skipMutation.isError && (
+        <p className="inline-error" role="alert">{skipMutation.error instanceof Error ? skipMutation.error.message : "Could not record the choice"}</p>
       )}
       <details>
         <summary className="muted">Prefer SSH? Equivalent commands</summary>
         <div className="code-strip">
-          <code>sudo omahab recovery apply --repository {"<repo-url>"}</code>
-          <CopyButton text="sudo omahab recovery apply --repository <repo-url>" label="Copy" />
-        </div>
-        <div className="code-strip">
           <code>sudo omahab recovery apply --repository {"<repo-url>"} --list</code>
           <CopyButton text="sudo omahab recovery apply --repository <repo-url> --list" label="Copy" />
         </div>
+        <div className="code-strip">
+          <code>sudo omahab recovery apply --repository {"<repo-url>"}</code>
+          <CopyButton text="sudo omahab recovery apply --repository <repo-url>" label="Copy" />
+        </div>
+        <p className="muted" style={{ fontSize: "0.85rem" }}>
+          The recovery-phrase prompt reads from the terminal, never argv, and the repository password is
+          derived exactly as during setup.
+        </p>
       </details>
     </div>
   );

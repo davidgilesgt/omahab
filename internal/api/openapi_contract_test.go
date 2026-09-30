@@ -24,10 +24,12 @@ func TestOpenAPIServesImplementedSurface(t *testing.T) {
 		"title: { type: string }",
 		"gateway_key_id: { type: string }",
 		"waiting_line: { type: string }",
-		"branch: { type: string, description: 'Deprecated: use title.",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("served openapi.yaml missing %q", want)
 		}
+	}
+	if strings.Contains(body, "branch: { type: string, description: 'Deprecated") {
+		t.Error("served openapi.yaml still documents the removed branch field")
 	}
 }

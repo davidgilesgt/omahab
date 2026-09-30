@@ -27,6 +27,23 @@ func (s *Server) handleRecoveryListSnapshots(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, out)
 }
 
+// handleRecoveryListInstances discovers earlier Omahab instances under a
+// backup account: POST /api/v1/recovery/instances with the recovery
+// phrase (plus Hetzner account credentials on a fresh machine, or an
+// exact generic location).
+func (s *Server) handleRecoveryListInstances(w http.ResponseWriter, r *http.Request) {
+	var req apitypes.RecoveryListRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	out, err := s.backend.ListRecoveryInstances(r.Context(), req)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 // handleRecoveryPrepareRestore stages and validates a server-config
 // snapshot without touching live state: POST /api/v1/recovery/restore.
 // The swap itself runs in the omahab-restore oneshot unit with omahabd
@@ -75,4 +92,15 @@ func (s *Server) handleGetRecoveryRestore(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, http.StatusOK, op)
+}
+
+// handleRecoverySkipRestore records the operator's "start new instead"
+// choice from the first setup step: the restore check becomes skipped so
+// the checklist stops offering a restore on this instance.
+func (s *Server) handleRecoverySkipRestore(w http.ResponseWriter, r *http.Request) {
+	if err := s.backend.SkipRecoveryRestore(r.Context()); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"skipped": true})
 }

@@ -17,7 +17,7 @@ import (
 func Migrations() []store.Migration {
 	return []store.Migration{
 		{
-			Name: "0001_exposure_services_and_acks",
+			Name: "exposure-001-baseline",
 			SQL: `
 CREATE TABLE IF NOT EXISTS exposure_services (
     id            TEXT PRIMARY KEY,
@@ -31,17 +31,14 @@ CREATE TABLE IF NOT EXISTS exposure_services (
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL
 );
+
 CREATE TABLE IF NOT EXISTS exposure_public_acks (
     service_id TEXT PRIMARY KEY,
     ack_id     TEXT NOT NULL,
     revision   INTEGER NOT NULL,
     created_at TEXT NOT NULL
 );
-`,
-		},
-		{
-			Name: "0002_exposure_plans",
-			SQL: `
+
 CREATE TABLE IF NOT EXISTS exposure_plans (
     id               TEXT PRIMARY KEY,
     service_id       TEXT NOT NULL,
@@ -60,11 +57,7 @@ CREATE TABLE IF NOT EXISTS exposure_plans (
     applied_at       TEXT
 );
 CREATE INDEX IF NOT EXISTS exposure_plans_by_service ON exposure_plans (service_id, created_at);
-`,
-		},
-		{
-			Name: "0003_exposure_observations",
-			SQL: `
+
 CREATE TABLE IF NOT EXISTS exposure_observations (
     service_id     TEXT PRIMARY KEY,
     observed_at    TEXT NOT NULL,

@@ -7,7 +7,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/omahab/omahab/internal/apitypes"
 	"github.com/omahab/omahab/internal/apps"
@@ -61,15 +63,15 @@ func (b *Backend) runLiveRestore(opID string) {
 		if err != nil {
 			return failRestoreOp(b.cfg.StateDir, &j, "staging validation: "+err.Error())
 		}
-		manifest, err := stagedManifest(rep)
-		if err != nil {
-			return failRestoreOp(b.cfg.StateDir, &j, err.Error())
+		if rep.Manifest == nil {
+			return failRestoreOp(b.cfg.StateDir, &j, "snapshot has no v2 manifest; it cannot be restored")
 		}
+		manifest := *rep.Manifest
 		scopes := j.Scopes
 		if len(scopes) == 0 {
-			scopes = manifest.Scopes
+			scopes = manifest.ScopeNames()
 		}
-		if err := checkRestoreScopes(rep, scopes); err != nil {
+		if err := checkRestoreScopes(manifest, scopes); err != nil {
 			return failRestoreOp(b.cfg.StateDir, &j, err.Error())
 		}
 		for _, s := range scopes {
@@ -90,6 +92,12 @@ func (b *Backend) runLiveRestore(opID string) {
 
 		// Newer-than-installed formats are not auto-downgraded.
 		if err := checkRestoreVersions(plan); err != nil {
+			return failRestoreOp(b.cfg.StateDir, &j, err.Error())
+		}
+		// PostgreSQL dumps from a newer major cannot restore into the
+		// running cluster: refuse with a clear error instead of a
+		// cryptic pg_restore failure mid-promotion.
+		if err := checkPostgresMajor(manifest); err != nil {
 			return failRestoreOp(b.cfg.StateDir, &j, err.Error())
 		}
 		// PocketID is identity-critical: distinct warning, checkpoint
@@ -131,6 +139,21 @@ func (b *Backend) runLiveRestore(opID string) {
 			}
 		}
 		j.Operation.Stage = RestoreWritersStop
+		_ = writeRestoreJournal(b.cfg.StateDir, j)
+		// Custom bundle definitions travel with the snapshot: write
+		// them back into the bundles repo and commit before any data
+		// promotion, so the modules that own the restored data exist
+		// when apps resume. The activation switch runs in the same
+		// omahab-bundle-apply oneshot unit the panel apply uses (the
+		// switch restarts omahabd); the restore journal resumes from
+		// this stage after the restart exactly like a failed live
+		// restore, and runLiveRestore is a no-op re-write once the
+		// definitions are already committed.
+		if err := b.restoreCustomBundles(ctx, plan, staged, opID); err != nil {
+			_ = b.rollbackLiveRestore(ctx, plan, safety, opID)
+			return failRestoreOp(b.cfg.StateDir, &j, "custom bundles: "+err.Error())
+		}
+		j.Operation.Stage = RestoreBundlesWritten
 		_ = writeRestoreJournal(b.cfg.StateDir, j)
 		// Promote staged files with ownership intact.
 		if err := promoteStagedFiles(plan, staged); err != nil {
@@ -197,10 +220,14 @@ type livePlan struct {
 	// safety holds pre-restore file copies: dest -> safety copy.
 	safetyFiles map[string]string
 	// safetyDBs holds pre-restore pg dumps: db -> safety dump.
-	safetyDBs   map[string]string
-	hasPocketID bool
-	manifest    backups.SnapshotManifest
-	staged      string
+	safetyDBs map[string]string
+	// customBundles are custom bundle definitions carried by the
+	// snapshot; they are written back into the bundles repo before data
+	// restore.
+	customBundles []*backups.ManifestBundle
+	hasPocketID   bool
+	manifest      backups.SnapshotManifest
+	staged        string
 }
 
 func (b *Backend) planLiveRestore(ctx context.Context, manifest backups.SnapshotManifest, scopes []string, staged string) (*livePlan, error) {
@@ -212,9 +239,9 @@ func (b *Backend) planLiveRestore(ctx context.Context, manifest backups.Snapshot
 		manifest:    manifest,
 		staged:      staged,
 	}
-	byBundle := map[string]backups.ManifestApp{}
-	for _, a := range manifest.Applications {
-		byBundle[a.BundleID] = a
+	byScope := map[string]backups.ManifestScope{}
+	for _, s := range manifest.Scopes {
+		byScope[s.Name] = s
 	}
 	want := map[string]bool{}
 	for _, s := range scopes {
@@ -282,9 +309,9 @@ func (b *Backend) planLiveRestore(ctx context.Context, manifest backups.Snapshot
 	plan.started = append([]string{}, reverseStrings(plan.stopOrder)...)
 	// Map staged files: restic restores absolute source paths under staging.
 	for id := range want {
-		app, ok := byBundle[id]
+		scope, ok := byScope[backups.AppScope(id)]
 		if !ok {
-			return nil, fmt.Errorf("%w: snapshot has no application %q", store.ErrValidation, id)
+			return nil, fmt.Errorf("%w: snapshot has no application scope for %q", store.ErrValidation, id)
 		}
 		bd, ok := catalogBundle(ctx, b, id)
 		if !ok {
@@ -297,14 +324,16 @@ func (b *Backend) planLiveRestore(ctx context.Context, manifest backups.Snapshot
 			}
 			plan.stagedFiles[v.Path] = src
 		}
-		for _, dbName := range app.Databases {
-			dump := findStagedDump(staged, dbName)
+		for _, db := range scope.Databases {
+			dump := findStagedDump(staged, db.Name)
 			if dump == "" {
-				return nil, fmt.Errorf("%w: staged dump missing for database %q", store.ErrValidation, dbName)
+				return nil, fmt.Errorf("%w: staged dump missing for database %q", store.ErrValidation, db.Name)
 			}
-			plan.databases[dbName] = dump
+			plan.databases[db.Name] = dump
 		}
-		_ = app
+		if scope.Bundle != nil && scope.Bundle.Source == "custom" {
+			plan.customBundles = append(plan.customBundles, scope.Bundle)
+		}
 	}
 	var lines []string
 	lines = append(lines, fmt.Sprintf("restore %d bundle(s): %s", len(bundles), strings.Join(bundles, ", ")))
@@ -329,11 +358,11 @@ func reverseStrings(in []string) []string {
 }
 
 func stagedManifest(rep backups.StagingReport) (backups.SnapshotManifest, error) {
-	if len(rep.Manifests) == 0 {
-		return backups.SnapshotManifest{}, fmt.Errorf("%w: snapshot has no manifest; legacy snapshots are staging/manual recovery only",
+	if rep.Manifest == nil {
+		return backups.SnapshotManifest{}, fmt.Errorf("%w: snapshot has no v2 manifest; it cannot be restored",
 			store.ErrValidation)
 	}
-	return rep.Manifests[0], nil
+	return *rep.Manifest, nil
 }
 
 // checkRestoreVersions refuses newer-than-installed formats instead of
@@ -344,15 +373,34 @@ func checkRestoreVersions(plan *livePlan) error {
 
 func checkRestoreVersionsAgainst(plan *livePlan, current string) error {
 	for _, id := range plan.bundles {
-		for _, a := range plan.manifest.Applications {
-			if a.BundleID != id {
-				continue
-			}
-			if strings.TrimSpace(a.Version) != "" && strings.TrimSpace(current) != "" &&
-				a.Version != current {
-				return fmt.Errorf("%w: bundle %q snapshot version %q differs from installed %q: refusing auto-downgrade; use the paused manual workflow",
-					store.ErrValidation, id, a.Version, current)
-			}
+		scope, ok := plan.manifest.Scope(backups.AppScope(id))
+		if !ok {
+			continue
+		}
+		v := strings.TrimSpace(scope.AppVersion)
+		if v != "" && strings.TrimSpace(current) != "" && v != current {
+			return fmt.Errorf("%w: bundle %q snapshot version %q differs from installed %q: refusing auto-downgrade; use the paused manual workflow",
+				store.ErrValidation, id, v, current)
+		}
+	}
+	return nil
+}
+
+// checkPostgresMajor refuses live restores whose dumped databases came
+// from a newer PostgreSQL major than the running cluster.
+func checkPostgresMajor(manifest backups.SnapshotManifest) error {
+	running := strings.TrimSpace(os.Getenv("OMAHAB_PG_MAJOR"))
+	if running == "" {
+		return nil
+	}
+	cur, err := strconv.Atoi(running)
+	if err != nil {
+		return nil
+	}
+	for _, s := range manifest.Scopes {
+		if s.PostgresMajor > cur {
+			return fmt.Errorf("%w: snapshot scope %s was dumped with PostgreSQL %d but this server runs %d; upgrade PostgreSQL before restoring",
+				store.ErrValidation, s.Name, s.PostgresMajor, cur)
 		}
 	}
 	return nil
@@ -375,12 +423,13 @@ func checkIdentityDomain(manifest backups.SnapshotManifest, b *Backend) error {
 		return err
 	}
 	current := strings.TrimSpace(inst.Domain)
-	if current == "" || strings.TrimSpace(manifest.Domain) == "" {
+	snap := strings.TrimSpace(manifest.Instance.Domain)
+	if current == "" || snap == "" {
 		return nil
 	}
-	if !strings.EqualFold(current, strings.TrimSpace(manifest.Domain)) {
+	if !strings.EqualFold(current, snap) {
 		return fmt.Errorf("%w: identity checkpoint domain %q differs from current %q: old passkeys do not migrate; use identity recovery, then enroll fresh",
-			store.ErrValidation, manifest.Domain, current)
+			store.ErrValidation, snap, current)
 	}
 	return nil
 }
@@ -475,12 +524,10 @@ func checkRestoreSecrets(ctx context.Context, b *Backend, manifest backups.Snaps
 	}
 	want := map[string]bool{}
 	for _, s := range scopes {
-		if id, ok := backups.ScopeBundleID(s); ok {
-			for _, a := range manifest.Applications {
-				if a.BundleID == id {
-					for _, name := range a.Secrets {
-						want[name] = true
-					}
+		if _, ok := backups.ScopeBundleID(s); ok {
+			if scope, ok := manifest.Scope(s); ok {
+				for _, name := range scope.SecretNames {
+					want[name] = true
 				}
 			}
 		}
@@ -672,3 +719,112 @@ func stagedManifestFromDir(staging string) (backups.SnapshotManifest, error) {
 	}
 	return stagedManifest(rep)
 }
+
+// restoreCustomBundles writes snapshot-carried custom bundle definitions
+// back into the custom-bundles repo (bundles/<id>/) and commits them, so
+// the restored app scopes' owning modules exist before data promotion.
+// The apply (build + switch + health gate) runs in the omahab-bundle-apply
+// oneshot unit through the same staging path as a panel apply: operation
+// journal plus tmpfs handoff, then `systemctl start`. The switch restarts
+// omahabd — it cannot health-gate its own restart — so the restore journal
+// stays at bundles_written across the restart and the stage-based resume
+// (POST /operations/{id}/actions resume) converges the apply outcome before
+// promotion continues. Re-entry is idempotent: WriteBundleDir overwrites
+// identically and waitRestoreBundleApply only re-triggers when no apply
+// outcome exists yet.
+func (b *Backend) restoreCustomBundles(ctx context.Context, plan *livePlan, staged, opID string) error {
+	if len(plan.customBundles) == 0 {
+		return nil
+	}
+	svc := b.bundlesSvc()
+	if svc == nil {
+		return fmt.Errorf("%w: custom bundles are not configured but the snapshot carries custom bundle definitions", store.ErrValidation)
+	}
+	if err := svc.EnsureRepo(ctx); err != nil {
+		return fmt.Errorf("ensure custom bundles repo: %w", err)
+	}
+	for _, mb := range plan.customBundles {
+		// Same layout the capture wrote: staging bundles/<id>/ holds
+		// the committed files (bundle.json, module.nix, assets).
+		src := filepath.Join(staged, "bundles", mb.ID)
+		if err := svc.WriteBundleDir(ctx, mb.ID, src); err != nil {
+			return fmt.Errorf("write custom bundle %q: %w", mb.ID, err)
+		}
+	}
+	if _, err := svc.Commit(ctx, "omahab restore "+opID+": custom bundle definitions"); err != nil {
+		return fmt.Errorf("commit restored custom bundles: %w", err)
+	}
+	return b.waitRestoreBundleApply(ctx, opID)
+}
+
+// waitRestoreBundleApply converges the restore-driven bundle apply. It
+// finds the apply operation this restore staged (restore journal field
+// bundle_apply), triggers the oneshot unit when the apply has not started
+// yet, and waits for the CLI outcome marker the unit run writes next to
+// the journal. The switch restarts omahabd; when the wait is cut by the
+// restart the restore stays resumable at bundles_written and the next
+// resume re-enters here: a recorded outcome is returned immediately, a
+// failed or rolled-back apply fails the restore, and only a healthy
+// switch lets promotion continue.
+func (b *Backend) waitRestoreBundleApply(ctx context.Context, opID string) error {
+	j, err := loadRestoreJournal(b.cfg.StateDir, opID)
+	if err != nil {
+		return err
+	}
+	applyID := j.BundleApplyID
+	if applyID == "" {
+		// Stage the apply exactly like TriggerBundleApply: journal,
+		// tmpfs handoff with the operation id, unit start.
+		op := newOperation(bundleApplyJournalKind, nil)
+		op.Stage = "unit-started"
+		op.Status = OpRunning
+		if err := writeOperationJournal(b.cfg.StateDir, op); err != nil {
+			return fmt.Errorf("stage bundle apply: %w", err)
+		}
+		if err := writeBundleApplyHandoff(op.ID); err != nil {
+			return fmt.Errorf("stage bundle apply: %w", err)
+		}
+		out, err := execCommand("systemctl", "start", "omahab-bundle-apply.service")
+		if err != nil {
+			_ = os.Remove(bundleApplyHandoffPath())
+			op.Status = OpFailed
+			op.Error = fmt.Sprintf("start omahab-bundle-apply.service: %v: %s", err, strings.TrimSpace(out))
+			_ = writeOperationJournal(b.cfg.StateDir, op)
+			return fmt.Errorf("activate restored custom bundles: %s", op.Error)
+		}
+		_ = writeOperationJournal(b.cfg.StateDir, op)
+		j.BundleApplyID = op.ID
+		applyID = op.ID
+		_ = writeRestoreJournal(b.cfg.StateDir, j)
+	}
+	// The switch may restart this daemon mid-wait; the outcome marker
+	// survives on disk, so poll it rather than holding in-memory state.
+	deadline := time.Now().Add(restoreBundleApplyTimeout)
+	for {
+		done, status, detail := readBundleApplyOutcome(b.cfg.StateDir, applyID)
+		if done {
+			if status != OpCompleted {
+				return fmt.Errorf("bundle apply for restore %s: %s: %s", opID, status, detail)
+			}
+			if err := b.reloadMergedCatalog(ctx); err != nil {
+				return fmt.Errorf("reload merged catalog after bundle apply: %w", err)
+			}
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("bundle apply for restore %s did not finish within %s", opID, restoreBundleApplyTimeout)
+		}
+		select {
+		case <-ctx.Done():
+			// Daemon restart cuts the context: keep the journal at
+			// bundles_written so the resume re-enters here.
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
+// restoreBundleApplyTimeout bounds how long a restore waits for the
+// omahab-bundle-apply unit (nix build + switch + health gate) before
+// failing the restore as resumable.
+const restoreBundleApplyTimeout = 20 * time.Minute

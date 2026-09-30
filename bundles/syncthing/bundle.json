@@ -1,0 +1,36 @@
+{
+  "id": "syncthing",
+  "name": "Syncthing",
+  "port": 8384,
+  "default_exposure": "private",
+  "max_exposure": "private",
+  "health_check": {
+    "kind": "http",
+    "path": "/rest/noauth/health",
+    "port": 8384
+  },
+  "startup_grace_seconds": 120,
+  "oidc": {
+    "supported": false
+  },
+  "resources": {
+    "memory_mb": 512
+  },
+  "default": true,
+  "route": "sync",
+  "app_path": "/",
+  "dependencies": [
+    "caddy"
+  ],
+  "secret_sources": [
+    "syncthing_api_key",
+    "syncthing_gui_password"
+  ],
+  "units": [
+    "syncthing.service"
+  ],
+  "groups": [
+    "members",
+    "admins"
+  ]
+}

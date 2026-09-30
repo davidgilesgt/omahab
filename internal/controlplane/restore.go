@@ -24,13 +24,14 @@ import (
 
 // Offline journal stages for restore operations.
 const (
-	RestorePreflight     = "preflight"
-	RestoreStaged        = "staged"
-	RestoreSafetySaved   = "safety_saved"
-	RestoreWritersStop   = "writers_stopped"
-	RestoreFilesPromoted = "files_promoted"
-	RestoreDBsRestored   = "databases_restored"
-	RestoreValidating    = "validating"
+	RestorePreflight      = "preflight"
+	RestoreStaged         = "staged"
+	RestoreSafetySaved    = "safety_saved"
+	RestoreWritersStop    = "writers_stopped"
+	RestoreBundlesWritten = "bundles_written"
+	RestoreFilesPromoted  = "files_promoted"
+	RestoreDBsRestored    = "databases_restored"
+	RestoreValidating     = "validating"
 )
 
 // restoreJournal persists a restore operation across restarts. It holds
@@ -47,6 +48,10 @@ type restoreJournal struct {
 	Scopes []string `json:"scopes"`
 	// StagingDir is this operation's validated staging tree.
 	StagingDir string `json:"staging_dir,omitempty"`
+	// BundleApplyID is the bundle-apply operation the restore staged to
+	// activate snapshot-carried custom bundle definitions; the restore
+	// waits on its outcome across the omahabd restart the switch causes.
+	BundleApplyID string `json:"bundle_apply_id,omitempty"`
 	// AffectedApps lists bundles touched by the selected scopes.
 	AffectedApps []string `json:"affected_apps,omitempty"`
 	// Error carries the failure reason for failed/paused journals.
@@ -195,7 +200,10 @@ func (b *Backend) runRestoreStaging(opID string) {
 		if err != nil {
 			return failRestoreOp(b.cfg.StateDir, &j, "staging validation: "+err.Error())
 		}
-		if err := checkRestoreScopes(rep, j.Scopes); err != nil {
+		if rep.Manifest == nil {
+			return failRestoreOp(b.cfg.StateDir, &j, "snapshot has no v2 manifest; it cannot be restored")
+		}
+		if err := checkRestoreScopes(*rep.Manifest, j.Scopes); err != nil {
 			return failRestoreOp(b.cfg.StateDir, &j, err.Error())
 		}
 		// Staged files/DB contents must equal the snapshot; live service
@@ -205,8 +213,9 @@ func (b *Backend) runRestoreStaging(opID string) {
 		j.Operation.Status = OpCompleted
 		j.Operation.Progress = 100
 		_ = writeRestoreJournal(b.cfg.StateDir, j)
-		log.Printf("restore %q staged at %s (files=%d sqlite=%d/%d pg=%d/%d legacy=%v)",
-			opID, staged, rep.Files, rep.SQLiteOK, rep.SQLiteChecked, rep.PGOK, rep.PGChecked, rep.Legacy)
+		log.Printf("restore %q staged at %s (files=%d sqlite=%d/%d pg=%d/%d scopes=%v)",
+			opID, staged, rep.Files, rep.SQLiteOK, rep.SQLiteChecked, rep.PGOK, rep.PGChecked,
+			rep.Manifest.ScopeNames())
 		return nil
 	})
 	if err != nil {
@@ -215,21 +224,15 @@ func (b *Backend) runRestoreStaging(opID string) {
 }
 
 // checkRestoreScopes verifies selected scope presence against the staged
-// manifest. Legacy snapshots without a manifest stay staging/manual-only:
-// scope selection is refused for them rather than guessed.
-func checkRestoreScopes(rep backups.StagingReport, scopes []string) error {
+// v2 manifest. A snapshot without a v2 manifest is refused: scope
+// selection is never guessed from a directory listing.
+func checkRestoreScopes(m backups.SnapshotManifest, scopes []string) error {
 	if len(scopes) == 0 {
 		return nil
 	}
-	if !rep.ManifestFound {
-		return fmt.Errorf("%w: scope selection requires a snapshot manifest; this legacy snapshot is staging/manual recovery only",
-			store.ErrValidation)
-	}
 	available := map[string]bool{}
-	for _, m := range rep.Manifests {
-		for _, s := range m.Scopes {
-			available[strings.TrimSpace(s)] = true
-		}
+	for _, s := range m.ScopeNames() {
+		available[strings.TrimSpace(s)] = true
 	}
 	var missing []string
 	for _, s := range scopes {

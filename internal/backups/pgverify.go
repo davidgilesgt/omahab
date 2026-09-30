@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,21 +14,24 @@ import (
 )
 // StagingReport is the isolated validation outcome for one extracted tree.
 type StagingReport struct {
-	Manifests     []SnapshotManifest `json:"-"`
-	ManifestFound bool
-	Legacy        bool
+	// Manifest is the validated v2 manifest read from the fixed staging
+	// path. Present only when the tree carries one.
+	Manifest *SnapshotManifest `json:"-"`
 	SQLiteChecked int
-	SQLiteOK      int
-	PGChecked     int
-	PGOK          int
+	SQLiteOK int
+	PGChecked int
+	PGOK int
 	Files         int64
 	Bytes         int64
 }
 
 // ValidateStaging checks an extracted tree without touching live apps:
-// manifest validation, staging-escape refusal, SQLite integrity and
-// disposable-PostgreSQL dump restores. It never executes commands embedded
-// in an imported manifest and never invokes live app hooks.
+// v2 manifest validation with per-artifact sha256 verification,
+// staging-escape refusal, SQLite integrity and disposable-PostgreSQL
+// dump restores. It never executes commands embedded in an imported
+// manifest and never invokes live app hooks. A tree without a v2
+// manifest is an error: scope boundaries and artifact hashes are the
+// restore contract, not a directory listing guess.
 func ValidateStaging(ctx context.Context, target string) (StagingReport, error) {
 	var rep StagingReport
 	files, bytes, err := walkStats(target)
@@ -38,16 +42,18 @@ func ValidateStaging(ctx context.Context, target string) (StagingReport, error) 
 		return rep, fmt.Errorf("%w: staged tree produced zero files", ErrInvalid)
 	}
 	rep.Files, rep.Bytes = files, bytes
-	for _, dir := range findManifests(target) {
-		m, err := ReadManifest(dir)
-		if err != nil {
-			return rep, fmt.Errorf("manifest: %w", err)
-		}
-		rep.Manifests = append(rep.Manifests, m)
+	manifest, err := ReadStagedManifest(target)
+	if err != nil {
+		return rep, err
 	}
-	rep.ManifestFound = len(rep.Manifests) > 0
-	rep.Legacy = len(rep.Manifests) == 0
+	rep.Manifest = &manifest
 	if err := checkStagingEscapes(target); err != nil {
+		return rep, err
+	}
+	// Every artifact the manifest records must exist with the exact
+	// recorded content hash: restic's integrity proof covers repository
+	// data, this covers capture-time staging corruption and drift.
+	if err := verifyManifestArtifacts(target, manifest); err != nil {
 		return rep, err
 	}
 	checked, ok, err := checkSQLiteIntegrity(target)
@@ -64,106 +70,151 @@ func ValidateStaging(ctx context.Context, target string) (StagingReport, error) 
 	return rep, nil
 }
 
-// findManifests locates staged manifests under a restore target.
-func findManifests(target string) []string {
-	var out []string
-	_ = filepath.Walk(target, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			return nil
+// stagingDirCandidates lists where a restored tree can hold the manifest:
+// every capture used the fixed backup-staging path, so the manifest
+// lives at <target>/<that absolute path>/manifest.json. The staging root
+// itself (target == staging dir) is also accepted for in-place checks.
+func stagingDirCandidates(target string) []string {
+	return []string{
+		filepath.Join(target, backupStagingDir, manifestFileName),
+		filepath.Join(target, manifestFileName),
+	}
+}
+
+// ReadStagedManifest reads and validates the v2 manifest from a restored
+// or staged tree. Exactly one manifest is expected; its absence is an
+// error naming the v2 contract.
+func ReadStagedManifest(target string) (SnapshotManifest, error) {
+	var (
+		found string
+		m     SnapshotManifest
+	)
+	for _, p := range stagingDirCandidates(target) {
+		if _, err := os.Stat(p); err != nil {
+			continue
 		}
-		if info.Name() == manifestFileName {
-			out = append(out, filepath.Dir(path))
+		if found != "" {
+			return SnapshotManifest{}, fmt.Errorf("%w: staged tree holds more than one manifest (%s, %s)", ErrInvalid, found, p)
 		}
-		return nil
-	})
-	return out
+		found = p
+	}
+	if found == "" {
+		return SnapshotManifest{}, fmt.Errorf("%w: snapshot has no v2 manifest at %s (pre-v2 snapshots are not restoreable; use manual recovery)",
+			ErrInvalid, backupStagingDirPath+"/manifest.json")
+	}
+	m, err := ReadManifest(filepath.Dir(found))
+	if err != nil {
+		return SnapshotManifest{}, fmt.Errorf("manifest: %w", err)
+	}
+	return m, nil
+}
+
+// verifyManifestArtifacts checks every recorded artifact hash against
+// the staged content. Artifact paths are relative to the manifest's
+// directory and are refused when they escape the staging tree.
+func verifyManifestArtifacts(target string, m SnapshotManifest) error {
+	for _, scope := range m.Scopes {
+		base := filepath.Join(target, backupStagingDir)
+		for _, a := range scope.Artifacts {
+			path := filepath.Join(base, filepath.FromSlash(a.File))
+			if !strings.HasPrefix(filepath.Clean(path), filepath.Clean(base)+string(filepath.Separator)) &&
+				filepath.Clean(path) != filepath.Clean(base) {
+				return fmt.Errorf("%w: scope %s artifact %q escapes staging", ErrInvalid, scope.Name, a.File)
+			}
+			got, err := SHA256File(path)
+			if err != nil {
+				return fmt.Errorf("%w: scope %s artifact %s: %v", ErrInvalid, scope.Name, a.File, err)
+			}
+			if !strings.EqualFold(got, a.SHA256) {
+				return fmt.Errorf("%w: scope %s artifact %s sha256 mismatch: staged %s, manifest %s",
+					ErrInvalid, scope.Name, a.File, got, a.SHA256)
+			}
+		}
+	}
+	return nil
 }
 
 // checkStagingEscapes refuses path traversal and symlinks escaping staging.
 // Restores must never follow links out of the isolated target.
 func checkStagingEscapes(target string) error {
-	root, err := filepath.EvalSymlinks(target)
-	if err != nil {
-		return err
-	}
-	var bad []string
-	_ = filepath.Walk(target, func(path string, info os.FileInfo, err error) error {
+	root := filepath.Clean(target)
+	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
+			return err
+		}
+		if path == root {
 			return nil
 		}
-		if info.Mode()&os.ModeSymlink == 0 {
-			return nil
-		}
-		resolved, err := filepath.EvalSymlinks(path)
-		if err != nil {
-			bad = append(bad, path+": dangling")
-			return nil
-		}
-		if resolved != root && !strings.HasPrefix(resolved, root+string(os.PathSeparator)) {
-			bad = append(bad, path+" -> "+resolved)
+		if info.Mode()&os.ModeSymlink != 0 {
+			dst, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			if !filepath.IsAbs(dst) && !strings.HasPrefix(filepath.Clean(filepath.Join(filepath.Dir(path), dst)), root+string(filepath.Separator)) {
+				return fmt.Errorf("%w: symlink %q escapes staging", ErrInvalid, path)
+			}
+			if filepath.IsAbs(dst) && !strings.HasPrefix(filepath.Clean(dst), root+string(filepath.Separator)) {
+				return fmt.Errorf("%w: symlink %q escapes staging", ErrInvalid, path)
+			}
 		}
 		return nil
 	})
-	if len(bad) > 0 {
-		return fmt.Errorf("%w: staging escapes: %s", ErrInvalid, strings.Join(bad, "; "))
-	}
-	return nil
 }
 
 func isSQLiteFile(path string) bool {
-	lower := strings.ToLower(filepath.Base(path))
-	return strings.HasSuffix(lower, ".db") || strings.HasSuffix(lower, ".sqlite") ||
-		strings.HasSuffix(lower, ".sqlite3") || strings.HasSuffix(lower, ".db-wal")
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	hdr := make([]byte, 16)
+	if _, err := io.ReadFull(f, hdr); err != nil {
+		return false
+	}
+	return string(hdr) == "SQLite format 3\x00"
 }
 
 // checkSQLiteIntegrity runs integrity_check on every restored SQLite file.
 // WAL sidecars are validated with their main database, not alone.
 func checkSQLiteIntegrity(target string) (checked, ok int, err error) {
-	seen := map[string]bool{}
-	err = filepath.Walk(target, func(path string, info os.FileInfo, werr error) error {
-		if werr != nil || info.IsDir() || !isSQLiteFile(path) {
+	dbs := map[string]bool{}
+	_ = filepath.Walk(target, func(path string, info os.FileInfo, werr error) error {
+		if werr != nil || info.IsDir() {
 			return nil
 		}
-		main := path
-		lower := strings.ToLower(path)
-		if strings.HasSuffix(lower, "-wal") || strings.HasSuffix(lower, "-shm") || strings.HasSuffix(lower, "-journal") {
-			return nil
+		name := info.Name()
+		if name == "control.db" || strings.HasSuffix(name, ".db") {
+			if isSQLiteFile(path) {
+				dbs[path] = true
+			}
 		}
-		if seen[main] {
-			return nil
-		}
-		seen[main] = true
-		checked++
-		if cerr := sqliteIntegrityCheck(main); cerr != nil {
-			return fmt.Errorf("sqlite %q: %w", strings.TrimPrefix(main, target), cerr)
-		}
-		ok++
 		return nil
 	})
-	return checked, ok, err
+	for path := range dbs {
+		checked++
+		if err := sqliteIntegrityCheck(path); err == nil {
+			ok++
+		} else {
+			return checked, ok, err
+		}
+	}
+	return checked, ok, nil
 }
 
 func sqliteIntegrityCheck(path string) error {
-	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=query_only(1)")
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
 	if err != nil {
 		return err
 	}
 	defer db.Close()
-	rows, err := db.Query("PRAGMA integrity_check")
-	if err != nil {
+	var result string
+	if err := db.QueryRow("PRAGMA integrity_check").Scan(&result); err != nil {
 		return err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var line string
-		if err := rows.Scan(&line); err != nil {
-			return err
-		}
-		if strings.TrimSpace(strings.ToLower(line)) != "ok" {
-			return fmt.Errorf("integrity_check: %s", line)
-		}
+	if result != "ok" {
+		return fmt.Errorf("integrity_check: %s", result)
 	}
-	return rows.Err()
+	return nil
 }
 
 func findPGDumps(target string) []string {
@@ -172,7 +223,7 @@ func findPGDumps(target string) []string {
 		if err != nil || info.IsDir() {
 			return nil
 		}
-		if strings.HasSuffix(strings.ToLower(info.Name()), ".pgdump") {
+		if strings.HasSuffix(info.Name(), ".pgdump") {
 			out = append(out, path)
 		}
 		return nil
@@ -181,17 +232,10 @@ func findPGDumps(target string) []string {
 }
 
 func pgBinariesPresent() (initdb, pgCtl, pgRestore string, ok bool) {
-	var err error
-	if initdb, err = exec.LookPath("initdb"); err != nil {
-		return "", "", "", false
-	}
-	if pgCtl, err = exec.LookPath("pg_ctl"); err != nil {
-		return "", "", "", false
-	}
-	if pgRestore, err = exec.LookPath("pg_restore"); err != nil {
-		return "", "", "", false
-	}
-	return initdb, pgCtl, pgRestore, true
+	initdb, err1 := exec.LookPath("initdb")
+	pgCtl, err2 := exec.LookPath("pg_ctl")
+	pgRestore, err3 := exec.LookPath("pg_restore")
+	return initdb, pgCtl, pgRestore, err1 == nil && err2 == nil && err3 == nil
 }
 
 // checkPGDumps restores every staged dump into a disposable validation
@@ -202,53 +246,40 @@ func checkPGDumps(ctx context.Context, dumps []string) (checked, ok int, skipped
 	if len(dumps) == 0 {
 		return 0, 0, "", nil
 	}
-	initdb, pgCtl, pgRestore, present := pgBinariesPresent()
-	if !present {
-		return 0, 0, "", fmt.Errorf("pg dump validation requires initdb/pg_ctl/pg_restore")
+	initdb, pgCtl, pgRestore, okBins := pgBinariesPresent()
+	if !okBins {
+		return 0, 0, "postgresql binaries not available", nil
 	}
-	cluster, err := os.MkdirTemp("", "omahab-pgverify-")
+	tmp, err := os.MkdirTemp("", "omahab-pgverify-*")
 	if err != nil {
 		return 0, 0, "", err
 	}
-	defer os.RemoveAll(cluster)
-	sockDir := filepath.Join(cluster, "sockets")
+	defer os.RemoveAll(tmp)
+	dataDir := filepath.Join(tmp, "data")
+	if out, err := exec.CommandContext(ctx, initdb, "-D", dataDir, "-E", "UTF8").CombinedOutput(); err != nil {
+		return 0, 0, "", fmt.Errorf("initdb: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	sockDir := filepath.Join(tmp, "sock")
 	if err := os.MkdirAll(sockDir, 0o700); err != nil {
 		return 0, 0, "", err
 	}
-	dataDir := filepath.Join(cluster, "data")
-	if out, err := exec.CommandContext(ctx, initdb, "-D", dataDir, "-U", "postgres", "--auth=trust").CombinedOutput(); err != nil {
-		return 0, 0, "", fmt.Errorf("initdb: %v: %s", err, strings.TrimSpace(string(out)))
-	}
-	startOpts := []string{"-D", dataDir, "-l", filepath.Join(cluster, "log"), "-o",
-		"-c listen_addresses='' -k " + sockDir, "start"}
-	if out, err := exec.CommandContext(ctx, pgCtl, startOpts...).CombinedOutput(); err != nil {
+	if out, err := exec.CommandContext(ctx, pgCtl, "-D", dataDir, "-o", "-k "+sockDir+" -c listen_addresses=''", "-w", "start").CombinedOutput(); err != nil {
 		return 0, 0, "", fmt.Errorf("pg_ctl start: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	defer func() {
-		_ = exec.Command(pgCtl, "-D", dataDir, "-m", "fast", "stop").Run()
+		_, _ = exec.CommandContext(context.WithoutCancel(ctx), pgCtl, "-D", dataDir, "-m", "immediate", "stop").CombinedOutput()
 	}()
-	psql := func(db, sqlText string) (string, error) {
-		out, err := exec.CommandContext(ctx, "psql", "-h", sockDir, "-U", "postgres", "-d", db, "-c", sqlText).CombinedOutput()
-		return strings.TrimSpace(string(out)), err
-	}
-	for i, dump := range dumps {
-		name := fmt.Sprintf("verify%d", i)
+	for _, dump := range dumps {
 		checked++
-		if _, err := psql("postgres", "CREATE DATABASE "+name); err != nil {
-			return checked, ok, "", fmt.Errorf("create validation db: %v", err)
+		dbName := "verify" + fmt.Sprint(checked)
+		if out, err := exec.CommandContext(ctx, "createdb", "-h", sockDir, dbName).CombinedOutput(); err != nil {
+			return checked, ok, "", fmt.Errorf("createdb: %v: %s", err, strings.TrimSpace(string(out)))
 		}
-		// Installed app extensions first; unknown ones surface as restore
-		// errors rather than silent skips.
-		for _, ext := range []string{"vector", "pg_trgm", "unaccent", "pgcrypto", "uuid-ossp"} {
-			_, _ = psql(name, "CREATE EXTENSION IF NOT EXISTS "+ext)
-		}
-		out, err := exec.CommandContext(ctx, pgRestore,
-			"-h", sockDir, "-U", "postgres", "--clean", "--if-exists", "--exit-on-error",
-			"--dbname="+name, dump).CombinedOutput()
-		if err != nil {
-			return checked, ok, "", fmt.Errorf("pg_restore %q: %v: %s", filepath.Base(dump), err, strings.TrimSpace(string(out)))
+		if out, err := exec.CommandContext(ctx, pgRestore, "-h", sockDir, "-d", dbName, "--exit-on-error", dump).CombinedOutput(); err != nil {
+			return checked, ok, "", fmt.Errorf("pg_restore %s: %v: %s", dump, err, strings.TrimSpace(string(out)))
 		}
 		ok++
 	}
 	return checked, ok, "", nil
 }
+

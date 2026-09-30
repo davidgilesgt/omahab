@@ -339,11 +339,11 @@ func TestService_ExpireIdle_Transitions(t *testing.T) {
 	ctx := context.Background()
 
 	// Create two workspaces
-	ws1, err := svc.Create(ctx, CreateInput{ProjectID: "proj1", Branch: "main", Agent: "omp"})
+	ws1, err := svc.Create(ctx, CreateInput{ProjectID: "proj1", Title: "main", Agent: "omp"})
 	if err != nil {
 		t.Fatalf("create ws1: %v", err)
 	}
-	ws2, err := svc.Create(ctx, CreateInput{ProjectID: "proj1", Branch: "dev", Agent: ""})
+	ws2, err := svc.Create(ctx, CreateInput{ProjectID: "proj1", Title: "dev", Agent: ""})
 	if err != nil {
 		t.Fatalf("create ws2: %v", err)
 	}
@@ -404,7 +404,7 @@ func TestService_Capability_IssueValidateExpire(t *testing.T) {
 	svc := New(st.DB(), NoopRunner{})
 	ctx := context.Background()
 
-	ws, err := svc.Create(ctx, CreateInput{ProjectID: "proj-cap", Branch: "main"})
+	ws, err := svc.Create(ctx, CreateInput{ProjectID: "proj-cap", Title: "main"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -456,7 +456,7 @@ func TestService_Capability_OneTime_AndTTL(t *testing.T) {
 	st := openTestDB(t)
 	svc := New(st.DB(), NoopRunner{})
 	ctx := context.Background()
-	ws, _ := svc.Create(ctx, CreateInput{ProjectID: "p1", Branch: "b1"})
+	ws, _ := svc.Create(ctx, CreateInput{ProjectID: "p1", Title: "b1"})
 	// capped TTL
 	cap, err := svc.IssueCapability(ctx, string(ws.ID), 2*time.Hour)
 	if err != nil {
@@ -475,7 +475,7 @@ func TestService_StartIdleExpirer(t *testing.T) {
 	defer cancel()
 	svc.StartIdleExpirer(ctx, 10*time.Millisecond)
 	// Create idle workspace
-	ws, _ := svc.Create(ctx, CreateInput{ProjectID: "p-exp", Branch: "main"})
+	ws, _ := svc.Create(ctx, CreateInput{ProjectID: "p-exp", Title: "main"})
 	past := time.Now().Add(-2 * DefaultIdleTimeout).Format(time.RFC3339Nano)
 	_, _ = st.DB().ExecContext(ctx, `UPDATE workspaces SET last_active_at = ? WHERE id = ?`, past, string(ws.ID))
 	// Wait for expirer to run
@@ -497,7 +497,7 @@ func TestService_DeleteAndAttach(t *testing.T) {
 	runner := NewDevPodRunner(DevPodRunnerConfig{Executor: fe, WorkspacesDir: t.TempDir()})
 	svc := New(st.DB(), runner)
 	ctx := context.Background()
-	ws, err := svc.Create(ctx, CreateInput{ProjectID: "proj-del", Branch: "main"})
+	ws, err := svc.Create(ctx, CreateInput{ProjectID: "proj-del", Title: "main"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -526,7 +526,7 @@ func TestService_ValidateCapability_ConsumedRaceFix(t *testing.T) {
 	st := openTestDB(t)
 	svc := New(st.DB(), NoopRunner{})
 	ctx := context.Background()
-	ws, _ := svc.Create(ctx, CreateInput{ProjectID: "p-race", Branch: "main"})
+	ws, _ := svc.Create(ctx, CreateInput{ProjectID: "p-race", Title: "main"})
 	cap, _ := svc.IssueCapability(ctx, string(ws.ID), time.Minute)
 	// First validate succeeds
 	if err := svc.ValidateCapability(ctx, string(ws.ID), cap.Token); err != nil {
@@ -553,7 +553,6 @@ func TestService_Create_RollsBackOnRunnerFailure(t *testing.T) {
 		name string
 		in   CreateInput
 	}{
-		{"branch-path", CreateInput{ProjectID: "p-fail", Branch: "main"}},
 		{"title-path", CreateInput{ProjectID: "p-fail", Title: "hello world"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -629,7 +628,7 @@ func TestService_Create_BranchOnlyRequest_MintsWorkspaceBranch(t *testing.T) {
 	runner := &captureRunner{}
 	svc, fake := openBranchTestService(t, runner)
 	ctx := context.Background()
-	ws, err := svc.Create(ctx, CreateInput{ProjectID: "proj-dev-code", Branch: "main", Agent: "omp"})
+	ws, err := svc.Create(ctx, CreateInput{ProjectID: "proj-dev-code", Title: "main", Agent: "omp"})
 	if err != nil {
 		t.Fatalf("Create branch-only: %v", err)
 	}

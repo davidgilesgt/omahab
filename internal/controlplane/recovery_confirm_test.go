@@ -42,54 +42,23 @@ func TestConfirmRecoveryKeySavedAck(t *testing.T) {
 	}
 }
 
-// Legacy 3-word challenge path keeps working.
-func TestConfirmRecoveryKeyChallengeBackCompat(t *testing.T) {
-	ctx := context.Background()
-	b, _ := newSetupBackend(t, nil)
-	b.cfg.StateDir = t.TempDir()
-
-	mat, err := b.GenerateRecoveryKey(ctx)
-	if err != nil {
-		t.Fatalf("generate: %v", err)
-	}
-	chal := map[int]string{0: mat.Phrase[0], 7: mat.Phrase[7], 23: mat.Phrase[23]}
-	if err := b.ConfirmRecoveryKey(ctx, mat.Fingerprint, chal); err != nil {
-		t.Fatalf("challenge confirm: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(b.cfg.StateDir, "recovery.kit")); err != nil {
-		t.Fatalf("recovery.kit missing: %v", err)
-	}
-
-	// Wrong word must fail.
-	mat2, err := b.GenerateRecoveryKey(ctx)
-	if err != nil {
-		t.Fatalf("generate2: %v", err)
-	}
-	bad := map[int]string{0: "wrong", 1: mat2.Phrase[1], 2: mat2.Phrase[2]}
-	if bad[0] == mat2.Phrase[0] {
-		bad[0] = "definitely-not-a-word"
-	}
-	if err := b.ConfirmRecoveryKey(ctx, mat2.Fingerprint, bad); err == nil {
-		t.Fatal("wrong challenge word should fail")
-	}
-	// Challenge with wrong arity must fail.
-	if err := b.ConfirmRecoveryKey(ctx, mat2.Fingerprint, map[int]string{0: mat2.Phrase[0]}); err == nil {
-		t.Fatal("1-entry challenge should fail")
-	}
-}
-
-// Admin account sorts before backups.
-func TestOrderSetupChecksAdminBeforeBackups(t *testing.T) {
+// Backups (restore + recovery + repository) lead the checklist; SSH keys,
+// Tailscale, and domain follow.
+func TestOrderSetupChecksBackupsFirst(t *testing.T) {
 	checks := []apitypes.SetupCheck{
 		{ID: "backups_configured"}, {ID: "storage_configured"},
 		{ID: "admin_passkeys"}, {ID: "domain"}, {ID: "recovery_key"},
+		{ID: "restore"}, {ID: "ssh_keys"}, {ID: "tailscale"},
 	}
 	got := orderSetupChecks(checks)
 	pos := map[string]int{}
 	for i, c := range got {
 		pos[c.ID] = i
 	}
-	if pos["admin_passkeys"] >= pos["backups_configured"] {
-		t.Fatalf("order = %v, want admin_passkeys before backups_configured", got)
+	wantOrder := []string{"restore", "recovery_key", "backups_configured", "ssh_keys", "tailscale", "domain", "admin_passkeys", "storage_configured"}
+	for i := range len(wantOrder) - 1 {
+		if pos[wantOrder[i]] >= pos[wantOrder[i+1]] {
+			t.Fatalf("order = %v, want %s before %s", got, wantOrder[i], wantOrder[i+1])
+		}
 	}
 }

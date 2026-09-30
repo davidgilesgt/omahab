@@ -1,0 +1,32 @@
+{
+  "id": "jellyfin",
+  "name": "Jellyfin",
+  "port": 8096,
+  "default_exposure": "private",
+  "max_exposure": "shared",
+  "health_check": {
+    "kind": "http",
+    "path": "/health",
+    "port": 8096
+  },
+  "startup_grace_seconds": 300,
+  "oidc": {
+    "supported": true
+  },
+  "resources": {
+    "memory_mb": 1024
+  },
+  "default": true,
+  "route": "media",
+  "app_path": "/",
+  "dependencies": [
+    "caddy"
+  ],
+  "units": [
+    "jellyfin.service"
+  ],
+  "groups": [
+    "members",
+    "admins"
+  ]
+}

@@ -51,11 +51,9 @@ type ModelSetupAlias struct {
 
 // ModelSetupStatus is the safe setup-models response. It carries no secrets.
 type ModelSetupStatus struct {
-	ManagementURL     string                 `json:"management_url,omitempty"`
-	MigrationComplete bool                   `json:"migration_complete"`
-	MigrationError    string                 `json:"migration_error,omitempty"`
-	Deployments       []ModelSetupDeployment `json:"deployments"`
-	Aliases           []ModelSetupAlias      `json:"aliases"`
+	ManagementURL string                 `json:"management_url,omitempty"`
+	Deployments   []ModelSetupDeployment `json:"deployments"`
+	Aliases       []ModelSetupAlias      `json:"aliases"`
 }
 
 // SeedModelAliasesRequest seeds missing chat-role aliases from one deployment.
@@ -423,8 +421,8 @@ type CreateBackupRepositoryRequest struct {
 	Mode string `json:"mode,omitempty"`
 }
 
-// CatalogBundle is the installable view of one curated bundle. Compose
-// templates and digest pinning stay server-side.
+// CatalogBundle is the installable view of one curated or custom bundle.
+// Compose templates and digest pinning stay server-side.
 type CatalogBundle struct {
 	ID              string          `json:"id"`
 	Name            string          `json:"name"`
@@ -437,6 +435,38 @@ type CatalogBundle struct {
 	// Runtime is "systemd" (native NixOS service; auto-installed and
 	// versioned by the system image) or "compose".
 	Runtime string `json:"runtime,omitempty"`
+	// Source is "catalog" (curated) or "custom" (from the bundles repo);
+	// omitted in views that predate custom bundles.
+	Source string `json:"source,omitempty"`
+}
+
+// BundleAdmin is one row of the bundle management list (GET /api/v1/bundles):
+// the merged catalog view enriched with repo state.
+type BundleAdmin struct {
+	ID     string   `json:"id"`
+	Name   string   `json:"name"`
+	Source string   `json:"source"`
+	Port   int      `json:"port"`
+	Units  []string `json:"units,omitempty"`
+	// Disabled marks a custom bundle excluded from rebuilds and the merged
+	// catalog; curated bundles never carry it.
+	Disabled bool `json:"disabled,omitempty"`
+	// Dirty reports uncommitted repo changes.
+	Dirty bool `json:"dirty,omitempty"`
+	// LastApply is the outcome of the most recent bundle apply
+	// (completed|failed|rolled_back|running); empty when none ran.
+	LastApply string `json:"last_apply,omitempty"`
+}
+
+// CreateBundleRequest adds a custom bundle. BundleJSON is the bundle.json
+// document (id must match its id field when both are given); ModuleNix is
+// the module.nix content. Both are validated (apps.Bundle validation plus
+// the custom contract: port in 20000–20999, no curated collisions) before
+// anything is written to the repo.
+type CreateBundleRequest struct {
+	ID         string `json:"id,omitempty"`
+	BundleJSON string `json:"bundle_json"`
+	ModuleNix  string `json:"module_nix"`
 }
 
 type CreateSecretRequest struct {
@@ -488,12 +518,44 @@ type RecoveryListRequest struct {
 	SubAccountPassword string `json:"sub_account_password,omitempty"`
 }
 
+// RecoveryInstance is one earlier Omahab instance discovered under a
+// backup account (POST /api/v1/recovery/instances).
+type RecoveryInstance struct {
+	InstanceID string `json:"instance_id"`
+	// Location is the exact resolvable restic repository URL for this
+	// instance; clients must use it verbatim and never build one.
+	Location string `json:"location"`
+	// LatestSnapshotTime is the RFC3339 time of the newest readable
+	// snapshot; empty when locked.
+	LatestSnapshotTime string `json:"latest_snapshot_time,omitempty"`
+	// Domain is the instance domain from the newest snapshot's v2
+	// manifest; empty when unreadable or locked.
+	Domain string `json:"domain,omitempty"`
+	// Locked is true when the supplied phrase-derived password cannot
+	// open this instance's repository.
+	Locked bool `json:"locked"`
+}
+
+// RecoveryInstanceList is the response of the instance discovery call.
+type RecoveryInstanceList struct {
+	Instances []RecoveryInstance `json:"instances"`
+}
+
 // RecoverySnapshot is one candidate snapshot in a recovery listing.
 type RecoverySnapshot struct {
 	ID           string `json:"id"`
 	Time         string `json:"time,omitempty"`
 	Hostname     string `json:"hostname,omitempty"`
 	ServerConfig bool   `json:"server_config"`
+	// Scopes are the snapshot's captured scope names (server-config,
+	// app:<bundle-id>, …) for the restore picker. App scopes beyond
+	// server-config are optional: the restore may take everything or a
+	// subset; server-config is always restored.
+	Scopes []string `json:"scopes,omitempty"`
+	// ReleaseRef is the snapshot manifest's system release ref when
+	// readable, so the UI can warn when it differs from the running
+	// system.
+	ReleaseRef string `json:"release_ref,omitempty"`
 }
 
 type RecoverySnapshotList struct {
@@ -558,8 +620,6 @@ type CreateWorkspaceRequest struct {
 	Instructions       string    `json:"instructions,omitempty"`
 	Agent              string    `json:"agent,omitempty"`
 	DevcontainerSource string    `json:"devcontainer_source,omitempty"`
-	// Branch is deprecated: use Title. Kept for internal SkipBranchCreate tests.
-	Branch string `json:"branch,omitempty"`
 }
 
 type SendWorkspaceRequest struct {
@@ -652,9 +712,23 @@ type SetupWoodpeckerRequest struct {
 // LocalReady is true once the daemon runs (local control panel ready),
 // independent of optional integration health (domain, Tailscale, backups, etc.).
 type SetupStatus struct {
-	State      string       `json:"state"`
-	LocalReady bool         `json:"local_ready"`
-	Checks     []SetupCheck `json:"checks"`
+	State      string            `json:"state"`
+	LocalReady bool              `json:"local_ready"`
+	Checks     []SetupCheck      `json:"checks"`
+	Nodes      []SetupNodeStatus `json:"nodes"`
+}
+
+// SetupNodeStatus is one automatic-setup DAG node's persisted state.
+// State is one of pending|running|succeeded|failed|waiting|blocked.
+// BlockedBy lists the node ids whose non-success blocked this node.
+type SetupNodeStatus struct {
+	ID        string   `json:"id"`
+	State     string   `json:"state"`
+	BlockedBy []string `json:"blocked_by"`
+	Error     string   `json:"error,omitempty"`
+	Owner     string   `json:"owner"`
+	Code      string   `json:"code,omitempty"`
+	UpdatedAt string   `json:"updated_at"`
 }
 
 // SetupCheck is one checklist entry. Status is ok|pending|failed|skipped.

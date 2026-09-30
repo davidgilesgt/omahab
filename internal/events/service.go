@@ -69,6 +69,9 @@ var allowedTypes = map[string]bool{
 	"workspace.deleted":            true,
 	"workspace.failed":             true,
 	"workspace.pending":            true,
+	"bundle.disabled":              true,
+	"bundle.applied":               true,
+	"bundle.apply_failed":          true,
 }
 
 func isAllowedType(t string) bool {

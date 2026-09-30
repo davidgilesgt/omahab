@@ -30,12 +30,6 @@ func newDropsRouteCmd() *cobra.Command {
 			if dataDir == "" {
 				dataDir = "/srv/omahab"
 			}
-			// Drain the retired Syncthing-backed media directory into the
-			// Jellyfin library first (idempotent, collision-preserving).
-			migrated, err := drops.MigrateLegacyMedia(dataDir)
-			if err != nil {
-				return err
-			}
 			res, err := drops.RouteInbox(
 				filepath.Join(dataDir, "sync", "drops", "inbox"),
 				drops.Destinations{
@@ -47,7 +41,6 @@ func newDropsRouteCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			res = append(migrated, res...)
 			if res == nil {
 				res = []drops.Result{}
 			}

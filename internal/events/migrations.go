@@ -2,13 +2,12 @@ package events
 
 import "github.com/omahab/omahab/internal/store"
 
-// Migrations returns the ordered SQLite migrations owned by the events
-// inbox. They provide a normalized durable event table with idempotency,
-// read state, and cursor ordering.
+// Migrations returns the schema owned by the events inbox: a normalized
+// durable event table with idempotency, read state, and cursor ordering.
 func Migrations() []store.Migration {
 	return []store.Migration{
 		{
-			Name: "events_001_events",
+			Name: "events-001-baseline",
 			SQL: `
 CREATE TABLE IF NOT EXISTS events (
     id TEXT PRIMARY KEY,

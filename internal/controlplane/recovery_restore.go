@@ -3,7 +3,9 @@ package controlplane
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -124,9 +126,99 @@ func (b *Backend) ListRecoverySnapshots(ctx context.Context, req apitypes.Recove
 	for _, s := range snaps {
 		out = append(out, apitypes.RecoverySnapshot{
 			ID: s.ID, Time: s.Time, Hostname: s.Hostname, ServerConfig: s.ServerCfg,
+			Scopes: snapshotScopesFromTags(s.Tags),
 		})
 	}
 	return apitypes.RecoverySnapshotList{Snapshots: out}, nil
+}
+
+// ListRecoveryInstances implements the instance-discovery step of the
+// first-restore flow: derive the restic password from the phrase, then
+// enumerate every earlier Omahab instance under the backup account
+// (Hetzner form: SFTP listing of ./omahab/ on port 23, with the backup
+// SSH key uploaded first on a fresh machine). A generic location is
+// probed directly: sftp roots enumerate through the same listing; other
+// schemes report the single location. Each instance's newest snapshot
+// time and manifest domain surface when the password opens it; locked
+// instances report as locked instead of failing the listing.
+func (b *Backend) ListRecoveryInstances(ctx context.Context, req apitypes.RecoveryListRequest) (apitypes.RecoveryInstanceList, error) {
+	seed, err := phraseSeedFromRequest(req.Phrase)
+	if err != nil {
+		return apitypes.RecoveryInstanceList{}, err
+	}
+	// A fresh machine may have no backup SSH key yet: Hetzner
+	// credentials upload the generated key once (the same setup flow)
+	// before any SFTP listing.
+	if req.Username != "" && req.Host != "" && req.SubAccountPassword != "" {
+		if err := b.prepareBackupSSHKey(ctx, req.Host, req.Username, req.SubAccountPassword); err != nil {
+			return apitypes.RecoveryInstanceList{}, err
+		}
+	}
+	// Password: phrase-derived unless the caller supplied one (generic
+	// repositories with their own password).
+	password := strings.TrimSpace(req.Password)
+	if password == "" {
+		password = secrets.DeriveResticPassword(seed)
+	}
+	runner := recoveryRunner(b.cfg.StateDir)
+
+	// Hetzner account form: list instance directories under
+	// sftp://<user>@<host>:23/./omahab.
+	if strings.TrimSpace(req.Location) == "" {
+		if strings.TrimSpace(req.Username) == "" || strings.TrimSpace(req.Host) == "" {
+			return apitypes.RecoveryInstanceList{}, translateError(fmt.Errorf("%w: recovery instance discovery needs the Hetzner account (username + host) or an exact location", store.ErrValidation))
+		}
+		root := fmt.Sprintf("sftp://%s@%s:%s/./omahab", strings.TrimSpace(req.Username), strings.TrimSpace(req.Host), backupSSHPort)
+		lister := sftpInstanceLister{stateDir: b.cfg.StateDir}
+		entries, err := backups.ListInstances(ctx, lister, runner, root, password)
+		if err != nil {
+			return apitypes.RecoveryInstanceList{}, translateError(err)
+		}
+		return recoveryInstanceListResponse(entries), nil
+	}
+
+	// Exact location given: sftp roots enumerate like the account form
+	// (the caller pointed at a parent directory); every other scheme is
+	// a single repository.
+	loc := strings.TrimSpace(req.Location)
+	if strings.HasPrefix(strings.ToLower(loc), "sftp://") {
+		lister := sftpInstanceLister{stateDir: b.cfg.StateDir}
+		entries, err := backups.ListInstances(ctx, lister, runner, loc, password)
+		if err != nil {
+			return apitypes.RecoveryInstanceList{}, translateError(err)
+		}
+		return recoveryInstanceListResponse(entries), nil
+	}
+	entry := backups.ListSingleInstance(ctx, runner, loc, password)
+	return recoveryInstanceListResponse([]backups.InstanceListEntry{entry}), nil
+}
+
+// recoveryInstanceListResponse converts discovered instances to their
+// API shape; the list is always non-null on the wire.
+func recoveryInstanceListResponse(entries []backups.InstanceListEntry) apitypes.RecoveryInstanceList {
+	out := make([]apitypes.RecoveryInstance, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, apitypes.RecoveryInstance{
+			InstanceID:         e.InstanceID,
+			Location:           e.Location,
+			LatestSnapshotTime: e.LatestSnapshotTime,
+			Domain:             e.Domain,
+			Locked:             e.Locked,
+		})
+	}
+	return apitypes.RecoveryInstanceList{Instances: out}
+}
+
+// snapshotScopesFromTags extracts the scope:<name> tags restic records on
+// every manifest-bearing snapshot, dropping the bare omahab marker.
+func snapshotScopesFromTags(tags []string) []string {
+	var scopes []string
+	for _, t := range tags {
+		if name, ok := strings.CutPrefix(t, "scope:"); ok && strings.TrimSpace(name) != "" {
+			scopes = append(scopes, strings.TrimSpace(name))
+		}
+	}
+	return scopes
 }
 
 // PrepareRecoveryRestore performs the safe, daemon-side half of the
@@ -169,6 +261,7 @@ func (b *Backend) PrepareRecoveryRestore(ctx context.Context, req apitypes.Recov
 		},
 		StagingDir: staging,
 	}
+	b.markRestoreSetupState("in_progress", op.ID, "")
 	if err := writeRecoveryRestoreJournal(b.cfg.StateDir, j); err != nil {
 		return RecoveryRestoreStatus{}, err
 	}
@@ -190,6 +283,7 @@ func (b *Backend) PrepareRecoveryRestore(ctx context.Context, req apitypes.Recov
 	if err != nil {
 		return b.failRecoveryRestore(&j, "staging validation: "+err.Error())
 	}
+	_ = rep
 	manifest, err := backups.ServerConfigManifest(staging)
 	if err != nil {
 		return b.failRecoveryRestore(&j, err.Error())
@@ -199,9 +293,9 @@ func (b *Backend) PrepareRecoveryRestore(ctx context.Context, req apitypes.Recov
 	}
 	scopes := j.Source.Scopes
 	if len(scopes) == 0 {
-		scopes = manifest.Scopes
+		scopes = manifest.ScopeNames()
 	}
-	if err := checkRestoreScopes(rep, scopes); err != nil {
+	if err := checkRestoreScopes(manifest, scopes); err != nil {
 		return b.failRecoveryRestore(&j, err.Error())
 	}
 	if _, err := backups.PlanServerConfigSwap(staging, b.cfg.StateDir, manifest); err != nil {
@@ -210,9 +304,28 @@ func (b *Backend) PrepareRecoveryRestore(ctx context.Context, req apitypes.Recov
 	j.Operation.Stage = "staged"
 	j.Operation.Status = OpCompleted
 	j.Operation.Progress = 100
+	if detail := restoreReleaseRefNote(manifest); detail != "" {
+		j.Operation.Preview = detail
+	}
 	j.Manifest = &manifest
 	_ = writeRecoveryRestoreJournal(b.cfg.StateDir, j)
 	return j.Operation, nil
+}
+
+// restoreReleaseRefNote warns when the staged snapshot was captured from a
+// different system release than the running one. The swap itself still
+// applies (control-plane state is release-independent); app payloads from
+// the snapshot restore later through the scoped path, which refuses
+// version mismatches on its own.
+func restoreReleaseRefNote(manifest backups.SnapshotManifest) string {
+	want := strings.TrimSpace(manifest.System.ReleaseRef)
+	if want == "" {
+		return ""
+	}
+	if current := strings.TrimSpace(systemReleaseRef()); current != "" && current != want {
+		return fmt.Sprintf("Snapshot was captured from release %s; this system runs %s. Control-plane state restores regardless; app data from this snapshot may need the matching release before it restores.", want, current)
+	}
+	return ""
 }
 
 // ApplyRecoveryRestore performs the offline swap half. It must run with
@@ -267,8 +380,20 @@ func (b *Backend) ApplyRecoveryRestore(ctx context.Context, opID string, req api
 	j.Operation.Stage = "completed"
 	j.Operation.Status = OpCompleted
 	j.Operation.Progress = 100
+	b.markRestoreSetupState("completed", j.Operation.ID, "")
 	_ = writeRecoveryRestoreJournal(b.cfg.StateDir, j)
 	return j.Operation, nil
+}
+
+// SkipRecoveryRestore records the operator's explicit "start a new server"
+// choice: the setup checklist's restore check turns skipped. It never
+// touches staged restores or journals.
+func (b *Backend) SkipRecoveryRestore(ctx context.Context) error {
+	if _, err := loadRestoreSetupState(b.cfg.StateDir); err != nil {
+		return err
+	}
+	b.markRestoreSetupState("skipped", "", "")
+	return nil
 }
 
 // ApplyStagedRecoveryRestore is the entry point for the omahab-restore
@@ -422,11 +547,65 @@ func loadRecoveryRestoreJournal(stateDir, id string) (recoveryRestoreJournal, er
 	return j, nil
 }
 
+// restoreSetupState is the persisted first-boot restore posture behind the
+// setup checklist's "restore" check: not_started | skipped | in_progress |
+// completed | failed. It is written at the restore flow's transitions and
+// survives the daemon restart the swap itself causes; "skipped" records the
+// operator's explicit "new server" choice so the checklist stops asking.
+type restoreSetupState struct {
+	State     string `json:"state"`
+	UpdatedAt string `json:"updated_at"`
+	Operation string `json:"operation,omitempty"`
+	Detail    string `json:"detail,omitempty"`
+}
+
+func restoreSetupStatePath(stateDir string) string {
+	return filepath.Join(stateDir, "restore_setup_state.json")
+}
+
+func writeRestoreSetupState(stateDir string, st restoreSetupState) error {
+	st.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	raw, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		return err
+	}
+	return syncWriteFile(restoreSetupStatePath(stateDir), append(raw, '\n'), 0o600)
+}
+
+func loadRestoreSetupState(stateDir string) (restoreSetupState, error) {
+	raw, err := os.ReadFile(restoreSetupStatePath(stateDir))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return restoreSetupState{State: "not_started"}, nil
+		}
+		return restoreSetupState{}, err
+	}
+	var st restoreSetupState
+	if err := json.Unmarshal(raw, &st); err != nil {
+		return restoreSetupState{}, fmt.Errorf("parse restore setup state: %w", err)
+	}
+	if strings.TrimSpace(st.State) == "" {
+		return restoreSetupState{State: "not_started"}, nil
+	}
+	return st, nil
+}
+
+// markRestoreSetupState persists a restore-flow transition; a write error is
+// logged, never fatal — the journal and staged tree remain the authority for
+// the restore itself.
+func (b *Backend) markRestoreSetupState(state, operation, detail string) {
+	st := restoreSetupState{State: state, Operation: operation, Detail: detail}
+	if err := writeRestoreSetupState(b.cfg.StateDir, st); err != nil {
+		log.Printf("persist restore setup state %q: %v", state, err)
+	}
+}
+
 func (b *Backend) failRecoveryRestore(j *recoveryRestoreJournal, msg string) (RecoveryRestoreStatus, error) {
 	j.Operation.Status = OpFailed
 	j.Operation.Stage = OpFailed
 	j.Operation.Error = msg
 	j.Error = msg
+	b.markRestoreSetupState("failed", j.Operation.ID, msg)
 	_ = writeRecoveryRestoreJournal(b.cfg.StateDir, *j)
 	return j.Operation, translateError(fmt.Errorf("%w: %s", store.ErrValidation, msg))
 }

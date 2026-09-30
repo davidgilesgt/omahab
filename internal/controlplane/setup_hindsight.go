@@ -126,13 +126,6 @@ func (b *Backend) ensureHindsightLiteLLMKey(ctx context.Context) (string, error)
 	if b.providers == nil || b.secrets == nil {
 		return "", fmt.Errorf("providers/secrets not configured")
 	}
-	// Best-effort orphan cleanup before the non-revoked lookup below (see
-	// providers-008 ordering note in CleanupLegacyGatewayOrphans).
-	if n, cerr := b.providers.CleanupLegacyGatewayOrphans(ctx); cerr != nil {
-		log.Printf("setup hindsight: legacy gateway orphan cleanup: %v", cerr)
-	} else if n > 0 {
-		log.Printf("setup hindsight: revoked %d legacy gateway orphan keys", n)
-	}
 	nowStr := store.FormatTime(time.Now().UTC())
 	var vkID, scopesStr string
 	var expiresAt, revokedAt sql.NullString
@@ -147,11 +140,7 @@ func (b *Backend) ensureHindsightLiteLLMKey(ctx context.Context) (string, error)
 		}
 		if len(scopes) == 1 && scopes[0] == providers.AliasMemory {
 			if v, rerr := b.secrets.RevealByName(ctx, "platform-app", hindsightLLMKeyName); rerr == nil && strings.TrimSpace(v) != "" {
-				if providers.IsLegacyVirtualKeyToken(v) {
-					log.Printf("setup hindsight: stored key is retired omk_, reissuing through gateway")
-				} else {
-					return strings.TrimSpace(v), nil
-				}
+				return strings.TrimSpace(v), nil
 			} else if rerr != nil && !errors.Is(rerr, store.ErrNotFound) {
 				return "", rerr
 			}

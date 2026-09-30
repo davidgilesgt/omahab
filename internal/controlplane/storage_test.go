@@ -34,46 +34,6 @@ func (storageTestRunner) Check(ctx context.Context, app domain.Application, spec
 	return domain.HealthHealthy, nil
 }
 
-// Legacy v1 media maps to the Immich library subvolume without moving
-// content; legacy data is preserved as a pending server-data placement that
-// is not applied until an explicit migration runs.
-func TestLoadStorageV1Migration(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "storage.json")
-	raw := `[{"volume":"media","fs_uuid":"UUID-MEDIA"},{"volume":"data","fs_uuid":"UUID-DATA"}]`
-	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	sf, existed, err := loadStorageFile(path)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if !existed {
-		t.Fatal("expected existed=true for legacy file")
-	}
-	if len(sf.Placements) != 2 {
-		t.Fatalf("placements = %+v, want 2", sf.Placements)
-	}
-	var media, data *StoragePlacement
-	for i := range sf.Placements {
-		switch sf.Placements[i].Volume {
-		case "immich:state":
-			media = &sf.Placements[i]
-		case "server-data":
-			data = &sf.Placements[i]
-		}
-	}
-	if media == nil || media.FSUUID == nil || *media.FSUUID != "UUID-MEDIA" || !media.Legacy {
-		t.Fatalf("media migration = %+v, want immich:state legacy UUID-MEDIA", media)
-	}
-	if media.Pending {
-		t.Fatal("legacy media must be active (content stays), not pending")
-	}
-	if data == nil || data.FSUUID == nil || *data.FSUUID != "UUID-DATA" || !data.Pending {
-		t.Fatalf("data migration = %+v, want server-data pending UUID-DATA", data)
-	}
-}
-
 func TestVolumeSlug(t *testing.T) {
 	if got := volumeSlug("immich:state"); got != "immich-state" {
 		t.Fatalf("slug = %q", got)
@@ -184,8 +144,8 @@ func TestConfigureStoragePendingRecordsWithoutMounts(t *testing.T) {
 	if len(sf.Placements) != 0 {
 		t.Fatalf("placements = %+v, want no active bindings", sf.Placements)
 	}
-	if len(sf.Proposals) != 1 || !sf.Proposals[0].Pending || sf.Proposals[0].Volume != "aa:state" {
-		t.Fatalf("proposals = %+v, want one pending aa:state proposal", sf.Proposals)
+	if len(sf.Proposals) != 1 || sf.Proposals[0].Volume != "aa:state" {
+		t.Fatalf("proposals = %+v, want one aa:state proposal", sf.Proposals)
 	}
 }
 
@@ -322,17 +282,17 @@ func TestConfigureStoragePendingPreservesActive(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(sf.Placements) != 1 || sf.Placements[0].Volume != "aa:state" ||
-		sf.Placements[0].Pending || effectiveUUID(sf.Placements[0]) != uuidA {
+		effectiveUUID(sf.Placements[0]) != uuidA {
 		t.Fatalf("placements = %+v, want live aa:state binding intact", sf.Placements)
 	}
-	if len(sf.Proposals) != 1 || !sf.Proposals[0].Pending || sf.Proposals[0].Volume != "bb:state" {
-		t.Fatalf("proposals = %+v, want pending bb:state proposal", sf.Proposals)
+	if len(sf.Proposals) != 1 || sf.Proposals[0].Volume != "bb:state" {
+		t.Fatalf("proposals = %+v, want bb:state proposal", sf.Proposals)
 	}
-	// Reboot view: the boot parser consumes non-pending placements only,
-	// so the pending proposal cannot redirect the live bind.
+	// Reboot view: the boot parser consumes Placements only, so the
+	// proposal cannot redirect the live bind.
 	var bootUUID string
 	for _, p := range sf.Placements {
-		if p.Volume == "aa:state" && !p.Pending && p.FSUUID != nil {
+		if p.Volume == "aa:state" && p.FSUUID != nil {
 			bootUUID = strings.TrimSpace(*p.FSUUID)
 		}
 	}
@@ -366,7 +326,7 @@ func TestMergeActivePlacements(t *testing.T) {
 		{Volume: "aa:state", FSUUID: strptr(uuidA)},
 		{Volume: "bb:state", FSUUID: strptr(uuidA)},
 	}
-	got := mergeActivePlacements(prev, []StoragePlacement{{Volume: "bb:state", FSUUID: strptr(uuidB), Pending: true}})
+	got := mergeActivePlacements(prev, []StoragePlacement{{Volume: "bb:state", FSUUID: strptr(uuidB)}})
 	byVol := map[string]StoragePlacement{}
 	for _, p := range got {
 		if _, dup := byVol[p.Volume]; dup {
@@ -380,8 +340,8 @@ func TestMergeActivePlacements(t *testing.T) {
 	if effectiveUUID(byVol["aa:state"]) != uuidA {
 		t.Fatalf("aa:state = %+v, want preserved binding %q", byVol["aa:state"], uuidA)
 	}
-	if effectiveUUID(byVol["bb:state"]) != uuidB || byVol["bb:state"].Pending {
-		t.Fatalf("bb:state = %+v, want committed %q without pending flag", byVol["bb:state"], uuidB)
+	if effectiveUUID(byVol["bb:state"]) != uuidB {
+		t.Fatalf("bb:state = %+v, want committed %q", byVol["bb:state"], uuidB)
 	}
 	// Null target drops the volume back to the system disk.
 	got = mergeActivePlacements(prev, []StoragePlacement{{Volume: "aa:state"}})
@@ -410,7 +370,7 @@ func TestSetupPhaseStorageFailsClosedOnMissingDisk(t *testing.T) {
 	b2 := storageTestBackend(t)
 	if err := writeStorageFile(storageJSONPath(b2.cfg.StateDir), storageFile{
 		Version:   storageFileVersion,
-		Proposals: []StoragePlacement{{Volume: "aa:state", FSUUID: strptr("deadbeef-dead-beef-dead-beefdeadbeef"), Pending: true}},
+		Proposals: []StoragePlacement{{Volume: "aa:state", FSUUID: strptr("deadbeef-dead-beef-dead-beefdeadbeef")}},
 	}); err != nil {
 		t.Fatal(err)
 	}

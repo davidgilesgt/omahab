@@ -22,10 +22,10 @@ var (
 )
 
 var (
-	releaseFile           = "/etc/omahab-release"
-	defaultReleaseURL     = "https://github.com/davidgilesgt/omahab/releases/latest/download/manifest.json"
-	updateAvailablePath   = "/var/lib/omahab/update-available"
-	updateCandidatePath   = "/var/lib/omahab/update-candidate.json"
+	releaseFile         = "/etc/omahab-release"
+	defaultReleaseURL   = "https://github.com/davidgilesgt/omahab/releases/latest/download/manifest.json"
+	updateAvailablePath = "/var/lib/omahab/update-available"
+	updateCandidatePath = "/var/lib/omahab/update-candidate.json"
 )
 
 // Upgrade result envelope.
@@ -69,18 +69,18 @@ var (
 	fsMkdirTemp = os.MkdirTemp
 	osChownFunc = os.Chown
 
-	copyDirFunc                  = defaultCopyDir
-	runNixMetadataFunc           = defaultRunNixMetadata
-	runNixosRebuildSwitchFunc    = defaultRunNixosRebuildSwitch
-	runNixosRebuildRollbackFunc  = defaultRunNixosRebuildRollback
-	currentSystemGenerationFunc  = defaultCurrentSystemGeneration
-	probeUpFunc                  = probeUp
-	httpGetFunc                  = defaultHttpGet
-	exchangeDirsFunc             = exchangeDirs
-	healthTimeout                = 120 * time.Second
-	healthInterval               = 5 * time.Second
-	sleepFunc                    = time.Sleep
-	nowFunc                      = time.Now
+	copyDirFunc                 = defaultCopyDir
+	runNixMetadataFunc          = defaultRunNixMetadata
+	runNixosRebuildSwitchFunc   = defaultRunNixosRebuildSwitch
+	runNixosRebuildRollbackFunc = defaultRunNixosRebuildRollback
+	currentSystemGenerationFunc = defaultCurrentSystemGeneration
+	probeUpFunc                 = probeUp
+	httpGetFunc                 = defaultHttpGet
+	exchangeDirsFunc            = exchangeDirs
+	healthTimeout               = 120 * time.Second
+	healthInterval              = 5 * time.Second
+	sleepFunc                   = time.Sleep
+	nowFunc                     = time.Now
 )
 
 // systemProfilePath is the NixOS system profile whose symlink target
@@ -228,7 +228,18 @@ func parseMetadataPath(data []byte) (string, error) {
 }
 
 func defaultRunNixosRebuildSwitch(flakeArg string) ([]byte, error) {
-	return exec.Command("nixos-rebuild", "switch", "--flake", flakeArg).CombinedOutput()
+	args := append([]string{"switch", "--flake", flakeArg}, bundlesOverrideArgs()...)
+	return exec.Command("nixos-rebuild", args...).CombinedOutput()
+}
+
+// bundlesOverrideArgs returns the nixos-rebuild flag set pinning the
+// `bundles` flake input to the committed custom-bundles repo, or nil when
+// the repo does not exist (fresh installs before any custom bundle).
+func bundlesOverrideArgs() []string {
+	if _, err := fsStat("/var/lib/omahab/bundles"); err != nil {
+		return nil
+	}
+	return []string{"--override-input", "bundles", "git+file:///var/lib/omahab/bundles"}
 }
 
 func defaultRunNixosRebuildRollback() ([]byte, error) {
@@ -637,7 +648,6 @@ func runSystemUpgradeRef(ref string) error {
 	fmt.Println("Upgrade healthy.")
 	return nil
 }
-
 
 func newSystemCheckUpdateCmd() *cobra.Command {
 	return &cobra.Command{

@@ -111,8 +111,7 @@ type RetentionResult struct {
 
 // RetentionGroup is the forget outcome of one scope group.
 type RetentionGroup struct {
-	// Tags is the group's tag set (omahab plus scope:<name>, or omahab
-	// alone for legacy pre-scope snapshots).
+	// Tags is the group's tag set: omahab plus scope:<name>.
 	Tags []string `json:"tags"`
 	// Keep is how many snapshots the policy retained.
 	Keep int `json:"keep"`

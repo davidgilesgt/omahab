@@ -258,26 +258,18 @@ func (b *Backend) StreamEvents(ctx context.Context, since domain.ID, out chan<- 
 // Sync folders
 
 func (b *Backend) IngestEmail(ctx context.Context, req apitypes.EmailIngestRequest) (domain.EmailMessage, error) {
-	// NOTE: Current apitypes.EmailIngestRequest is legacy; workers/email sends v1 payload {from,to,timestamp,nonce,raw(base64),rawSize}
-	// and signs via emailing.BuildCanonicalBytes with X-Omahab-Signature. This mismatch is a known blocker.
-	// Parent is aligning API separately. We attempt to handle both shapes by delegating to emailing service via raw bytes if available.
-	// For now map legacy fields to new IngestRequest.
 	if b.emailing == nil {
 		return domain.EmailMessage{}, translateError(fmt.Errorf("%w: email not configured", ErrNotConfigured))
 	}
-	// Map api EmailIngestRequest (worker v1: from,to,timestamp(str),nonce,raw,rawSize,signature) to emailing.IngestRequest
-	var ingestReq emailing.IngestRequest
-	ingestReq.TimestampStr = req.Timestamp
-	ingestReq.Nonce = req.Nonce
-	ingestReq.Raw = req.Raw
-	ingestReq.Signature = req.Signature
-	ingestReq.From = req.From
-	ingestReq.To = req.To
-	ingestReq.RawSize = req.RawSize
-	// legacy aliases set too for verifier fallback
-	ingestReq.EnvelopeFrom = req.From
-	ingestReq.Recipient = req.To
-	res, err := b.emailing.Ingest(ctx, ingestReq)
+	res, err := b.emailing.Ingest(ctx, emailing.IngestRequest{
+		TimestampStr: req.Timestamp,
+		Nonce:        req.Nonce,
+		Raw:          req.Raw,
+		Signature:    req.Signature,
+		From:         req.From,
+		To:           req.To,
+		RawSize:      req.RawSize,
+	})
 	if err != nil {
 		return domain.EmailMessage{}, translateError(err)
 	}
@@ -294,9 +286,9 @@ func (b *Backend) IngestEmail(ctx context.Context, req apitypes.EmailIngestReque
 	}
 	return domain.EmailMessage{
 		ID:             domain.ID(res.MessageID),
-		EnvelopeFrom:   ingestReq.From,
-		HeaderFrom:     ingestReq.From,
-		Recipient:      ingestReq.To,
+		EnvelopeFrom:   req.From,
+		HeaderFrom:     req.From,
+		Recipient:      req.To,
 		Subject:        subject,
 		Authentication: reason,
 		Status:         res.Status,

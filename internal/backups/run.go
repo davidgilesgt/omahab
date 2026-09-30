@@ -7,10 +7,10 @@ import (
 )
 
 // RunBackup starts a backup run: it resolves repository credentials,
-// guarantees the scoped restic backend is initialized, runs every
-// registered pre-backup hook, and only then snapshots the configured paths
-// with restic. Any hook failure aborts the run before restic starts,
-// because copying live database files is not a valid backup.
+// guarantees the scoped restic backend is initialized, and snapshots the
+// explicitly requested paths with restic. Paths and scopes are required:
+// scoped capture (Backend.CreateBackupScoped) computes both from the
+// selected scopes; there is no implicit default path set.
 //
 // The returned run is the persisted record; when the run fails, the record
 // carries the failed stage and redacted error and the error is non-nil.
@@ -36,20 +36,19 @@ func (s *Service) RunBackup(ctx context.Context, req RunRequest) (Run, error) {
 		return Run{}, err
 	}
 
-	if herr := s.executeHooks(ctx, run, HookPreBackup, creds); herr != nil {
-		s.failRun(ctx, run, StageHooks, herr, creds.Password, creds.AccessKey)
-		return *run, fmt.Errorf("backups: backup run %s failed: %w", run.ID, herr)
-	}
-
 	if err := s.advanceRun(ctx, run, StageSnapshot, creds); err != nil {
 		return *run, fmt.Errorf("backups: backup run %s failed: %w", run.ID, err)
 	}
-	paths := req.Paths
-	if len(paths) == 0 {
-		paths = s.cfg.Paths
+	if len(req.Paths) == 0 {
+		s.failRun(ctx, run, StageSnapshot, fmt.Errorf("%w: backup run %s: no capture paths", ErrInvalid, run.ID), creds.Password, creds.AccessKey)
+		return *run, fmt.Errorf("backups: backup run %s failed: %w", run.ID, ErrInvalid)
+	}
+	if len(req.Scopes) == 0 {
+		s.failRun(ctx, run, StageSnapshot, fmt.Errorf("%w: backup run %s: no capture scopes", ErrInvalid, run.ID), creds.Password, creds.AccessKey)
+		return *run, fmt.Errorf("backups: backup run %s failed: %w", run.ID, ErrInvalid)
 	}
 	snap, err := s.runner.Backup(ctx, repo, creds, BackupRequest{
-		Paths:    paths,
+		Paths:    req.Paths,
 		Host:     s.cfg.Host,
 		Tags:     snapshotTags(req.Scopes),
 		Excludes: req.Excludes,
@@ -130,109 +129,11 @@ func (s *Service) failRun(ctx context.Context, run *Run, stage string, err error
 		})
 }
 
-// executeHooks runs every hook of the given kind sequentially and records
-// each outcome. Hooks after the first failure are recorded as skipped, so
-// partial failures persist accurately. It returns the first failure, or
-// nil when every hook succeeded.
-func (s *Service) executeHooks(ctx context.Context, run *Run, kind HookKind, creds Credentials) error {
-	if s.hooks == nil {
-		return nil
-	}
-	hooks, err := s.hooks.Hooks(ctx, kind)
-	if err != nil {
-		return fmt.Errorf("list %s hooks: %w", kind, err)
-	}
-	redactions := []string{creds.Password, creds.AccessKey}
-	var firstErr error
-	for _, h := range hooks {
-		if firstErr != nil {
-			if serr := s.recordHook(ctx, run.ID, h, kind, HookSkipped, HookOutcome{}, redactions); serr != nil {
-				return serr
-			}
-			continue
-		}
-		if verr := h.validate(); verr != nil {
-			_ = s.recordHook(ctx, run.ID, h, kind, HookFailed, HookOutcome{Error: fmt.Errorf("invalid hook: %w", verr)}, redactions)
-			firstErr = fmt.Errorf("%s hook %q is invalid: %w", kind, h.Application, verr)
-			continue
-		}
-		out := s.runHook(ctx, h)
-		status := HookOK
-		if out.Error != nil || out.ExitCode == nil || *out.ExitCode != 0 {
-			status = HookFailed
-		}
-		if serr := s.recordHook(ctx, run.ID, h, kind, status, out, redactions); serr != nil {
-			return serr
-		}
-		if status == HookFailed {
-			firstErr = describeHookFailure(kind, h, out, redactions)
-		}
-	}
-	return firstErr
-}
-
-// runHook executes one hook under its configured timeout.
-func (s *Service) runHook(ctx context.Context, h Hook) HookOutcome {
-	timeout := h.Timeout
-	if timeout <= 0 {
-		timeout = defaultHookTimeout
-	}
-	hctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	return s.hookRunner.RunHook(hctx, h)
-}
-
-// recordHook persists one hook outcome with redacted, truncated output.
-func (s *Service) recordHook(ctx context.Context, runID string, h Hook, kind HookKind, status HookStatus, out HookOutcome, redactions []string) error {
-	row := HookResult{
-		ID:          newID(),
-		RunID:       runID,
-		Application: h.Application,
-		Hook:        kind,
-		Status:      status,
-	}
-	if status == HookSkipped {
-		row.StartedAt = s.nowUTC()
-		return s.insertHookResult(ctx, row)
-	}
-	start := out.StartedAt.UTC()
-	if start.IsZero() {
-		start = s.nowUTC()
-	}
-	finished := out.FinishedAt.UTC()
-	if finished.IsZero() || finished.Before(start) {
-		finished = start
-	}
-	row.ExitCode = out.ExitCode
-	row.StartedAt = start
-	row.FinishedAt = &finished
-	row.Output = truncate(redact(out.Output, redactions...), maxHookOutput)
-	if out.Error != nil {
-		row.Error = truncate(redact(out.Error.Error(), redactions...), maxErrorLength)
-	}
-	return s.insertHookResult(ctx, row)
-}
-
-func describeHookFailure(kind HookKind, h Hook, out HookOutcome, redactions []string) error {
-	var msg strings.Builder
-	fmt.Fprintf(&msg, "%s hook %q failed", kind, h.Application)
-	if out.ExitCode != nil {
-		fmt.Fprintf(&msg, ": exit code %d", *out.ExitCode)
-	}
-	if out.Error != nil {
-		fmt.Fprintf(&msg, ": %s", redact(out.Error.Error(), redactions...))
-	}
-	if out.Output != "" {
-		fmt.Fprintf(&msg, ": %s", truncate(redact(out.Output, redactions...), 200))
-	}
-	return fmt.Errorf("%s", msg.String())
-}
-
 // snapshotTags returns the tags stamped on every snapshot: the omahab
 // marker plus one scope:<name> tag per captured scope. Retention groups
 // by tags, so scope tags are what keeps server-config history
-// independent from chatty app scopes. Snapshots with no scopes (legacy
-// paths) carry only omahab and form their own group.
+// independent from chatty app scopes. Scopes are required: every
+// snapshot carries its scope set.
 func snapshotTags(scopes []string) []string {
 	tags := append([]string{}, backupTags...)
 	seen := map[string]bool{"omahab": true}

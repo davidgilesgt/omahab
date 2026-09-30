@@ -54,7 +54,30 @@ export interface CatalogBundle {
   installed: boolean;
   /** "systemd" = native NixOS service (auto-installed, image-versioned); "compose" = Docker Compose. */
   runtime?: string;
+  /** "catalog" = curated release bundle; "custom" = from this machine's bundles repo. */
+  source?: "catalog" | "custom";
   groups?: string[];
+}
+
+/** One row of GET /api/v1/bundles: merged catalog view with repo state. */
+export interface BundleAdmin {
+  id: string;
+  name: string;
+  source: "catalog" | "custom";
+  port?: number;
+  units?: string[];
+  /** Custom bundle excluded from rebuilds and the merged catalog. */
+  disabled?: boolean;
+  /** Uncommitted repo changes. */
+  dirty?: boolean;
+  /** Outcome of the most recent bundle apply; empty when none ran. */
+  last_apply?: string;
+}
+
+export interface CreateBundleRequest {
+  id?: string;
+  bundle_json: string;
+  module_nix: string;
 }
 export interface ExposureState {
   resource_type: "application" | "project";
@@ -96,6 +119,53 @@ export interface Backup {
   finished_at?: string;
   error?: string;
   operation_id?: string;
+}
+
+/** One earlier Omahab instance discovered under a backup account (POST /recovery/instances). */
+export interface RecoveryInstance {
+  instance_id: string;
+  /** Exact resolvable restic repository URL — always use this, never build one client-side. */
+  location: string;
+  latest_snapshot_time?: string;
+  domain?: string;
+  locked: boolean;
+}
+
+export interface RecoveryInstancesRequest {
+  phrase: string;
+  /** Exact restic repository URL (from a discovered instance). */
+  location?: string;
+  password?: string;
+  username?: string;
+  host?: string;
+  sub_account_password?: string;
+}
+
+export interface RecoveryListRequest {
+  phrase: string;
+  location: string;
+  password?: string;
+  latest?: number;
+  username?: string;
+  host?: string;
+  sub_account_password?: string;
+}
+
+export interface RecoverySnapshot {
+  id: string;
+  time?: string;
+  hostname?: string;
+  server_config: boolean;
+  /** Captured scope names (server-config, app:<bundle-id>, …). */
+  scopes?: string[];
+  release_ref?: string;
+}
+
+export interface RecoveryRestoreRequest extends RecoveryListRequest {
+  snapshot_id?: string;
+  /** Subset of the snapshot's scopes to restore; empty means all. */
+  scopes?: string[];
+  include_apps?: boolean;
 }
 
 export interface Disk {
@@ -213,8 +283,6 @@ export interface ModelSetupAlias {
 
 export interface ModelSetupStatus {
   management_url?: string;
-  migration_complete: boolean;
-  migration_error?: string;
   deployments: ModelSetupDeployment[];
   aliases: ModelSetupAlias[];
 }
@@ -286,10 +354,21 @@ export interface SetupCheck {
   target?: number;
 }
 
+export interface SetupNodeStatus {
+  id: string;
+  state: "pending" | "running" | "succeeded" | "failed" | "waiting" | "blocked";
+  blocked_by: string[];
+  error?: string;
+  owner: "operator" | "system";
+  code?: string;
+  updated_at: string;
+}
+
 export interface SetupStatus {
   state: "waiting_for_cloudflare" | "reconciling" | "attention" | "complete";
   local_ready: boolean;
   checks: SetupCheck[];
+  nodes: SetupNodeStatus[];
 }
 
 export interface ListEnvelope<T> {

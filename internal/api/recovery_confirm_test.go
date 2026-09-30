@@ -41,29 +41,19 @@ func genRecovery(t *testing.T, srv *Server) apitypes.RecoveryKeyMaterial {
 	return mat
 }
 
-func TestRecoveryConfirmSavedAckAndChallenge(t *testing.T) {
+func TestRecoveryConfirmSavedAck(t *testing.T) {
 	backend := newRealBackend(t, nil)
 	srv := newRealServer(t, backend)
 
-	// --- saved-ack mode ---
 	mat := genRecovery(t, srv)
 	ackBody := `{"fingerprint":` + strconv.Quote(mat.Fingerprint) + `,"saved_ack":true}`
 	if rec := doAuthed(srv, http.MethodPost, "/api/v1/recovery/confirm", ackBody); rec.Code != http.StatusOK {
 		t.Fatalf("saved-ack confirm status %d, body %s", rec.Code, rec.Body.String())
 	}
 
-	// --- legacy challenge mode ---
+	// Missing ack: must be rejected.
 	mat2 := genRecovery(t, srv)
-	chalBody := `{"fingerprint":` + strconv.Quote(mat2.Fingerprint) + `,"challenge":{"0":` +
-		strconv.Quote(mat2.Phrase[0]) + `,"1":` + strconv.Quote(mat2.Phrase[1]) +
-		`,"2":` + strconv.Quote(mat2.Phrase[2]) + `}}`
-	if rec := doAuthed(srv, http.MethodPost, "/api/v1/recovery/confirm", chalBody); rec.Code != http.StatusOK {
-		t.Fatalf("challenge confirm status %d, body %s", rec.Code, rec.Body.String())
-	}
-
-	// --- neither mode: must be rejected ---
-	mat3 := genRecovery(t, srv)
-	emptyBody := `{"fingerprint":` + strconv.Quote(mat3.Fingerprint) + `}`
+	emptyBody := `{"fingerprint":` + strconv.Quote(mat2.Fingerprint) + `}`
 	if rec := doAuthed(srv, http.MethodPost, "/api/v1/recovery/confirm", emptyBody); rec.Code == http.StatusOK {
 		t.Fatalf("empty confirm should fail, got 200 %s", rec.Body.String())
 	}

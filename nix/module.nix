@@ -12,12 +12,19 @@
   lib,
   pkgs,
   self,
+  nixpkgs ? null,
+  bundles ? null,
   ...
 }:
 
 with lib;
 let
   cfg = config.services.omahab;
+
+  # Locked nixpkgs revision for the v2 snapshot manifest (empty when the
+  # module is used standalone without the nixpkgs flake input).
+  nixpkgsRev =
+    if nixpkgs != null && nixpkgs ? rev then nixpkgs.rev or nixpkgs.dirtyRev or "" else "";
 
   # Flake packages (passed via specialArgs) with fallbacks to
   # nixpkgs-built equivalents for standalone use.
@@ -28,6 +35,27 @@ let
   omahabEmbeddingWorkerPkg =
     flakePkgs.omahab-embedding-worker or pkgs.omahab-embedding-worker;
   omahabOncePkg = flakePkgs.omahab-once or pkgs.omahab-once;
+  # Curated bundle ids: every directory under ./../bundles holding a
+  # module.nix (the per-bundle NixOS config; see nix/bundle-lib.nix).
+  curatedBundleDirs =
+    let
+      root = ./. + "/../bundles";
+      entries = builtins.readDir root;
+    in
+    builtins.filter (
+      d: entries.${d} == "directory" && builtins.pathExists (root + "/${d}/module.nix")
+    ) (builtins.attrNames entries);
+  # Custom bundle ids from the `bundles` flake input (null = standalone
+  # module use without the input). Same layout as the curated tree.
+  customBundleDirs =
+    if bundles == null then [ ]
+    else
+      let
+        entries = builtins.readDir bundles;
+      in
+      builtins.filter (
+        d: entries.${d} == "directory" && builtins.pathExists (bundles + "/${d}/module.nix")
+      ) (builtins.attrNames entries);
   stateDir = "/var/lib/omahab";
   dataDir = "/srv/omahab";
   appEnvDir = "${stateDir}/appenv";
@@ -178,7 +206,21 @@ in
     };
   };
 
-  imports = [ ./apps.nix ./storage.nix ];
+  # Shared platform config (postgres, redis, ISO pre-cache) + storage.
+  imports =
+    [ ./apps.nix ./storage.nix ]
+    # Curated per-bundle NixOS modules: bundles/<id>/module.nix for every
+    # bundle directory in the tree. Disabling a curated bundle is not a
+    # thing — the curated set ships with the generation.
+    ++ builtins.map (d: ./. + "/../bundles/${d}/module.nix") curatedBundleDirs
+    # Custom bundles: every ${bundles}/<id>/module.nix from the `bundles`
+    # flake input (default: the in-repo empty dir; overridden at rebuild
+    # time with git+file:///var/lib/omahab/bundles so only committed
+    # files are built). A disabled custom bundle removes its module file
+    # from the repo by the `omahab bundle` service instead.
+    ++ lib.optionals (bundles != null) (
+      builtins.map (d: "${bundles}/${d}/module.nix") customBundleDirs
+    );
 
   config = mkIf cfg.enable {
     assertions = [
@@ -339,6 +381,18 @@ in
         # this the daemon is API-only and first-run WebUI setup is unreachable.
         OMAHAB_WEB_DIR = "${cfg.webPackage}";
         OMAHAB_ADMIN_USER = cfg.adminUser;
+        # v2 snapshot manifest inputs: the locked nixpkgs revision, the
+        # flake.lock hash, and the running PostgreSQL major, so captures
+        # record the exact system generation and restores can refuse
+        # cross-major database restores. flake.lock is hashed from the
+        # flake source when available (standalone module use without a
+        # flake self leaves it empty).
+        OMAHAB_NIXPKGS_REV = nixpkgsRev;
+        OMAHAB_FLAKE_LOCK_SHA256 =
+          if self ? outPath && builtins.pathExists (self.outPath + "/flake.lock")
+          then builtins.hashFile "sha256" (self.outPath + "/flake.lock")
+          else "";
+        OMAHAB_PG_MAJOR = lib.versions.major config.services.postgresql.finalPackage.version;
         DEVPOD_HOME = "${stateDir}/devpod";
         HOME = "${stateDir}/devpod";
       };
@@ -504,6 +558,44 @@ in
           "AF_INET6"
         ];
         RestrictNamespaces = true;
+      };
+    };
+
+    # ------------------------------------------------------------------
+    # Custom bundle apply (DESIGN §6.1): the panel/API "Apply bundles"
+    # action stages an operation journal plus a tmpfs handoff and triggers
+    # this unit. It runs the SAME internal/bundles.Service.Apply flow as
+    # the interactive CLI (`omahab bundle apply --apply-staged`): build the
+    # flake with the bundles override, switch, health-gate, rollback on
+    # failure. The switch restarts omahabd naturally; omahabd must NOT run
+    # apply itself (health-gating its own restart deadlocks) and is NOT
+    # stopped here. nixos-rebuild needs /nix/var/nix, /etc and
+    # /run/current-system write access, so hardenBase's ProtectSystem=strict
+    # does not apply: this is a privileged maintenance unit, same trust
+    # level as `omahab system upgrade` from a root shell.
+    # ------------------------------------------------------------------
+    systemd.services.omahab-bundle-apply = {
+      description = "Omahab custom bundle apply (rebuild + switch)";
+      documentation = [ "https://github.com/davidgilesgt/omahab" ];
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
+      unitConfig = {
+        RequiresMountsFor = [ stateDir ];
+        ConditionPathExists = "/run/omahab/bundle-apply";
+        # Never started at boot: only on demand from the panel/CLI.
+      };
+      # git reads the bundles repo at HEAD; nixos-rebuild/nix build+switch.
+      path = [ pkgs.git pkgs.nixos-rebuild config.nix.package pkgs.systemd ];
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = "${cfg.package}/bin/omahab bundle apply --apply-staged";
+        User = "root";
+        Group = "root";
+        ReadWritePaths = [
+          stateDir
+          "/run/omahab"
+          "/var/lib/omahab/bundles"
+        ];
       };
     };
 
@@ -770,15 +862,7 @@ in
           # the bare name through PATH, which sudo resolves via secure_path
           # to the sw symlink — so both spellings must be allowed.
           {
-            command = "/run/current-system/sw/bin/omahab runner attach *";
-            options = [ "NOPASSWD" ];
-          }
-          {
             command = "/run/current-system/sw/bin/omahab workspace attach *";
-            options = [ "NOPASSWD" ];
-          }
-          {
-            command = "${cfg.package}/bin/omahab runner attach *";
             options = [ "NOPASSWD" ];
           }
           {
@@ -1054,6 +1138,6 @@ in
     # mechanism; no command flags or env overrides in cmd/omahab/system.go).
     nix.settings.experimental-features = [ "nix-command" "flakes" ];
     # home-assistant-cli: omahabd validates Home Assistant live via `hass-cli state list` during connect (DESIGN §17).
-    systemd.services.omahabd.path = [ omahabOncePkg pkgs.tailscale pkgs.docker pkgs.systemd pkgs.restic config.services.postgresql.finalPackage pkgs.nftables pkgs.util-linux pkgs.rsync pkgs.jq pkgs.home-assistant-cli pkgs.devpod pkgs.tmux ];
+    systemd.services.omahabd.path = [ omahabOncePkg pkgs.tailscale pkgs.docker pkgs.systemd pkgs.restic config.services.postgresql.finalPackage pkgs.nftables pkgs.util-linux pkgs.rsync pkgs.jq pkgs.home-assistant-cli pkgs.devpod pkgs.tmux pkgs.git pkgs.gnutar ];
   };
 }

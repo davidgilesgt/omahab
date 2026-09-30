@@ -53,69 +53,27 @@ type ParsedMessage struct {
 // IngestRequest is the Worker-to-omahabd webhook payload after the Worker
 // has attached timestamp/nonce metadata and HMAC. Raw is the exact bytes
 // over which the HMAC was computed. The v1 canonical covers from/to/rawSize
-// exactly as forwarded from the Email Worker; EnvelopeFrom/Recipient are
-// legacy aliases for From/To and are treated identically.
+// exactly as forwarded from the Email Worker.
 type IngestRequest struct {
-	Timestamp    int64  // legacy int64 seconds; if TimestampStr set, that string is canonical
-	TimestampStr string // decimal string as sent by worker (preferred for HMAC)
+	TimestampStr string // decimal string as sent by the worker
 	Nonce        string // unique per request, opaque
 	Raw          []byte // raw RFC 5322 message
 	Signature    string // hex-encoded HMAC-SHA256, may be "sha256=hex"
 	From         string // envelope MAIL FROM (canonical)
 	To           string // envelope RCPT TO (canonical)
 	RawSize      int    // declared raw length; 0 means len(Raw)
-	// Legacy aliases
-	EnvelopeFrom string // alias for From
-	Recipient    string // alias for To
 }
 
 func (r IngestRequest) canonicalTimestamp() string {
-	if r.TimestampStr != "" {
-		return r.TimestampStr
-	}
-	if r.Timestamp != 0 {
-		// Use decimal without leading zeros.
-		return formatInt64(r.Timestamp)
-	}
-	return ""
+	return r.TimestampStr
 }
 
 func (r IngestRequest) canonicalFrom() string {
-	if r.From != "" {
-		return r.From
-	}
-	return r.EnvelopeFrom
+	return r.From
 }
 
 func (r IngestRequest) canonicalTo() string {
-	if r.To != "" {
-		return r.To
-	}
-	return r.Recipient
-}
-
-func formatInt64(v int64) string {
-	// Avoid importing strconv in types.go body; use local.
-	if v == 0 {
-		return "0"
-	}
-	neg := false
-	if v < 0 {
-		neg = true
-		v = -v
-	}
-	var buf [20]byte
-	pos := len(buf)
-	for v > 0 {
-		pos--
-		buf[pos] = byte('0' + v%10)
-		v /= 10
-	}
-	if neg {
-		pos--
-		buf[pos] = '-'
-	}
-	return string(buf[pos:])
+	return r.To
 }
 
 type IngestResult struct {

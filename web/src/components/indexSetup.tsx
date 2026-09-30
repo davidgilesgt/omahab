@@ -27,11 +27,8 @@ export function IndexSetupControl({ onSaved }: { onSaved?: () => void }) {
   const choiceQuery = useQuery({ queryKey: ["knowledge", "index-setup"], queryFn: client.knowledgeGetIndexSetup });
 
   const rawChoice = choiceQuery.data?.choice ?? "";
-  // Mirror the server normalization (setup_status.go): trim, lowercase,
-  // legacy "fulltext" reads as "full_text". Raw SQL rows may carry any
-  // casing/whitespace the validated setter would never write.
-  const normalized = rawChoice.trim().toLowerCase();
-  const persisted = normalized === "fulltext" ? "full_text" : normalized;
+  // Mirror the server normalization: trim, lowercase.
+  const persisted = rawChoice.trim().toLowerCase();
 
   // Draft selection with an explicit dirty flag. The draft initializes when
   // the persisted choice first arrives and re-syncs to later persisted
@@ -53,7 +50,7 @@ export function IndexSetupControl({ onSaved }: { onSaved?: () => void }) {
       void queryClient.invalidateQueries({ queryKey: ["knowledge", "index-setup"] });
       void queryClient.invalidateQueries({ queryKey: ["setup"] });
       const opts = optionsQuery.data ?? [];
-      const label = opts.find((item) => item.id === choice || (choice === "fulltext" && item.id === "full_text"))?.label ?? choice;
+      const label = opts.find((item) => item.id === choice)?.label ?? choice;
       toast.success(`Index setup saved: ${label}`);
     },
     onError: (err: unknown) => toast.error(err instanceof Error ? err.message : "Could not save choice"),

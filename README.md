@@ -57,9 +57,13 @@ At daemon startup, it is copied to `~/.config/omahab/token` for the configured a
 
 Then work through the setup checklist at `http://<lan-ip>:8484/setup`:
 
-1. **SSH keys** — the installer writes the `--authorized-keys-file` contents (when given) for the configured admin account (`services.omahab.adminUser`, default `omahab`); add more here if needed.
-2. **Tailscale** — approve the server into your tailnet.
-3. Everything after (domain, Cloudflare, recovery key, storage, AI providers, backups) happens on the panel.
+1. **Backups** — the first step asks: do you have a recovery phrase from an earlier Omahab server?
+   - **Yes (restore):** enter the phrase plus Hetzner Storage Box credentials (or a generic restic URL). The panel lists earlier server instances under `./omahab/`, their snapshots, and restores — server configuration always, then all app scopes or a chosen subset. After the swap the repository is attached so backups continue into the same instance path.
+   - **No (new server):** generate the 24-word recovery phrase (saved-ack ritual), then connect the Hetzner Storage Box (username, host, sub-account password once) or a generic restic URL. The repository initializes and the first backup + verify run in the background.
+   Before Tailscale is up the panel is plain HTTP on the LAN — the sub-account password crosses the LAN unencrypted, and the step says so. The SSH alternative is `sudo omahab recovery apply --repository <url>`.
+2. **SSH keys** — the installer writes the `--authorized-keys-file` contents (when given) for the configured admin account (`services.omahab.adminUser`, default `omahab`); add more here if needed.
+3. **Tailscale** — approve the server into your tailnet.
+4. Everything after (domain, Cloudflare, storage, AI providers) happens on the panel.
 
 ### `omahab setup` (SSH fallback)
 
@@ -75,8 +79,7 @@ It walks Tailscale enrollment and Cloudflare domain/token entry in the terminal,
 
 After the handoff, complete enrollment at `http://<tailscale-ip>:8484`:
 
-- **Recovery phrase** — 24 words shown once; confirm three of them. The phrase wraps the master key into `/var/lib/omahab/recovery.kit` (fingerprint `recovery_fingerprint`).
-- **Backups** — Hetzner Storage Box (recommended, ~€4/mo). Create a sub-account with SSH enabled; enter its username and password once. The system generates an ed25519 key at `/var/lib/omahab/backup_ssh/id_ed25519` (0600) and appends it to `.ssh/authorized_keys` via SFTP:23 (`golang.org/x/crypto/ssh` + `github.com/pkg/sftp`, `known_hosts` recorded, password discarded, location `sftp://<user>@<host>:23/./omahab/<instanceID>` with `-o sftp.command=...`, restic password `HKDF-SHA256(seed, salt "omahab-recovery-v1", info "restic-password")` so the phrase alone opens the repository, stored as `platform-app/backup_repo_credentials`); first backup + verify run immediately so “Verify a restore” passes on day one; then daily backup + weekly verify timers are enabled. Generic restic URL remains as “Advanced” (restic URL + password).
+- **Backups (first step)** — the checklist opens with backups. **Restore path:** 24-word phrase + Hetzner credentials (or generic repo) → `POST /api/v1/recovery/instances` lists earlier servers under `./omahab/` (locked entries mark a phrase mismatch) → snapshot list → restore everything or some apps (server-config always included) → the staged `omahab-restore` unit swaps state and restarts the daemon; the repository is then attached (`mode:attach`, exact instance location) so backups continue into the same path. **New-server path:** 24 words shown once with the saved-ack ritual; the phrase wraps the master key into `/var/lib/omahab/recovery.kit` (fingerprint `recovery_fingerprint`). Then the Hetzner Storage Box (recommended, ~€4/mo): create a sub-account with SSH enabled; enter its username and password once. The system generates an ed25519 key at `/var/lib/omahab/backup_ssh/id_ed25519` (0600) and appends it to `.ssh/authorized_keys` via SFTP:23 (`golang.org/x/crypto/ssh` + `github.com/pkg/sftp`, `known_hosts` recorded, password discarded, location `sftp://<user>@<host>:23/./omahab/<instanceID>` with `-o sftp.command=...`, restic password `HKDF-SHA256(seed, salt "omahab-recovery-v1", info "restic-password")` so the phrase alone opens the repository, stored as `platform-app/backup_repo_credentials`); first backup + verify run immediately so “Verify a restore” passes on day one; then daily backup + weekly verify timers are enabled.
 - **Backup retention** — snapshots never grow forever: each snapshot is tagged with its scopes (`scope:server-config`, `scope:app:<id>`, …) and a weekly `restic forget --prune` pass (`omahab backup prune`, timer `omahab-backup-prune`, also considered after scheduled backups) retains 7 daily / 4 weekly / 12 monthly / 2 yearly snapshots **per scope group**, so chatty app scopes can never thin the control-plane history. The newest verified-restorable snapshot is never forgotten; failures publish `backup.retention_failed` (warning), a low-space local repository publishes `backup.repo_space_low`.
 - **Storage placement** *(optional)* — dedicate a disk to media (photos) or data; the `omahab-storage` unit orders the mount before `postgresql`, `immich-server`, and `syncthing` (not every app unit).
 - **AI providers** — provider credentials/OAuth and model aliases.
@@ -106,6 +109,56 @@ All of these install automatically (no click-to-install) as native NixOS service
 | Restic REST Server | Machine backups (restic REST, append-only, `backup.<domain>`) |
 
 Cross-app integrations are provisioned automatically: Pocket ID OIDC clients for the supporting services (Forgejo, Immich, Paperless, Karakeep, Hermes, LiteLLM), Forgejo↔Woodpecker OAuth (Woodpecker has `oidc.supported=false` in the catalog and authenticates via Forgejo, not Pocket ID), and a real LiteLLM virtual key for Hermes. Application versions track the nixpkgs pin in `flake.lock` — the flake is the release gate.
+
+
+## Custom bundles
+
+Anything not in the curated set can be added as a **custom bundle** — the
+same two-file layout, managed on the server itself instead of the release:
+
+```sh
+/var/lib/omahab/bundles/<id>/bundle.json   # one catalog Bundle object
+/var/lib/omahab/bundles/<id>/module.nix    # that app's NixOS config
+```
+
+The directory is a git repo (Forgejo is only a mirror — pushes there are
+best-effort and never required). Only **committed** files are built: the
+daemon reads `bundle.json` at HEAD (`git show`, never the dirty worktree)
+and every rebuild passes
+`--override-input bundles git+file:///var/lib/omahab/bundles`, so a file
+edited over SSH but not committed never reaches the system.
+
+Commands (run on the server):
+
+```sh
+sudo omahab bundle list               # curated + custom, with source
+sudo omahab bundle add <dir>          # copy a bundle dir in and commit
+sudo omahab bundle remove <id>        # remove and commit
+sudo omahab bundle apply              # rebuild + switch + health gates
+sudo omahab bundle status             # repo state (dirty, disabled)
+sudo omahab validate-bundle <path>     # lint one bundle.json
+```
+
+The panel has a **Bundles** page doing the same from the browser: merged
+list (curated + custom with dirty/disabled state), add, enable/disable,
+remove, and an Apply button that polls the operation to completion.
+
+Rules enforced at add time: ids, units, and ports must not collide with
+curated entries or other custom bundles; ports must fall inside the
+reserved custom range **20000–20999** (curated native ports are below it);
+`name`, `units`, `port`, and `health_check.kind` are required, and a
+`module.nix` sibling must exist. Secrets never belong in `module.nix` —
+env flows through `/var/lib/omahab/appenv/<id>.env` with
+`ConditionPathExists`, exactly like curated gated bundles.
+
+Apply (panel or CLI) rebuilds and switches a new generation. Because the
+switch restarts `omahabd`, the apply runs in the `omahab-bundle-apply`
+oneshot unit: commit staged changes, build with the bundles override,
+switch, health-gate the panel `/up` plus each newly-enabled custom
+bundle's `health_check`, and roll back to the previous generation on
+failure. A custom bundle whose module fails the build is disabled via a
+committed `bundles/<id>/disabled` marker, reported by id, and the build is
+retried once without it — the panel can re-enable it later.
 
 ## AI tools (Hermes via MCP)
 
@@ -157,7 +210,7 @@ omahab project rollback <project-id> <release-id>
 ## Paths on the machine
 
 | Path | Content |
-| `/var/lib/omahab` | State: `control.db`, `secrets/`, `appenv/`, `caddy/`, `cloudflared/`, `dumps/`, `master.key`, `recovery.kit`, `backup.env` |
+| `/var/lib/omahab` | State: `control.db`, `secrets/`, `appenv/`, `caddy/`, `cloudflared/`, `backup-staging/` (per-run capture staging), `master.key`, `recovery.kit`, `backup.env` |
 | `/var/lib/omahab/appenv/<bundle>.env` | Per-bundle env file; gated bundles (pocket-id, woodpecker, karakeep, litellm, hermes, forgejo, immich, paperless, ntfy — plus restic on its htpasswd) refuse to start without it, while caddy/syncthing read appenv as an optional `EnvironmentFile` (or need none) and still start |
 | `/var/lib/omahab/master.key` | Master key (0600, sealed with TPM2 when available) |
 | `/var/lib/omahab/recovery.kit` | Recovery kit JSON `{version:1,fingerprint,master_wrapped base64,created_at}` (0600) |
@@ -175,7 +228,7 @@ omahab project rollback <project-id> <release-id>
 - Default-deny inbound; SSH 22, Tailscale UDP 41641, 80/443 on `tailscale0`, the LAN 80/443 + household DNS 53 rules above, the `br-*` dashboard-upstream rule, and ICMP echo/error classes are the other accepts.
 - sshd on the installed system: no passwords, no root login (`PermitRootLogin no`); the ISO-live environment uses `prohibit-password` and the dev VM re-enables passwords for development. Config is atomic with the generation.
 - Secrets live under `/var/lib/omahab/secrets` (0700) and per-bundle `appenv` files (0640, service-user group); a `.nix` file never holds a secret.
-- Restic backups cover state + data + native-service directories; databases are dumped (`pg_dump -Fc` into `/var/lib/omahab/dumps`) before every backup — raw DB files are never backed up.
+- Restic backups are scoped captures with a v2 manifest: selected writers stop, databases are dumped logically (`pg_dump -Fc` into the fixed staging directory `/var/lib/omahab/backup-staging/`) and each snapshot records its scopes with per-artifact sha256 hashes — raw DB files are never backed up.
 
 ## Upgrades
 
@@ -212,7 +265,7 @@ Repository layout:
 | `cmd/omahabd` | The daemon (control plane) |
 | `cmd/omahab-clientd` | Companion daemon for Omarchy workstations |
 | `internal/` | apps, controlplane, api, backups, secrets, providers, … |
-| `deploy/catalog/` | Curated bundle catalog |
+| `bundles/<id>/` | Curated bundle definitions (`bundle.json` + `module.nix`) |
 | `web/` | Dashboard (Vite, React 19) |
 | `workers/` | Embedding worker (Python) and email worker (Cloudflare, TypeScript) |
 | `companion/omarchy/` | Omarchy shell plugin |

@@ -148,11 +148,24 @@ func TestWaitingForEnrollmentSuppressesEvents(t *testing.T) {
 	}
 	assertNoEventType(t, ev, "setup.step_failed")
 	assertNoEventType(t, ev, "setup.reconciled")
+	// Waiting is a node outcome, not a whole-run abort: preconditions
+	// persists waiting and every downstream node is blocked with
+	// blocked_by = [preconditions].
+	states := b.setupNodeStates(ctx)
+	if states["preconditions"] != setupNodeWaiting {
+		t.Fatalf("preconditions state = %q, want waiting (states: %v)", states["preconditions"], states)
+	}
+	for _, id := range []string{"tunnel", "secrets", "storage", "exposure"} {
+		if states[id] != setupNodeBlocked {
+			t.Fatalf("node %s state = %q, want blocked (states: %v)", id, states[id], states)
+		}
+	}
 }
 
 func TestPhaseErrorSuppressesCompletion(t *testing.T) {
 	ctx := context.Background()
 	b, ev := newSetupBackend(t, nil)
+
 	inst, err := b.store.Instance(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -165,7 +178,9 @@ func TestPhaseErrorSuppressesCompletion(t *testing.T) {
 	if _, err := b.secrets.Put(ctx, "platform-app", "cloudflare_dns", "dns-token"); err != nil {
 		t.Fatal(err)
 	}
-	// apps is nil → core_apps fails after tunnel skip + secrets.
+	// apps is nil → the shared core_apps node fails; tunnel/secrets/storage
+	// still converge (independent roots) and oidc/dependent/exposure are
+	// blocked by core_apps.
 	if err := b.RunSetupReconciler(ctx); err != nil {
 		t.Fatalf("RunSetupReconciler: %v", err)
 	}
@@ -177,6 +192,18 @@ func TestPhaseErrorSuppressesCompletion(t *testing.T) {
 		t.Fatalf("failure should be core_apps, messages=%v", eventMessages(t, ev, "setup.step_failed"))
 	}
 	assertNoEventType(t, ev, "setup.reconciled")
+	states := b.setupNodeStates(ctx)
+	for _, id := range []string{"tunnel", "secrets", "storage"} {
+		if states[id] != setupNodeSucceeded {
+			t.Fatalf("node %s state = %q, want succeeded (states: %v)", id, states[id], states)
+		}
+	}
+	if states["core_apps"] != setupNodeFailed {
+		t.Fatalf("core_apps state = %q, want failed", states["core_apps"])
+	}
+	if states["oidc"] != setupNodeBlocked {
+		t.Fatalf("oidc state = %q, want blocked", states["oidc"])
+	}
 }
 
 func TestTopoSortDefaultOrder(t *testing.T) {
@@ -1078,6 +1105,9 @@ func newSetupBackend(t *testing.T, runner apps.Runner) (*Backend, *events.Servic
 	if err := st.Migrate(ctx, identity.Migrations()...); err != nil {
 		t.Fatal(err)
 	}
+	if err := st.Migrate(ctx, glueMigrations()...); err != nil {
+		t.Fatal(err)
+	}
 	key := make([]byte, 32)
 	for i := range key {
 		key[i] = byte(i + 1)
@@ -1278,61 +1308,6 @@ func TestEnsureDefaultAppNonNativeUnknownFails(t *testing.T) {
 	if runner.removeCount == 0 {
 		t.Fatalf("non-native Unknown should have triggered Uninstall/Remove, removeCount=%d", runner.removeCount)
 	}
-}
-
-func bundleIDs(bundles []apps.Bundle) []string {
-	out := make([]string, 0, len(bundles))
-	for _, b := range bundles {
-		out = append(out, b.ID)
-	}
-	return out
-}
-
-func TestPartitionLoginBundlesPutsLoginFirst(t *testing.T) {
-	t.Parallel()
-	digest := "sha256:" + strings.Repeat("a", 64)
-	mk := func(ids ...string) []apps.Bundle {
-		out := make([]apps.Bundle, 0, len(ids))
-		for _, id := range ids {
-			out = append(out, testSetupBundle(id, digest, domain.ExposurePrivate, id, nil))
-		}
-		return out
-	}
-	login, rest := partitionLoginBundles(mk("caddy", "embedding-worker", "litellm", "ntfy", "pocket-id", "forgejo", "immich"))
-	if got := bundleIDs(login); len(got) != 2 || got[0] != "caddy" || got[1] != "pocket-id" {
-		t.Fatalf("login = %v, want [caddy pocket-id]", got)
-	}
-	if got, want := bundleIDs(rest), []string{"embedding-worker", "litellm", "ntfy", "forgejo", "immich"}; !equalStrings(got, want) {
-		t.Fatalf("rest = %v, want %v", got, want)
-	}
-	// Reversed input still pins caddy ahead of pocket-id.
-	login, rest = partitionLoginBundles(mk("pocket-id", "karakeep", "caddy"))
-	if got := bundleIDs(login); len(got) != 2 || got[0] != "caddy" || got[1] != "pocket-id" {
-		t.Fatalf("login reversed = %v, want [caddy pocket-id]", got)
-	}
-	if got := bundleIDs(rest); len(got) != 1 || got[0] != "karakeep" {
-		t.Fatalf("rest reversed = %v, want [karakeep]", got)
-	}
-	// No login bundles → everything stays in rest, order preserved.
-	login, rest = partitionLoginBundles(mk("immich", "karakeep"))
-	if len(login) != 0 {
-		t.Fatalf("login = %v, want empty", bundleIDs(login))
-	}
-	if got := bundleIDs(rest); len(got) != 2 || got[0] != "immich" || got[1] != "karakeep" {
-		t.Fatalf("rest = %v, want [immich karakeep]", got)
-	}
-}
-
-func equalStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
 
 func TestGraceForBundleDurations(t *testing.T) {
@@ -1711,9 +1686,8 @@ func TestEnsureKarakeepLiteLLMKeyIssuesAndRenders(t *testing.T) {
 	b.cfg.DataDir = filepath.Join(stateRoot, "data")
 	gw := &recordingGateway{token: "sk-karakeep-test-1"}
 	karakeepTestProviders(t, b, gw)
-	// Post-handoff gating reads the native deployment, not the legacy SQLite
-	// alias below (kept as inert recovery material).
-	nativeGw := newHandoffFakeGateway()
+	// Gating reads the native LiteLLM deployment, not the local SQLite tables.
+	nativeGw := newFakeNativeGateway()
 	karakeepDB := true
 	nativeGw.setModel(providers.GatewayDeployment{
 		ModelName:     providers.AliasKarakeep,
@@ -1722,23 +1696,6 @@ func TestEnsureKarakeepLiteLLMKeyIssuesAndRenders(t *testing.T) {
 	})
 	b.gateway = nativeGw
 	karakeepTestCatalog(t, b, runner, digest)
-	if _, err := b.providers.CreateCredential(ctx, providers.CreateCredentialInput{
-		ID:             "cred-karakeep",
-		Provider:       providers.ProviderOpenAI,
-		CredentialType: providers.CredentialTypeAPIKey,
-		DisplayName:    "karakeep test",
-		SecretID:       "test-secret-id",
-		ManagedBy:      providers.ManagedByOmahab,
-	}); err != nil {
-		t.Fatalf("create credential: %v", err)
-	}
-	if _, err := b.providers.SetAlias(ctx, providers.SetAliasInput{
-		Name:         providers.AliasKarakeep,
-		CredentialID: "cred-karakeep",
-		Model:        "gpt-4o-mini",
-	}); err != nil {
-		t.Fatalf("set alias: %v", err)
-	}
 	oidc := map[string]string{"NEXTAUTH_URL": "https://keep.omahab.com", "OAUTH_CLIENT_ID": "cid"}
 	if err := b.writeAppEnv("karakeep", oidc, "karakeep"); err != nil {
 		t.Fatal(err)

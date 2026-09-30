@@ -15,16 +15,14 @@ import (
 	"github.com/omahab/omahab/internal/apps"
 	"github.com/omahab/omahab/internal/backups"
 )
-//
+
 // volume identifies <bundle-id>:<DataVolume.Name>, "postgresql" (the whole
 // shared cluster directory), or "server-data". fs_uuid:null means the system
 // disk. The UI normally offers one selection for all of an app's owned file
 // volumes, with the shared database location visibly separate.
 type StoragePlacement struct {
-	Volume  string  `json:"volume"`
-	FSUUID  *string `json:"fs_uuid"`
-	Legacy  bool    `json:"legacy,omitempty"`
-	Pending bool    `json:"pending,omitempty"`
+	Volume string  `json:"volume"`
+	FSUUID *string `json:"fs_uuid"`
 }
 
 type storageFile struct {
@@ -120,11 +118,7 @@ func firstLayoutPath(e layoutEntry) string {
 	return ""
 }
 
-// loadStorageFile reads storage.json, migrating the v1 media|data array into
-// v2 placements. The old media mapping becomes the Immich library subvolume
-// without moving its existing <disk>/media content (legacy bind); the old
-// data entry was ignored by the mount script, so it is preserved as a pending
-// server-data placement that is not applied until an explicit migration runs.
+// loadStorageFile reads storage.json (v2 object format only).
 func loadStorageFile(path string) (storageFile, bool, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -132,29 +126,6 @@ func loadStorageFile(path string) (storageFile, bool, error) {
 			return storageFile{Version: storageFileVersion}, false, nil
 		}
 		return storageFile{}, false, err
-	}
-	trimmed := strings.TrimSpace(string(raw))
-	if strings.HasPrefix(trimmed, "[") {
-		var old []storageEntry
-		if err := json.Unmarshal(raw, &old); err != nil {
-			return storageFile{}, true, fmt.Errorf("parse legacy storage.json: %w", err)
-		}
-		sf := storageFile{Version: storageFileVersion}
-		for _, e := range old {
-			switch e.Volume {
-			case "media":
-				if strings.TrimSpace(e.FSUUID) != "" {
-					uuid := strings.TrimSpace(e.FSUUID)
-					sf.Placements = append(sf.Placements, StoragePlacement{Volume: "immich:state", FSUUID: &uuid, Legacy: true})
-				}
-			case "data":
-				if strings.TrimSpace(e.FSUUID) != "" {
-					uuid := strings.TrimSpace(e.FSUUID)
-					sf.Placements = append(sf.Placements, StoragePlacement{Volume: "server-data", FSUUID: &uuid, Pending: true})
-				}
-			}
-		}
-		return sf, true, nil
 	}
 	var sf storageFile
 	if err := json.Unmarshal(raw, &sf); err != nil {
@@ -203,23 +174,10 @@ func effectiveUUID(p StoragePlacement) string {
 	return strings.TrimSpace(*p.FSUUID)
 }
 
-// splitPlacements separates live bindings from legacy pending-flagged
-// entries carried inside Placements by pre-proposal files.
-func splitPlacements(all []StoragePlacement) (active, pending []StoragePlacement) {
-	for _, p := range all {
-		if p.Pending {
-			pending = append(pending, p)
-			continue
-		}
-		active = append(active, p)
-	}
-	return active, pending
-}
-
 // mergeActivePlacements folds migration targets over the preserved active
-// set: targets win per volume with pending flags cleared, unmentioned
-// volumes keep their bindings, and null targets drop the volume back to
-// the system disk. The result is boot-safe: every entry is a live binding.
+// set: targets win per volume, unmentioned volumes keep their bindings, and
+// null targets drop the volume back to the system disk. The result is
+// boot-safe: every entry is a live binding.
 func mergeActivePlacements(previous, targets []StoragePlacement) []StoragePlacement {
 	targetByVol := map[string]StoragePlacement{}
 	var order []string
@@ -227,17 +185,14 @@ func mergeActivePlacements(previous, targets []StoragePlacement) []StoragePlacem
 		if _, ok := targetByVol[p.Volume]; !ok {
 			order = append(order, p.Volume)
 		}
-		cp := p
-		cp.Pending = false
-		targetByVol[p.Volume] = cp
+		targetByVol[p.Volume] = p
 	}
 	merged := make([]StoragePlacement, 0, len(previous)+len(targets))
 	seen := map[string]bool{}
 	for _, p := range previous {
-		if p.Pending || seen[p.Volume] {
+		if seen[p.Volume] {
 			continue
 		}
-		seen[p.Volume] = true
 		if _, overridden := targetByVol[p.Volume]; overridden {
 			continue
 		}
@@ -263,9 +218,7 @@ func rollbackProposals(j storageJournal) []StoragePlacement {
 		if _, ok := byVol[p.Volume]; !ok {
 			order = append(order, p.Volume)
 		}
-		cp := p
-		cp.Pending = true
-		byVol[p.Volume] = cp
+		byVol[p.Volume] = p
 	}
 	for _, p := range j.PreviousProposals {
 		note(p)
@@ -486,7 +439,7 @@ func (b *Backend) ConfigureStorage(ctx context.Context, req apitypes.ConfigureSt
 	}
 	// UUID shape is validated on record; full device validation (lsblk
 	// identity, filesystem support, capacity, read/write access) runs at
-	// migration time, when missing disks must fail closed. Pending records
+	// migration time, when missing disks must fail closed. Proposals
 	// may reference disks that are not currently attached (restore remaps
 	// them before activation).
 	for _, p := range req.Placements {
@@ -515,10 +468,7 @@ func (b *Backend) ConfigureStorage(ctx context.Context, req apitypes.ConfigureSt
 	var moves []StoragePlacement
 	prevByVol := map[string]*string{}
 	for _, pl := range sf.Placements {
-		if !pl.Pending {
-			v := pl.FSUUID
-			prevByVol[pl.Volume] = v
-		}
+		prevByVol[pl.Volume] = pl.FSUUID
 	}
 	toInternal := func(p apitypes.StoragePlacement) StoragePlacement {
 		return StoragePlacement{Volume: strings.TrimSpace(p.Volume), FSUUID: p.FSUUID}
@@ -545,34 +495,20 @@ func (b *Backend) ConfigureStorage(ctx context.Context, req apitypes.ConfigureSt
 		// stay authoritative across reboots until a migration commits.
 		// A proposal identical to the active binding is a no-op and is
 		// dropped; anything else is stored in Proposals, which the boot
-		// parser never reads. Legacy pending-flagged entries are carried
-		// into Proposals so no recorded intent is lost.
-		active, legacyPending := splitPlacements(sf.Placements)
+		// parser never reads.
 		activeByVol := map[string]string{}
-		for _, p := range active {
+		for _, p := range sf.Placements {
 			activeByVol[p.Volume] = effectiveUUID(p)
 		}
-		inReq := map[string]bool{}
 		var proposals []StoragePlacement
 		for _, p := range req.Placements {
 			vol := strings.TrimSpace(p.Volume)
-			inReq[vol] = true
 			if cur, ok := activeByVol[vol]; ok && cur == effectiveUUID(toInternal(p)) {
 				continue
 			}
-			cp := toInternal(p)
-			cp.Pending = true
-			proposals = append(proposals, cp)
+			proposals = append(proposals, toInternal(p))
 		}
-		for _, p := range legacyPending {
-			if inReq[p.Volume] {
-				continue
-			}
-			cp := p
-			cp.Pending = true
-			proposals = append(proposals, cp)
-		}
-		if err := writeStorageFile(path, storageFile{Version: storageFileVersion, Placements: active, Proposals: proposals}); err != nil {
+		if err := writeStorageFile(path, storageFile{Version: storageFileVersion, Placements: sf.Placements, Proposals: proposals}); err != nil {
 			return Operation{}, err
 		}
 		op := newOperation("storage", affectedAppIDs(known, req.Placements))
@@ -612,13 +548,12 @@ func (b *Backend) ConfigureStorage(ctx context.Context, req apitypes.ConfigureSt
 	for _, p := range req.Placements {
 		jPlacements = append(jPlacements, toInternal(p))
 	}
-	// Journal the preserved active set (legacy pending entries excluded)
-	// plus current proposals so rollback restores both.
-	prevActive, _ := splitPlacements(sf.Placements)
+	// Journal the preserved active set plus current proposals so
+	// rollback restores both.
 	j := storageJournal{
 		Operation:         op,
 		Placements:        jPlacements,
-		Previous:          prevActive,
+		Previous:          sf.Placements,
 		PreviousProposals: sf.Proposals,
 	}
 	if err := writeStorageJournal(b.cfg.StateDir, j); err != nil {
@@ -664,18 +599,9 @@ func (b *Backend) setupPhaseStorage(ctx context.Context) error {
 		// Catalog/layout unavailable: leave binds to the storage units.
 		return nil
 	}
-	// Migrate a legacy v1 file in place so later reads see v2.
-	if _, _, err := loadStorageFile(path); err == nil {
-		raw, _ := os.ReadFile(path)
-		if strings.HasPrefix(strings.TrimSpace(string(raw)), "[") {
-			if err := writeStorageFile(path, sf); err != nil {
-				return err
-			}
-		}
-	}
 	var missing []string
 	for _, p := range sf.Placements {
-		if p.Pending || p.FSUUID == nil || strings.TrimSpace(*p.FSUUID) == "" {
+		if p.FSUUID == nil || strings.TrimSpace(*p.FSUUID) == "" {
 			continue
 		}
 		cp := known[p.Volume]
@@ -819,11 +745,6 @@ func (b *Backend) runStorageMigration(opID string) {
 				kept = append(kept, p)
 			}
 		}
-		for _, p := range cur.Placements {
-			if p.Pending && !migrated[p.Volume] {
-				kept = append(kept, p)
-			}
-		}
 		active := storageFile{Version: storageFileVersion, Placements: merged, Proposals: kept}
 		if err := writeStorageFile(storageJSONPath(b.cfg.StateDir), active); err != nil {
 			_ = resumeStorageApps(b, ctx, j)
@@ -843,9 +764,6 @@ func (b *Backend) runStorageMigration(opID string) {
 			}
 			uuid := strings.TrimSpace(*p.FSUUID)
 			src := managedSubdir(uuid, p.Volume)
-			if p.Legacy {
-				src = filepath.Join(diskMountpoint(uuid), "media")
-			}
 			if out, err := exec.Command("mount", "--bind", src, cp).CombinedOutput(); err != nil {
 				log.Printf("storage: live bind %q -> %q: %v: %s", src, cp, err, strings.TrimSpace(string(out)))
 			}
@@ -956,5 +874,3 @@ func failStorageOp(stateDir string, j *storageJournal, msg string) error {
 	_ = writeStorageJournal(stateDir, *j)
 	return fmt.Errorf("%s", msg)
 }
-
-

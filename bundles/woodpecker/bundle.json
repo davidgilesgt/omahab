@@ -1,0 +1,43 @@
+{
+  "id": "woodpecker",
+  "name": "Woodpecker CI",
+  "port": 8000,
+  "default_exposure": "private",
+  "max_exposure": "shared",
+  "health_check": {
+    "kind": "http",
+    "path": "/healthz",
+    "port": 8000
+  },
+  "startup_grace_seconds": 120,
+  "oidc": {
+    "supported": false
+  },
+  "resources": {
+    "memory_mb": 512
+  },
+  "default": true,
+  "route": "ci",
+  "app_path": "/",
+  "dependencies": [
+    "caddy",
+    "forgejo"
+  ],
+  "secret_sources": [
+    "woodpecker_forgejo_client_id",
+    "woodpecker_forgejo_client_secret",
+    "woodpecker_agent_secret",
+    "woodpecker_grpc_secret",
+    "woodpecker_db_url",
+    "woodpecker_db_password"
+  ],
+  "pipeline_image": "quay.io/podman/stable@sha256:943585c013eeeb5acc9f4e6d2a81d80c6b0be3069557cbb9a5aa737a8c4aae3e",
+  "units": [
+    "woodpecker-server.service",
+    "woodpecker-agent-docker.service"
+  ],
+  "groups": [
+    "members",
+    "admins"
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "id": "karakeep",
+  "name": "Karakeep",
+  "port": 3010,
+  "default_exposure": "private",
+  "max_exposure": "shared",
+  "health_check": {
+    "kind": "http",
+    "path": "/api/health",
+    "port": 3010
+  },
+  "startup_grace_seconds": 300,
+  "oidc": {
+    "supported": true,
+    "mode": "native",
+    "provider": "pocket-id"
+  },
+  "resources": {
+    "memory_mb": 1024
+  },
+  "default": true,
+  "route": "keep",
+  "app_path": "/",
+  "dependencies": [
+    "caddy",
+    "pocket-id"
+  ],
+  "secret_sources": [
+    "karakeep_db_password",
+    "karakeep_nextauth_secret",
+    "karakeep_meili_master_key"
+  ],
+  "units": [
+    "karakeep-web.service",
+    "karakeep-workers.service",
+    "karakeep-browser.service"
+  ],
+  "groups": [
+    "members",
+    "admins"
+  ]
+}

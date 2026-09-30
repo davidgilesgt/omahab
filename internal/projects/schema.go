@@ -7,7 +7,7 @@ import "github.com/omahab/omahab/internal/store"
 func Migrations() []store.Migration {
 	return []store.Migration{
 		{
-			Name: "0001_projects_releases",
+			Name: "projects-001-baseline",
 			SQL: `
 CREATE TABLE projects (
     id                    TEXT PRIMARY KEY,
@@ -24,7 +24,7 @@ CREATE TABLE projects (
     deploy_started_ns     INTEGER NOT NULL DEFAULT 0,
     created_at            TEXT NOT NULL,
     updated_at            TEXT NOT NULL
-);
+) STRICT;
 
 CREATE TABLE releases (
     id         TEXT PRIMARY KEY,
@@ -43,45 +43,6 @@ CREATE TABLE releases (
 CREATE UNIQUE INDEX releases_one_active ON releases(project_id) WHERE active = 1;
 CREATE INDEX releases_project_recent ON releases(project_id, created_at DESC);
 
-CREATE TRIGGER releases_identity_immutable
-BEFORE UPDATE ON releases
-FOR EACH ROW
-WHEN OLD.project_id <> NEW.project_id
-  OR OLD.commit_sha <> NEW.commit_sha
-  OR OLD.digest <> NEW.digest
-BEGIN
-    SELECT RAISE(ABORT, 'release identity is immutable');
-END;
-`,
-		},
-		{
-			Name: "0002_projects_drop_bot_profile_id",
-			SQL: `
--- Remove bot_profile_id for Step 3 (projects deleted). Recreate without the column
--- because older SQLite has no DROP COLUMN. Safe for new DBs where the column never existed.
-CREATE TABLE IF NOT EXISTS projects_new (
-    id                    TEXT PRIMARY KEY,
-    slug                  TEXT NOT NULL UNIQUE,
-    name                  TEXT NOT NULL,
-    repository_url        TEXT NOT NULL,
-    image_base            TEXT NOT NULL,
-    exposure              TEXT NOT NULL DEFAULT 'private',
-    hostname              TEXT NOT NULL DEFAULT '',
-    contract_port         INTEGER NOT NULL,
-    contract_health_path  TEXT NOT NULL,
-    contract_storage_path TEXT NOT NULL,
-    deploying             INTEGER NOT NULL DEFAULT 0 CHECK (deploying IN (0, 1)),
-    deploy_started_ns     INTEGER NOT NULL DEFAULT 0,
-    created_at            TEXT NOT NULL,
-    updated_at            TEXT NOT NULL
-) STRICT;
-INSERT OR IGNORE INTO projects_new (id, slug, name, repository_url, image_base, exposure, hostname, contract_port, contract_health_path, contract_storage_path, deploying, deploy_started_ns, created_at, updated_at)
-	SELECT id, slug, name, repository_url, image_base, exposure, hostname, contract_port, contract_health_path, contract_storage_path, deploying, deploy_started_ns, created_at, updated_at FROM projects;
-DROP TABLE IF EXISTS projects;
-ALTER TABLE projects_new RENAME TO projects;
-CREATE UNIQUE INDEX IF NOT EXISTS releases_one_active ON releases(project_id) WHERE active = 1;
-CREATE INDEX IF NOT EXISTS releases_project_recent ON releases(project_id, created_at DESC);
-DROP TRIGGER IF EXISTS releases_identity_immutable;
 CREATE TRIGGER releases_identity_immutable
 BEFORE UPDATE ON releases
 FOR EACH ROW

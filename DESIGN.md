@@ -215,13 +215,13 @@ On first boot the console (tty1) shows the LAN panel URL and the 8-character pan
 There is no claim step. The panel requires its 8-character token on every placement and source, including LAN and tailnet.
 The token is stored at `/var/lib/omahab/api.token` (root 0600).
 At startup, the daemon copies it to `~/.config/omahab/token` for the configured admin user.
-SSH keys come from the installer's `--authorized-keys-file` (optional) and are extended as the first setup-checklist
+Backups lead the setup checklist (§5.4): the first step restores from an earlier server or starts fresh with a recovery phrase plus repository. SSH keys come from the installer's `--authorized-keys-file` (optional) and are extended as the next setup-checklist
 step; Tailscale enrollment lives on the checklist too. `omahab setup` is the SSH
 fallback for the Tailscale + Cloudflare-domain/token part of the flow (it does not manage SSH keys; key provisioning lives in the `install`/`omahab-install-disk` path).
 
 ### 5.4 Strict appliance posture
 
-The system remains an appliance: it does not adopt arbitrary existing servers. Fresh-image boot is the only supported path; disaster recovery = boot fresh image → “Restore from backup” on the setup checklist → Hetzner credentials + recovery phrase. The checklist offers “Set up a new server” (normal SSH-keys → Tailscale flow) and “Restore from backup” (Hetzner Storage Box username+host+sub-account password once + 24-word phrase → `restic snapshots --json --latest 10` → restore `--target /` with `--include` per `DefaultPaths()` including `/var/lib/tailscale` so the node keeps its Tailscale identity/IP; fallback to normal Tailscale step if coordination server rejects it). Restore never writes under `/nix` or `/etc`.
+The system remains an appliance: it does not adopt arbitrary existing servers. Fresh-image boot is the only supported path. Backups are the FIRST setup step: the box asks "Do you have a recovery phrase from an earlier Omahab server?" — "Set up a new server" walks the 24-word phrase ritual (saved-ack) then repository creation (Hetzner Storage Box username+host+sub-account password once, or a generic restic URL; mode=create initializes the repository, first backup + verify run in the background). "Restore from backup" takes the phrase + Hetzner credentials (or generic repo), lists earlier instance directories under `./omahab/` via `POST /api/v1/recovery/instances` (the server returns the exact instance location; the client never builds sftp URLs), lists snapshots of that location, then restores server-config plus all app scopes (`include_apps=true`) or a chosen app-scope subset (server-config always included — app scopes require it) through the staged `omahab-restore` unit. After the swap the repository is attached (mode=attach, exact instance location) so backups continue into the same instance path; a verify runs afterwards so `recovery_tested` reflects the restored repository. A snapshot whose manifest `release_ref` differs from the running system is surfaced clearly before apply. Restore state is observable server-side (check `restore`: not_started | skipped | in_progress | completed | failed, persisted in `restore_setup_state.json`); the box is done when the restore completed or both `recovery_key` and `backups_configured` are ok. Before Tailscale the panel is plain HTTP on the LAN — the first step warns that the Hetzner password crosses the LAN and offers the SSH alternative `omahab recovery apply --repository …`. Restore never writes under `/nix` or `/etc`.
 
 ### 5.5 SSH-first setup and hardening
 
@@ -260,7 +260,7 @@ A platform bundle entry in the curated catalog declares:
 - `id`, `name`, `port`, `default_exposure`, `max_exposure`;
 - `health_check` (HTTP probes against the loopback port map, `kind`/`path`/`port`);
 - `data` (persistent-data locations, `name`/`path` pairs under `/srv/omahab` and `/var/lib/<svc>`);
-- `backup` (`pre_backup`/`post_restore` native commands, e.g. `pg_dump -Fc <db> -f /var/lib/omahab/dumps/<db>.pgdump` and `pg_restore --clean --if-exists -d <db> ... && systemctl restart <unit>`);
+- `backup` (`databases` listing the PostgreSQL logical databases scoped capture dumps and restores; consistency is the capture engine's job, not per-bundle commands);
 - `oidc` (`supported`/`mode`/`provider` for native OIDC via Pocket ID);
 - `resources` (`memory_mb` guidance);
 - `default` (whether installed by default);
@@ -270,7 +270,39 @@ A platform bundle entry in the curated catalog declares:
 
 Gated bundles (pocket-id, woodpecker, karakeep, litellm, hermes, forgejo, immich, paperless, ntfy; restic gates on its htpasswd instead) gate on their `appenv/<bundle>.env` file via `ConditionPathExists` (condition-skip, not failure); only caddy/syncthing read appenv as an optional `EnvironmentFile = [ "-..." ]` (or need none) and still start. `omahabd` renders the env file after enrollment and starts the gated units. Versions of native services track the nixpkgs pin — there is no per-app image update; `omahab system upgrade` switches the whole generation.
 
-Users do not edit application configuration; everything flows through omahabd.
+**Bundle layout (curated and custom).** Every bundle is one directory:
+`bundles/<id>/bundle.json` (exactly one catalog Bundle object — the same
+schema as the entries of the former single-file catalog; `source` is
+loader-assigned, never present in files) and `bundles/<id>/module.nix`
+(that app's NixOS config; shared gates and helpers live in
+`nix/bundle-lib.nix`). The `omahab-catalog` flake package assembles
+`catalog.json` from `bundles/*/bundle.json` at build time, so
+`OMAHAB_CATALOG` keeps working unchanged; `nix/module.nix` imports every
+`bundles/<id>/module.nix`.
+
+**Custom bundles** live in a git repo at `/var/lib/omahab/bundles` with
+the same layout (Forgejo is only a mirror; pushes are best-effort). The
+daemon merges committed custom `bundle.json` files into the runtime
+catalog (read at HEAD via `git show`, never the dirty worktree) and
+rebuilds pass `--override-input bundles git+file:///var/lib/omahab/bundles`
+so only committed files are built. Custom validation: ids and units must
+not collide with curated entries; ports must be unique and inside the
+reserved custom range 20000–20999; `name`, `units`, `port`,
+`health_check.kind`, and `module.nix` are required. Secrets never appear
+in `module.nix` — env flows through `/var/lib/omahab/appenv/<id>.env`
+with `ConditionPathExists`, exactly like curated gated bundles. `omahab
+bundle list|add|remove|apply|status` and the admin API (panel-token
+authenticated) drive the same `internal/bundles` service. A custom bundle
+whose module fails a rebuild is reported by id, disabled via a committed
+`bundles/<id>/disabled` marker, and the build retried once.
+
+Applying runs out-of-process for the same reason `omahab system upgrade`
+does — the switch restarts `omahabd`, so the daemon must not health-gate
+its own restart. The panel's POST `/api/v1/bundles/apply` stages an
+operation journal plus a tmpfs handoff and starts the
+`omahab-bundle-apply` oneshot unit, which runs `omahab bundle apply
+--apply-staged` as root through the same `internal/bundles` apply path;
+the daemon converges the journal on poll after it restarts.
 
 ### 6.2 Project applications
 
@@ -684,7 +716,7 @@ The Omarchy companion can create an isolated remote runner for a project:
 5. `DevPodRunner.Up` clones `https://<forgejo>/<owner>/<repo>.git@<branch>` with `--workspace-env` (`OPENAI_BASE_URL=https://models.<domain>/v1`, `OPENAI_API_KEY=<virtualKey>`, `ANTHROPIC_BASE_URL=https://models.<domain>`, `ANTHROPIC_API_KEY=<same>`, `OMAHAB_WORKSPACE_ID=<id>`, `GIT_AUTHOR_NAME=omahab`/`EMAIL`, `GIT_COMMITTER_*`) and devcontainer (`{"name":"omahab-<name>","image":"mcr.microsoft.com/devcontainers/base:ubuntu","features":{"ghcr.io/devcontainers/features/node:1":{}},"postCreateCommand":"npm install -g @oh-my-pi/pi-coding-agent && git config --global credential.helper store"}` or repo `.devcontainer/devcontainer.json` when `DevcontainerSource=="devcontainer"` and present via `GetFile`).
 6. If `Instructions` non-empty, writes `/workspaces/<repo>/.omahab/TASK.md` (`mkdir -p $(ls -d /workspaces/*|head -1)/.omahab && echo <base64> | base64 -d > ...`); always `tmux new-session -d -s omp "omp"` and, when TASK present, `tmux send-keys -t omp "$(cat $(ls -d /workspaces/*|head -1)/.omahab/TASK.md)" Enter`. User and Hermes share the same `omp` tmux session.
 7. `workspace_send` (`POST /api/v1/workspaces/{id}/send {message}`, `MCP workspace_send`) → `DevPodRunner.Send` = `devpod ssh <id> --command "tmux send-keys -t omp '<shell-quoted message>' Enter"`. `RunPrint(id,prompt)` for Step 6 (`devpod ssh <id> --command 'cd $(ls -d /workspaces/*|head -1) && omp -p --mode json "<prompt>"'`).
-8. Attach: `ssh -t omahab@<tailscale-ip> sudo omahab workspace attach <id>` (`workspace` is canonical; `runner` remains a hidden CLI alias) re-execs via `sudo` if not root (`security.sudo.extraRules` `omahab NOPASSWD omahab runner attach *`, `DEVPOD_HOME=/var/lib/omahab/devpod` in `omahabd` unit and `DevPodRunner` `withDevPodEnv`), then `POST /api/v1/workspaces/{id}/attach` → `DevPodRunner.Attach` (`tmux new-session -A -s omahab-<id> devpod ssh <id> --tty`). `omahabd` runs devpod as root with `DEVPOD_HOME`.
+8. Attach: `ssh -t omahab@<tailscale-ip> sudo omahab workspace attach <id>` re-execs via `sudo` if not root (`security.sudo.extraRules` `omahab NOPASSWD omahab workspace attach *`, `DEVPOD_HOME=/var/lib/omahab/devpod` in `omahabd` unit and `DevPodRunner` `withDevPodEnv`), then `POST /api/v1/workspaces/{id}/attach` → `DevPodRunner.Attach` (`tmux new-session -A -s omahab-<id> devpod ssh <id> --tty`). `omahabd` runs devpod as root with `DEVPOD_HOME`.
 
 Companion: `workspace.create {project_slug, title}` → `POST /api/v1/companion/workspaces` (deviceAuth) → on `running` `Launcher.OpenTerminalCommand(["ssh","-t","omahab@"+ip,"sudo","omahab","workspace","attach",id])` (`alacritty -e`, `kitty`, `gnome-terminal --`, `xterm -e` search); `workspace.attach {id}` → same ssh; `workspace.list` → `GET /api/v1/companion/workspaces`; `project.list` → existing. `Clientd.qml` `workspace.*` methods on newline-JSON socket; `Panel.qml` "New workspace…" picker (projects from `project.list`, title field) and live list (name, project, idle minutes) with Attach/Stop.
 
@@ -861,27 +893,24 @@ No outbound AI email or automatic reply is required initially.
 
 Use restic as the backup engine. Hetzner Storage Box over SFTP is the recommended destination, with other restic-compatible destinations possible later.
 
-Back up:
+Back up, as explicit scopes the operator selects:
 
-- encrypted Omahab control state;
-- service configuration;
-- Forgejo repositories and required metadata;
-- application-aware database dumps;
-- Immich uploaded media and database;
-- Paperless documents and database;
-- Karakeep data;
-- shared Syncthing server folders;
-- project persistent data;
-- secret ciphertext and recovery metadata.
+- `server-config` — the control-plane checkpoint: a VACUUM INTO copy of `control.db`, `recovery.kit`, `storage.json`, the inseparable Pocket ID identity data, and the rendered configuration subtrees (`appenv/`, `caddy/`, `cloudflared/`) from the state directory;
+- `app:<bundle-id>` — per-application data volumes plus logical PostgreSQL dumps;
+- `server-sync`, `server-projects`, `machine-backups` — server-owned data directories.
 
-Application bundles supply pre-backup and post-restore hooks. Database consistency is mandatory. Copying only live database files is not considered a valid backup.
+Capture is scoped and consistent: selected writers stop, SQLite databases are cold-copied while stopped and PostgreSQL is dumped logically as the postgres OS user (`pg_dump --format=custom`) into the fixed staging directory `/var/lib/omahab/backup-staging/`, restic snapshots exactly the staging tree plus each scope's live source paths, and writers resume even on failure. There are no bundle-level backup hooks; copying live database files raw is never treated as a valid backup.
+
+Every snapshot carries a v2 manifest at `/var/lib/omahab/backup-staging/manifest.json`: `format_version: 2`, `instance` (id, domain, placement), `system` (release ref, nixpkgs rev, flake.lock sha256, custom-bundles repo rev), and one `scopes[]` record per captured scope with its live `paths`, staged `artifacts` (file + sha256 + kind), `requires` (app scopes require `server-config`), `volumes`, `databases` (name, file, sha256, `postgres_major`), and `secret_names`. Custom bundle definitions travel with their app scope: the committed files at the bundles repo HEAD are copied into staging `bundles/<id>/` and recorded in the scope's `bundle` record. Snapshots without a v2 manifest are not restoreable.
 Initial objectives:
 
 - recovery point objective: no more than 24 hours;
 - recovery time objective: approximately four hours for the supported single-node restore path;
 - periodic automated restore verification;
 - visible last backup and last verified restore status;
-- first backup and first verified restore complete during setup (Hetzner repo configured immediately after the recovery phrase → `RunBackup` then `Verify` so `recovery_tested` passes on day one; timers enabled via `enableBackupTimers`).
+- first backup and first verified restore complete during setup (Hetzner repo configured immediately after the recovery phrase → scoped capture then `Verify` so `recovery_tested` passes on day one; timers enabled via `enableBackupTimers`).
+
+Restore contract: staged extraction validates the v2 manifest and refuses any artifact whose sha256 does not match the staged bytes before anything live is touched. Live app-scope restores additionally refuse dumps captured with a newer PostgreSQL major than the running cluster (`postgres_major` in the manifest names the dump source). Server-config restores run offline through the recovery executor, never in the live daemon.
 
 A backup is not healthy until Omahab has demonstrated that it can restore the relevant data.
 
@@ -895,7 +924,7 @@ Initialize only a repository that Omahab creates; never initialize an attached r
 
 Each Omarchy workstation gets its own append-only restic repository on the server:
 
-- `services.restic.server` (`nix/apps.nix`) listens on `127.0.0.1:8500`, `dataDir /srv/omahab/machine-backups`, `appendOnly true`, `privateRepos true`, `htpasswd-file /var/lib/omahab/machine-backups.htpasswd` (systemd socket `restic-rest-server.socket` → `restic-rest-server.service`, user `restic`). Caddy exposes it as `https://backup.<domain>` → `127.0.0.1:8500` via the catalog bundle `restic-server` (`route backup.{{.Domain}}`, `max_exposure private`, `units restic-rest-server.service`). The data directory is included in `backups.DefaultPaths()` so the server's nightly Hetzner backup ships every machine's history off-site.
+- `services.restic.server` (`nix/apps.nix`) listens on `127.0.0.1:8500`, `dataDir /srv/omahab/machine-backups`, `appendOnly true`, `privateRepos true`, `htpasswd-file /var/lib/omahab/machine-backups.htpasswd` (systemd socket `restic-rest-server.socket` → `restic-rest-server.service`, user `restic`). Caddy exposes it as `https://backup.<domain>` → `127.0.0.1:8500` via the catalog bundle `restic-server` (`route backup.{{.Domain}}`, `max_exposure private`, `units restic-rest-server.service`). The data directory is the `machine-backups` scope, so the server's nightly Hetzner backup ships every machine's history off-site.
 - At companion enrollment, `companion.EnrollDevice` creates an htpasswd entry `dev-<deviceID>` with a random 32-byte password (bcrypt via `golang.org/x/crypto/bcrypt`), rewrites `/var/lib/omahab/machine-backups.htpasswd` atomically, `systemctl reload restic-rest-server` (fallback `restart` if SIGHUP not supported), and returns once `{restic_repo:"rest:https://backup.<domain>/dev-<id>", restic_password:<random 32B>, rest_user, rest_password}`. The repo directory `/srv/omahab/machine-backups/dev-<id>` is kept on revocation (admin deletes it manually); `RevokeDevice` removes only the htpasswd line.
 - `omahab-clientd` stores those four values in the desktop keyring (`backup-repo`, `backup-password`, `backup-rest-user`, `backup-rest-password`, service `omahab`). `omahab backup-drive enable [--paths ~/Documents,~/Pictures]` writes `~/.config/omahab/backup-paths` (default `$HOME`, excluding `~/.cache`, `**/.cache`, `~/.local/share/Trash`, `**/node_modules`, `**/.git` plus the Trash basename — six patterns in `ExcludePatterns`) and installs a systemd **user** timer `omahab-machine-backup.timer` (`OnCalendar=daily`, `Persistent=true`) whose service runs `omahab backup-drive run` = `restic backup --exclude-file <generated> $(paths)` → `restic forget --keep-daily 14 --keep-weekly 8 --keep-monthly 12` (no `--prune` — the server is append-only, so `forget` only marks; growth is bounded by deleting `/srv/omahab/machine-backups/dev-<id…
 - `omahab-clientd` polls `StatusBackupDrive` every `backupInterval` (15 min) and surfaces `backup_last_snapshot`/`backup_error` in `DaemonStatus`; the Omarchy plugin shows “PC backup: <age>” and “Back up now” (`backup.run`/`backup.status` via the Unix socket).
@@ -980,7 +1009,7 @@ omahab workspace create
 omahab workspace attach
 omahab workspace send
 omahab workspace stop
-(`runner` remains a hidden alias for the workspace commands.) Additional real commands not shown here: `workspace show|open|ssh-proxy`, `project list|show|rm`, `sync list|show|rm`, `hermes open --url`, `env`, `provider login`.
+Additional real commands not shown here: `workspace show|open|ssh-proxy`, `project list|show|rm`, `sync list|show|rm`, `hermes open --url`, `env`, `provider login`.
 omahab sync add
 omahab hermes open
 omahab backup-drive enable [--paths ~/Documents,~/Pictures]
@@ -1138,7 +1167,7 @@ Omahab is not complete until these scenarios work end to end.
 3. Configure encrypted Hetzner backup (wizard step immediately after recovery phrase: enter Hetzner sub-account username+host+password once; system generates ed25519 key, uploads via SFTP:23, derives restic password from phrase, creates `sftp://…/omahab/<instanceID>`, runs first backup + verify so `recovery_tested` is ok).
 4. Destroy the Omahab machine.
 5. Boot a fresh appliance image on a replacement.
-6. On the setup checklist choose “Restore from backup” → enter Hetzner username+host+password (once) + 24-word phrase → system derives restic password, uploads key, lists `restic snapshots --json --latest 10`, restores `--target /` with `--include` per `DefaultPaths()` (including `/var/lib/tailscale` so Tailscale IP is kept; fallback to normal Tailscale step if rejected), unwraps `recovery.kit` → `master.key`, runs `post_restore` hooks, restarts `omahabd` (or `omahab backup restore --fresh` from SSH).
+6. On the setup checklist choose “Restore from backup” → enter Hetzner username+host+password (once) + 24-word phrase → `POST /api/v1/recovery/instances` lists every earlier instance directory under `./omahab/` (the server returns the exact location; wrong-phrase instances report locked, never an error), then `POST /api/v1/recovery/restore/snapshots` lists the newest snapshots with scope tags. Staging extracts and validates the v2 manifest (artifact sha256, fingerprint), the `omahab-restore` oneshot unit applies the server-config swap (`control.db`, `recovery.kit` → `master.key`, `storage.json`, rendered config subtrees) with omahabd stopped, restarts the daemon, and the repository is attached (`mode:attach`) so backups continue into the same instance path. App scopes restore afterwards through the live scoped path. SSH alternative: `sudo omahab recovery apply`.
 7. Confirm photos, databases, repositories, identities, and projects are usable.
 
 **Retention.** Server repositories (Hetzner SFTP, local) apply a retention policy so daily snapshots do not grow forever. Every snapshot is tagged `omahab` plus one `scope:<name>` tag per captured scope; retention runs `restic forget --prune --group-by tags` with keep-daily 7, keep-weekly 4, keep-monthly 12, keep-yearly 2 — applied per scope group so `server-config` history is independent of chatty `app:` scopes. The pass is planned with `--dry-run --json`; the newest verified-restorable snapshot (per repository, from `backup_snapshots.verified_at`) is removed from the forget set before applying, so the only verified proof can never be pruned away. It runs weekly (`omahab-backup-prune.timer` → `omahab backup prune` → `POST /api/v1/backups/prune`) and opportunistically after scheduled backups when due (>7 days since last pass, recorded in `backup_retention_state`). Failures publish `backup.retention_failed` (warning); `restic stats --mode restore-size --json` reports post-prune size; a local repository with <5 GiB free publishes `backup.repo_space_low`. The policy and last outcome surface read-only in the backups status (`GET` backup status `retention` field).

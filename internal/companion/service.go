@@ -1316,13 +1316,6 @@ func (s *Service) ensureDeviceVirtualKey(ctx context.Context, deviceID string) (
 		return "", fmt.Errorf("providers or secrets not configured")
 	}
 	secretName := "device-key." + deviceID
-	// Best-effort orphan cleanup before the non-revoked lookup below (see
-	// providers-008 ordering note in CleanupLegacyGatewayOrphans).
-	if n, cerr := s.providers.CleanupLegacyGatewayOrphans(ctx); cerr != nil {
-		log.Printf("companion: legacy gateway orphan cleanup: %v", cerr)
-	} else if n > 0 {
-		log.Printf("companion: revoked %d legacy gateway orphan keys", n)
-	}
 	// Check for existing valid vk row
 	var vkID string
 	var expiresAt sql.NullString
@@ -1331,14 +1324,9 @@ func (s *Service) ensureDeviceVirtualKey(ctx context.Context, deviceID string) (
 	err := s.db.QueryRowContext(ctx, `SELECT id, expires_at, revoked_at FROM provider_virtual_keys WHERE owner_kind = 'device' AND owner_id = ? AND (revoked_at IS NULL) AND (expires_at IS NULL OR expires_at > ?) ORDER BY created_at DESC LIMIT 1`, deviceID, nowStr).Scan(&vkID, &expiresAt, &revokedAt)
 	foundValid := err == nil
 	if foundValid {
-		// Try to reveal cached plaintext; a retired omk_ secret is treated
-		// as a cache miss so the device is reissued a gateway sk- bearer.
+		// Cached plaintext: reuse it; a cache miss re-issues through the gateway.
 		if v, err := s.secrets.RevealByName(ctx, "platform-app", secretName); err == nil && strings.TrimSpace(v) != "" {
-			if providers.IsLegacyVirtualKeyToken(v) {
-				log.Printf("companion: device key is retired omk_, reissuing through gateway")
-			} else {
-				return strings.TrimSpace(v), nil
-			}
+			return strings.TrimSpace(v), nil
 		}
 		// Cache miss but row exists -> need to re-issue (revoke old row and create new)
 		_ = s.providers.RevokeVirtualKey(ctx, domain.ID(vkID))

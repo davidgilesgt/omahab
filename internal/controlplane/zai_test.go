@@ -12,8 +12,8 @@ import (
 // Unauthorized Coding Plan saves fail with no silent paid fallback; the
 // backend never surfaces an error-free connection in that state.
 func TestConnectZAI_CodingRequiresAck(t *testing.T) {
-	gw := newHandoffFakeGateway()
-	b := newHandoffBackend(t, gw)
+	gw := newFakeNativeGateway()
+	b := newModelSetupBackend(t, gw)
 	b.providers.SetVirtualKeyGateway(gw)
 	_, err := b.ConnectZAI(context.Background(), apitypes.ConnectZAIRequest{
 		Plan: "coding", APIKey: "sk-coding",
@@ -26,8 +26,8 @@ func TestConnectZAI_CodingRequiresAck(t *testing.T) {
 // PAYG connects through the PAYG endpoint only; the coding endpoint is never
 // touched and no deployment aliases are disturbed.
 func TestConnectZAI_PAYGUsesPAYGEndpoint(t *testing.T) {
-	gw := newHandoffFakeGateway()
-	b := newHandoffBackend(t, gw)
+	gw := newFakeNativeGateway()
+	b := newModelSetupBackend(t, gw)
 	b.providers.SetVirtualKeyGateway(gw)
 	conn, err := b.ConnectZAI(context.Background(), apitypes.ConnectZAIRequest{
 		Plan: "payg", APIKey: "sk-payg", Model: "glm-4.6",
@@ -57,8 +57,8 @@ func TestConnectZAI_PAYGUsesPAYGEndpoint(t *testing.T) {
 // Authorized Coding Plan use routes to the coding endpoint with the
 // acknowledgement recorded; unauthorized terms are never implied.
 func TestConnectZAI_CodingUsesCodingEndpoint(t *testing.T) {
-	gw := newHandoffFakeGateway()
-	b := newHandoffBackend(t, gw)
+	gw := newFakeNativeGateway()
+	b := newModelSetupBackend(t, gw)
 	b.providers.SetVirtualKeyGateway(gw)
 	conn, err := b.ConnectZAI(context.Background(), apitypes.ConnectZAIRequest{
 		Plan: "coding", APIKey: "sk-coding", AuthorizedCodingUse: true, Model: "glm-4.6",
@@ -82,8 +82,8 @@ func TestConnectZAI_CodingUsesCodingEndpoint(t *testing.T) {
 // aliases still referencing the deployment block instead of silently
 // breaking routing.
 func TestDisconnectZAI_KeepsUnrelated(t *testing.T) {
-	gw := newHandoffFakeGateway()
-	b := newHandoffBackend(t, gw)
+	gw := newFakeNativeGateway()
+	b := newModelSetupBackend(t, gw)
 	b.providers.SetVirtualKeyGateway(gw)
 	ctx := context.Background()
 	if _, err := b.ConnectZAI(ctx, apitypes.ConnectZAIRequest{Plan: "payg", APIKey: "sk-payg"}); err != nil {

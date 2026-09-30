@@ -266,29 +266,12 @@ func (s *Service) Ingest(ctx context.Context, req IngestRequest) (IngestResult, 
 	}
 	from := req.canonicalFrom()
 	to := req.canonicalTo()
-	// from/to may be empty for legacy callers that used raw direct HMAC; allow empty for fallback.
 
 	// 2. HMAC verification (v1 canonical covering from/to/raw.length).
 	if len(s.cfg.HMACKey) == 0 {
 		return IngestResult{}, ErrAuthFailed
 	}
-	// Prefer v1 canonical when worker fields are present; fallback to legacy for tests.
-	valid := false
-	if from != "" || to != "" || req.TimestampStr != "" {
-		valid = VerifyHMACV1(s.cfg.HMACKey, tsStr, req.Nonce, from, to, req.Raw, req.Signature)
-		// If v1 fails but caller used legacy framing (no from/to), try legacy as fallback
-		if !valid && from == "" && to == "" {
-			valid = VerifyHMAC(s.cfg.HMACKey, req.Timestamp, req.Nonce, req.Signature, req.Raw)
-		}
-	} else {
-		// Legacy path: timestamp as int64 + nonce + raw
-		valid = VerifyHMAC(s.cfg.HMACKey, req.Timestamp, req.Nonce, req.Signature, req.Raw)
-		if !valid && tsStr != "" {
-			// Also try v1 with empty from/to for legacy callers that set TimestampStr
-			valid = VerifyHMACV1(s.cfg.HMACKey, tsStr, req.Nonce, "", "", req.Raw, req.Signature)
-		}
-	}
-	if !valid {
+	if !VerifyHMACV1(s.cfg.HMACKey, tsStr, req.Nonce, from, to, req.Raw, req.Signature) {
 		return IngestResult{}, ErrAuthFailed
 	}
 	// Verify rawSize if declared (worker sends rawSize); mismatch is tampering.
@@ -443,17 +426,13 @@ func (s *Service) checkAndInsertNonce(ctx context.Context, nonce string, now tim
 	return nil
 }
 
-func (s *Service) IngestBytes(ctx context.Context, timestamp int64, nonce string, raw []byte, sig string) (IngestResult, error) {
-	return s.Ingest(ctx, IngestRequest{Timestamp: timestamp, Nonce: nonce, Raw: raw, Signature: sig})
-}
-
 func (s *Service) quarantine(ctx context.Context, req IngestRequest, reason string, now time.Time, parsed *ParsedMessage) (IngestResult, error) {
 	// Extract safe header fields without logging raw content.
 	// For size-limit reasons skip heavy MIME parsing to avoid OOM.
 	headerFrom := ""
 	subject := ""
-	envelopeFrom := req.EnvelopeFrom
-	recipient := req.Recipient
+	envelopeFrom := req.From
+	recipient := req.To
 	rawSize := len(req.Raw)
 	decodedSize := 0
 	if parsed != nil {

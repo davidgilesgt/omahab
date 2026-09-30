@@ -66,16 +66,22 @@ func (f *fakeRecoveryRunner) Restore(_ context.Context, repo Repository, creds C
 }
 
 // writeServerConfigSnapshot builds a staging template that mirrors the
-// real snapshot layout: state files under <staging>/<stateDir>/ plus a
-// manifest with the server-config scope.
+// real scoped-capture snapshot layout: checkpoint files (control.db,
+// recovery.kit, storage.json) staged under the fixed backup-staging
+// path, the manifest next to them, and the state directory captured at
+// its absolute path (rendered configuration subtrees like appenv/ live
+// under <staging>/<stateDir>/).
 func writeServerConfigSnapshot(t *testing.T, template, stateDir string, m SnapshotManifest) {
 	t.Helper()
-	base := filepath.Join(template, stateDir)
-	if err := os.MkdirAll(base, 0o700); err != nil {
-		t.Fatal(err)
+	staging := filepath.Join(template, backupStagingDir)
+	base := filepath.Join(template, stateDir, "appenv")
+	for _, d := range []string{staging, base} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
 	// A real SQLite control.db so ValidateStaging integrity passes.
-	db, err := sql.Open("sqlite", "file:"+filepath.Join(base, "control.db"))
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(staging, "control.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,30 +89,57 @@ func writeServerConfigSnapshot(t *testing.T, template, stateDir string, m Snapsh
 		t.Fatal(err)
 	}
 	_ = db.Close()
-	if err := os.WriteFile(filepath.Join(base, "recovery.kit"), []byte(`{"version":1,"fingerprint":"aabbccdd","master_wrapped":"x"}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(staging, "recovery.kit"), []byte(`{"version":1,"fingerprint":"aabbccdd","master_wrapped":"x"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(base, "storage.json"), []byte(`{"version":2}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(staging, "storage.json"), []byte(`{"version":2}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(base, "appenv"), 0o700); err != nil {
+	if err := os.WriteFile(filepath.Join(base, "immich.env"), []byte("K=v\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(base, "appenv", "immich.env"), []byte("K=v\n"), 0o640); err != nil {
+	// Stamp the real content hashes into the manifest artifacts before
+	// writing it next to them.
+	controlSHA, err := SHA256File(filepath.Join(staging, "control.db"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteManifest(template, m); err != nil {
+	kitSHA, err := SHA256File(filepath.Join(staging, "recovery.kit"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	storageSHA, err := SHA256File(filepath.Join(staging, "storage.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range m.Scopes {
+		if m.Scopes[i].Name != ScopeServerConfig {
+			continue
+		}
+		m.Scopes[i].Artifacts = []ManifestArtifact{
+			{File: "control.db", SHA256: controlSHA, Kind: ArtifactSQLiteDump},
+			{File: "recovery.kit", SHA256: kitSHA, Kind: ArtifactFile},
+			{File: "storage.json", SHA256: storageSHA, Kind: ArtifactFile},
+		}
+	}
+	if err := WriteManifest(staging, m); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func recoveryTestManifest(fp string) SnapshotManifest {
 	return SnapshotManifest{
-		FormatVersion:       1,
-		InstanceID:          "inst-1",
-		Domain:              "omahab.com",
-		ReleaseRef:          "v1",
-		Scopes:              []string{ScopeServerConfig},
+		FormatVersion: ManifestFormatVersion,
+		Instance:      ManifestInstance{ID: "inst-1", Domain: "omahab.com", Placement: "vps"},
+		System:        ManifestSystem{ReleaseRef: "v1"},
+		Scopes: []ManifestScope{{
+			Name: ScopeServerConfig,
+			Artifacts: []ManifestArtifact{
+				{File: "control.db", SHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Kind: ArtifactSQLiteDump},
+				{File: "recovery.kit", SHA256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Kind: ArtifactFile},
+				{File: "storage.json", SHA256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", Kind: ArtifactFile},
+			},
+		}},
 		RecoveryFingerprint: fp,
 	}
 }
@@ -180,7 +213,11 @@ func TestServerConfigManifestRefusesLegacyAndWrongScopes(t *testing.T) {
 	if _, err := ServerConfigManifest(dir); err == nil {
 		t.Fatal("legacy snapshot without manifest must be refused")
 	}
-	if err := WriteManifest(dir, SnapshotManifest{FormatVersion: 1, InstanceID: "i", Scopes: []string{AppScope("immich")}}); err != nil {
+	if err := WriteManifest(dir, SnapshotManifest{
+		FormatVersion: ManifestFormatVersion,
+		Instance:      ManifestInstance{ID: "i"},
+		Scopes:        []ManifestScope{{Name: AppScope("immich")}},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ServerConfigManifest(dir); err == nil {
@@ -259,11 +296,11 @@ func TestPlanServerConfigSwapRefusesMissingDBAndKit(t *testing.T) {
 	if _, err := PlanServerConfigSwap(staging, stateDir, recoveryTestManifest("")); err == nil {
 		t.Fatal("missing control.db must be refused")
 	}
-	base := filepath.Join(staging, stateDir)
-	if err := os.MkdirAll(base, 0o700); err != nil {
+	stagedBase := filepath.Join(staging, backupStagingDir)
+	if err := os.MkdirAll(stagedBase, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(base, "control.db"), []byte("x"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(stagedBase, "control.db"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := PlanServerConfigSwap(staging, stateDir, recoveryTestManifest("")); err == nil {

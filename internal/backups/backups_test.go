@@ -109,8 +109,35 @@ func (f *fakeRunner) Restore(_ context.Context, repo Repository, creds Credentia
 	if fn != nil {
 		return fn(repo, creds, snapshotID, target)
 	}
-	writeTestTree(target, map[string]string{"a.txt": "aaa", "sub/b.txt": "bbbb"})
-	return nil
+	return defaultRestoreTree(target)
+}
+
+// defaultRestoreTree writes the v2 snapshot layout every restore fake
+// shares: the fixed staging directory, two data files, and the v2
+// manifest describing them.
+func defaultRestoreTree(target string) error {
+	staging := filepath.Join(target, backupStagingDir)
+	writeTestTree(staging, map[string]string{"a.txt": "aaa", "sub/b.txt": "bbbb"})
+	aSHA, err := SHA256File(filepath.Join(staging, "a.txt"))
+	if err != nil {
+		return err
+	}
+	bSHA, err := SHA256File(filepath.Join(staging, "sub", "b.txt"))
+	if err != nil {
+		return err
+	}
+	return WriteManifest(staging, SnapshotManifest{
+		FormatVersion: ManifestFormatVersion,
+		Instance:      ManifestInstance{ID: "inst-1", Domain: "omahab.com", Placement: "vps"},
+		System:        ManifestSystem{ReleaseRef: "v1"},
+		Scopes: []ManifestScope{{
+			Name: ScopeServerConfig,
+			Artifacts: []ManifestArtifact{
+				{File: "a.txt", SHA256: aSHA, Kind: ArtifactFile},
+				{File: "sub/b.txt", SHA256: bSHA, Kind: ArtifactFile},
+			},
+		}},
+	})
 }
 
 func (f *fakeRunner) backups() int {
@@ -127,30 +154,6 @@ type fakeSecrets struct {
 func (f *fakeSecrets) Resolve(_ context.Context, ref SecretRef) (Credentials, error) {
 	f.calls = append(f.calls, ref)
 	return f.creds, nil
-}
-
-type fakeHooks struct {
-	byKind map[HookKind][]Hook
-}
-
-func (f fakeHooks) Hooks(_ context.Context, kind HookKind) ([]Hook, error) {
-	return f.byKind[kind], nil
-}
-
-type fakeHookRunner struct {
-	results map[string]HookOutcome
-}
-
-func (f fakeHookRunner) RunHook(_ context.Context, h Hook) HookOutcome {
-	if out, ok := f.results[h.Application]; ok {
-		if out.StartedAt.IsZero() {
-			out.StartedAt = time.Now()
-			out.FinishedAt = out.StartedAt.Add(time.Second)
-		}
-		return out
-	}
-	now := time.Now()
-	return HookOutcome{ExitCode: intPtr(0), StartedAt: now, FinishedAt: now.Add(time.Millisecond)}
 }
 
 type fakePublisher struct {
@@ -202,7 +205,6 @@ func newTestService(t *testing.T, mutate func(*Config, *Deps)) (*Service, *fakeP
 		t.Fatalf("migrate: %v", err)
 	}
 	cfg := Config{
-		Paths:          []string{filepath.Join(root, "data")},
 		Host:           "testhost",
 		VerifyRoot:     filepath.Join(root, "verify"),
 		CacheDir:       filepath.Join(root, "cache"),
@@ -212,11 +214,9 @@ func newTestService(t *testing.T, mutate func(*Config, *Deps)) (*Service, *fakeP
 	fr := &fakeRunner{}
 	pub := &fakePublisher{}
 	deps := Deps{
-		Runner:     fr,
-		Hooks:      fakeHooks{byKind: map[HookKind][]Hook{}},
-		HookRunner: fakeHookRunner{},
-		Secrets:    &fakeSecrets{creds: Credentials{Password: testPassword, Username: "u123", AccessKey: testAccessKey}},
-		Events:     pub,
+		Runner:  fr,
+		Secrets: &fakeSecrets{creds: Credentials{Password: testPassword, Username: "u123", AccessKey: testAccessKey}},
+		Events:  pub,
 	}
 	if mutate != nil {
 		mutate(&cfg, &deps)
@@ -246,17 +246,14 @@ func mustList(t *testing.T, svc *Service) []Snapshot {
 	return snaps
 }
 
-func hookStatuses(t *testing.T, svc *Service, runID string) []HookStatus {
-	t.Helper()
-	d, err := svc.GetRun(context.Background(), runID)
-	if err != nil {
-		t.Fatalf("get run: %v", err)
+// testRunRequest is the minimal valid v2 capture request: explicit
+// scopes and explicit paths.
+func testRunRequest() RunRequest {
+	return RunRequest{
+		Trigger: TriggerScheduled,
+		Scopes:  []string{ScopeServerConfig},
+		Paths:   []string{"/var/lib/omahab/backup-staging"},
 	}
-	out := make([]HookStatus, 0, len(d.Hooks))
-	for _, h := range d.Hooks {
-		out = append(out, h.Status)
-	}
-	return out
 }
 
 // --- configure ---
@@ -300,7 +297,7 @@ func TestConfigureLifecycle(t *testing.T) {
 	}
 
 	// A repository with recorded runs is audit history and cannot be deleted.
-	if _, err := svc.RunBackup(ctx, RunRequest{}); err != nil {
+	if _, err := svc.RunBackup(ctx, testRunRequest()); err != nil {
 		t.Fatalf("backup: %v", err)
 	}
 	if err := svc.DeleteRepository(ctx, repo.ID); !errors.Is(err, ErrConflict) {
@@ -319,18 +316,11 @@ func TestConfigureLifecycle(t *testing.T) {
 // --- run ---
 
 func TestRunBackupSuccess(t *testing.T) {
-	svc, pub, fr := newTestService(t, func(cfg *Config, deps *Deps) {
-		deps.Hooks = fakeHooks{byKind: map[HookKind][]Hook{
-			HookPreBackup: {
-				{Application: "immich", Command: []string{"/usr/local/bin/immich-dump"}},
-				{Application: "forgejo", Command: []string{"/usr/local/bin/forgejo-dump"}},
-			},
-		}}
-	})
+	svc, pub, fr := newTestService(t, nil)
 	ctx := context.Background()
 	mustConfigure(t, svc)
 
-	run, err := svc.RunBackup(ctx, RunRequest{Trigger: TriggerScheduled})
+	run, err := svc.RunBackup(ctx, testRunRequest())
 	if err != nil {
 		t.Fatalf("run backup: %v", err)
 	}
@@ -339,9 +329,6 @@ func TestRunBackupSuccess(t *testing.T) {
 	}
 	if run.SnapshotID != "fakesnap111111" || run.Stats == nil || run.Stats.Files != 7 {
 		t.Fatalf("snapshot stats not recorded: %+v", run)
-	}
-	if got := hookStatuses(t, svc, run.ID); len(got) != 2 || got[0] != HookOK || got[1] != HookOK {
-		t.Fatalf("hook outcomes: %v", got)
 	}
 	snaps := mustList(t, svc)
 	if len(snaps) != 1 {
@@ -353,8 +340,13 @@ func TestRunBackupSuccess(t *testing.T) {
 	if len(fr.backupCalls) != 1 {
 		t.Fatalf("restic called %d times", len(fr.backupCalls))
 	}
+	// Scoped capture: the request carries the exact scope paths plus a
+	// scope:<name> tag per scope.
 	if len(fr.backupCalls[0].Paths) != 1 || fr.backupCalls[0].Host != "testhost" {
 		t.Fatalf("backup request: %+v", fr.backupCalls[0])
+	}
+	if len(fr.backupCalls[0].Tags) != 2 || fr.backupCalls[0].Tags[1] != "scope:server-config" {
+		t.Fatalf("scope tags: %v", fr.backupCalls[0].Tags)
 	}
 	completed := pub.byType(EventBackupCompleted)
 	if len(completed) != 1 || completed[0].ResourceID != domain.ID(run.ID) {
@@ -365,43 +357,32 @@ func TestRunBackupSuccess(t *testing.T) {
 	}
 }
 
-func TestRunBackupHookPartialFailure(t *testing.T) {
-	svc, pub, fr := newTestService(t, func(cfg *Config, deps *Deps) {
-		deps.Hooks = fakeHooks{byKind: map[HookKind][]Hook{
-			HookPreBackup: {
-				{Application: "immich", Command: []string{"immich-dump"}},
-				{Application: "forgejo", Command: []string{"forgejo-dump"}},
-				{Application: "paperless", Command: []string{"paperless-dump"}},
-			},
-		}}
-		deps.HookRunner = fakeHookRunner{results: map[string]HookOutcome{
-			"forgejo": {ExitCode: intPtr(1), Output: "pg_dump: connection refused"},
-		}}
-	})
+func TestRunBackupRequiresScopesAndPaths(t *testing.T) {
+	svc, _, fr := newTestService(t, nil)
 	ctx := context.Background()
 	mustConfigure(t, svc)
 
-	run, err := svc.RunBackup(ctx, RunRequest{})
+	// v2 capture is explicit: no scopes or no paths fails the run at
+	// staging time; restic never runs.
+	run, err := svc.RunBackup(ctx, RunRequest{Paths: []string{"/var/lib/omahab/backup-staging"}})
 	if err == nil {
-		t.Fatal("expected failure")
+		t.Fatal("expected failure without scopes")
 	}
-	if run.Status != StatusFailed || run.Stage != StageHooks {
+	if run.Status != StatusFailed || run.Stage != StageSnapshot {
 		t.Fatalf("run state: %+v", run)
 	}
-	if !strings.Contains(run.Error, "forgejo") || !strings.Contains(run.Error, "connection refused") {
-		t.Fatalf("hook failure not described: %q", run.Error)
+	if !strings.Contains(run.Error, "scopes") {
+		t.Fatalf("failure must name scopes: %q", run.Error)
 	}
-	// All three outcomes persist: ok, failed, skipped.
-	if got := hookStatuses(t, svc, run.ID); len(got) != 3 || got[0] != HookOK || got[1] != HookFailed || got[2] != HookSkipped {
-		t.Fatalf("partial hook outcomes: %v", got)
+	run, err = svc.RunBackup(ctx, RunRequest{Scopes: []string{ScopeServerConfig}})
+	if err == nil {
+		t.Fatal("expected failure without paths")
 	}
-	// restic must never run after a consistency failure.
+	if run.Status != StatusFailed || !strings.Contains(run.Error, "paths") {
+		t.Fatalf("run state: %+v", run)
+	}
 	if fr.backups() != 0 {
-		t.Fatalf("restic ran %d times after hook failure", fr.backups())
-	}
-	failed := pub.byType(EventBackupFailed)
-	if len(failed) != 1 || failed[0].Data["stage"] != StageHooks {
-		t.Fatalf("backup.failed events: %+v", failed)
+		t.Fatalf("restic ran %d times", fr.backups())
 	}
 	if snaps := mustList(t, svc); len(snaps) != 0 {
 		t.Fatalf("no snapshot should persist: %+v", snaps)
@@ -411,9 +392,6 @@ func TestRunBackupHookPartialFailure(t *testing.T) {
 func TestRunBackupResticFailureRedactsSecrets(t *testing.T) {
 	fr := &fakeRunner{}
 	svc, pub, _ := newTestService(t, func(cfg *Config, deps *Deps) {
-		deps.Hooks = fakeHooks{byKind: map[HookKind][]Hook{
-			HookPreBackup: {{Application: "immich", Command: []string{"immich-dump"}}},
-		}}
 		deps.Runner = fr
 	})
 	fr.backupFn = func(_ Repository, _ Credentials, _ BackupRequest) (Snapshot, error) {
@@ -422,7 +400,7 @@ func TestRunBackupResticFailureRedactsSecrets(t *testing.T) {
 	ctx := context.Background()
 	mustConfigure(t, svc)
 
-	run, err := svc.RunBackup(ctx, RunRequest{})
+	run, err := svc.RunBackup(ctx, testRunRequest())
 	if err == nil {
 		t.Fatal("expected failure")
 	}
@@ -433,10 +411,6 @@ func TestRunBackupResticFailureRedactsSecrets(t *testing.T) {
 		if strings.Contains(run.Error, secret) {
 			t.Fatalf("run error leaks secret: %q", run.Error)
 		}
-	}
-	// Hooks succeeded before restic failed; both facts persist.
-	if got := hookStatuses(t, svc, run.ID); len(got) != 1 || got[0] != HookOK {
-		t.Fatalf("hook outcomes: %v", got)
 	}
 	failed := pub.byType(EventBackupFailed)
 	if len(failed) != 1 || failed[0].Data["stage"] != StageSnapshot {
@@ -453,7 +427,7 @@ func TestSingleActiveOperation(t *testing.T) {
 	mustConfigure(t, svc)
 
 	// Seed a snapshot so verification and restore pass request validation.
-	if _, err := svc.RunBackup(ctx, RunRequest{}); err != nil {
+	if _, err := svc.RunBackup(ctx, testRunRequest()); err != nil {
 		t.Fatalf("seed backup: %v", err)
 	}
 
@@ -466,12 +440,12 @@ func TestSingleActiveOperation(t *testing.T) {
 		return Snapshot{ID: "fakesnap222222", Paths: req.Paths, FileCount: 1, SizeBytes: 1}, nil
 	}}
 	go func() {
-		_, err := svc.RunBackup(ctx, RunRequest{})
+		_, err := svc.RunBackup(ctx, testRunRequest())
 		done <- err
 	}()
 	<-entered
 
-	if _, err := svc.RunBackup(ctx, RunRequest{}); !errors.Is(err, ErrOperationInProgress) {
+	if _, err := svc.RunBackup(ctx, testRunRequest()); !errors.Is(err, ErrOperationInProgress) {
 		t.Fatalf("second concurrent operation: got %v", err)
 	}
 	if _, _, err := svc.Verify(ctx, VerifyRequest{}); !errors.Is(err, ErrOperationInProgress) {
@@ -501,15 +475,14 @@ func TestVerifySuccess(t *testing.T) {
 	ctx := context.Background()
 	mustConfigure(t, svc)
 
-	if _, err := svc.RunBackup(ctx, RunRequest{}); err != nil {
+	if _, err := svc.RunBackup(ctx, testRunRequest()); err != nil {
 		t.Fatalf("backup: %v", err)
 	}
 	fr.restoreFn = func(_ Repository, _ Credentials, _, target string) error {
 		if !strings.HasPrefix(target, svc.Config().VerifyRoot+string(filepath.Separator)) {
 			t.Errorf("restore target outside VerifyRoot: %s", target)
 		}
-		writeTestTree(target, map[string]string{"a.txt": "aaa", "sub/b.txt": "bbbb"})
-		return nil
+		return defaultRestoreTree(target)
 	}
 
 	run, ver, err := svc.Verify(ctx, VerifyRequest{})
@@ -519,7 +492,7 @@ func TestVerifySuccess(t *testing.T) {
 	if run.Kind != KindVerify || run.Status != StatusCompleted {
 		t.Fatalf("verify run: %+v", run)
 	}
-	if ver.Status != VerificationPassed || ver.FilesRestored != 2 || ver.BytesRestored != 7 {
+	if ver.Status != VerificationPassed || ver.FilesRestored != 3 || ver.BytesRestored < 7 {
 		t.Fatalf("verification: %+v", ver)
 	}
 	if ver.CleanedAt == nil || ver.CleanupError != "" {
@@ -549,7 +522,7 @@ func TestVerifyFailureRedactsAndCleansUp(t *testing.T) {
 	ctx := context.Background()
 	mustConfigure(t, svc)
 
-	if _, err := svc.RunBackup(ctx, RunRequest{}); err != nil {
+	if _, err := svc.RunBackup(ctx, testRunRequest()); err != nil {
 		t.Fatalf("backup: %v", err)
 	}
 	fr.restoreFn = func(_ Repository, creds Credentials, _, target string) error {
@@ -594,7 +567,7 @@ func TestVerifyEmptyRestoreFails(t *testing.T) {
 	ctx := context.Background()
 	mustConfigure(t, svc)
 
-	if _, err := svc.RunBackup(ctx, RunRequest{}); err != nil {
+	if _, err := svc.RunBackup(ctx, testRunRequest()); err != nil {
 		t.Fatalf("backup: %v", err)
 	}
 	fr.restoreFn = func(_ Repository, _ Credentials, _, _ string) error { return nil }
@@ -616,7 +589,7 @@ func TestVerifySnapshotSelection(t *testing.T) {
 	if _, _, err := svc.Verify(ctx, VerifyRequest{}); !errors.Is(err, ErrNoSnapshot) {
 		t.Fatalf("verify without snapshots: got %v", err)
 	}
-	if _, err := svc.RunBackup(ctx, RunRequest{}); err != nil {
+	if _, err := svc.RunBackup(ctx, testRunRequest()); err != nil {
 		t.Fatalf("backup: %v", err)
 	}
 	if _, _, err := svc.Verify(ctx, VerifyRequest{SnapshotID: "unknown"}); !errors.Is(err, ErrNotFound) {
@@ -630,15 +603,11 @@ func TestVerifySnapshotSelection(t *testing.T) {
 // --- restore ---
 
 func TestRestoreFlow(t *testing.T) {
-	svc, pub, _ := newTestService(t, func(cfg *Config, deps *Deps) {
-		deps.Hooks = fakeHooks{byKind: map[HookKind][]Hook{
-			HookPostRestore: {{Application: "immich", Command: []string{"immich-restore"}}},
-		}}
-	})
+	svc, pub, _ := newTestService(t, nil)
 	ctx := context.Background()
 	mustConfigure(t, svc)
 
-	if _, err := svc.RunBackup(ctx, RunRequest{}); err != nil {
+	if _, err := svc.RunBackup(ctx, testRunRequest()); err != nil {
 		t.Fatalf("backup: %v", err)
 	}
 	target := t.TempDir()
@@ -649,13 +618,6 @@ func TestRestoreFlow(t *testing.T) {
 	}
 	if run.Status != StatusCompleted || run.Stage != StageCompleted {
 		t.Fatalf("restore run: %+v", run)
-	}
-	d, err := svc.GetRun(ctx, run.ID)
-	if err != nil {
-		t.Fatalf("get run: %v", err)
-	}
-	if len(d.Hooks) != 1 || d.Hooks[0].Status != HookOK || d.Hooks[0].Hook != HookPostRestore {
-		t.Fatalf("post-restore hooks: %+v", d.Hooks)
 	}
 	// A real successful restore is itself proof of restorability.
 	snaps := mustList(t, svc)
@@ -670,44 +632,11 @@ func TestRestoreFlow(t *testing.T) {
 	}
 }
 
-func TestRestoreHookFailure(t *testing.T) {
-	svc, pub, _ := newTestService(t, func(cfg *Config, deps *Deps) {
-		deps.Hooks = fakeHooks{byKind: map[HookKind][]Hook{
-			HookPostRestore: {{Application: "immich", Command: []string{"immich-restore"}}},
-		}}
-		deps.HookRunner = fakeHookRunner{results: map[string]HookOutcome{
-			"immich": {ExitCode: intPtr(2), Output: "restore hook exploded"},
-		}}
-	})
-	ctx := context.Background()
-	mustConfigure(t, svc)
-
-	if _, err := svc.RunBackup(ctx, RunRequest{}); err != nil {
-		t.Fatalf("backup: %v", err)
-	}
-	target := t.TempDir()
-
-	run, err := svc.Restore(ctx, RestoreRequest{SnapshotID: "fakesnap111111", TargetDir: target})
-	if err == nil {
-		t.Fatal("expected failure")
-	}
-	// Data was restored, but the run records the post-restore hook failure.
-	if run.Status != StatusFailed || run.Stage != StageHooks {
-		t.Fatalf("restore run: %+v", run)
-	}
-	if !strings.Contains(run.Error, "immich") {
-		t.Fatalf("hook failure not described: %q", run.Error)
-	}
-	if got := pub.byType(EventBackupFailed); len(got) != 1 {
-		t.Fatalf("backup.failed events: %+v", got)
-	}
-}
-
 func TestRestoreValidation(t *testing.T) {
 	svc, _, _ := newTestService(t, nil)
 	ctx := context.Background()
 	mustConfigure(t, svc)
-	if _, err := svc.RunBackup(ctx, RunRequest{}); err != nil {
+	if _, err := svc.RunBackup(ctx, testRunRequest()); err != nil {
 		t.Fatalf("backup: %v", err)
 	}
 
@@ -746,7 +675,7 @@ func TestHealthLifecycle(t *testing.T) {
 	}
 
 	mustConfigure(t, svc)
-	if _, err := svc.RunBackup(ctx, RunRequest{}); err != nil {
+	if _, err := svc.RunBackup(ctx, testRunRequest()); err != nil {
 		t.Fatalf("backup: %v", err)
 	}
 	rep, err = svc.Status(ctx)
@@ -892,7 +821,7 @@ func TestReconcileInterrupted(t *testing.T) {
 		t.Fatalf("backup.failed events: %+v", got)
 	}
 	// After reconciliation a new operation can start.
-	if _, err := svc.RunBackup(ctx, RunRequest{}); err != nil {
+	if _, err := svc.RunBackup(ctx, testRunRequest()); err != nil {
 		t.Fatalf("backup after reconcile: %v", err)
 	}
 }
@@ -900,15 +829,11 @@ func TestReconcileInterrupted(t *testing.T) {
 // --- run detail ---
 
 func TestGetRunDetail(t *testing.T) {
-	svc, _, _ := newTestService(t, func(cfg *Config, deps *Deps) {
-		deps.Hooks = fakeHooks{byKind: map[HookKind][]Hook{
-			HookPreBackup: {{Application: "immich", Command: []string{"immich-dump"}}},
-		}}
-	})
+	svc, _, _ := newTestService(t, nil)
 	ctx := context.Background()
 	mustConfigure(t, svc)
 
-	brun, err := svc.RunBackup(ctx, RunRequest{})
+	brun, err := svc.RunBackup(ctx, testRunRequest())
 	if err != nil {
 		t.Fatalf("backup: %v", err)
 	}
@@ -921,7 +846,7 @@ func TestGetRunDetail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("backup detail: %v", err)
 	}
-	if len(bd.Hooks) != 1 || bd.Snapshot == nil || bd.Verification != nil {
+	if bd.Snapshot == nil || bd.Verification != nil {
 		t.Fatalf("backup detail: %+v", bd)
 	}
 	vd, err := svc.GetRun(ctx, vrun.ID)
@@ -942,7 +867,7 @@ func TestRepositoryLocationCarriesInstanceFolder(t *testing.T) {
 	})
 	mustConfigure(t, svc)
 	ctx := context.Background()
-	if _, err := svc.RunBackup(ctx, RunRequest{}); err != nil {
+	if _, err := svc.RunBackup(ctx, testRunRequest()); err != nil {
 		t.Fatalf("backup: %v", err)
 	}
 	if got := fr.backupRepos[0].Location; got != "sftp://u123@u123.your-storagebox.de/./omahab/inst123abc" {
@@ -989,7 +914,7 @@ func TestInstanceFolderSuffixIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("configure: %v", err)
 	}
-	if _, err := svc.RunBackup(ctx, RunRequest{RepositoryID: repo.ID}); err != nil {
+	if _, err := svc.RunBackup(ctx, RunRequest{RepositoryID: repo.ID, Scopes: []string{ScopeServerConfig}, Paths: []string{"/var/lib/omahab/backup-staging"}}); err != nil {
 		t.Fatalf("backup: %v", err)
 	}
 	if got := fr.backupRepos[0].Location; got != "sftp://u@host/backups/inst123abc" {
@@ -1000,7 +925,7 @@ func TestInstanceFolderSuffixIsIdempotent(t *testing.T) {
 func TestNoInstanceSourceLeavesLocationUntouched(t *testing.T) {
 	svc, _, fr := newTestService(t, nil)
 	mustConfigure(t, svc)
-	if _, err := svc.RunBackup(context.Background(), RunRequest{}); err != nil {
+	if _, err := svc.RunBackup(context.Background(), testRunRequest()); err != nil {
 		t.Fatalf("backup: %v", err)
 	}
 	if got := fr.backupRepos[0].Location; got != "sftp://u123@u123.your-storagebox.de/./omahab" {

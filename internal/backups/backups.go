@@ -1,8 +1,8 @@
 // Package backups implements Omahab's restic-backed backup orchestration.
 //
-// The controller persists repositories, runs, snapshots, application hook
-// outcomes, and restore-verification records in SQLite, and enforces the
-// following product invariants:
+// The controller persists repositories, runs, snapshots, and
+// restore-verification records in SQLite, and enforces the following
+// product invariants:
 //
 //   - Repository credentials are stored as secret references only. They are
 //     resolved at run time and handed to restic exclusively through the
@@ -11,9 +11,11 @@
 //   - Exactly one operation (backup, verification, or restore) may be active
 //     at any time. The constraint is enforced by the database schema, not
 //     merely by in-process locking.
-//   - Backups require application consistency: registered pre-backup hooks
-//     must succeed before restic runs and every hook outcome is persisted.
-//     Copying live database files without hooks is never treated as a valid
+//   - Backups are scoped captures with explicit paths: the caller (scoped
+//     capture in the control plane) stops selected writers, stages logical
+//     database dumps plus the v2 manifest in the fixed staging directory,
+//     and snapshots exactly those paths. A run without scopes or paths is
+//     refused; copying live database files raw is never treated as a valid
 //     backup.
 //   - Restore verification restores into a fresh single-use directory under
 //     VerifyRoot and removes it afterwards; verified restores never touch
@@ -47,32 +49,8 @@ const (
 	maxListingLimit       = 500
 )
 
-// DefaultPaths returns the host paths included in every backup run by
-// default: control-plane state, encrypted secrets, application stacks,
-// project data, and shared sync folders.
-func DefaultPaths() []string {
-	return []string{
-		"/var/lib/omahab",
-		"/srv/omahab/apps",
-		"/srv/omahab/projects",
-		"/srv/omahab/sync",
-		// Native (NixOS systemd) services relocated app state from docker
-		// volumes to these host paths; they follow the backup contract.
-		"/var/lib/forgejo",
-		"/var/lib/pocket-id",
-		"/var/lib/karakeep",
-		"/var/lib/syncthing",
-		"/var/lib/ntfy-sh",
-		"/var/lib/omahab/dumps",
-		"/var/lib/tailscale",
-		"/srv/omahab/machine-backups",
-	}
-}
-
 // Config holds controller-level defaults.
 type Config struct {
-	// Paths are the host paths handed to restic on every backup run.
-	Paths []string
 	// Host tags snapshots; empty lets restic use the system hostname.
 	Host string
 	// VerifyRoot is the isolated root under which restore-verification
@@ -92,9 +70,6 @@ type Config struct {
 }
 
 func (c Config) withDefaults() Config {
-	if len(c.Paths) == 0 {
-		c.Paths = DefaultPaths()
-	}
 	if c.VerifyRoot == "" {
 		c.VerifyRoot = DefaultVerifyRoot
 	}
@@ -119,11 +94,6 @@ func (c Config) withDefaults() Config {
 type Deps struct {
 	// Runner performs restic operations. Required.
 	Runner Runner
-	// Hooks supplies application consistency hooks. Nil means no
-	// application has registered hooks.
-	Hooks HookSource
-	// HookRunner executes a single hook. Nil means ExecHookRunner.
-	HookRunner HookRunner
 	// Secrets resolves repository credential references. Required.
 	Secrets SecretSource
 	// Events receives normalized events. Nil disables event emission.
@@ -142,8 +112,6 @@ type Service struct {
 	st         *store.Store
 	cfg        Config
 	runner     Runner
-	hooks      HookSource
-	hookRunner HookRunner
 	secrets    SecretSource
 	events     EventPublisher
 	instanceID func(ctx context.Context) string
@@ -162,9 +130,6 @@ func New(st *store.Store, cfg Config, deps Deps) *Service {
 	if deps.Secrets == nil {
 		panic("backups: nil secret source")
 	}
-	if deps.HookRunner == nil {
-		deps.HookRunner = ExecHookRunner{}
-	}
 	if deps.Now == nil {
 		deps.Now = func() time.Time { return time.Now() }
 	}
@@ -172,8 +137,6 @@ func New(st *store.Store, cfg Config, deps Deps) *Service {
 		st:         st,
 		cfg:        cfg.withDefaults(),
 		runner:     deps.Runner,
-		hooks:      deps.Hooks,
-		hookRunner: deps.HookRunner,
 		secrets:    deps.Secrets,
 		events:     deps.Events,
 		instanceID: deps.InstanceID,

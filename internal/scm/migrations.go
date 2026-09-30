@@ -2,11 +2,15 @@ package scm
 
 import "github.com/omahab/omahab/internal/store"
 
-// Migrations returns the SQLite migrations owned by the SCM controller.
+// Migrations returns the schema owned by the SCM controller. The adopted
+// flag records whether the Forgejo repository predates the project (adopted)
+// or was created by provisioning it: ordinary project rm deletes only
+// product-created repositories, adopted pre-existing repositories are
+// preserved unless explicitly deleted.
 func Migrations() []store.Migration {
 	return []store.Migration{
 		{
-			Name: "scm-001-repositories",
+			Name: "scm-001-baseline",
 			SQL: `
 CREATE TABLE IF NOT EXISTS scm_repositories (
 	id TEXT PRIMARY KEY,
@@ -23,14 +27,11 @@ CREATE TABLE IF NOT EXISTS scm_repositories (
 	observed_detail TEXT NOT NULL DEFAULT '',
 	created_at TEXT NOT NULL,
 	updated_at TEXT NOT NULL,
+	adopted INTEGER NOT NULL DEFAULT 0,
 	UNIQUE(owner, name)
 );
 CREATE INDEX IF NOT EXISTS idx_scm_repositories_project_id ON scm_repositories(project_id);
-`,
-		},
-		{
-			Name: "scm-002-ci_repos",
-			SQL: `
+
 CREATE TABLE IF NOT EXISTS scm_ci_repos (
 	id TEXT PRIMARY KEY,
 	repository_id TEXT NOT NULL UNIQUE REFERENCES scm_repositories(id) ON DELETE CASCADE,
@@ -46,11 +47,7 @@ CREATE TABLE IF NOT EXISTS scm_ci_repos (
 	updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_scm_ci_repos_woodpecker_repo_id ON scm_ci_repos(woodpecker_repo_id);
-`,
-		},
-		{
-			Name: "scm-003-ci_runs",
-			SQL: `
+
 CREATE TABLE IF NOT EXISTS scm_ci_runs (
 	id TEXT PRIMARY KEY,
 	repository_id TEXT NOT NULL REFERENCES scm_repositories(id) ON DELETE CASCADE,
@@ -70,11 +67,7 @@ CREATE TABLE IF NOT EXISTS scm_ci_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_scm_ci_runs_repository_id ON scm_ci_runs(repository_id);
 CREATE INDEX IF NOT EXISTS idx_scm_ci_runs_status ON scm_ci_runs(status);
-`,
-		},
-		{
-			Name: "scm-004-mirrors",
-			SQL: `
+
 CREATE TABLE IF NOT EXISTS scm_mirrors (
 	id TEXT PRIMARY KEY,
 	repository_id TEXT NOT NULL UNIQUE REFERENCES scm_repositories(id) ON DELETE CASCADE,
@@ -92,17 +85,5 @@ CREATE TABLE IF NOT EXISTS scm_mirrors (
 );
 `,
 		},
-		{
-			Name: "scm-005-repo-ownership",
-			SQL: `
--- Tracks whether the Forgejo repository predates the project (adopted) or
--- was created by provisioning it. Ordinary project rm deletes only
--- product-created repositories; adopted pre-existing repositories are
--- preserved unless explicitly deleted. Legacy rows default to 0
--- (product-created), preserving historical rm behavior; every new
--- Provision records the true origin explicitly.
-ALTER TABLE scm_repositories ADD COLUMN adopted INTEGER NOT NULL DEFAULT 0;
-`,
-		},
-}
+	}
 }

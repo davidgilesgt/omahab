@@ -13,6 +13,7 @@ import (
 	"github.com/omahab/omahab/internal/apitypes"
 	"github.com/omahab/omahab/internal/apps"
 	"github.com/omahab/omahab/internal/backups"
+	"github.com/omahab/omahab/internal/bundles"
 	"github.com/omahab/omahab/internal/cloudflare"
 	"github.com/omahab/omahab/internal/companion"
 	"github.com/omahab/omahab/internal/config"
@@ -53,6 +54,7 @@ type Backend struct {
 	startedAt time.Time
 
 	apps          *apps.Service
+	bundles       *bundles.Service
 	projects      *projects.Service
 	secrets       *secrets.Service
 	events        *events.Service
@@ -245,29 +247,43 @@ func (b *Backend) initServices(ctx context.Context) error {
 		return strings.TrimSpace(os.Getenv(env))
 	}
 
-	// apps: the runtime catalog ships with signed releases. A missing file
-	// means no bundles are installable (fail closed); a present but invalid
-	// file is a release defect and aborts startup.
+	// apps: the runtime catalog ships with signed releases; committed
+	// custom bundles (bundles repo at HEAD) merge on top. A missing curated
+	// file means no bundles are installable (fail closed, warning event);
+	// an invalid curated file is a release defect and aborts startup, and
+	// an invalid custom bundle fails loudly so it cannot silently vanish.
 	catalog := &apps.Catalog{}
-	if b.cfg.CatalogPath != "" {
-		loaded, err := apps.LoadCatalogFile(b.cfg.CatalogPath)
+	if b.cfg.CatalogPath != "" || b.cfg.CustomBundlesDir != "" {
+		curatedMissing := false
+		if b.cfg.CatalogPath != "" {
+			if _, err := os.Stat(b.cfg.CatalogPath); err != nil && errors.Is(err, fs.ErrNotExist) {
+				curatedMissing = true
+			}
+		}
+		loaded, err := b.loadMergedCatalog(ctx)
 		switch {
 		case err == nil:
 			catalog = loaded
-		case errors.Is(err, fs.ErrNotExist):
+		default:
+			return fmt.Errorf("apps catalog: %w", err)
+		}
+		if curatedMissing {
 			_, _ = b.events.Publish(ctx, events.PublishInput{
 				Type:     "applications.catalog_missing",
 				Severity: "warning",
 				Message:  "no runtime application catalog at " + b.cfg.CatalogPath + "; installs disabled until a signed release catalog is provided",
 			})
-		default:
-			return fmt.Errorf("apps catalog %s: %w", b.cfg.CatalogPath, err)
 		}
 	}
+	// The systemd runner resolves units through the live catalog snapshot
+	// (SetCatalog swaps in the merged view after a bundle apply).
 	systemdRunner := b.appsRunner
 	if systemdRunner == nil {
 		systemdRunner = apps.NewSystemdRunner(nil, "", func(bundleID string) []string {
-			bundle, ok := catalog.Get(bundleID)
+			if b.apps == nil {
+				return nil
+			}
+			bundle, ok := b.apps.CatalogGet(bundleID)
 			if !ok {
 				return nil
 			}
@@ -353,30 +369,23 @@ func (b *Backend) initServices(ctx context.Context) error {
 	projSvc.SetReleaseTokenVerifier(projSvc)
 	projSvc.SetSecrets(b.secrets)
 	b.projects = projSvc
-	// backups with real HookSource. The restic cache lives under the
-	// state dir and is handed to every product restic invocation via
-	// CommandRunner: the child environment is otherwise minimal, so
-	// without this every restic call fails with "unable to locate cache
-	// directory" before any snapshot.
+	// backups. The restic cache lives under the state dir and is handed
+	// to every product restic invocation via CommandRunner: the child
+	// environment is otherwise minimal, so without this every restic
+	// call fails with "unable to locate cache directory" before any
+	// snapshot. Capture paths come from the scoped capture planner
+	// (CreateBackupScoped), not a static Config default.
 	backupCacheDir := b.cfg.StateDir + "/restic-cache"
 	if err := os.MkdirAll(backupCacheDir, 0o700); err != nil {
 		log.Printf("backups: ensure restic cache dir %q: %v", backupCacheDir, err)
 	}
 	backupSvc := backups.New(b.store, backups.Config{
-		Paths: []string{
-			b.cfg.StateDir,
-			b.cfg.DataDir + "/apps",
-			b.cfg.DataDir + "/projects",
-			b.cfg.DataDir + "/sync",
-		},
 		VerifyRoot: b.cfg.DataDir + "/backups/verify",
 		CacheDir:   backupCacheDir,
 	}, backups.Deps{
-		Runner:     &backups.CommandRunner{CacheDir: backupCacheDir},
-		Hooks:      backups.NewAppHookSource(appSvc),
-		HookRunner: &backups.ExecHookRunner{},
-		Secrets:    backupSecretSource{service: secSvc},
-		Events:     newBackupsSink(b.events),
+		Runner:  &backups.CommandRunner{CacheDir: backupCacheDir},
+		Secrets: backupSecretSource{service: secSvc},
+		Events:  newBackupsSink(b.events),
 		InstanceID: func(ctx context.Context) string {
 			inst, err := b.store.Instance(ctx)
 			if err != nil {
@@ -386,9 +395,6 @@ func (b *Backend) initServices(ctx context.Context) error {
 		},
 	})
 	b.backups = backupSvc
-	if err := b.migrateBackupCredentialShapes(ctx); err != nil {
-		return fmt.Errorf("migrate backup credentials: %w", err)
-	}
 
 	b.hermes = hermes.New(b.db, newHermesSink(b.events))
 
@@ -1011,6 +1017,9 @@ func translateError(err error) error {
 	}
 	if errors.Is(err, apps.ErrAlreadyExists) {
 		return fmt.Errorf("%w: %v", apitypes.ErrAlreadyExists, err)
+	}
+	if errors.Is(err, apps.ErrInvalid) {
+		return fmt.Errorf("%w: %v", apitypes.ErrValidation, err)
 	}
 	if errors.Is(err, apps.ErrMaintained) || errors.Is(err, apps.ErrConflict) {
 		return fmt.Errorf("%w: %v", apitypes.ErrConflict, err)

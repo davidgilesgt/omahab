@@ -180,29 +180,15 @@ func StageRecoverySnapshot(ctx context.Context, runner Runner, src RecoverySourc
 	return runner.Restore(ctx, repo, creds, snapshotID, staging)
 }
 
-// serverConfigManifest reads and validates the staged manifest, refusing
-// legacy snapshots and snapshots without the server-config scope.
+// ServerConfigManifest reads and validates the staged v2 manifest,
+// refusing snapshots without the server-config scope.
 func ServerConfigManifest(staging string) (SnapshotManifest, error) {
-	dirs := findManifests(staging)
-	if len(dirs) == 0 {
-		return SnapshotManifest{}, fmt.Errorf("%w: snapshot has no manifest; legacy snapshots require manual recovery", ErrInvalid)
-	}
-	m, err := ReadManifest(dirs[0])
+	m, err := ReadStagedManifest(staging)
 	if err != nil {
-		return SnapshotManifest{}, fmt.Errorf("manifest: %w", err)
-	}
-	if err := m.Validate(); err != nil {
 		return SnapshotManifest{}, err
 	}
-	hasConfig := false
-	for _, s := range m.Scopes {
-		if strings.TrimSpace(s) == ScopeServerConfig {
-			hasConfig = true
-			break
-		}
-	}
-	if !hasConfig {
-		return SnapshotManifest{}, fmt.Errorf("%w: manifest scopes %v lack server-config", ErrInvalid, m.Scopes)
+	if _, ok := m.Scope(ScopeServerConfig); !ok {
+		return SnapshotManifest{}, fmt.Errorf("%w: manifest scopes %v lack server-config", ErrInvalid, m.ScopeNames())
 	}
 	return m, nil
 }
@@ -225,29 +211,27 @@ func CheckRecoveryFingerprint(manifest SnapshotManifest, phraseFingerprint strin
 
 // planServerConfigSwap validates the staged tree against the swap contract
 // and returns the swap plan. No live path is touched here.
+//
+// Staged layout: restic restores every captured absolute path under the
+// staging target. Scoped capture stages the checkpoint files (control.db,
+// recovery.kit, storage.json) in the fixed staging directory —
+// <staging>/var/lib/omahab/backup-staging/ — and captures the state
+// directory itself at its absolute path, so the rendered configuration
+// subtrees appear at <staging>/<stateDir>/<name>. Both bases are exactly
+// what runCaptureLocked captured; no other layout is accepted (v2 is the
+// only manifest format).
 func PlanServerConfigSwap(staging, stateDir string, manifest SnapshotManifest) (*serverConfigSwap, error) {
 	if err := checkStagingEscapes(staging); err != nil {
 		return nil, err
 	}
-	// Snapshot layout: restic restores absolute source paths under the
-	// staging target, so state files appear at
-	// <staging>/<stateDir>/<file>. Older snapshots carried the dump
-	// directory at the staging root (manifest next to control.db); both
-	// layouts are accepted.
 	stateStaged := filepath.Join(staging, filepath.Clean(stateDir))
-	dumpStaged := staging
-	stateBase := ""
-	if _, err := os.Stat(filepath.Join(stateStaged, "control.db")); err != nil {
-		if _, err := os.Stat(filepath.Join(dumpStaged, "control.db")); err != nil {
-			return nil, fmt.Errorf("%w: staged snapshot has no control.db under %s or the staging root", ErrInvalid, stateDir)
-		}
-		stateBase = dumpStaged
-	} else {
-		stateBase = stateStaged
+	stagedBase := filepath.Join(staging, backupStagingDir)
+	if _, err := os.Stat(filepath.Join(stagedBase, "control.db")); err != nil {
+		return nil, fmt.Errorf("%w: staged snapshot has no control.db under %s", ErrInvalid, backupStagingDirPath)
 	}
 	plan := &serverConfigSwap{stagingRoot: staging}
 	for _, name := range strings.Split(recoveryStateFiles, ",") {
-		src := filepath.Join(stateBase, name)
+		src := filepath.Join(stagedBase, name)
 		if _, err := os.Stat(src); err != nil {
 			if name == "control.db" {
 				return nil, fmt.Errorf("%w: staged control.db missing", ErrInvalid)
@@ -259,14 +243,14 @@ func PlanServerConfigSwap(staging, stateDir string, manifest SnapshotManifest) (
 		plan.files = append(plan.files, swapFile{source: src, dest: filepath.Join(stateDir, name)})
 	}
 	for _, name := range strings.Split(recoveryStateDirs, ",") {
-		src := filepath.Join(stateBase, name)
+		src := filepath.Join(stateStaged, name)
 		if entries, err := os.ReadDir(src); err == nil && len(entries) > 0 {
 			plan.files = append(plan.files, swapFile{source: src, dest: filepath.Join(stateDir, name)})
 		}
 	}
 	// The staged kit unwraps the master key that decrypts the restored
 	// control.db secrets; the kit itself is also swapped in.
-	kitStaged := filepath.Join(stateBase, "recovery.kit")
+	kitStaged := filepath.Join(stagedBase, "recovery.kit")
 	if _, err := os.Stat(kitStaged); err == nil {
 		plan.unwrap = &unwrapMasterKey{kitPath: kitStaged, dest: filepath.Join(stateDir, "master.key")}
 	}
@@ -280,14 +264,11 @@ func PlanServerConfigSwap(staging, stateDir string, manifest SnapshotManifest) (
 }
 
 // StagedRecoveryKitPath returns the staged recovery.kit path for the
-// state layout PlanServerConfigSwap resolves.
-func StagedRecoveryKitPath(staging, stateDir string) (string, error) {
-	stateStaged := filepath.Join(staging, filepath.Clean(stateDir))
-	for _, base := range []string{stateStaged, staging} {
-		p := filepath.Join(base, "recovery.kit")
-		if _, err := os.Stat(p); err == nil {
-			return p, nil
-		}
+// layout PlanServerConfigSwap resolves: the fixed backup-staging base.
+func StagedRecoveryKitPath(staging, _ string) (string, error) {
+	p := filepath.Join(staging, backupStagingDir, "recovery.kit")
+	if _, err := os.Stat(p); err == nil {
+		return p, nil
 	}
 	return "", fmt.Errorf("%w: staged snapshot has no recovery.kit", ErrInvalid)
 }

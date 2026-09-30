@@ -202,6 +202,7 @@ func TestSetupStatusMetadataAndTailscaleAction(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string]struct{ label, owner string }{
+		"restore":                  {"Backups: restore or start new", "operator"},
 		"ssh_keys":                 {"Add SSH keys", "operator"},
 		"domain":                   {"Choose your domain", "operator"},
 		"cloudflare_dns":           {"Connect Cloudflare DNS", "operator"},
@@ -232,8 +233,8 @@ func TestSetupStatusMetadataAndTailscaleAction(t *testing.T) {
 			t.Fatalf("%s label/owner = %q/%q want %q/%q", c.ID, c.Label, c.Owner, meta.label, meta.owner)
 		}
 	}
-	if len(st.Checks) == 0 || st.Checks[0].ID != "ssh_keys" {
-		t.Fatalf("first check = %q, want ssh_keys", st.Checks[0].ID)
+	if len(st.Checks) == 0 || st.Checks[0].ID != "restore" {
+		t.Fatalf("first check = %q, want restore", st.Checks[0].ID)
 	}
 	var tail apitypes.SetupCheck
 	for _, c := range st.Checks {

@@ -1,0 +1,26 @@
+{
+  "id": "embedding-worker",
+  "name": "Embedding Worker",
+  "port": 8090,
+  "default_exposure": "private",
+  "max_exposure": "private",
+  "health_check": {
+    "kind": "http",
+    "path": "unix:///run/omahab-embedding/embedding.sock/health"
+  },
+  "startup_grace_seconds": 60,
+  "oidc": {
+    "supported": false
+  },
+  "resources": {
+    "memory_mb": 1536
+  },
+  "default": true,
+  "route": "",
+  "units": [
+    "omahab-embedding-worker.service"
+  ],
+  "groups": [
+    "admins"
+  ]
+}

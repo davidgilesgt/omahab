@@ -24,7 +24,7 @@ func TestTranslateErrorRollbackConflict(t *testing.T) {
 	}
 }
 
-// Unknown fingerprint -> 404 (store.ErrNotFound); empty / wrong word -> 400.
+// Unknown fingerprint -> 404 (store.ErrNotFound); empty -> 400.
 func TestConfirmRecoveryKeyFingerprintStatus(t *testing.T) {
 	ctx := context.Background()
 	b, _ := newSetupBackend(t, nil)
@@ -34,21 +34,5 @@ func TestConfirmRecoveryKeyFingerprintStatus(t *testing.T) {
 	}
 	if err := b.ConfirmRecoveryKeySavedAck(ctx, ""); !errors.Is(err, store.ErrValidation) {
 		t.Fatalf("empty fingerprint ack = %v, want store.ErrValidation", err)
-	}
-	chal := map[int]string{0: "a", 1: "b", 2: "c"}
-	if err := b.ConfirmRecoveryKey(ctx, "deadbeef", chal); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("unknown fingerprint challenge = %v, want store.ErrNotFound", err)
-	}
-
-	mat, err := b.GenerateRecoveryKey(ctx)
-	if err != nil {
-		t.Fatalf("generate: %v", err)
-	}
-	bad := map[int]string{0: "wrong", 1: mat.Phrase[1], 2: mat.Phrase[2]}
-	if bad[0] == mat.Phrase[0] {
-		bad[0] = "definitely-not-a-word"
-	}
-	if err := b.ConfirmRecoveryKey(ctx, mat.Fingerprint, bad); !errors.Is(err, store.ErrValidation) {
-		t.Fatalf("wrong challenge word = %v, want store.ErrValidation", err)
 	}
 }

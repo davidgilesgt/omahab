@@ -54,8 +54,8 @@ func vkeyTestService(t *testing.T, gw virtualKeyGateway) *Service {
 	return svc
 }
 
-// F-ai-virtual-key-gateway-prefix: the issued product key must be the bearer
-// LiteLLM accepts (sk-), with its hash stored for local validation.
+// The issued product key must be the bearer LiteLLM accepts (sk-), with its
+// hash stored locally.
 func TestIssueVirtualKeyReturnsGatewayBearer(t *testing.T) {
 	ctx := context.Background()
 	gw := &scriptedGateway{token: "sk-test-gateway-bearer-001", keyID: "key-test-001"}
@@ -76,9 +76,6 @@ func TestIssueVirtualKeyReturnsGatewayBearer(t *testing.T) {
 	if !strings.HasPrefix(got.Token, GatewayVirtualKeyPrefix) {
 		t.Fatalf("token = %q, want sk- prefix", got.Token)
 	}
-	if IsLegacyVirtualKeyToken(got.Token) {
-		t.Fatalf("token = %q, must not be legacy omk_", got.Token)
-	}
 	if got.VirtualKey.KeyPrefix != got.Token[:12] {
 		t.Fatalf("prefix = %q, want %q", got.VirtualKey.KeyPrefix, got.Token[:12])
 	}
@@ -87,14 +84,6 @@ func TestIssueVirtualKeyReturnsGatewayBearer(t *testing.T) {
 	}
 	if len(gw.issues) != 1 || len(gw.issues[0].Scopes) != 1 || gw.issues[0].Scopes[0] != AliasFast {
 		t.Fatalf("gateway scopes = %+v, want [omahab/fast]", gw.issues)
-	}
-	// Same token validates locally: hash of the gateway bearer is stored.
-	found, err := svc.ValidateVirtualKey(ctx, got.Token)
-	if err != nil {
-		t.Fatalf("ValidateVirtualKey(gateway token): %v", err)
-	}
-	if found.ID != got.VirtualKey.ID {
-		t.Fatalf("validated id = %q, want %q", found.ID, got.VirtualKey.ID)
 	}
 }
 
@@ -117,17 +106,10 @@ func TestIssueVirtualKeyOutOfScopeForbidden(t *testing.T) {
 	if got.VirtualKey.Allows(AliasBalanced) {
 		t.Fatalf("out-of-scope %q must be forbidden", AliasBalanced)
 	}
-	found, err := svc.ValidateVirtualKey(ctx, got.Token)
-	if err != nil {
-		t.Fatalf("ValidateVirtualKey: %v", err)
-	}
-	if found.Allows(AliasReasoning) {
-		t.Fatalf("out-of-scope %q must be forbidden after validation", AliasReasoning)
-	}
 }
 
 // Revocation marks the row locally and revokes the gateway row by alias +
-// key id; the bearer no longer validates.
+// key id.
 func TestRevokeVirtualKeyEffective(t *testing.T) {
 	ctx := context.Background()
 	gw := &scriptedGateway{token: "sk-test-revoke-003", keyID: "key-test-003"}
@@ -142,8 +124,12 @@ func TestRevokeVirtualKeyEffective(t *testing.T) {
 	if err := svc.RevokeVirtualKey(ctx, got.VirtualKey.ID); err != nil {
 		t.Fatalf("RevokeVirtualKey: %v", err)
 	}
-	if _, err := svc.ValidateVirtualKey(ctx, got.Token); !errors.Is(err, ErrVirtualKeyRevoked) {
-		t.Fatalf("ValidateVirtualKey after revoke = %v, want ErrVirtualKeyRevoked", err)
+	stored, err := svc.GetVirtualKey(ctx, got.VirtualKey.ID)
+	if err != nil {
+		t.Fatalf("GetVirtualKey after revoke: %v", err)
+	}
+	if stored.RevokedAt == nil {
+		t.Fatal("revoked row must carry revoked_at")
 	}
 	if len(gw.revokes) != 1 {
 		t.Fatalf("gateway revokes = %+v, want one revoke", gw.revokes)
@@ -154,7 +140,7 @@ func TestRevokeVirtualKeyEffective(t *testing.T) {
 }
 
 // Without a gateway no gateway-accepted token exists: issuance fails closed
-// and persists no row, instead of minting a local-only omk_ token.
+// and persists no row.
 func TestIssueVirtualKeyRequiresGateway(t *testing.T) {
 	ctx := context.Background()
 	svc := vkeyTestService(t, nil)
@@ -176,13 +162,13 @@ func TestIssueVirtualKeyRequiresGateway(t *testing.T) {
 // A gateway response outside the sk- contract fails issuance with no row.
 func TestIssueVirtualKeyRejectsNonSkBearer(t *testing.T) {
 	ctx := context.Background()
-	gw := &scriptedGateway{token: "omk_legacyunusable00000000000000000000000000000000000000000000000000", keyID: "key-test-004"}
+	gw := &scriptedGateway{token: "not-a-bearer-plaintext", keyID: "key-test-004"}
 	svc := vkeyTestService(t, gw)
 	if _, err := svc.IssueVirtualKey(ctx, IssueVirtualKeyInput{
 		Name:   "bad-prefix",
 		Scopes: []string{AliasFast},
 	}); err == nil {
-		t.Fatal("omk_-prefixed gateway bearer must be rejected")
+		t.Fatal("non-sk gateway bearer must be rejected")
 	}
 	list, err := svc.ListVirtualKeys(ctx)
 	if err != nil {
@@ -193,22 +179,7 @@ func TestIssueVirtualKeyRejectsNonSkBearer(t *testing.T) {
 	}
 }
 
-func TestLegacyVirtualKeyHelpers(t *testing.T) {
-	if !IsLegacyVirtualKeyToken("omk_abc") {
-		t.Fatal("omk_ token must be legacy")
-	}
-	if !IsLegacyVirtualKeyToken("  omk_abc  ") {
-		t.Fatal("padded omk_ token must be legacy")
-	}
-	if IsLegacyVirtualKeyToken("sk-abc") {
-		t.Fatal("sk- token must not be legacy")
-	}
-	if !IsLegacyVirtualKeyPrefix("omk_12345678") {
-		t.Fatal("omk_ prefix must be legacy")
-	}
-	if IsLegacyVirtualKeyPrefix("sk-12345678") {
-		t.Fatal("sk- prefix must not be legacy")
-	}
+func TestGatewayVirtualKeyPrefixContract(t *testing.T) {
 	if GatewayVirtualKeyPrefix != "sk-" {
 		t.Fatalf("gateway prefix = %q, want sk-", GatewayVirtualKeyPrefix)
 	}
@@ -320,48 +291,6 @@ func TestGatewayIssueRejectsMissingKey(t *testing.T) {
 	}
 	if _, err := gw.IssueVirtualKey(context.Background(), VirtualKey{Name: "x"}); err == nil {
 		t.Fatal("response without key plaintext must fail")
-	}
-}
-
-// Legacy omk_ rows retire safely: revoking the old row (gateway orphan cleanup
-// by alias) then issuing through the gateway yields a usable sk- bearer.
-func TestLegacyOmkRetireAndReissue(t *testing.T) {
-	ctx := context.Background()
-	gw := &scriptedGateway{token: "sk-test-reissued-005", keyID: "key-test-005"}
-	svc := vkeyTestService(t, gw)
-	// Plant a pre-fix row exactly as the old minter left it.
-	legacyHash := hashToken("omk_plantedlegacy000000000000000000000000000000000000000000000000")
-	if _, err := svc.db.ExecContext(ctx,
-		`INSERT INTO provider_virtual_keys (id, name, key_hash, key_prefix, scopes, gateway_key_id, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		"legacy-row-1", "hermes", legacyHash, "omk_plantedl", "omahab/fast",
-		"orphan-gateway-id",
-		"2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z",
-	); err != nil {
-		t.Fatalf("plant legacy row: %v", err)
-	}
-	// The retirement migration revokes surviving omk_ rows.
-	if _, err := svc.db.ExecContext(ctx,
-		`UPDATE provider_virtual_keys SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE key_prefix LIKE 'omk_%' AND revoked_at IS NULL`,
-	); err != nil {
-		t.Fatalf("retire omk rows: %v", err)
-	}
-	if _, err := svc.ValidateVirtualKey(ctx, "omk_plantedlegacy000000000000000000000000000000000000000000000000"); !errors.Is(err, ErrVirtualKeyRevoked) {
-		t.Fatalf("legacy token after retire = %v, want ErrVirtualKeyRevoked", err)
-	}
-	// Revoke cleans the gateway orphan by alias; reissue yields sk-.
-	if err := svc.RevokeVirtualKey(ctx, "legacy-row-1"); err != nil {
-		t.Fatalf("revoke legacy row: %v", err)
-	}
-	if len(gw.revokes) != 1 || gw.revokes[0][1] != "hermes" {
-		t.Fatalf("gateway revokes = %+v, want alias hermes for orphan cleanup", gw.revokes)
-	}
-	reissued, err := svc.IssueVirtualKey(ctx, IssueVirtualKeyInput{Name: "hermes", Scopes: []string{AliasFast}})
-	if err != nil {
-		t.Fatalf("reissue: %v", err)
-	}
-	if reissued.Token != "sk-test-reissued-005" {
-		t.Fatalf("reissued token = %q, want gateway sk- bearer", reissued.Token)
 	}
 }
 
@@ -502,8 +431,8 @@ func TestDeleteVirtualKeyGatewayFailureTombstones(t *testing.T) {
 	if kept.GatewayKeyID == nil || *kept.GatewayKeyID != "key-test-tombstone-1" {
 		t.Fatalf("tombstone lost gateway handle: %+v", kept.GatewayKeyID)
 	}
-	if _, err := svc.ValidateVirtualKey(ctx, got.Token); !errors.Is(err, ErrVirtualKeyRevoked) {
-		t.Fatalf("tombstoned token = %v, want ErrVirtualKeyRevoked", err)
+	if kept.RevokedAt == nil {
+		t.Fatal("tombstoned row must carry revoked_at")
 	}
 	// Gateway heals: retry completes the delete.
 	gw.revokeErr = nil

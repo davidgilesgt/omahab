@@ -3,8 +3,8 @@
 # Mounts physical disks once at /mnt/omahab-disks/<fs_uuid> (outside backed-up
 # canonical trees), and binds their managed omahab/volumes/<slug>
 # subdirectories onto canonical service roots from nix/app-data.nix.
-# No-op when the volume selects the system disk (fs_uuid null/absent) or is
-# pending: the canonical tree stays authoritative.
+# No-op when the volume selects the system disk (fs_uuid null/absent): the
+# canonical tree stays authoritative.
 #
 # Missing selected disks fail ONLY their dependent apps closed: every consumer
 # Requires/After its volumes' units (see gate in apps.nix), so a failed unit
@@ -52,22 +52,12 @@ let
           SLUG=${lib.escapeShellArg v.slug}
           CANONICAL=${lib.escapeShellArg v.canonical}
           CFG=${lib.escapeShellArg "${stateDir}/storage.json"}
-          MNTBASE="/mnt/omahab-disks"
           UUID=""
-          LEGACY="false"
           if [ -f "$CFG" ]; then
             if ${pkgs.jq}/bin/jq -e 'type == "object"' "$CFG" >/dev/null 2>&1; then
               # Null-tolerant: pre-validation files may carry placements:null;
               # treat as unplaced (system disk) so boot stays safe.
-              UUID=$(${pkgs.jq}/bin/jq -r --arg v "$VOLUME" '(.placements // [])[] | select(.volume == $v and ((.pending // false) | not)) | .fs_uuid // empty' "$CFG" | head -n1)
-              LEGACY=$(${pkgs.jq}/bin/jq -r --arg v "$VOLUME" '(.placements // [])[] | select(.volume == $v) | (.legacy // false | tostring)' "$CFG" | head -n1)
-            elif ${pkgs.jq}/bin/jq -e 'type == "array"' "$CFG" >/dev/null 2>&1; then
-              # v1 array compat: old media binds onto the Immich library
-              # subvolume without moving existing <disk>/media content.
-              if [ "$VOLUME" = "immich:state" ]; then
-                UUID=$(${pkgs.jq}/bin/jq -r '.[] | select(.volume == "media") | .fs_uuid // empty' "$CFG" | head -n1)
-                if [ -n "$UUID" ]; then LEGACY="true"; fi
-              fi
+              UUID=$(${pkgs.jq}/bin/jq -r --arg v "$VOLUME" '(.placements // [])[] | select(.volume == $v) | .fs_uuid // empty' "$CFG" | head -n1)
             fi
           fi
           if [ -z "$UUID" ]; then
@@ -78,13 +68,8 @@ let
           if ! mountpoint -q "$MNT"; then
             mount -U "$UUID" "$MNT"
           fi
-          if [ "$LEGACY" = "true" ]; then
-            SRC="$MNT/media"
-            DEST="$CANONICAL/library"
-          else
-            SRC="$MNT/omahab/volumes/$SLUG"
-            DEST="$CANONICAL"
-          fi
+          SRC="$MNT/omahab/volumes/$SLUG"
+          DEST="$CANONICAL"
           mkdir -p "$SRC" "$DEST"
           if ! mountpoint -q "$DEST"; then
             mount --bind "$SRC" "$DEST"

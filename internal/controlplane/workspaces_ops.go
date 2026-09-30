@@ -4,10 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
-	"path/filepath"
-	"strings"
-	"time"
 	"github.com/omahab/omahab/internal/apitypes"
 	"github.com/omahab/omahab/internal/companion"
 	"github.com/omahab/omahab/internal/domain"
@@ -15,6 +11,10 @@ import (
 	"github.com/omahab/omahab/internal/store"
 	"github.com/omahab/omahab/internal/syncer"
 	"github.com/omahab/omahab/internal/workspaces"
+	"log"
+	"path/filepath"
+	"strings"
+	"time"
 )
 
 func (b *Backend) ListSyncFolders(ctx context.Context, p apitypes.Pagination) ([]domain.SyncFolder, error) {
@@ -180,7 +180,6 @@ func (b *Backend) CreateWorkspace(ctx context.Context, req apitypes.CreateWorksp
 		Instructions:       req.Instructions,
 		Agent:              req.Agent,
 		DevcontainerSource: req.DevcontainerSource,
-		Branch:             req.Branch,
 	})
 	if err != nil {
 		if errors.Is(err, workspaces.ErrProvisionFailed) {
@@ -299,6 +298,7 @@ func (b *Backend) CreateCompanionProject(ctx context.Context, req apitypes.Creat
 	}
 	return b.CreateProject(ctx, req)
 }
+
 // Users (glue)
 
 func (b *Backend) IssueWorkspaceCapability(ctx context.Context, workspaceID string) (apitypes.WorkspaceCapabilityResponse, error) {

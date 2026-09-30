@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -16,7 +15,6 @@ import (
 	"github.com/omahab/omahab/internal/companion"
 	"github.com/omahab/omahab/internal/domain"
 	"github.com/omahab/omahab/internal/emailing"
-	"github.com/omahab/omahab/internal/store"
 )
 
 // list envelope used by dashboard. Matches web/src/api/types.ts ListEnvelope<T> {items}
@@ -783,7 +781,7 @@ func (s *Server) handleCreateWorkspace(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, errBadRequest("project_id is required"))
 		return
 	}
-	if strings.TrimSpace(req.Title) == "" && strings.TrimSpace(req.Branch) == "" {
+	if strings.TrimSpace(req.Title) == "" {
 		writeError(w, r, errBadRequest("title is required"))
 		return
 	}
@@ -2239,37 +2237,22 @@ func (s *Server) handleGenerateRecoveryKey(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, mat)
 }
 
-// handleConfirmRecoveryKey persists the recovery kit via either the new
-// saved-ack mode ({"fingerprint","saved_ack":true} — the client verified a
-// paste-back locally plus an explicit ack checkbox) or the legacy 3-word
-// challenge ({"fingerprint","challenge":{idx:word}x3}).
+// handleConfirmRecoveryKey persists the recovery kit via the saved-ack mode
+// ({"fingerprint","saved_ack":true} — the client verified a paste-back
+// locally plus an explicit ack checkbox).
 func (s *Server) handleConfirmRecoveryKey(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Fingerprint string            `json:"fingerprint"`
-		Challenge   map[string]string `json:"challenge"`
-		SavedAck    bool              `json:"saved_ack"`
+		Fingerprint string `json:"fingerprint"`
+		SavedAck    bool   `json:"saved_ack"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if req.SavedAck {
-		if err := s.backend.ConfirmRecoveryKeySavedAck(r.Context(), req.Fingerprint); err != nil {
-			writeError(w, r, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]bool{"confirmed": true})
+	if !req.SavedAck {
+		writeError(w, r, newAPIError(http.StatusBadRequest, "validation", "saved_ack must be true: the phrase paste-back was not confirmed"))
 		return
 	}
-	chal := make(map[int]string, len(req.Challenge))
-	for k, v := range req.Challenge {
-		var idx int
-		if _, err := fmt.Sscanf(k, "%d", &idx); err != nil {
-			writeError(w, r, fmt.Errorf("%w: invalid challenge key %q", store.ErrValidation, k))
-			return
-		}
-		chal[idx] = v
-	}
-	if err := s.backend.ConfirmRecoveryKey(r.Context(), req.Fingerprint, chal); err != nil {
+	if err := s.backend.ConfirmRecoveryKeySavedAck(r.Context(), req.Fingerprint); err != nil {
 		writeError(w, r, err)
 		return
 	}

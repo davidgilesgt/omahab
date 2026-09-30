@@ -20,7 +20,7 @@ func newWorkspaceOpsBackend(t *testing.T) (*Backend, *fakeReviewRunner, *capturi
 	fake.Repos["omahab/dev-code"] = &scm.Repo{
 		Owner: "omahab", Name: "dev-code",
 		CloneURL: "https://forgejo.example.com/omahab/dev-code.git",
-		Private: true, DefaultBranch: "main",
+		Private:  true, DefaultBranch: "main",
 	}
 	fake.Branches["omahab/dev-code"] = map[string]*scm.Branch{
 		"main": {Name: "main", CommitSHA: "912a11906"},
@@ -37,10 +37,7 @@ func newWorkspaceOpsBackend(t *testing.T) (*Backend, *fakeReviewRunner, *capturi
 	}
 	return backend, runner, cap
 }
-// The reported repro POSTs {project_id, branch:main, agent:omp} with no title
-// against a repo whose main branch already exists. It must create a workspace
-// on a fresh ws/ branch and list it — not 500 with an empty list.
-func TestCreateWorkspace_BranchOnlyRequest_Succeeds(t *testing.T) {
+func TestCreateWorkspace_UniqueBranchFromTitle(t *testing.T) {
 	backend, _, _ := newWorkspaceOpsBackend(t)
 	ctx := context.Background()
 	pr, err := backend.projects.GetBySlug(ctx, "dev-code")
@@ -49,11 +46,11 @@ func TestCreateWorkspace_BranchOnlyRequest_Succeeds(t *testing.T) {
 	}
 	ws, err := backend.CreateWorkspace(ctx, apitypes.CreateWorkspaceRequest{
 		ProjectID: pr.ID,
-		Branch:    "main",
+		Title:     "main",
 		Agent:     "omp",
 	})
 	if err != nil {
-		t.Fatalf("CreateWorkspace branch-only: %v", err)
+		t.Fatalf("CreateWorkspace: %v", err)
 	}
 	if ws.Branch == "main" || !strings.HasPrefix(ws.Branch, "ws/main-") {
 		t.Fatalf("branch = %q, want ws/main-<short>", ws.Branch)

@@ -2,11 +2,11 @@ package integrations
 
 import "github.com/omahab/omahab/internal/store"
 
-// Migrations returns the SQLite migrations owned by the integrations controller.
+// Migrations returns the schema owned by the integrations controller.
 func Migrations() []store.Migration {
 	return []store.Migration{
 		{
-			Name: "integrations-001-ha_integrations",
+			Name: "integrations-001-baseline",
 			SQL: `
 CREATE TABLE IF NOT EXISTS ha_integrations (
 	id TEXT PRIMARY KEY,

@@ -4,18 +4,16 @@ import "github.com/omahab/omahab/internal/store"
 
 // Migrations returns the schema owned by the apps controller. The apps table
 // holds desired and observed state plus the current digest; app_releases
-// retains the current and previous rendered releases for rollback.
+// retains the current and previous rendered releases for rollback;
+// app_maintenance marks bundles locked during import, restore, or storage ops.
 func Migrations() []store.Migration {
 	return []store.Migration{{
-		Name: "0001_apps_and_app_releases",
-		SQL:  appsSchema,
-	}, {
-		Name: "0002_app_maintenance",
-		SQL:  maintenanceSchema,
+		Name: "apps-001-baseline",
+		SQL:  schema,
 	}}
 }
 
-const appsSchema = `
+const schema = `
 CREATE TABLE IF NOT EXISTS apps (
     id                  TEXT PRIMARY KEY,
     name                TEXT NOT NULL UNIQUE,
@@ -43,9 +41,7 @@ CREATE TABLE IF NOT EXISTS app_releases (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_app_releases_app ON app_releases (app_id, created_at);
-`
 
-const maintenanceSchema = `
 CREATE TABLE IF NOT EXISTS app_maintenance (
     bundle_id    TEXT PRIMARY KEY,
     reason       TEXT NOT NULL CHECK (reason IN ('import','restore','storage')),

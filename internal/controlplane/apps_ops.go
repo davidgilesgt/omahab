@@ -13,6 +13,7 @@ import (
 
 	"github.com/omahab/omahab/internal/apitypes"
 	"github.com/omahab/omahab/internal/apps"
+	"github.com/omahab/omahab/internal/bundles"
 	"github.com/omahab/omahab/internal/domain"
 	"github.com/omahab/omahab/internal/health"
 	"github.com/omahab/omahab/internal/store"
@@ -254,6 +255,7 @@ func (b *Backend) ListCatalog(ctx context.Context) ([]apitypes.CatalogBundle, er
 		}
 	}
 	bundles := b.apps.CatalogBundles()
+	sources := b.catalogSources(ctx)
 	out := make([]apitypes.CatalogBundle, 0, len(bundles))
 	for _, bundle := range bundles {
 		exposure := bundle.DefaultExposure
@@ -271,9 +273,32 @@ func (b *Backend) ListCatalog(ctx context.Context) ([]apitypes.CatalogBundle, er
 			MaxExposure:     maxExposure,
 			MemoryMB:        bundle.Resources.MemoryMB,
 			Installed:       installed[bundle.ID],
+			Source:          sources[bundle.ID],
 		})
 	}
 	return out, nil
+}
+
+// catalogSources maps bundle id -> "catalog"|"custom" from the merged
+// view, so ListCatalog can badge provenance without leaking the repo.
+func (b *Backend) catalogSources(ctx context.Context) map[string]string {
+	out := map[string]string{}
+	if b.cfg.CustomBundlesDir == "" {
+		if m, err := bundles.LoadMerged(ctx, b.cfg.CatalogPath, ""); err == nil {
+			for _, id := range m.IDs() {
+				out[id] = string(bundles.SourceCatalog)
+			}
+		}
+		return out
+	}
+	m, err := bundles.LoadMerged(ctx, b.cfg.CatalogPath, b.cfg.CustomBundlesDir)
+	if err != nil {
+		return out
+	}
+	for _, bdl := range m.Bundles() {
+		out[bdl.ID] = string(bdl.Source)
+	}
+	return out
 }
 
 func (b *Backend) GetApplication(ctx context.Context, id domain.ID) (domain.Application, error) {

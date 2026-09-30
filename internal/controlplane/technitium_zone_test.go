@@ -133,6 +133,9 @@ func newFakeTechnitiumZoneServer(t *testing.T) *fakeTechnitiumZone {
 // exposure configured, and a stubbed LAN IP.
 func technitiumZoneTestBackend(t *testing.T) (*Backend, *fakeTechnitiumZone) {
 	b, _ := newTechnitiumInstalledBackend(t)
+	origLAN := lanAddresses
+	lanAddresses = func() []string { return []string{"192.168.1.20"} }
+	t.Cleanup(func() { lanAddresses = origLAN })
 	// Login comes from the stored initial password (the fake accepts any).
 	if _, err := b.secrets.Put(context.Background(), "platform-app", "technitium_initial_password", "pw"); err != nil {
 		t.Fatal(err)

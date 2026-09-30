@@ -767,7 +767,6 @@ type CreateWorkspaceRequest struct {
 	ProjectID          string `json:"project_id"`
 	Title              string `json:"title,omitempty"`
 	Instructions       string `json:"instructions,omitempty"`
-	Branch             string `json:"branch,omitempty"`
 	Agent              string `json:"agent,omitempty"`
 	DevcontainerSource string `json:"devcontainer_source,omitempty"`
 }

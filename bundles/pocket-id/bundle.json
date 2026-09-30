@@ -1,0 +1,36 @@
+{
+  "id": "pocket-id",
+  "name": "Pocket ID",
+  "port": 1411,
+  "default_exposure": "private",
+  "max_exposure": "shared",
+  "health_check": {
+    "kind": "http",
+    "path": "/health",
+    "port": 1411
+  },
+  "startup_grace_seconds": 180,
+  "oidc": {
+    "supported": true,
+    "mode": "provider"
+  },
+  "resources": {
+    "memory_mb": 256
+  },
+  "default": true,
+  "route": "id",
+  "app_path": "/",
+  "dependencies": [
+    "caddy"
+  ],
+  "secret_sources": [
+    "pocket_id_encryption_key",
+    "maxmind_license"
+  ],
+  "units": [
+    "pocket-id.service"
+  ],
+  "groups": [
+    "admins"
+  ]
+}

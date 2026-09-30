@@ -17,7 +17,6 @@ import (
 
 	"github.com/omahab/omahab/internal/apitypes"
 	"github.com/omahab/omahab/internal/backups"
-	"github.com/omahab/omahab/internal/domain"
 	"github.com/omahab/omahab/internal/events"
 	"github.com/omahab/omahab/internal/secrets"
 	"github.com/omahab/omahab/internal/setupguide"
@@ -66,7 +65,7 @@ type recoveryPending struct {
 
 // GenerateRecoveryKey creates a fresh 24-word phrase and holds the seed in
 // memory keyed by fingerprint (first 8 hex of SHA-256(seed)) for 15 minutes.
-// The phrase is shown once and never persisted until ConfirmRecoveryKey.
+// The phrase is shown once and never persisted until ConfirmRecoveryKeySavedAck.
 func (b *Backend) GenerateRecoveryKey(ctx context.Context) (apitypes.RecoveryKeyMaterial, error) {
 	words, seed, err := secrets.GenerateRecoveryPhrase()
 	if err != nil {
@@ -92,45 +91,11 @@ func (b *Backend) GenerateRecoveryKey(ctx context.Context) (apitypes.RecoveryKey
 	}, nil
 }
 
-// ConfirmRecoveryKey verifies the 3-word challenge, wraps the master key with
-// the derived recovery key, and persists recovery.kit (0600) plus the
-// platform-app/recovery_fingerprint secret.
-func (b *Backend) ConfirmRecoveryKey(ctx context.Context, fingerprint string, challenge map[int]string) error {
-	fingerprint = strings.TrimSpace(strings.ToLower(fingerprint))
-	if fingerprint == "" {
-		return fmt.Errorf("%w: fingerprint is required", store.ErrValidation)
-	}
-	if len(challenge) != 3 {
-		return fmt.Errorf("%w: challenge must have exactly 3 entries", store.ErrValidation)
-	}
-	recoveryMu.Lock()
-	pend, ok := recoveryPend[fingerprint]
-	if ok && time.Now().After(pend.expires) {
-		delete(recoveryPend, fingerprint)
-		ok = false
-	}
-	recoveryMu.Unlock()
-	if !ok {
-		return fmt.Errorf("%w: recovery phrase expired or not found; generate again", store.ErrNotFound)
-	}
-	for idx, word := range challenge {
-		if idx < 0 || idx >= 24 {
-			return fmt.Errorf("%w: challenge index %d out of range (0-23)", store.ErrValidation, idx)
-		}
-		expected := pend.phrase[idx]
-		if strings.TrimSpace(strings.ToLower(word)) != strings.TrimSpace(strings.ToLower(expected)) {
-			return fmt.Errorf("%w: challenge word mismatch at position %d", store.ErrValidation, idx)
-		}
-	}
-	return b.persistRecoveryKit(ctx, fingerprint, pend.seed)
-}
-
-// ConfirmRecoveryKeySavedAck persists recovery.kit for the new client ritual:
+// ConfirmRecoveryKeySavedAck persists recovery.kit for the client ritual:
 // the user ticks an explicit "I saved the phrase" ack and the client has
 // already verified a paste-back locally. No challenge words are sent; the
 // pending seed (held in memory for 15 minutes after generate) proves the
-// phrase was freshly generated in this session. Back-compat: the 3-word
-// challenge path via ConfirmRecoveryKey keeps working unchanged.
+// phrase was freshly generated in this session.
 func (b *Backend) ConfirmRecoveryKeySavedAck(ctx context.Context, fingerprint string) error {
 	fingerprint = strings.TrimSpace(strings.ToLower(fingerprint))
 	if fingerprint == "" {
@@ -390,11 +355,9 @@ func (b *Backend) CreateBackupRepository(ctx context.Context, req apitypes.Creat
 		}
 		// Allow location with Env overrides; keep as is.
 	}
-	// Each repository gets its own secret record instead of rotating the
-	// shared backup_repo_credentials name. Existing references migrate
-	// without changing their actual passwords (see migrateBackupCredentialShapes).
-	// The per-repo name needs the repository ID, so credentials stage under
-	// a provisional name first and move once the repository exists.
+	// Each repository gets its own secret record: the per-repo name needs
+	// the repository ID, so credentials stage under a provisional name
+	// first and move once the repository exists.
 	putRepoSecret := func(value string, key string) (backups.SecretRef, error) {
 		encoded, err := json.Marshal(backups.Credentials{Password: value})
 		if err != nil {
@@ -451,27 +414,33 @@ func (b *Backend) CreateBackupRepository(ctx context.Context, req apitypes.Creat
 	}
 	_ = b.secrets.DeleteByName(ctx, "platform-app", "backup_repo_"+sanitizeSecretName(stageKey))
 	b.enableBackupTimers(ctx)
-	// After creation run first backup immediately then verify so recovery_tested passes day one.
-	// Fire in background to not block the API response.
-	go func() {
-		bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-		defer cancel()
-		if _, err := b.backups.RunBackup(bgCtx, backups.RunRequest{RepositoryID: repo.ID}); err != nil {
-			_, _ = b.events.Publish(bgCtx, events.PublishInput{
-				Type:     "backups.first_backup_failed",
-				Severity: "warning",
-				Message:  fmt.Sprintf("first backup after configure failed: %v", err),
-			})
-			return
-		}
-		if _, _, err := b.backups.Verify(bgCtx, backups.VerifyRequest{RepositoryID: repo.ID}); err != nil {
-			_, _ = b.events.Publish(bgCtx, events.PublishInput{
-				Type:     "backups.first_verify_failed",
-				Severity: "warning",
-				Message:  fmt.Sprintf("first verify after configure failed: %v", err),
-			})
-		}
-	}()
+	// After creation run the first backup immediately through the scoped
+	// capture path (consistent dumps, v2 manifest, quiesce/resume) with
+	// all configured scopes, then verify, so recovery_tested passes day
+	// one. Attach never triggers it: an attached repository already
+	// holds the prior instance's snapshots. Fire in background to not
+	// block the API response.
+	if mode == "create" {
+		go func() {
+			bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+			defer cancel()
+			if _, err := b.CreateBackupScoped(bgCtx, repo.ID, nil, false); err != nil {
+				_, _ = b.events.Publish(bgCtx, events.PublishInput{
+					Type:     "backups.first_backup_failed",
+					Severity: "warning",
+					Message:  fmt.Sprintf("first backup after configure failed: %v", err),
+				})
+				return
+			}
+			if _, _, err := b.backups.Verify(bgCtx, backups.VerifyRequest{RepositoryID: repo.ID}); err != nil {
+				_, _ = b.events.Publish(bgCtx, events.PublishInput{
+					Type:     "backups.first_verify_failed",
+					Severity: "warning",
+					Message:  fmt.Sprintf("first verify after configure failed: %v", err),
+				})
+			}
+		}()
+	}
 	return repo, nil
 }
 
@@ -501,117 +470,6 @@ func sanitizeSecretName(s string) string {
 	return out
 }
 
-// migrateBackupCredentialShapes converts legacy raw-password backup secrets into
-// backups.Credentials JSON objects without changing password bytes. Valid
-// credential objects are left unchanged. Shared backup_repo_credentials
-// references each receive a separate backup_repo_<sanitized-repository-id>
-// record. Per-repository backup_repo_* records rotate in place. Repository
-// references update through Configure without reinitializing restic data.
-// Empty legacy values and credential objects with invalid field types are
-// migration errors. Already converted objects survive a retry.
-func (b *Backend) migrateBackupCredentialShapes(ctx context.Context) error {
-	if b.backups == nil || b.secrets == nil {
-		return nil
-	}
-	repos, err := b.backups.Repositories(ctx)
-	if err != nil {
-		return fmt.Errorf("list backup repositories: %w", err)
-	}
-	for _, repo := range repos {
-		meta, err := b.secrets.Get(ctx, domain.ID(repo.SecretRef.ID))
-		if err != nil {
-			return fmt.Errorf("load backup credential metadata for repository %q: %w", repo.ID, err)
-		}
-		if meta.Scope != "platform-app" {
-			continue
-		}
-		shared := meta.Name == "backup_repo_credentials"
-		if !shared && !strings.HasPrefix(meta.Name, "backup_repo_") {
-			continue
-		}
-		value, err := b.secrets.Reveal(ctx, domain.ID(repo.SecretRef.ID))
-		if err != nil {
-			return fmt.Errorf("reveal backup credential for repository %q: %w", repo.ID, err)
-		}
-		if value == "" {
-			return fmt.Errorf("backup credential for repository %q is empty", repo.ID)
-		}
-		var creds backups.Credentials
-		if err := json.Unmarshal([]byte(value), &creds); err == nil && strings.TrimSpace(creds.Password) != "" {
-			if !shared {
-				continue
-			}
-			// Shared valid object still needs a separate per-repository record.
-			name := "backup_repo_" + sanitizeSecretName(repo.ID)
-			sec, err := b.secrets.Put(ctx, "platform-app", name, value)
-			if err != nil {
-				return fmt.Errorf("store backup credential for repository %q: %w", repo.ID, err)
-			}
-			if _, err := b.backups.Configure(ctx, backups.ConfigureRequest{
-				ID: repo.ID, Label: repo.Label, Location: repo.Location,
-				SecretRef: backups.SecretRef{ID: string(sec.ID), Version: sec.Version},
-			}); err != nil {
-				return fmt.Errorf("point repository %q at migrated credential: %w", repo.ID, err)
-			}
-			continue
-		}
-		if looksLikeCredentialObject(value) {
-			return fmt.Errorf("backup credential for repository %q has invalid credential fields", repo.ID)
-		}
-		encoded, err := json.Marshal(backups.Credentials{Password: value})
-		if err != nil {
-			return fmt.Errorf("encode backup credential for repository %q: %w", repo.ID, err)
-		}
-		if shared {
-			name := "backup_repo_" + sanitizeSecretName(repo.ID)
-			sec, err := b.secrets.Put(ctx, "platform-app", name, string(encoded))
-			if err != nil {
-				return fmt.Errorf("store backup credential for repository %q: %w", repo.ID, err)
-			}
-			if _, err := b.backups.Configure(ctx, backups.ConfigureRequest{
-				ID: repo.ID, Label: repo.Label, Location: repo.Location,
-				SecretRef: backups.SecretRef{ID: string(sec.ID), Version: sec.Version},
-			}); err != nil {
-				return fmt.Errorf("point repository %q at migrated credential: %w", repo.ID, err)
-			}
-			continue
-		}
-		sec, err := b.secrets.Rotate(ctx, domain.ID(repo.SecretRef.ID), string(encoded))
-		if err != nil {
-			return fmt.Errorf("rotate backup credential for repository %q: %w", repo.ID, err)
-		}
-		if _, err := b.backups.Configure(ctx, backups.ConfigureRequest{
-			ID: repo.ID, Label: repo.Label, Location: repo.Location,
-			SecretRef: backups.SecretRef{ID: string(sec.ID), Version: sec.Version},
-		}); err != nil {
-			return fmt.Errorf("point repository %q at migrated credential: %w", repo.ID, err)
-		}
-	}
-	return nil
-}
-
-// looksLikeCredentialObject reports whether value parses as a JSON object
-// containing credential field names. Such values must decode as valid
-// credentials; otherwise migration must fail instead of treating the object
-// text as a raw password.
-func looksLikeCredentialObject(value string) bool {
-	trimmed := strings.TrimSpace(value)
-	if !strings.HasPrefix(trimmed, "{") {
-		return false
-	}
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(value), &obj); err != nil {
-		return false
-	}
-	for k := range obj {
-		switch strings.ToLower(strings.TrimSpace(k)) {
-		case "password", "username", "accesskey", "access_key", "access-key":
-			return true
-		}
-	}
-	return false
-}
-
 // enableBackupTimers turns on the daily backup, weekly verify and
 // weekly retention-prune timers.
 func (b *Backend) enableBackupTimers(ctx context.Context) {
@@ -624,13 +482,6 @@ func (b *Backend) enableBackupTimers(ctx context.Context) {
 			})
 		}
 	}
-}
-
-// storageEntry is the legacy v1 placement record (kept for migration in
-// storage.go).
-type storageEntry struct {
-	Volume string `json:"volume"`
-	FSUUID string `json:"fs_uuid"`
 }
 
 // lsblkDevices models the lsblk -J output.

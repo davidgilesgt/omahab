@@ -282,17 +282,13 @@ func (s *Service) ListRuns(ctx context.Context, f ListFilter) ([]Run, error) {
 	return s.listRuns(ctx, f)
 }
 
-// GetRun returns a run with its hook outcomes, snapshot, and verification
-// record.
+// GetRun returns a run with its snapshot and verification record.
 func (s *Service) GetRun(ctx context.Context, id string) (RunDetail, error) {
 	run, err := s.getRun(ctx, id)
 	if err != nil {
 		return RunDetail{}, err
 	}
 	d := RunDetail{Run: run}
-	if d.Hooks, err = s.listHookResults(ctx, id); err != nil {
-		return d, err
-	}
 	if run.SnapshotID != "" {
 		snap, err := s.findSnapshot(ctx, run.SnapshotID)
 		switch {

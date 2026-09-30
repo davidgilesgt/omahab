@@ -19,8 +19,47 @@ import (
 // secrets, exposure observations, apps, identity, and backups.
 // It persists nothing new — all derivable — per plan step 6.
 func (b *Backend) GetSetupStatus(ctx context.Context) (apitypes.SetupStatus, error) {
-	checks := make([]apitypes.SetupCheck, 0, 16)
-	// --- ssh_keys check (first: installer seeds keys, add more here) ---
+	checks := make([]apitypes.SetupCheck, 0, 17)
+	// --- restore check (first: restore-from-backup or start-new) ---
+	// Backups lead the checklist (DESIGN §5.4): a replacement server
+	// restores its control plane before anything else is configured.
+	// The posture is the persisted restore_setup_state.json written by
+	// the restore flow; "skipped" is the operator's explicit new-server
+	// choice. recovery_key+backups_configured remain the done signal —
+	// a restore also yields both (kit restored, repository attached).
+	restoreCheck := apitypes.SetupCheck{ID: "restore"}
+	if st, err := loadRestoreSetupState(b.cfg.StateDir); err != nil {
+		restoreCheck.Status = "failed"
+		restoreCheck.Detail = "restore state unreadable: " + err.Error()
+	} else {
+		switch st.State {
+		case "completed":
+			restoreCheck.Status = "ok"
+			restoreCheck.Detail = "server restored from backup"
+		case "skipped":
+			restoreCheck.Status = "skipped"
+			restoreCheck.Detail = "new server (no restore)"
+		case "in_progress":
+			restoreCheck.Status = "pending"
+			if st.Operation != "" {
+				restoreCheck.Detail = "restore in progress (" + st.Operation + ")"
+			} else {
+				restoreCheck.Detail = "restore in progress"
+			}
+		case "failed":
+			restoreCheck.Status = "failed"
+			if st.Detail != "" {
+				restoreCheck.Detail = "restore failed: " + st.Detail
+			} else {
+				restoreCheck.Detail = "restore failed"
+			}
+		default:
+			restoreCheck.Status = "pending"
+			restoreCheck.Detail = "restore from an earlier server or start new"
+		}
+	}
+	checks = append(checks, restoreCheck)
+	// --- ssh_keys check (installer seeds keys, add more here) ---
 	sshCheck := apitypes.SetupCheck{ID: "ssh_keys"}
 	if keys, err := b.ListSSHKeys(ctx); err != nil {
 		sshCheck.Status = "pending"
@@ -349,12 +388,9 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (apitypes.SetupStatus, err
 		case "":
 			idxCheck.Status = "pending"
 			idxCheck.Detail = "no document search mode chosen"
-		case "english", "worldwide", "full_text", "fulltext":
+		case "english", "worldwide", "full_text":
 			idxCheck.Status = "ok"
 			idxCheck.Detail = normalized
-			if idxCheck.Detail == "fulltext" {
-				idxCheck.Detail = "full_text"
-			}
 		default:
 			idxCheck.Status = "failed"
 			idxCheck.Detail = "invalid document search mode: " + choice
@@ -392,25 +428,25 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (apitypes.SetupStatus, err
 	// --- restore_tested check ("Last application restore test") ---
 	// Release evidence only: the installer/E2E result, never inferred from
 	// extraction. Timestamp or "Not yet tested".
-	restoreCheck := apitypes.SetupCheck{ID: "restore_tested"}
+	restoreTestedCheck := apitypes.SetupCheck{ID: "restore_tested"}
 	var restoreAt sql.NullString
 	rerr := b.db.QueryRowContext(ctx, `SELECT MAX(finished_at) FROM backup_runs WHERE kind='restore' AND status='completed' AND finished_at IS NOT NULL`).Scan(&restoreAt)
 	if rerr != nil {
 		if strings.Contains(rerr.Error(), "no such table") {
-			restoreCheck.Status = "pending"
-			restoreCheck.Detail = "Not yet tested"
+			restoreTestedCheck.Status = "pending"
+			restoreTestedCheck.Detail = "Not yet tested"
 		} else {
-			restoreCheck.Status = "failed"
-			restoreCheck.Detail = "query failed: " + rerr.Error()
+			restoreTestedCheck.Status = "failed"
+			restoreTestedCheck.Detail = "query failed: " + rerr.Error()
 		}
 	} else if !restoreAt.Valid || strings.TrimSpace(restoreAt.String) == "" {
-		restoreCheck.Status = "pending"
-		restoreCheck.Detail = "Not yet tested"
+		restoreTestedCheck.Status = "pending"
+		restoreTestedCheck.Detail = "Not yet tested"
 	} else {
-		restoreCheck.Status = "ok"
-		restoreCheck.Detail = "last application restore test: " + strings.TrimSpace(restoreAt.String)
+		restoreTestedCheck.Status = "ok"
+		restoreTestedCheck.Detail = "last application restore test: " + strings.TrimSpace(restoreAt.String)
 	}
-	checks = append(checks, restoreCheck)
+	checks = append(checks, restoreTestedCheck)
 
 	// --- recovery_key check (kit exported + fingerprint stored) ---
 	recovKeyCheck := apitypes.SetupCheck{ID: "recovery_key"}
@@ -435,11 +471,6 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (apitypes.SetupStatus, err
 		storageCheck.Detail = "root disk holds everything"
 	default:
 		pending := len(sf.Proposals)
-		for _, p := range sf.Placements {
-			if p.Pending {
-				pending++
-			}
-		}
 		if pending > 0 {
 			storageCheck.Status = "pending"
 			storageCheck.Detail = "volume placement recorded but not applied"
@@ -563,7 +594,7 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (apitypes.SetupStatus, err
 
 	localReady := b.isLocalReady()
 
-	return apitypes.SetupStatus{State: state, LocalReady: localReady, Checks: checks}, nil
+	return apitypes.SetupStatus{State: state, LocalReady: localReady, Checks: checks, Nodes: b.setupNodesList(ctx)}, nil
 }
 
 func (b *Backend) isLocalReady() bool {
@@ -586,6 +617,16 @@ func deriveSetupState(checks []apitypes.SetupCheck, domainSentinel bool, cfDNSPr
 				hasPendingOrFailed = true
 			}
 		case "tunnel":
+			if c.Status == "skipped" {
+				continue
+			}
+			if c.Status != "ok" {
+				hasPendingOrFailed = true
+			}
+		case "restore":
+			// "skipped" is the operator's explicit new-server choice; it
+			// is terminal and fine. Pending (still choosing) or failed
+			// stays attention-worthy like any blocking step.
 			if c.Status == "skipped" {
 				continue
 			}
@@ -654,6 +695,10 @@ func classifyCoreApp(st apps.Status, isNative bool) apitypes.SetupAppStatus {
 
 func applySetupCheckMeta(c apitypes.SetupCheck) apitypes.SetupCheck {
 	switch c.ID {
+	case "restore":
+		c.Label = "Backups: restore or start new"
+		c.Owner = "operator"
+		c.Action = "Restore from an earlier server with the recovery phrase, or start fresh and set up backups."
 	case "ssh_keys":
 		c.Label = "Add SSH keys"
 		c.Owner = "operator"
@@ -726,7 +771,7 @@ func applySetupCheckMeta(c apitypes.SetupCheck) apitypes.SetupCheck {
 }
 
 func orderSetupChecks(checks []apitypes.SetupCheck) []apitypes.SetupCheck {
-	order := []string{"ssh_keys", "domain", "cloudflare_dns", "tailscale", "recovery_key", "admin_passkeys", "knowledge_index_setup", "backups_configured", "storage_configured", "tunnel", "dashboard_dns", "core_apps", "technitium_dns", "woodpecker_connection", "automatic_reconciliation", "recovery_tested", "restore_tested"}
+	order := []string{"restore", "recovery_key", "backups_configured", "ssh_keys", "tailscale", "domain", "cloudflare_dns", "admin_passkeys", "knowledge_index_setup", "storage_configured", "tunnel", "dashboard_dns", "core_apps", "technitium_dns", "woodpecker_connection", "automatic_reconciliation", "recovery_tested", "restore_tested"}
 	byID := make(map[string]apitypes.SetupCheck, len(checks))
 	for _, c := range checks {
 		byID[c.ID] = c
@@ -826,4 +871,3 @@ func (b *Backend) unreadCloudflareDNSFailure(ctx context.Context) (string, bool)
 	}
 	return "Cloudflare DNS token was rejected or lacks DNS permissions", true
 }
-

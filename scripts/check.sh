@@ -40,7 +40,7 @@ fi
 # No Debian path remnants.
 ! grep -rn "internal/installer" --include="*.go" cmd/ internal/ && pass "installer package deleted" || fail_check "installer package still referenced"
 test ! -d packaging/deb && pass "no deb packaging" || fail_check "deb packaging present"
-grep -q 'd ${stateDir} 0711 root root' nix/apps.nix && pass "state directory 0711" || fail_check "state directory 0711"
+grep -q 'd ${stateDir} 0711 root root' bundles/caddy/module.nix && pass "state directory 0711" || fail_check "state directory 0711"
 grep -q 'd ${dataDir} 0755 root root' nix/module.nix && pass "data directory exists" || fail_check "data directory"
 
 # Root binaries must not be checked in (use nix build).
@@ -67,9 +67,9 @@ test ! -f "$ROOT/.dockerignore" && pass ".dockerignore deleted" || fail_check ".
 
 # Gated native units: every appenv consumer has a condition, and every app
 # unit is gated on maintenance markers (boot-time pause authority).
-grep -q '"${appEnv}/${bundle}.env"' nix/apps.nix && pass "appenv gating present" || fail_check "appenv gating missing"
-grep -q '"!${stateDir}/maintenance/apps/${bundle}"' nix/apps.nix && pass "maintenance app marker gating present" || fail_check "maintenance app marker gating missing"
-grep -q '"!${stateDir}/maintenance/server"' nix/apps.nix && pass "maintenance server marker gating present" || fail_check "maintenance server marker gating missing"
+grep -q '"${appEnv}/${bundle}.env"' nix/bundle-lib.nix && pass "appenv gating present" || fail_check "appenv gating missing"
+grep -q '"!${stateDir}/maintenance/apps/${bundle}"' nix/bundle-lib.nix && pass "maintenance app marker gating present" || fail_check "maintenance app marker gating missing"
+grep -q '"!${stateDir}/maintenance/server"' nix/bundle-lib.nix && pass "maintenance server marker gating present" || fail_check "maintenance server marker gating missing"
 
 # No runtime writes to /etc from the daemon (internal/ + cmd/omahabd).
 # CLI-only /etc paths are out of scope: `omahab install` looks up the live
@@ -84,27 +84,24 @@ grep -q '"!${stateDir}/maintenance/server"' nix/apps.nix && pass "maintenance se
 # Catalog: single-source runtime, no legacy references.
 pat="apps-catalog"; pat+=".json"
 ! grep -rn "$pat" --include="*.go" --include="*.nix" --include="*.sh" --include="*.md" --include="*.json" . 2>/dev/null | grep -q . && pass "no apps-catalog ref" || fail_check "apps-catalog ref present"
-! grep -q "docker compose" deploy/catalog/catalog.json && pass "catalog no docker compose" || fail_check "catalog contains docker compose"
-# Catalog ↔ nix/apps.nix drift (A5): every catalog units[] must exist in nix/apps.nix.
+! grep -q "docker compose" bundles/*/bundle.json && pass "catalog no docker compose" || fail_check "catalog contains docker compose"
+# Catalog ↔ bundle module drift (A5): every bundle units[] must exist in its bundles/<id>/module.nix.
 if command -v jq >/dev/null 2>&1; then
   missing=0
-  while IFS= read -r unit; do
-    case "$unit" in
-      woodpecker-agent-docker.service) pattern="woodpecker-agents.agents.docker" ;;
-      immich-machine-learning.service) pattern="services.immich" ;;
-      paperless-web.service|paperless-consumer.service|paperless-scheduler.service|paperless-task-queue.service|tika.service|gotenberg.service) pattern="services.paperless" ;;
-      restic-rest-server.service) pattern="services.restic.server" ;;
-      *) pattern="${unit%.service}" ;;
-    esac
-    if ! grep -qF "$pattern" nix/apps.nix; then
-      echo "FAIL: catalog unit $unit (pattern $pattern) missing in nix/apps.nix" >&2
-      missing=1
-    fi
-  done < <(jq -r '.bundles[].units[]' deploy/catalog/catalog.json)
+  for f in bundles/*/bundle.json; do
+    mod="bundles/$(basename "$(dirname "$f")")/module.nix"
+    while IFS= read -r unit; do
+      pattern="${unit%.service}"
+      if ! grep -qF "$pattern" "$mod"; then
+        echo "FAIL: bundle unit $unit (pattern $pattern) missing in $mod" >&2
+        missing=1
+      fi
+    done < <(jq -r '.units[]' "$f")
+  done
   if [[ $missing -eq 0 ]]; then
-    pass "catalog units exist in nix/apps.nix"
+    pass "bundle units exist in bundle modules"
   else
-    fail_check "catalog ↔ nix unit drift"
+    fail_check "bundle ↔ module unit drift"
   fi
 else
   fail_check "jq not found for catalog unit check"
@@ -114,7 +111,7 @@ if command -v go >/dev/null 2>&1; then
   go build ./internal/... ./cmd/... && pass "go build" || fail_check "go build"
   go vet ./internal/... ./cmd/... && pass "go vet" || fail_check "go vet"
   go test ./internal/config/ -run 'TestDefaultListenIsLoopback|TestLoadWithoutListenEnvUsesLoopbackDefault|TestLoadAcceptsPackagedWildcardWhenExplicitlySet' -count=1 >/dev/null 2>&1 && pass "loopback API default" || fail_check "loopback API default"
-  go run ./cmd/omahab catalog validate deploy/catalog/catalog.json && pass "catalog validate" || fail_check "catalog validate"
+  ok=1; for f in bundles/*/bundle.json; do go run ./cmd/omahab bundle validate-bundle "$f" || ok=0; done; [[ $ok -eq 1 ]] && pass "catalog validate" || fail_check "catalog validate"
 else
   fail_check "go toolchain not found"
 fi

@@ -35,29 +35,10 @@ const (
 const (
 	StagePrepare     = "prepare"
 	StageCredentials = "credentials"
-	StageHooks       = "hooks"
 	StageSnapshot    = "snapshot"
 	StageRestore     = "restore"
 	StageVerify      = "verify"
 	StageCompleted   = "completed"
-)
-
-// HookKind names the application consistency hooks supplied by application
-// bundles.
-type HookKind string
-
-const (
-	HookPreBackup   HookKind = "pre_backup"
-	HookPostRestore HookKind = "post_restore"
-)
-
-// HookStatus is the persisted outcome of one hook invocation.
-type HookStatus string
-
-const (
-	HookOK      HookStatus = "ok"
-	HookFailed  HookStatus = "failed"
-	HookSkipped HookStatus = "skipped"
 )
 
 // VerificationStatus is the lifecycle state of a restore verification.
@@ -139,20 +120,6 @@ type Snapshot struct {
 	VerifiedAt   *time.Time `json:"verified_at,omitempty"`
 }
 
-// HookResult persists the outcome of one application consistency hook.
-type HookResult struct {
-	ID          string     `json:"id"`
-	RunID       string     `json:"run_id"`
-	Application string     `json:"application"`
-	Hook        HookKind   `json:"hook"`
-	Status      HookStatus `json:"status"`
-	ExitCode    *int       `json:"exit_code,omitempty"`
-	Error       string     `json:"error,omitempty"`
-	Output      string     `json:"output,omitempty"`
-	StartedAt   time.Time  `json:"started_at"`
-	FinishedAt  *time.Time `json:"finished_at,omitempty"`
-}
-
 // Verification records a restore verification performed against an isolated
 // single-use target directory.
 type Verification struct {
@@ -169,8 +136,8 @@ type Verification struct {
 	CleanedAt     *time.Time         `json:"cleaned_at,omitempty"`
 	Error         string             `json:"error,omitempty"`
 	CleanupError  string             `json:"cleanup_error,omitempty"`
-	// Depth carries isolated database proof when loaded with it; nil for
-	// legacy rows and for in-flight verifications.
+	// Depth carries isolated database proof when loaded with it; nil
+	// while a verification is in flight.
 	Depth *VerificationDepth `json:"depth,omitempty"`
 }
 
@@ -181,7 +148,6 @@ type Verification struct {
 type VerificationDepth struct {
 	VerificationID string    `json:"verification_id"`
 	ManifestFound  bool      `json:"manifest_found"`
-	Legacy         bool      `json:"legacy"`
 	SQLiteChecked  int       `json:"sqlite_checked"`
 	SQLiteOK       int       `json:"sqlite_ok"`
 	PGChecked      int       `json:"pg_checked"`
@@ -199,7 +165,9 @@ type ConfigureRequest struct {
 	SecretRef SecretRef `json:"secret_ref"`
 }
 
-// RunRequest triggers a backup run.
+// RunRequest triggers a backup run. Paths and Scopes are both required:
+// the scoped capture path (Backend.CreateBackupScoped) computes the
+// exact file set for the selected scopes and passes it explicitly.
 type RunRequest struct {
 	// RepositoryID selects the destination; optional when exactly one
 	// repository is configured.
@@ -207,13 +175,12 @@ type RunRequest struct {
 	// Trigger is manual or scheduled; empty means manual.
 	Trigger string `json:"trigger,omitempty"`
 	// Scopes selects snapshot content (server-config, app:<bundle-id>,
-	// server-sync, server-projects, machine-backups). Empty means all
-	// configured scopes.
-	Scopes []string `json:"scopes,omitempty"`
-	// Paths overrides the configured source paths when non-empty. The
-	// control plane sets explicit scoped paths; direct service use falls
-	// back to Config.Paths.
-	Paths []string `json:"paths,omitempty"`
+	// server-sync, server-projects, machine-backups) and stamps one
+	// scope:<name> tag per scope.
+	Scopes []string `json:"scopes"`
+	// Paths is the explicit capture path set for the selected scopes,
+	// including the staging directory carrying the v2 manifest.
+	Paths []string `json:"paths"`
 	// Excludes are restic --exclude patterns for caches, staging trees,
 	// live databases and transient runtime files.
 	Excludes []string `json:"excludes,omitempty"`
@@ -227,9 +194,10 @@ type VerifyRequest struct {
 	Trigger      string `json:"trigger,omitempty"`
 }
 
-// RestoreRequest restores a snapshot into an existing target directory and
-// runs post-restore application hooks. Restores are the disaster-recovery
-// path and always require an explicit snapshot and target.
+// RestoreRequest restores a snapshot into an existing target directory.
+// Restores are the disaster-recovery path and always require an explicit
+// snapshot and target; app-level state transitions are handled by the
+// typed orchestration, not shell hooks.
 type RestoreRequest struct {
 	SnapshotID   string `json:"snapshot_id"`
 	TargetDir    string `json:"target_dir"`
@@ -248,7 +216,6 @@ type ListFilter struct {
 // RunDetail is a run together with its persisted child records.
 type RunDetail struct {
 	Run          Run           `json:"run"`
-	Hooks        []HookResult  `json:"hooks,omitempty"`
 	Snapshot     *Snapshot     `json:"snapshot,omitempty"`
 	Verification *Verification `json:"verification,omitempty"`
 }

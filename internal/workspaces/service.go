@@ -304,15 +304,6 @@ func parseRepoRef(cloneURL string) (scm.RepoRef, string, error) {
 // (and any issued credentials) is rolled back and nil is returned with the error.
 func (s *Service) Create(ctx context.Context, in CreateInput) (*domain.Workspace, error) {
 	title := strings.TrimSpace(in.Title)
-	if title == "" {
-		// Branch-only requests (e.g. {"project_id":..., "branch":"main"}) carry
-		// no title. Treat the branch value as the title so creation always
-		// mints a unique ws/<slug>-XXXX branch off the repo default instead
-		// of sitting directly on an existing repo branch like main with no
-		// credentials or workspace env. This matches the CLI, which sends
-		// Title=Branch when --title is omitted.
-		title = strings.TrimSpace(in.Branch)
-	}
 	instructions := in.Instructions // preserve as-is, but trim leading/trailing whitespace for empty check?
 	// Validate title (+slug) before project_id so callers get the
 	// field error for the title they typed, not a downstream missing ref.

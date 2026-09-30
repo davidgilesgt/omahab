@@ -16,6 +16,7 @@ import (
 
 	"github.com/omahab/omahab/internal/apps"
 	"github.com/omahab/omahab/internal/backups"
+	"github.com/omahab/omahab/internal/bundles"
 	"github.com/omahab/omahab/internal/domain"
 	"github.com/omahab/omahab/internal/store"
 )
@@ -469,12 +470,23 @@ func (b *Backend) CreateBackupScoped(ctx context.Context, repository string, sco
 	return result, nil
 }
 
+// backupStagingPath returns the fixed capture staging directory: one
+// constant system path, recreated per run under the capture lock, so the
+// manifest location inside a snapshot is always
+// /var/lib/omahab/backup-staging/manifest.json.
+func (b *Backend) backupStagingPath() string {
+	return filepath.Join(b.cfg.StateDir, "backup-staging")
+}
+
 // runCaptureLocked stages dumps and the manifest and runs the restic
 // capture. The caller owns quiesce/resume around it; every error is
 // already translated for API callers.
 func (b *Backend) runCaptureLocked(ctx context.Context, plan *capturePlan, resolved []string, repository string, scheduled bool) (domain.Backup, error) {
-	staging, err := os.MkdirTemp(filepath.Join(b.cfg.StateDir, "dumps"), "run-")
-	if err != nil {
+	staging := b.backupStagingPath()
+	if err := os.RemoveAll(staging); err != nil && !os.IsNotExist(err) {
+		return domain.Backup{}, err
+	}
+	if err := os.MkdirAll(staging, 0o700); err != nil {
 		return domain.Backup{}, err
 	}
 	success := false
@@ -509,7 +521,12 @@ func (b *Backend) runCaptureLocked(ctx context.Context, plan *capturePlan, resol
 			return domain.Backup{}, translateError(err)
 		}
 	}
-	manifest, err := b.buildManifest(ctx, resolved, plan)
+	// Custom bundle definitions travel with their app scopes: the
+	// committed files at HEAD are copied into staging bundles/<id>/.
+	if err := b.stageCustomBundleDefinitions(ctx, plan, staging); err != nil {
+		return domain.Backup{}, translateError(err)
+	}
+	manifest, err := b.buildManifest(ctx, resolved, plan, staging)
 	if err != nil {
 		return domain.Backup{}, translateError(err)
 	}
@@ -549,7 +566,9 @@ func triggerFor(scheduled bool) string {
 	return backups.TriggerManual
 }
 
-func (b *Backend) buildManifest(ctx context.Context, scopes []string, plan *capturePlan) (backups.SnapshotManifest, error) {
+// buildManifest assembles the v2 manifest for the resolved scopes with
+// per-artifact sha256 hashes over the staged files.
+func (b *Backend) buildManifest(ctx context.Context, scopes []string, plan *capturePlan, staging string) (backups.SnapshotManifest, error) {
 	inst, err := b.store.Instance(ctx)
 	if err != nil {
 		return backups.SnapshotManifest{}, err
@@ -561,32 +580,24 @@ func (b *Backend) buildManifest(ctx context.Context, scopes []string, plan *capt
 		}
 	}
 	m := backups.SnapshotManifest{
-		FormatVersion: 1,
-		InstanceID:    string(inst.ID),
-		Domain:        strings.TrimSpace(inst.Domain),
-		ReleaseRef:    b.version,
-		Scopes:        scopes,
-		Omitted:       plan.omitted,
-	}
-	for _, bd := range plan.bundles {
-		var vols []backups.ManifestDisk
-		for _, v := range bd.Data {
-			vols = append(vols, backups.ManifestDisk{Volume: bd.ID + ":" + v.Name, Path: v.Path})
-		}
-		m.Applications = append(m.Applications, backups.ManifestApp{
-			BundleID:  bd.ID,
-			Version:   b.version,
-			Volumes:   vols,
-			Databases: bd.Backup.Databases,
-			Secrets:   bd.SecretSources,
-		})
+		FormatVersion: backups.ManifestFormatVersion,
+		Instance: backups.ManifestInstance{
+			ID:        string(inst.ID),
+			Domain:    strings.TrimSpace(inst.Domain),
+			Placement: Placement(),
+		},
+		System: backups.ManifestSystem{
+			ReleaseRef:      b.version,
+			NixpkgsRev:      strings.TrimSpace(os.Getenv("OMAHAB_NIXPKGS_REV")),
+			FlakeLockSHA256: strings.TrimSpace(os.Getenv("OMAHAB_FLAKE_LOCK_SHA256")),
+			BundlesRepoRev:  bundlesRepoRev(ctx),
+		},
+		Scopes:  plan.scopeRecords(ctx, scopes, bundleByID, staging),
+		Omitted: plan.omitted,
 	}
 	if sf, _, err := loadStorageFile(storageJSONPath(b.cfg.StateDir)); err == nil {
 		known, _ := b.knownVolumes(ctx)
 		for _, pl := range sf.Placements {
-			if pl.Pending {
-				continue
-			}
 			m.Storage = append(m.Storage, backups.ManifestDisk{Volume: pl.Volume, Path: known[pl.Volume], FSUUID: pl.FSUUID})
 		}
 	}
@@ -594,4 +605,17 @@ func (b *Backend) buildManifest(ctx context.Context, scopes []string, plan *capt
 		m.RecoveryFingerprint = strings.TrimSpace(fp)
 	}
 	return m, nil
+}
+
+// bundlesRepoRev reports the custom-bundles repo HEAD when the repo
+// exists; empty otherwise.
+func bundlesRepoRev(ctx context.Context) string {
+	if !bundles.RepoExists() {
+		return ""
+	}
+	out, err := exec.CommandContext(ctx, "git", "-C", bundles.RepoPath, "rev-parse", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }

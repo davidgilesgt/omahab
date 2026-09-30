@@ -1,0 +1,31 @@
+{
+  "id": "technitium",
+  "name": "Technitium DNS",
+  "port": 5380,
+  "default_exposure": "private",
+  "max_exposure": "private",
+  "health_check": {
+    "kind": "http",
+    "path": "/",
+    "port": 5380
+  },
+  "startup_grace_seconds": 120,
+  "oidc": {
+    "supported": true
+  },
+  "resources": {
+    "memory_mb": 512
+  },
+  "default": true,
+  "route": "dns",
+  "app_path": "/",
+  "dependencies": [
+    "caddy"
+  ],
+  "units": [
+    "technitium-dns-server.service"
+  ],
+  "groups": [
+    "admins"
+  ]
+}

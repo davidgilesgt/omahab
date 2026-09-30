@@ -116,8 +116,7 @@ func (s *Service) Verify(ctx context.Context, req VerifyRequest) (Run, Verificat
 		return failVer(StageVerify, err)
 	}
 	depth := VerificationDepth{VerificationID: ver.ID, CheckedAt: s.nowUTC(),
-		ManifestFound: rep.ManifestFound, Legacy: rep.Legacy,
-		SQLiteChecked: rep.SQLiteChecked, SQLiteOK: rep.SQLiteOK,
+		ManifestFound: true, SQLiteChecked: rep.SQLiteChecked, SQLiteOK: rep.SQLiteOK,
 		PGChecked: rep.PGChecked, PGOK: rep.PGOK}
 	if err := s.saveVerificationDepth(ctx, depth); err != nil {
 		return failVer(StageVerify, err)
@@ -163,9 +162,8 @@ func (s *Service) Verify(ctx context.Context, req VerifyRequest) (Run, Verificat
 }
 
 // Restore is the disaster-recovery path: it restores a snapshot into an
-// existing explicit target directory, then runs post-restore application
-// hooks. A successful restore also demonstrates restorability and marks the
-// snapshot verified.
+// existing explicit target directory. A successful restore also
+// demonstrates restorability and marks the snapshot verified.
 func (s *Service) Restore(ctx context.Context, req RestoreRequest) (Run, error) {
 	if req.SnapshotID == "" {
 		return Run{}, fmt.Errorf("%w: snapshot_id is required", ErrInvalid)
@@ -219,12 +217,6 @@ func (s *Service) Restore(ctx context.Context, req RestoreRequest) (Run, error) 
 	if err := s.runner.Restore(ctx, s.scopedRepository(ctx, repo), creds, snap.ID, target); err != nil {
 		s.failRun(ctx, run, StageRestore, err, creds.Password, creds.AccessKey)
 		return *run, fmt.Errorf("backups: restore run %s failed: %w", run.ID, err)
-	}
-
-	// Application bundles bring data back to a consistent state.
-	if herr := s.executeHooks(ctx, run, HookPostRestore, creds); herr != nil {
-		s.failRun(ctx, run, StageHooks, herr, creds.Password, creds.AccessKey)
-		return *run, fmt.Errorf("backups: restore run %s failed: %w", run.ID, herr)
 	}
 
 	now := s.nowUTC()

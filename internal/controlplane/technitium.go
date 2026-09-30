@@ -51,7 +51,9 @@ func technitiumBlocklists() []string {
 // IPv6. Tailnet, container, link-local and loopback interfaces are excluded.
 // No LAN address means DNS stays awaiting LAN configuration (the web UI
 // keeps running); never fall back to 0.0.0.0.
-func lanAddresses() []string {
+var lanAddresses = hostLANAddresses
+
+func hostLANAddresses() []string {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return nil

@@ -118,7 +118,7 @@ func TestHindsightMissingModelPreventsActivation(t *testing.T) {
 	b.cfg.DataDir = filepath.Join(stateRoot, "data")
 	gw := &recordingGateway{token: "sk-hindsight-1"}
 	hindsightTestProviders(t, b, gw)
-	nativeGw := newHandoffFakeGateway()
+	nativeGw := newFakeNativeGateway()
 	b.gateway = nativeGw
 	hindsightTestCatalog(t, b, runner, digest)
 	if err := b.ensureHindsightSecrets(ctx); err != nil {
@@ -155,7 +155,7 @@ func TestHindsightUnreadyNomicPreventsActivation(t *testing.T) {
 	b.cfg.DataDir = filepath.Join(stateRoot, "data")
 	gw := &recordingGateway{token: "sk-hindsight-1"}
 	hindsightTestProviders(t, b, gw)
-	nativeGw := newHandoffFakeGateway()
+	nativeGw := newFakeNativeGateway()
 	dbTrue := true
 	nativeGw.setModel(providers.GatewayDeployment{
 		ModelName:     providers.AliasMemory,
@@ -225,7 +225,7 @@ func TestHindsightSecretsIdempotentAndScoped(t *testing.T) {
 		t.Fatal(err)
 	}
 	b.providers.SetVirtualKeyGateway(gw)
-	nativeGw := newHandoffFakeGateway()
+	nativeGw := newFakeNativeGateway()
 	dbTrue := true
 	nativeGw.setModel(providers.GatewayDeployment{
 		ModelName: providers.AliasMemory, LitellmParams: map[string]any{"model": "openai/gpt-5.6-luna"},
@@ -256,7 +256,7 @@ func TestHindsightUnusableKeyReplaced(t *testing.T) {
 	b.cfg.DataDir = filepath.Join(t.TempDir(), "data")
 	gw := &recordingGateway{token: "sk-hindsight-new"}
 	hindsightTestProviders(t, b, gw)
-	nativeGw := newHandoffFakeGateway()
+	nativeGw := newFakeNativeGateway()
 	dbTrue := true
 	nativeGw.setModel(providers.GatewayDeployment{
 		ModelName: providers.AliasMemory, LitellmParams: map[string]any{"model": "openai/gpt-5.6-luna"},
@@ -327,7 +327,7 @@ func TestSeedDoesNotCreateMemoryAlias(t *testing.T) {
 	runner := &scriptedRunner{health: domain.HealthHealthy}
 	b := newAppsBackend(t, runner, "sha256:"+strings.Repeat("a", 64))
 	b.cfg.StateDir = filepath.Join(t.TempDir(), "state")
-	nativeGw := newHandoffFakeGateway()
+	nativeGw := newFakeNativeGateway()
 	dbTrue := true
 	nativeGw.setModel(providers.GatewayDeployment{
 		ModelName: "omahab/fast", LitellmParams: map[string]any{"model": "openai/gpt-5.6-luna"},
@@ -338,9 +338,6 @@ func TestSeedDoesNotCreateMemoryAlias(t *testing.T) {
 		t.Fatal(err)
 	}
 	b.providers = providers.New(b.db, nil)
-	if err := b.handoffSetPhase(ctx, handoffPhaseComplete); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := b.SeedModelAliases(ctx, apitypes.SeedModelAliasesRequest{ModelID: "src-1"}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -356,20 +353,19 @@ func TestSeedDoesNotCreateMemoryAlias(t *testing.T) {
 }
 
 func TestHindsightCatalogParticipatesInBackup(t *testing.T) {
-	raw, err := os.ReadFile("../../deploy/catalog/catalog.json")
-	if err != nil {
-		t.Fatalf("read catalog: %v", err)
+	parse := func(id string) apps.Bundle {
+		t.Helper()
+		raw, err := os.ReadFile("../../bundles/" + id + "/bundle.json")
+		if err != nil {
+			t.Fatalf("read bundle %s: %v", id, err)
+		}
+		bd, err := apps.ParseBundleBytes(raw)
+		if err != nil {
+			t.Fatalf("decode bundle %s: %v", id, err)
+		}
+		return bd
 	}
-	var parsed struct {
-		Bundles []apps.Bundle `json:"bundles"`
-	}
-	if err := json.Unmarshal(raw, &parsed); err != nil {
-		t.Fatalf("decode catalog: %v", err)
-	}
-	byID := map[string]apps.Bundle{}
-	for _, bd := range parsed.Bundles {
-		byID[bd.ID] = bd
-	}
+	byID := map[string]apps.Bundle{"hindsight": parse("hindsight"), "hermes": parse("hermes")}
 	hs, ok := byID["hindsight"]
 	if !ok || !hs.Default {
 		t.Fatal("hindsight bundle missing or not default")

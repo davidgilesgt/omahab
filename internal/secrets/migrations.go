@@ -2,11 +2,11 @@ package secrets
 
 import "github.com/omahab/omahab/internal/store"
 
-// Migrations returns the SQLite migrations owned by the secrets broker.
+// Migrations returns the schema owned by the secrets broker.
 func Migrations() []store.Migration {
 	return []store.Migration{
 		{
-			Name: "secrets-001-secrets",
+			Name: "secrets-001-baseline",
 			SQL: `
 CREATE TABLE IF NOT EXISTS secrets (
 	id TEXT PRIMARY KEY,

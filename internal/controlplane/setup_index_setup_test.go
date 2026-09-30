@@ -84,28 +84,6 @@ func TestKnowledgeIndexSetupOKChoices(t *testing.T) {
 	}
 }
 
-func TestKnowledgeIndexSetupLegacyFulltextOK(t *testing.T) {
-	ctx := context.Background()
-	b, _ := newSetupBackend(t, nil)
-	wireKnowledgeTestService(t, b)
-	// Legacy rows predate server-side normalization; bypass the validated
-	// setter to plant one exactly as an old install left it.
-	if _, err := b.db.ExecContext(ctx, `INSERT INTO knowledge_settings (key, value, updated_at) VALUES ('index_setup_choice', 'fulltext', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
-		t.Fatal(err)
-	}
-	st, err := b.GetSetupStatus(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	c := checkByID(t, st.Checks, "knowledge_index_setup")
-	if c.Status != "ok" {
-		t.Fatalf("legacy fulltext status = %q want ok (%q)", c.Status, c.Detail)
-	}
-	if c.Detail != "full_text" {
-		t.Fatalf("legacy fulltext detail = %q want full_text", c.Detail)
-	}
-}
-
 func TestKnowledgeIndexSetupFailedOnInvalid(t *testing.T) {
 	ctx := context.Background()
 	b, _ := newSetupBackend(t, nil)
@@ -166,14 +144,16 @@ func TestKnowledgeIndexSetupMetaAndOrder(t *testing.T) {
 		t.Fatalf("ok action should be cleared, got %q", ok.Action)
 	}
 	got := orderSetupChecks([]apitypes.SetupCheck{
-		{ID: "backups_configured"}, {ID: "knowledge_index_setup"}, {ID: "admin_passkeys"},
+		{ID: "backups_configured"}, {ID: "knowledge_index_setup"}, {ID: "admin_passkeys"}, {ID: "restore"},
 	})
 	pos := map[string]int{}
 	for i, c := range got {
 		pos[c.ID] = i
 	}
-	if !(pos["admin_passkeys"] < pos["knowledge_index_setup"] && pos["knowledge_index_setup"] < pos["backups_configured"]) {
-		t.Fatalf("order = %v, want admin_passkeys < knowledge_index_setup < backups_configured", got)
+	// Backups lead the checklist (DESIGN §5.4): restore, then the
+	// repository, then everything downstream of enrollment.
+	if !(pos["restore"] < pos["backups_configured"] && pos["backups_configured"] < pos["admin_passkeys"] && pos["admin_passkeys"] < pos["knowledge_index_setup"]) {
+		t.Fatalf("order = %v, want restore < backups_configured < admin_passkeys < knowledge_index_setup", got)
 	}
 }
 

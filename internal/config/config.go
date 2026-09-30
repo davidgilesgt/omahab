@@ -19,6 +19,10 @@ const (
 	DefaultDataDir     = "/srv/omahab"
 	DefaultListen      = "127.0.0.1:8484"
 	DefaultCatalogPath = "/usr/share/omahab/catalog/catalog.json"
+	// DefaultCustomBundlesDir is the on-machine git repo holding custom
+	// bundles (bundles/<id>/{bundle.json,module.nix}), mirrored to Forgejo
+	// when available. Rebuilds override the `bundles` flake input with it.
+	DefaultCustomBundlesDir = "/var/lib/omahab/bundles"
 )
 
 type Config struct {
@@ -48,17 +52,21 @@ type Config struct {
 	// native layout used by storage generation). Empty means layout features
 	// that need postgresql/server-data paths are unavailable.
 	NativeLayoutPath string
+	// CustomBundlesDir is the git repo of custom bundles merged into the
+	// runtime catalog and imported at rebuild time via
+	// --override-input bundles. Empty disables custom bundles.
+	CustomBundlesDir string
 }
 
 func Load() (Config, error) {
 	cfg := Config{
-		StateDir:      envOr("OMAHAB_STATE_DIR", DefaultStateDir),
-		DataDir:       envOr("OMAHAB_DATA_DIR", DefaultDataDir),
-		Listen:        envOr("OMAHAB_LISTEN", DefaultListen),
-		ShutdownGrace: 15 * time.Second,
-		CatalogPath:   envOr("OMAHAB_CATALOG", DefaultCatalogPath),
-		AdminUser:     envOr("OMAHAB_ADMIN_USER", "omahab"),
-		NativeLayoutPath: envOr("OMAHAB_NATIVE_LAYOUT", ""),
+		StateDir:         envOr("OMAHAB_STATE_DIR", DefaultStateDir),
+		DataDir:          envOr("OMAHAB_DATA_DIR", DefaultDataDir),
+		Listen:           envOr("OMAHAB_LISTEN", DefaultListen),
+		ShutdownGrace:    15 * time.Second,
+		CatalogPath:      envOr("OMAHAB_CATALOG", DefaultCatalogPath),
+		AdminUser:        envOr("OMAHAB_ADMIN_USER", "omahab"),
+		CustomBundlesDir: envOr("OMAHAB_CUSTOM_BUNDLES", DefaultCustomBundlesDir),
 	}
 	cfg.DatabasePath = envOr("OMAHAB_DATABASE", filepath.Join(cfg.StateDir, "control.db"))
 	cfg.MasterKeyPath = envOr("OMAHAB_MASTER_KEY", filepath.Join(cfg.StateDir, "master.key"))

@@ -1,0 +1,39 @@
+{
+  "id": "immich",
+  "name": "Immich",
+  "port": 2283,
+  "default_exposure": "private",
+  "max_exposure": "shared",
+  "health_check": {
+    "kind": "http",
+    "path": "/api/server/ping",
+    "port": 2283
+  },
+  "startup_grace_seconds": 600,
+  "oidc": {
+    "supported": true,
+    "mode": "native",
+    "provider": "pocket-id"
+  },
+  "resources": {
+    "memory_mb": 4096
+  },
+  "default": true,
+  "route": "photos",
+  "app_path": "/",
+  "dependencies": [
+    "caddy",
+    "pocket-id"
+  ],
+  "secret_sources": [
+    "immich_db_password"
+  ],
+  "units": [
+    "immich-server.service",
+    "immich-machine-learning.service"
+  ],
+  "groups": [
+    "members",
+    "admins"
+  ]
+}

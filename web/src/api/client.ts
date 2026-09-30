@@ -5,7 +5,9 @@ import type {
   ApiErrorEnvelope,
   Application,
   Backup,
+  BundleAdmin,
   CatalogBundle,
+  CreateBundleRequest,
   CompanionDevice,
   ControlEvent,
   CreateCompanionEnrollmentResponse,
@@ -30,6 +32,11 @@ import type {
   NtfyConfig,
   OAuthSession,
   Operation,
+  RecoveryInstance,
+  RecoveryInstancesRequest,
+  RecoveryListRequest,
+  RecoveryRestoreRequest,
+  RecoverySnapshot,
   Project,
   PublicStatusResponse,
   RecoverySession,
@@ -180,6 +187,18 @@ export class ApiClient {
       method: "POST",
       body: JSON.stringify({ action, confirm: true }),
     });
+
+  bundles = () => this.list<BundleAdmin>("/bundles");
+  createBundle = (input: CreateBundleRequest) =>
+    this.request<BundleAdmin>("/bundles", { method: "POST", body: JSON.stringify(input) });
+  removeBundle = (id: string) =>
+    this.request<void>(`/bundles/${encodeURIComponent(id)}`, { method: "DELETE" });
+  setBundleDisabled = (id: string, disabled: boolean) =>
+    this.request<void>(`/bundles/${encodeURIComponent(id)}/${disabled ? "disable" : "enable"}`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+  applyBundles = () => this.request<Operation>("/bundles/apply", { method: "POST", body: JSON.stringify({}) });
   technitiumSetup = () => this.request<TechnitiumSetup>("/technitium/setup");
   backups = () => this.list<Backup>("/backups");
   createBackup = (input?: { repository?: string; scopes?: string[] }) =>
@@ -189,6 +208,18 @@ export class ApiClient {
     this.request<Backup>(`/backups/${encodeURIComponent(id)}/restore`, { method: "POST", body: JSON.stringify(input ?? {}) });
   importRepoSnapshots = (repositoryId: string) =>
     this.request<{ imported: number }>(`/backup-repositories/${encodeURIComponent(repositoryId)}/snapshots/import`, { method: "POST", body: JSON.stringify({}) });
+  listRecoveryInstances = (input: RecoveryInstancesRequest) =>
+    this.request<{ instances: RecoveryInstance[] }>("/recovery/instances", { method: "POST", body: JSON.stringify(input) });
+  listRecoverySnapshots = (input: RecoveryListRequest) =>
+    this.request<{ snapshots: RecoverySnapshot[] }>("/recovery/restore/snapshots", { method: "POST", body: JSON.stringify(input) });
+  prepareRecoveryRestore = (input: RecoveryRestoreRequest) =>
+    this.request<Operation>("/recovery/restore", { method: "POST", body: JSON.stringify(input) });
+  applyRecoveryRestore = (id: string, phrase: string) =>
+    this.request<Operation>(`/recovery/restore/${encodeURIComponent(id)}/apply`, { method: "POST", body: JSON.stringify({ phrase }) });
+  recoveryRestoreStatus = (id: string) =>
+    this.request<Operation>(`/recovery/restore/${encodeURIComponent(id)}`);
+  skipRecoveryRestore = () =>
+    this.request<{ skipped: boolean }>("/recovery/restore/skip", { method: "POST", body: JSON.stringify({}) });
 
   events = () => this.list<ControlEvent>("/events");
   unreadEventCount = async () => {

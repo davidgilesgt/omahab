@@ -170,8 +170,9 @@ func generateTestPhrase(t *testing.T) ([]string, [32]byte, error) {
 	return secrets.GenerateRecoveryPhrase()
 }
 
-// writeTestRecoveryKit persists a kit wrapping master under seed into
-// dir/recovery.kit and returns the decoded kit.
+// writeTestRecoveryKit persists a kit wrapping master under seed at the
+// v2 staged location dir/backup-staging/recovery.kit and returns the
+// decoded kit.
 func writeTestRecoveryKit(t *testing.T, dir string, seed, master [32]byte) recoveryKitFile {
 	t.Helper()
 	rk := secrets.DeriveRecoveryKey(seed)
@@ -186,7 +187,11 @@ func writeTestRecoveryKit(t *testing.T, dir string, seed, master [32]byte) recov
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "recovery.kit"), raw, 0o600); err != nil {
+	staged := filepath.Join(dir, "backup-staging")
+	if err := os.MkdirAll(staged, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staged, "recovery.kit"), raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return kit

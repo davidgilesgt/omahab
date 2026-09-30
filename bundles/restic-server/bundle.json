@@ -1,0 +1,30 @@
+{
+  "id": "restic-server",
+  "name": "Restic REST Server",
+  "port": 8500,
+  "default_exposure": "private",
+  "max_exposure": "private",
+  "health_check": {
+    "kind": "http",
+    "path": "/",
+    "port": 8500
+  },
+  "startup_grace_seconds": 60,
+  "oidc": {
+    "supported": false
+  },
+  "resources": {
+    "memory_mb": 256
+  },
+  "default": false,
+  "route": "backup.{{.Domain}}",
+  "dependencies": [
+    "caddy"
+  ],
+  "units": [
+    "restic-rest-server.service"
+  ],
+  "groups": [
+    "admins"
+  ]
+}

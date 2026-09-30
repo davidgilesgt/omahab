@@ -137,7 +137,7 @@ paths:
   /api/v1/recovery/generate:
     post:
       summary: Generate a recovery phrase (one-time)
-      description: Creates a 24-word BIP39 recovery phrase. The phrase is shown exactly once and never persisted; the seed is held in memory keyed by fingerprint for 15 minutes until /api/v1/recovery/confirm persists recovery.kit via either saved-ack or a 3-word challenge.
+      description: Creates a 24-word BIP39 recovery phrase. The phrase is shown exactly once and never persisted; the seed is held in memory keyed by fingerprint for 15 minutes until /api/v1/recovery/confirm persists recovery.kit via saved-ack.
       operationId: generateRecoveryKey
       responses:
         '200':
@@ -154,7 +154,7 @@ paths:
   /api/v1/recovery/confirm:
     post:
       summary: Confirm the saved recovery phrase
-      description: Persists recovery.kit at /var/lib/omahab/recovery.kit (0600) as {version 1, fingerprint, master_wrapped base64, created_at RFC3339} and stores platform-app/recovery_fingerprint. Two modes - saved-ack with fingerprint plus saved_ack true for the new client ritual (explicit ack checkbox plus client-local paste-back verify, no challenge words sent), or legacy fingerprint plus challenge map of 0-based index to word verifying 3 words from the generated phrase. Fingerprint always required; saved_ack true skips challenge verification, otherwise a 3-entry challenge is required.
+      description: Persists recovery.kit at /var/lib/omahab/recovery.kit (0600) as {version 1, fingerprint, master_wrapped base64, created_at RFC3339} and stores platform-app/recovery_fingerprint. The client ritual sends fingerprint plus saved_ack true (explicit ack checkbox plus client-local paste-back verify, no challenge words sent). Fingerprint and saved_ack are required.
       operationId: confirmRecoveryKey
       requestBody:
         required: true
@@ -162,11 +162,10 @@ paths:
           application/json:
             schema:
               type: object
-              required: [fingerprint]
+              required: [fingerprint, saved_ack]
               properties:
                 fingerprint: { type: string, example: "a1b2c3d4" }
-                challenge: { type: object, additionalProperties: { type: string }, description: "Legacy mode - 3 entries, index (0-23) to word", minProperties: 3, maxProperties: 3 }
-                saved_ack: { type: boolean, description: "New client ritual - true confirms the phrase was saved (client verified paste-back locally); skips challenge verification" }
+                saved_ack: { type: boolean, description: "Confirms the phrase was saved (client verified paste-back locally)" }
       responses:
         '200':
           description: Kit stored
@@ -177,6 +176,186 @@ paths:
                 properties:
                   confirmed: { type: boolean }
         '400': { $ref: '#/components/responses/Error' }
+  /api/v1/recovery/instances:
+    post:
+      summary: List earlier Omahab instances under a backup account
+      description: >-
+        Disaster-recovery instance discovery for the first setup step: derives
+        the restic password from the 24-word recovery phrase (or accepts an
+        explicit repository password for generic locations), then lists the
+        instance subdirectories under ./omahab on the Storage Box (or the
+        repo's parent for generic locations). Hetzner form carries username +
+        host plus the sub-account password once to upload the backup SSH key
+        on a fresh machine (same flow as /recovery/restore/snapshots).
+      operationId: listRecoveryInstances
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RecoveryListRequest' }
+      responses:
+        '200':
+          description: Instances found
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [instances]
+                properties:
+                  instances:
+                    type: array
+                    items:
+                      type: object
+                      required: [instance_id, location, locked]
+                      properties:
+                        instance_id: { type: string, description: "Instance identifier (subdirectory name)" }
+                        location: { type: string, description: "Exact resolvable restic repository URL for this instance; always use this, never build one client-side" }
+                        latest_snapshot_time: { type: string, description: "RFC3339 time of the newest readable snapshot; empty when locked" }
+                        domain: { type: string, description: "Domain recorded for the instance; empty when unreadable or locked" }
+                        locked: { type: boolean, description: "true when the phrase-derived password cannot open this subdirectory (skip it or use its own phrase)" }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/Error' }
+
+  /api/v1/recovery/restore/snapshots:
+    post:
+      summary: List candidate snapshots for an offline restore
+      description: >-
+        Lists the newest snapshots (default 10, max 50) of the repository at
+        the exact location given, marking which carry server-config. Scope
+        tags (scope:<name>) surface as scopes so the picker can offer
+        everything vs a subset. The recovery phrase derives the restic
+        password for Hetzner-style repositories and is held in memory only.
+      operationId: listRecoverySnapshots
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RecoveryListRequest' }
+      responses:
+        '200':
+          description: Snapshots
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [snapshots]
+                properties:
+                  snapshots:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, server_config]
+                      properties:
+                        id: { type: string }
+                        time: { type: string }
+                        hostname: { type: string }
+                        server_config: { type: boolean, description: "Snapshot paths cover the state directory" }
+                        scopes: { type: array, items: { type: string }, description: "Captured scope names (server-config, app:<bundle-id>, …)" }
+                        release_ref: { type: string, description: "Manifest system release ref when readable" }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/Error' }
+
+  /api/v1/recovery/restore:
+    post:
+      summary: Stage and validate an offline server-config restore
+      description: >-
+        Phrase validation, snapshot selection (snapshot_id or the newest
+        server-config snapshot), extraction to staging, and full validation
+        (manifest, fingerprint, scopes). Writes an operation journal and
+        never swaps anything: the omahab-restore oneshot unit applies the
+        swap with omahabd stopped. scopes selects a subset (server-config is
+        always restored); include_apps defers app payload restore to the
+        existing app-scoped restore once the daemon reconverges. Returns
+        HTTP 202 plus the operation; preview carries the release-ref
+        mismatch note when the snapshot's release differs from the running
+        one.
+      operationId: prepareRecoveryRestore
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/RecoveryListRequest'
+                - type: object
+                  properties:
+                    snapshot_id: { type: string }
+                    scopes: { type: array, items: { type: string }, description: "Subset of the snapshot's scopes to restore; empty means all" }
+                    include_apps: { type: boolean, description: "true restores all app scopes' payloads after the swap" }
+      responses:
+        '202':
+          description: Staged
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Operation' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/Error' }
+
+  /api/v1/recovery/restore/skip:
+    post:
+      summary: Record the start-new choice
+      description: Marks the setup checklist's restore step skipped — the operator chose to start a new server instead of restoring. Idempotent; never touches staged restores or journals.
+      operationId: skipRecoveryRestore
+      responses:
+        '200':
+          description: Skipped
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  skipped: { type: boolean }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/recovery/restore/{id}/apply:
+    post:
+      summary: Apply a staged restore via the omahab-restore unit
+      description: >-
+        Triggers the omahab-restore oneshot unit for a staged restore: the
+        unit stops omahabd, swaps state atomically as root (rollback copy
+        kept), and restarts omahabd. The phrase travels once through a 0600
+        tmpfs handoff consumed and removed by the unit. After the swap the
+        daemon is back; poll GET /api/v1/recovery/restore/{id} for progress.
+      operationId: applyRecoveryRestore
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phrase]
+              properties:
+                phrase: { type: string, description: "24-word recovery phrase; re-validated against the staged snapshot's fingerprint" }
+      responses:
+        '202':
+          description: Unit started
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Operation' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/recovery/restore/{id}:
+    get:
+      summary: Poll one offline restore
+      description: Returns the journaled operation (stage listing → staging → staged → unit-started → swapping → completed | failed).
+      operationId: getRecoveryRestore
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      responses:
+        '200':
+          description: Operation
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Operation' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
   /api/v1/system/disks:
     get:
       summary: List candidate storage disks
@@ -931,6 +1110,84 @@ paths:
         '409': { $ref: '#/components/responses/Conflict' }
         '500': { $ref: '#/components/responses/Error' }
 
+  /api/v1/bundles:
+    get:
+      summary: List bundles (curated + custom)
+      description: >-
+        Merged catalog view enriched with repo state: source badge,
+        disabled marker, uncommitted (dirty) changes, and the last bundle
+        apply outcome.
+      operationId: listBundles
+      responses:
+        '200': { description: Bundles, content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/BundleAdmin' } } } } } } }
+    post:
+      summary: Add a custom bundle
+      description: >-
+        Validates bundle.json (shared bundle validation plus the custom
+        contract: port in 20000-20999, no curated id/unit/port collisions)
+        and module.nix before anything is written, then commits to the
+        bundles repo. Activation requires a bundle apply.
+      operationId: createBundle
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CreateBundleRequest' } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/BundleAdmin' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/v1/bundles/{id}:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    delete:
+      summary: Remove a custom bundle
+      description: Deletes bundles/<id>/ from the repo and commits. Activation on next apply.
+      operationId: deleteBundle
+      responses:
+        '204': { description: Removed }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/bundles/{id}/disable:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    post:
+      summary: Disable a custom bundle
+      operationId: disableBundle
+      responses:
+        '200': { description: Disabled }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/bundles/{id}/enable:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    post:
+      summary: Enable a custom bundle
+      operationId: enableBundle
+      responses:
+        '200': { description: Enabled }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/bundles/apply:
+    post:
+      summary: Apply bundles (rebuild + switch)
+      description: >-
+        Starts the omahab-bundle-apply oneshot unit which runs the same
+        bundles.Service.Apply flow as the CLI. Returns 202 with an
+        operation; poll GET /api/v1/operations/{id}. The switch restarts
+        omahabd; the journal converges from the CLI outcome marker.
+      operationId: applyBundles
+      responses:
+        '202': { description: Accepted, content: { application/json: { schema: { $ref: '#/components/schemas/Operation' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/v1/bundles/apply/{id}:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    get:
+      summary: Bundle apply status
+      operationId: getBundleApply
+      responses:
+        '200': { description: Operation, content: { application/json: { schema: { $ref: '#/components/schemas/Operation' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   /api/v1/backups/{id}/verify:
     post:
       summary: Verify backup
@@ -1182,7 +1439,7 @@ paths:
   /api/v1/setup/models:
     get:
       summary: Get native model setup status
-      description: Admin only. Read-only native LiteLLM inventory for optional provider onboarding. No endpoint accepts provider credentials from the browser. Supplies management_url from the installed LiteLLM launch URL (never example.com). Handoff failures expose only safe migration_error text; seed is unavailable until migration_complete.
+      description: Admin only. Read-only native LiteLLM inventory for optional provider onboarding. No endpoint accepts provider credentials from the browser. Supplies management_url from the installed LiteLLM launch URL (never example.com).
       operationId: modelSetup
       responses:
         '200': { description: Model setup status, content: { application/json: { schema: { $ref: '#/components/schemas/ModelSetupStatus' } } } }
@@ -2471,6 +2728,29 @@ components:
         max_exposure: { $ref: '#/components/schemas/Exposure' }
         memory_mb: { type: integer }
         installed: { type: boolean }
+        runtime: { type: string, description: "systemd (native) or compose." }
+        source: { type: string, enum: [catalog, custom], description: "Provenance: curated release catalog or the machine's custom bundles repo." }
+
+    BundleAdmin:
+      type: object
+      required: [id, name, source]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        source: { type: string, enum: [catalog, custom] }
+        port: { type: integer }
+        units: { type: array, items: { type: string } }
+        disabled: { type: boolean, description: "Custom bundle excluded from rebuilds and the merged catalog." }
+        dirty: { type: boolean, description: "Uncommitted repo changes." }
+        last_apply: { type: string, description: "Outcome of the most recent bundle apply (completed|failed|rolled_back|running); empty when none ran." }
+
+    CreateBundleRequest:
+      type: object
+      required: [bundle_json, module_nix]
+      properties:
+        id: { type: string, description: "Optional; must match the bundle.json id when given." }
+        bundle_json: { type: string, description: "bundle.json document (raw JSON text)." }
+        module_nix: { type: string, description: "module.nix content (Nix module text)." }
 
     Project:
       type: object
@@ -2606,11 +2886,9 @@ components:
     ModelSetupStatus:
       type: object
       description: Safe setup-models response; carries no secrets.
-      required: [migration_complete, deployments, aliases]
+      required: [deployments, aliases]
       properties:
         management_url: { type: string }
-        migration_complete: { type: boolean }
-        migration_error: { type: string }
         deployments: { type: array, items: { $ref: '#/components/schemas/ModelSetupDeployment' } }
         aliases: { type: array, items: { $ref: '#/components/schemas/ModelSetupAlias' } }
     SeedModelAliasesRequest:
@@ -2817,6 +3095,7 @@ components:
         state: { type: string, enum: [waiting_for_cloudflare, reconciling, attention, complete] }
         local_ready: { type: boolean, description: "true once the daemon runs; local control panel is ready independent of integration health" }
         checks: { type: array, items: { $ref: '#/components/schemas/SetupCheck' } }
+        nodes: { type: array, items: { $ref: '#/components/schemas/SetupNodeStatus' }, description: "automatic-setup DAG node states (persisted)" }
 
     SetupCheck:
       type: object
@@ -2831,6 +3110,18 @@ components:
         apps: { type: array, items: { $ref: '#/components/schemas/SetupAppStatus' } }
         passkey_count: { type: integer }
         target: { type: integer }
+
+    SetupNodeStatus:
+      type: object
+      required: [id, state, owner, updated_at]
+      properties:
+        id: { type: string, description: "setup node id, e.g. preconditions, core_apps:pocket-id" }
+        state: { type: string, enum: [pending, running, succeeded, failed, waiting, blocked] }
+        blocked_by: { type: array, items: { type: string }, description: "node ids whose non-success blocked this node" }
+        error: { type: string, description: "redacted error detail" }
+        owner: { type: string, enum: [operator, system] }
+        code: { type: string }
+        updated_at: { type: string }
 
     SetupAppStatus:
       type: object
@@ -3002,6 +3293,19 @@ components:
         confirm: { type: boolean }
       additionalProperties: false
 
+    RecoveryListRequest:
+      type: object
+      required: [phrase, location]
+      properties:
+        phrase: { type: string, description: "24-word recovery phrase; derives the restic password when no explicit password is supplied" }
+        location: { type: string, description: "Exact restic repository URL (from /recovery/instances for a discovered instance)" }
+        password: { type: string, format: password, description: "Explicit repository password for generic locations; empty for phrase-derived" }
+        latest: { type: integer, description: "Cap for snapshot listings (default 10, max 50)" }
+        username: { type: string, description: "Hetzner Storage Box username; uploads the backup SSH key once on a fresh machine" }
+        host: { type: string, description: "Hetzner Storage Box host" }
+        sub_account_password: { type: string, format: password, description: "Hetzner sub-account password used once to upload the SSH key, never stored" }
+      additionalProperties: false
+
     UpdateSecretRequest:
       type: object
       required: [value]
@@ -3037,14 +3341,13 @@ components:
 
     CreateWorkspaceRequest:
       type: object
-      required: [project_id]
+      required: [project_id, title]
       properties:
         project_id: { type: string }
         title: { type: string }
         instructions: { type: string }
         agent: { type: string }
         devcontainer_source: { type: string }
-        branch: { type: string, description: 'Deprecated: use title. Accepted for compatibility.' }
       additionalProperties: false
 
     CreateUserRequest:

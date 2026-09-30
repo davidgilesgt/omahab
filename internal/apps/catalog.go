@@ -41,12 +41,8 @@ type DataVolume struct {
 
 // BackupHooks carries typed native consistency metadata. QuiesceUnits lists
 // systemd units stopped for a consistent snapshot; Databases lists logical
-// PostgreSQL databases dumped with pg_dump. Legacy PreBackup/PostRestore
-// argv hooks are container-era and must not carry container paths or database
-// dumps; new code uses typed orchestration instead of shell strings.
+// PostgreSQL databases dumped with pg_dump.
 type BackupHooks struct {
-	PreBackup    []string `json:"pre_backup,omitempty"`
-	PostRestore  []string `json:"post_restore,omitempty"`
 	QuiesceUnits []string `json:"quiesce_units,omitempty"`
 	Databases    []string `json:"databases,omitempty"`
 }
@@ -229,20 +225,6 @@ func (b Bundle) validate() (Bundle, error) {
 		seenVol[v.Name] = true
 	}
 
-	for name, argv := range map[string][]string{"pre_backup": b.Backup.PreBackup, "post_restore": b.Backup.PostRestore} {
-		for _, arg := range argv {
-			if strings.TrimSpace(arg) == "" {
-				problems = append(problems, fmt.Sprintf("backup hook %s contains an empty argument", name))
-			}
-			lower := strings.ToLower(arg)
-			for _, bad := range []string{"/app/backend/data", "/var/lib/postgresql", "/var/lib/omahab/dumps", "pg_dump", "pg_restore", "sqlite3"} {
-				if strings.Contains(lower, strings.ToLower(bad)) {
-					problems = append(problems, fmt.Sprintf("backup hook %s must not contain container-era %q; use quiesce_units/databases", name, bad))
-					break
-				}
-			}
-		}
-	}
 	seenQuiesce := map[string]bool{}
 	for _, u := range b.Backup.QuiesceUnits {
 		if !strings.HasSuffix(u, ".service") && !strings.HasSuffix(u, ".socket") && !strings.HasSuffix(u, ".timer") {
@@ -434,6 +416,28 @@ func ParseCatalog(r io.Reader) (*Catalog, error) {
 	}
 	return NewCatalog(doc.Bundles...)
 }
+
+// ParseBundleBytes decodes exactly one bundle object. Unknown fields are
+// rejected; "source" is loader-owned (catalog|custom) and never valid in
+// bundle files. Used by the per-bundle bundle.json loader
+// (bundles/<id>/bundle.json).
+func ParseBundleBytes(raw []byte) (Bundle, error) {
+	var b Bundle
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&b); err != nil {
+		return Bundle{}, invalid("bundle JSON: %v", err)
+	}
+	// Reject trailing non-whitespace content: one object per file.
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		return Bundle{}, invalid("bundle JSON: expected exactly one object")
+	}
+	return b, nil
+}
+
+// Validate normalizes and validates a bundle (exported form of the
+// catalog contract check used by NewCatalog). It returns a copy.
+func (b Bundle) Validate() (Bundle, error) { return b.validate() }
 
 // LoadCatalogFile reads and validates a runtime catalog document. A missing
 // file returns an error wrapping fs.ErrNotExist so callers can distinguish

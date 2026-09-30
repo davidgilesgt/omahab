@@ -16,6 +16,7 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   renameSync,
@@ -35,10 +36,10 @@ const CONTEXT_REL = "testing/CONTEXT.md";
 const SKILL_BROWSER_REL = "testing/skills/browser-testing.md";
 const SKILL_APPLIANCE_REL = "testing/skills/appliance-testing.md";
 const AGENTS_REL = "AGENTS.md";
-const CATALOG_REL = "deploy/catalog/catalog.json";
+const BUNDLES_GLOB_REL = "bundles/*/bundle.json";
 const APP_TSX_REL = "web/src/App.tsx";
+const BUNDLES_HASH_INPUT = "nix/module.nix";
 const SERVER_GO_REL = "internal/api/server.go";
-
 const VERSION = 1;
 const ID_RE = /^[a-z0-9]+(?:[.-][a-z0-9]+)*$/;
 const EVIDENCE_TYPES = ["BROWSER", "LIVE_API", "LIVE_CLI", "INTEGRATION", "UNIT", "SOURCE_REVIEW"];
@@ -177,15 +178,29 @@ export function extractApiRoutes(root = REPO_ROOT) {
   return extractApiRoutesFromText(readFileSync(abs, "utf8"));
 }
 
-export function getCatalogIdsFromJson(json) {
-  if (!json || !Array.isArray(json.bundles)) throw new Error(`invalid catalog: missing bundles[]`);
-  return json.bundles.map((b) => b.id);
+export function getBundleIdsFromDocs(docs) {
+  if (!Array.isArray(docs)) throw new Error("invalid bundles glob: expected array of documents");
+  return docs.map((doc) => {
+    if (!doc || typeof doc !== "object" || typeof doc.id !== "string" || doc.id.length === 0) {
+      throw new Error("invalid bundle.json: missing id");
+    }
+    return doc.id;
+  });
 }
 
+// Curated bundle ids come from the per-bundle files bundles/<id>/bundle.json
+// (one catalog Bundle object per file; ids match their directory names).
+// The deployed catalog.json is assembled from these at build time, so the
+// glob is the one source of truth in the repo.
 export function getCatalogIds(root = REPO_ROOT) {
-  const abs = join(root, CATALOG_REL);
-  if (!existsSync(abs)) throw new Error(`missing file: ${CATALOG_REL}`);
-  return getCatalogIdsFromJson(JSON.parse(readFileSync(abs, "utf8")));
+  const dir = join(root, "bundles");
+  if (!existsSync(dir)) throw new Error(`missing directory: bundles/`);
+  const docs = readdirSync(dir)
+    .filter((entry) => existsSync(join(dir, entry, "bundle.json")))
+    .sort()
+    .map((entry) => JSON.parse(readFileSync(join(dir, entry, "bundle.json"), "utf8")));
+  if (docs.length === 0) throw new Error(`no ${BUNDLES_GLOB_REL} found`);
+  return getBundleIdsFromDocs(docs);
 }
 
 // --- validation ---
@@ -701,7 +716,7 @@ function cmdNewSync(outputArg) {
       [SKILL_BROWSER_REL]: sha256File(repoAbs(SKILL_BROWSER_REL)),
       [SKILL_APPLIANCE_REL]: sha256File(repoAbs(SKILL_APPLIANCE_REL)),
     },
-    catalog_sha256: sha256File(repoAbs(CATALOG_REL)),
+    bundles_sha256: sha256File(repoAbs(BUNDLES_HASH_INPUT)),
     routes_sha256: sha256File(repoAbs(APP_TSX_REL)),
     api_sha256: sha256File(repoAbs(SERVER_GO_REL)),
   };

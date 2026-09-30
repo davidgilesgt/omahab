@@ -1,0 +1,27 @@
+{
+  "id": "caddy",
+  "name": "Caddy",
+  "port": 80,
+  "default_exposure": "public",
+  "max_exposure": "public",
+  "health_check": {
+    "kind": "http",
+    "path": "/config/",
+    "port": 2019
+  },
+  "startup_grace_seconds": 60,
+  "oidc": {
+    "supported": false
+  },
+  "resources": {
+    "memory_mb": 256
+  },
+  "default": true,
+  "route": "",
+  "units": [
+    "caddy.service"
+  ],
+  "groups": [
+    "admins"
+  ]
+}

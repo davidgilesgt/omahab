@@ -1,0 +1,34 @@
+{
+  "id": "ntfy",
+  "name": "ntfy",
+  "port": 2586,
+  "default_exposure": "private",
+  "max_exposure": "public",
+  "health_check": {
+    "kind": "http",
+    "path": "/v1/health",
+    "port": 2586
+  },
+  "startup_grace_seconds": 60,
+  "oidc": {
+    "supported": false
+  },
+  "resources": {
+    "memory_mb": 256
+  },
+  "default": true,
+  "route": "ntfy",
+  "app_path": "/",
+  "dependencies": [
+    "caddy"
+  ],
+  "secret_sources": [
+    "ntfy_auth_file"
+  ],
+  "units": [
+    "ntfy-sh.service"
+  ],
+  "groups": [
+    "admins"
+  ]
+}

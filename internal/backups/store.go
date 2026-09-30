@@ -470,66 +470,6 @@ func (s *Service) getRetentionState(ctx context.Context) (*retentionState, error
 	return st, nil
 }
 
-// --- hook results ---
-
-const hookColumns = "id, run_id, application, hook, status, exit_code, error, output, started_at, finished_at"
-
-func scanHookResult(sc rowScanner) (HookResult, error) {
-	var (
-		h        HookResult
-		exit     sql.NullInt64
-		herr     sql.NullString
-		output   sql.NullString
-		started  string
-		finished sql.NullString
-	)
-	if err := sc.Scan(&h.ID, &h.RunID, &h.Application, &h.Hook, &h.Status, &exit, &herr, &output, &started, &finished); err != nil {
-		return HookResult{}, err
-	}
-	if exit.Valid {
-		code := int(exit.Int64)
-		h.ExitCode = &code
-	}
-	h.Error = herr.String
-	h.Output = output.String
-	var err error
-	if h.StartedAt, err = parseTime(started); err != nil {
-		return HookResult{}, fmt.Errorf("parse hook started_at: %w", err)
-	}
-	if finished.Valid {
-		t, err := parseTime(finished.String)
-		if err != nil {
-			return HookResult{}, fmt.Errorf("parse hook finished_at: %w", err)
-		}
-		h.FinishedAt = &t
-	}
-	return h, nil
-}
-
-func (s *Service) insertHookResult(ctx context.Context, h HookResult) error {
-	_, err := s.st.DB().ExecContext(ctx,
-		"INSERT INTO backup_hook_results (id, run_id, application, hook, status, exit_code, error, output, started_at, finished_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-		h.ID, h.RunID, h.Application, h.Hook, h.Status, h.ExitCode, nullStr(h.Error), nullStr(h.Output), fmtTime(h.StartedAt), nullTime(h.FinishedAt))
-	return err
-}
-
-func (s *Service) listHookResults(ctx context.Context, runID string) ([]HookResult, error) {
-	rows, err := s.st.DB().QueryContext(ctx, "SELECT "+hookColumns+" FROM backup_hook_results WHERE run_id = ? ORDER BY rowid", runID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []HookResult
-	for rows.Next() {
-		h, err := scanHookResult(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, h)
-	}
-	return out, rows.Err()
-}
-
 // --- verifications ---
 
 const verificationColumns = "id, run_id, repository_id, snapshot_id, status, target, files_restored, bytes_restored, started_at, finished_at, cleaned_at, error, cleanup_error"
@@ -739,27 +679,27 @@ func boolToInt(v bool) int {
 
 func (s *Service) saveVerificationDepth(ctx context.Context, d VerificationDepth) error {
 	_, err := s.st.DB().ExecContext(ctx,
-		`INSERT INTO verification_depth (verification_id, manifest_found, legacy, sqlite_checked, sqlite_ok, pg_checked, pg_ok, pg_skipped, checked_at)
-		 VALUES (?,?,?,?,?,?,?,?,?)`,
-		d.VerificationID, boolToInt(d.ManifestFound), boolToInt(d.Legacy),
+		`INSERT INTO verification_depth (verification_id, manifest_found, sqlite_checked, sqlite_ok, pg_checked, pg_ok, pg_skipped, checked_at)
+		 VALUES (?,?,?,?,?,?,?,?)`,
+		d.VerificationID, boolToInt(d.ManifestFound),
 		d.SQLiteChecked, d.SQLiteOK, d.PGChecked, d.PGOK, d.PGSkipped, fmtTime(d.CheckedAt))
 	return err
 }
 
 func (s *Service) getVerificationDepth(ctx context.Context, verificationID string) (VerificationDepth, error) {
 	var d VerificationDepth
-	var manifestFound, legacy int
+	var manifestFound int
 	var checked string
 	err := s.st.DB().QueryRowContext(ctx,
-		`SELECT verification_id, manifest_found, legacy, sqlite_checked, sqlite_ok, pg_checked, pg_ok, pg_skipped, checked_at
+		`SELECT verification_id, manifest_found, sqlite_checked, sqlite_ok, pg_checked, pg_ok, pg_skipped, checked_at
 		 FROM verification_depth WHERE verification_id = ?`, verificationID).
-		Scan(&d.VerificationID, &manifestFound, &legacy, &d.SQLiteChecked, &d.SQLiteOK,
+		Scan(&d.VerificationID, &manifestFound,
+			&d.SQLiteChecked, &d.SQLiteOK,
 			&d.PGChecked, &d.PGOK, &d.PGSkipped, &checked)
 	if err != nil {
 		return VerificationDepth{}, err
 	}
 	d.ManifestFound = manifestFound != 0
-	d.Legacy = legacy != 0
 	if t, err := parseTime(checked); err == nil {
 		d.CheckedAt = t
 	}

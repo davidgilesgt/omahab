@@ -133,6 +133,26 @@ func (s *Service) CatalogBundles() []Bundle {
 	return s.catalog.Bundles()
 }
 
+// SetCatalog swaps in a freshly loaded catalog (the merged curated+custom
+// view after a bundle apply). The caller is responsible for validation;
+// the swap is atomic for concurrent readers.
+func (s *Service) SetCatalog(c *Catalog) {
+	if c == nil {
+		return
+	}
+	s.catMu.Lock()
+	defer s.catMu.Unlock()
+	s.catalog = c
+}
+
+// CatalogGet returns one catalog bundle by id under the read lock; used
+// by runners resolving unit sets from the live catalog.
+func (s *Service) CatalogGet(bundleID string) (Bundle, bool) {
+	s.catMu.RLock()
+	defer s.catMu.RUnlock()
+	return s.catalog.Get(bundleID)
+}
+
 // Install validates the request, claims the app row with observed state
 // provisioning, deploys through the runner, and finalizes to running.
 func (s *Service) Install(ctx context.Context, req InstallRequest) (Status, error) {

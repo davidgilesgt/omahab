@@ -1016,7 +1016,7 @@ func (b *Backend) probeAndMarkHealthy(ctx context.Context, provider string) erro
 	if modelToProbe == "" {
 		return nil
 	}
-	// Issue a short-lived probe virtual key scoped to modelToProbe; LiteLLM is authoritative for auth, not local ValidateVirtualKey.
+	// Issue a short-lived probe virtual key scoped to modelToProbe; LiteLLM is authoritative for auth.
 	ownerKind := "harness"
 	ownerID := "probe-" + string(store.NewID())
 	probeReq := providers.IssueVirtualKeyInput{

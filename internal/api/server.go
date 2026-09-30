@@ -257,6 +257,15 @@ func (s *Server) buildRouter() chi.Router {
 		r.Post("/api/v1/backups/verify", s.handleVerifyLatestBackup)
 		r.Post("/api/v1/backups/prune", s.handlePruneBackups)
 
+		// Custom bundles (admin)
+		r.Get("/api/v1/bundles", s.handleListBundles)
+		r.Post("/api/v1/bundles", s.withBodyLimit(defaultBodyLimit, s.handleCreateBundle))
+		r.Delete("/api/v1/bundles/{id}", s.handleDeleteBundle)
+		r.Post("/api/v1/bundles/{id}/disable", s.handleDisableBundle)
+		r.Post("/api/v1/bundles/{id}/enable", s.handleEnableBundle)
+		r.Post("/api/v1/bundles/apply", s.handleApplyBundles)
+		r.Get("/api/v1/bundles/apply/{id}", s.handleGetBundleApply)
+
 		// Events + SSE
 		r.Get("/api/v1/events", s.handleListEvents)
 		r.Get("/api/v1/events/unread-count", s.handleUnreadEventCount)
@@ -310,10 +319,12 @@ func (s *Server) buildRouter() chi.Router {
 		r.Post("/api/v1/network/open-lan", s.withBodyLimit(defaultBodyLimit, s.handleOpenLAN))
 		r.Post("/api/v1/recovery/generate", s.handleGenerateRecoveryKey)
 		r.Post("/api/v1/recovery/confirm", s.withBodyLimit(defaultBodyLimit, s.handleConfirmRecoveryKey))
+		r.Post("/api/v1/recovery/instances", s.withBodyLimit(8<<10, s.handleRecoveryListInstances))
 		r.Post("/api/v1/recovery/restore/snapshots", s.withBodyLimit(8<<10, s.handleRecoveryListSnapshots))
 		r.Post("/api/v1/recovery/restore", s.withBodyLimit(8<<10, s.handleRecoveryPrepareRestore))
 		r.Post("/api/v1/recovery/restore/{id}/apply", s.handleRecoveryApplyRestore)
 		r.Get("/api/v1/recovery/restore/{id}", s.handleGetRecoveryRestore)
+		r.Post("/api/v1/recovery/restore/skip", s.handleRecoverySkipRestore)
 		r.Get("/api/v1/system/disks", s.handleListDisks)
 		r.Put("/api/v1/system/storage", s.withBodyLimit(defaultBodyLimit, s.handleConfigureStorage))
 		r.Get("/api/v1/operations/{id}", s.handleGetOperation)

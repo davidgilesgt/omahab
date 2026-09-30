@@ -30,7 +30,7 @@ func (b *Backend) ReconcileSyncFolders(ctx context.Context) ([]syncer.ReconcileR
 	if sf, _, err := loadStorageFile(storageJSONPath(b.cfg.StateDir)); err == nil {
 		known, _ := b.knownVolumes(ctx)
 		for _, pl := range sf.Placements {
-			if pl.Pending || pl.FSUUID == nil || strings.TrimSpace(*pl.FSUUID) == "" {
+			if pl.FSUUID == nil || strings.TrimSpace(*pl.FSUUID) == "" {
 				continue
 			}
 			if !strings.HasPrefix(pl.Volume, "syncthing:") {

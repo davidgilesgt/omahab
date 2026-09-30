@@ -131,45 +131,6 @@ func RouteInbox(inbox string, dests Destinations) ([]Result, error) {
 	return out, nil
 }
 
-// MigrateLegacyMedia moves files out of the retired Syncthing-backed media
-// directory into the Jellyfin library. Media now belongs to Jellyfin
-// (apps/jellyfin/library); the old drops/media path stays as a Syncthing
-// folder but no longer receives routed files. Collisions get a -N suffix;
-// old data is preserved, never deleted. Idempotent: converges to an empty
-// legacy directory across runs.
-func MigrateLegacyMedia(dataDir string) ([]Result, error) {
-	legacy := filepath.Join(dataDir, "sync", "drops", "media")
-	library := filepath.Join(dataDir, "apps", "jellyfin", "library")
-	if st, err := os.Stat(legacy); err != nil || !st.IsDir() {
-		return nil, nil
-	}
-	if err := os.MkdirAll(library, 0o755); err != nil {
-		return nil, fmt.Errorf("mkdir %s: %w", library, err)
-	}
-	entries, err := os.ReadDir(legacy)
-	if err != nil {
-		return nil, fmt.Errorf("read legacy media: %w", err)
-	}
-	var out []Result
-	for _, e := range entries {
-		name := e.Name()
-		if strings.HasPrefix(name, ".") || !e.Type().IsRegular() {
-			continue
-		}
-		to := filepath.Join(library, name)
-		if _, err := os.Stat(to); err == nil {
-			to = uniqueName(library, name)
-		}
-		from := filepath.Join(legacy, name)
-		if err := os.Rename(from, to); err != nil {
-			continue
-		}
-		_ = os.Chmod(to, 0o644)
-		out = append(out, Result{File: name, Target: TargetMedia, To: to})
-	}
-	return out, nil
-}
-
 func uniqueName(dir, name string) string {
 	ext := filepath.Ext(name)
 	stem := strings.TrimSuffix(name, ext)
