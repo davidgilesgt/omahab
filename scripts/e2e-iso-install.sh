@@ -428,7 +428,12 @@ check() {  # check <name> <curl-args...> -- <grep-pattern>
   fi
 }
 check "liveness" "$BASE/up" -- '"status":"up"'
-check "setup starts at ssh_keys" "$BASE/api/v1/setup" -- 'ssh_keys'
+if curl -sf -m 15 -H "Authorization: Bearer $PANEL_TOKEN" "$BASE/api/v1/setup" | python3 -c 'import json,sys; d = json.load(sys.stdin); ids = [c["id"] for c in d["checks"]]; sys.exit(0 if ids and ids[0] == "restore" and "ssh_keys" in ids and isinstance(d.get("nodes"), list) else 1)'; then
+  log "ok: setup starts at restore and exposes DAG nodes"
+else
+  die "FAILED: setup starts at restore and exposes DAG nodes"
+fi
+check "bundles list includes curated caddy" "$BASE/api/v1/bundles" -- '"id":"caddy"'
 check "storage candidates (lsblk on daemon PATH)" "$BASE/api/v1/system/disks" -- 'items'
 check "control-plane status" "$BASE/api/v1/status" -- 'instance_id'
 check "panel serves SPA" "$BASE/" -- '<div id="root">'
@@ -458,6 +463,12 @@ if curl -sf -m 15 -H "Authorization: Bearer $PANEL_TOKEN" "$BASE/api/v1/setup" |
   log "ok: setup checklist flips recovery_key"
 else
   die "FAILED: setup checklist flips recovery_key (recovery_key not ok after confirm)"
+fi
+check "restore skip (start new server)" -X POST "$BASE/api/v1/recovery/restore/skip" -- ''
+if curl -sf -m 15 -H "Authorization: Bearer $PANEL_TOKEN" "$BASE/api/v1/setup" | python3 -c 'import json,sys; checks = json.load(sys.stdin)["checks"]; sys.exit(0 if any(c["id"] == "restore" and c["status"] == "skipped" for c in checks) else 1)'; then
+  log "ok: setup checklist records restore skipped"
+else
+  die "FAILED: setup checklist records restore skipped"
 fi
 log "phase 2: all probes passed"
 if [[ $KEEP -eq 0 ]]; then
