@@ -308,6 +308,11 @@ the daemon converges the journal on poll after it restarts.
 
 User-created projects deploy through ONCE by default.
 
+Project records and releases use the shared store timestamp functions.
+Timestamps use UTC RFC3339 with optional fractional seconds.
+Project updates and release records use the stored project ID.
+A project slug resolves to that ID before changes are saved.
+
 Default project contract:
 
 - one repository;

@@ -378,18 +378,18 @@ func (s *Service) beginRelease(ctx context.Context, projectID domain.ID, commit,
 		if existing.Commit != commit {
 			return nil, fmt.Errorf("%w: digest %s was released from commit %s", ErrReleaseMismatch, digest, existing.Commit)
 		}
-		nowS := formatTime(time.Now().UTC())
+		nowS := store.FormatTime(time.Now().UTC())
 		if _, err := s.db.ExecContext(ctx, `UPDATE releases SET status = ?, updated_at = ? WHERE id = ?`, ReleaseDeploying, nowS, string(existing.ID)); err != nil {
 			return nil, fmt.Errorf("mark release deploying: %w", err)
 		}
-		if t, err := parseTime(nowS); err == nil {
+		if t, err := store.ParseTime(nowS); err == nil {
 			existing.UpdatedAt = t
 		}
 		existing.Status = ReleaseDeploying
 		return existing, nil
 	case errors.Is(err, ErrNotFound):
 		now := umtimeNow()
-		nowS := formatTime(now)
+		nowS := store.FormatTime(now)
 		rel := &domain.Release{
 			ID:        domain.ID(store.NewID()),
 			ProjectID: projectID,
@@ -418,11 +418,11 @@ VALUES (?, ?, ?, ?, ?, 0, ?, ?)`,
 }
 
 func (s *Service) failRelease(ctx context.Context, rel *domain.Release, proj *Project, commit, digest string, cause error) error {
-	nowS := formatTime(time.Now().UTC())
+	nowS := store.FormatTime(time.Now().UTC())
 	if _, err := s.db.ExecContext(context.WithoutCancel(ctx), `UPDATE releases SET status = ?, updated_at = ? WHERE id = ?`, ReleaseFailed, nowS, string(rel.ID)); err != nil {
 		return err
 	}
-	if t, err := parseTime(nowS); err == nil {
+	if t, err := store.ParseTime(nowS); err == nil {
 		rel.UpdatedAt = t
 	}
 	rel.Status = ReleaseFailed
@@ -439,7 +439,7 @@ func (s *Service) activateRelease(ctx context.Context, projectID, releaseID doma
 		return fmt.Errorf("begin activation: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	nowS := formatTime(time.Now().UTC())
+	nowS := store.FormatTime(time.Now().UTC())
 	if _, err := tx.ExecContext(ctx, `UPDATE releases SET active = 0, updated_at = ? WHERE project_id = ? AND active = 1 AND id <> ?`, nowS, string(projectID), string(releaseID)); err != nil {
 		return fmt.Errorf("deactivate previous release: %w", err)
 	}
@@ -506,11 +506,11 @@ func scanRelease(sc interface{ Scan(dest ...any) error }) (*domain.Release, erro
 	if err := sc.Scan(&idStr, &projectIDStr, &commitSHA, &digest, &status, &active, &createdAtS, &updatedAtS); err != nil {
 		return nil, err
 	}
-	createdAt, err := parseTime(createdAtS)
+	createdAt, err := store.ParseTime(createdAtS)
 	if err != nil {
 		return nil, fmt.Errorf("parse release created_at: %w", err)
 	}
-	updatedAt, err := parseTime(updatedAtS)
+	updatedAt, err := store.ParseTime(updatedAtS)
 	if err != nil {
 		return nil, fmt.Errorf("parse release updated_at: %w", err)
 	}

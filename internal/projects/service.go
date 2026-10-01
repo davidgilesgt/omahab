@@ -42,11 +42,11 @@ type CreateParams struct {
 // Service implements one-repo-one-project CRUD and ONCE deployment
 // orchestration for the Omahab control plane.
 type Service struct {
-	db     *sql.DB
-	runner ONCERunner
-	cfg    Config
-	events EventRecorder
-	tokens ReleaseTokenVerifier
+	db      *sql.DB
+	runner  ONCERunner
+	cfg     Config
+	events  EventRecorder
+	tokens  ReleaseTokenVerifier
 	secrets secretsSource
 }
 
@@ -98,6 +98,7 @@ func (s *Service) SetReleaseTokenVerifier(v ReleaseTokenVerifier) {
 func (s *Service) SetSecrets(src secretsSource) {
 	s.secrets = src
 }
+
 // Ensure the package honors the store.Migrate contract.
 var _ = func() {
 	var _ = Migrations
@@ -154,7 +155,7 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (*Project, error) 
 		Contract:  contract,
 		Deploying: false,
 	}
-	nowS := formatTime(now)
+	nowS := store.FormatTime(now)
 	_, err = s.db.ExecContext(ctx, `
 INSERT INTO projects
   (id, slug, name, repository_url, image_base, exposure, hostname,
@@ -443,11 +444,11 @@ func scanProject(sc interface{ Scan(dest ...any) error }) (*Project, error) {
 		&deploying, &createdAtS, &updatedAtS); err != nil {
 		return nil, err
 	}
-	createdAt, err := parseTime(createdAtS)
+	createdAt, err := store.ParseTime(createdAtS)
 	if err != nil {
 		return nil, fmt.Errorf("parse project created_at: %w", err)
 	}
-	updatedAt, err := parseTime(updatedAtS)
+	updatedAt, err := store.ParseTime(updatedAtS)
 	if err != nil {
 		return nil, fmt.Errorf("parse project updated_at: %w", err)
 	}

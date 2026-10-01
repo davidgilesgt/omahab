@@ -173,6 +173,40 @@ func TestCreateAndListGetDelete(t *testing.T) {
 	}
 }
 
+func TestGetBySlugAfterTimestampPrecisionChange(t *testing.T) {
+	ctx := context.Background()
+	svc := newService(t, &fakeRunner{}, nil, nil)
+	project, err := svc.Create(ctx, validCreate())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name      string
+		timestamp string
+		nanos     int
+	}{
+		{"seconds", "2026-09-30T12:00:00Z", 0},
+		{"milliseconds", "2026-09-30T12:00:00.123Z", 123000000},
+		{"microseconds", "2026-09-30T12:00:00.123456Z", 123456000},
+		{"nanoseconds", "2026-09-30T12:00:00.123456789Z", 123456789},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := svc.db.ExecContext(ctx, `UPDATE projects SET name = ?, updated_at = ? WHERE id = ?`,
+				tc.name, tc.timestamp, string(project.ID)); err != nil {
+				t.Fatal(err)
+			}
+			got, err := svc.GetBySlug(ctx, project.Slug)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantTime := time.Date(2026, 9, 30, 12, 0, 0, tc.nanos, time.UTC)
+			if got.ID != project.ID || got.Name != tc.name || !got.UpdatedAt.Equal(wantTime) {
+				t.Fatalf("updated project = %+v, want name %q and time %s", got, tc.name, wantTime)
+			}
+		})
+	}
+}
+
 func TestValidation(t *testing.T) {
 	runner := &fakeRunner{}
 	svc := newService(t, runner, nil, nil)

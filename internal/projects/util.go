@@ -4,18 +4,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
-	"time"
 )
-
-const timeFormat = "2006-01-02T15:04:05.000000000Z07:00"
-
-func formatTime(t time.Time) string {
-	return t.UTC().Format(timeFormat)
-}
-
-func parseTime(s string) (time.Time, error) {
-	return time.Parse(timeFormat, s)
-}
 
 // Contract is the default ONCE project runtime contract (design §6.2):
 // HTTP on port 80, /up health endpoint, persistent state at /storage.
