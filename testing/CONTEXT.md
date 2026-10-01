@@ -5,6 +5,24 @@ This file is the agent campaign bundle for deep end-to-end testing.
 `AGENTS.md` and both skill files, in fixed order, with source labels.
 `node scripts/test-checklist.mjs new` snapshots this file into each run.
 
+## Testing design
+
+- Never write unit tests after writing the code they test.
+- Write required unit tests first. Observe failure before implementation,
+  then observe success after implementation.
+- Prefer unit tests for complex behavior and edge cases.
+- Strongly prefer E2E tests for feature verification, especially complex
+  features.
+- Before testing a system in isolation, write all identified failure modes
+  before writing implementation code.
+- Tautological tests and change-detector tests are harmful. Do not restate
+  setup, copy implementation, or pin wording, source text, internal
+  structure, or incidental defaults without a behavior contract.
+- Add a bug-fix regression test only for a genuine gap in behavior coverage.
+- Simulated browser tests verify presentation only, not E2E integration.
+- End each E2E run with a verifiable, repeatable artifact. Record inputs,
+  source identity, procedure, results, and evidence. Keep secrets separate.
+
 ## Campaign order
 
 1. Create a blank run with `node scripts/test-checklist.mjs new`.

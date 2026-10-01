@@ -21,6 +21,18 @@
 - Gate before every commit: `bash scripts/check.sh` (needs go+npm on PATH — use `nix develop` if missing). For Go changes also `nix build .#checks.x86_64-linux.go-vet .#checks.x86_64-linux.go-test --print-build-logs`.
 - Never commit artifacts, `.env*`, `*.sqlite`, or root binaries (check.sh enforces most of this).
 
+## Testing design
+- Never write unit tests after writing the code they test.
+- When unit tests are required, write them first. Observe failure before implementation, then observe success after implementation.
+- Prefer unit tests for complex behavior and edge cases.
+- Strongly prefer end-to-end (E2E) tests for feature verification, especially complex features.
+- Each E2E run must produce a verifiable artifact with the inputs, source identity, procedure, results, and evidence needed to repeat it.
+- Before testing a system in isolation, write all identified failure modes before writing implementation code.
+- Tautological tests are harmful. Do not add tests that merely restate their setup or implementation.
+- Change-detector tests are harmful. Do not pin wording, source text, internal structure, or incidental defaults without a behavior contract.
+- Do not add regression tests for bug fixes unless a genuine gap exists in behavior coverage.
+- Simulated browser tests verify presentation only. They do not establish E2E integration coverage.
+
 ## VM testing — E2E ISO harness is the default
 - When asked to test in a VM, run `scripts/e2e-iso-install.sh`: builds the ISO, installs it onto a fresh VM disk, boots the installed system, probes the setup flow. Never substitute `nix run .#vm` or the NixOS unit tests — those skip the ISO/install path.
 - Freshness is mandatory: the VM disk is always recreated, and the ISO is rebuilt whenever HEAD moved since the last run (marker in `dist/e2e/`; the script enforces this even with `--skip-build`). When new commits land, re-run the harness from scratch — never reuse a booted VM or a stale ISO across commits, and never ask whether to recreate.
