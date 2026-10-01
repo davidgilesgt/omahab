@@ -316,9 +316,14 @@ paths:
       description: >-
         Triggers the omahab-restore oneshot unit for a staged restore: the
         unit stops omahabd, swaps state atomically as root (rollback copy
-        kept), and restarts omahabd. The phrase travels once through a 0600
-        tmpfs handoff consumed and removed by the unit. After the swap the
-        daemon is back; poll GET /api/v1/recovery/restore/{id} for progress.
+        kept), and restarts omahabd. The phrase transits a deliberate
+        exception to in-memory-only handling: because the apply runs after
+        omahabd stops, it travels once through a 0600 root-owned file on
+        tmpfs (/run/omahab/recovery-phrase) that the unit consumes and
+        removes first; it is readable by root during the apply window —
+        the same trust boundary as the master key on a running host. After
+        the swap the daemon is back; poll GET /api/v1/recovery/restore/{id}
+        for progress.
       operationId: applyRecoveryRestore
       parameters:
         - $ref: '#/components/parameters/IdPath'

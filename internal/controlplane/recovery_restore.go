@@ -459,7 +459,11 @@ func (b *Backend) TriggerRecoveryRestoreUnit(ctx context.Context, opID, phrase s
 	// Phrase handoff: the oneshot unit runs as root after this daemon
 	// stops, so the phrase travels through a 0600 file on /run (tmpfs —
 	// RAM-backed, never disk) that the apply step reads and removes
-	// first thing. The journal never stores it.
+	// first thing. The journal never stores it. This is a deliberate
+	// exception to "phrase in memory only": root on the host could read
+	// the file during the apply window. Root already has equivalent
+	// access to master.key and control.db on a running host (DESIGN
+	// secret-storage boundary), so this grants no new capability.
 	if err := writeRecoveryPhraseHandoff(j.Operation.ID, phrase); err != nil {
 		return RecoveryRestoreStatus{}, translateError(err)
 	}
@@ -477,7 +481,11 @@ func (b *Backend) TriggerRecoveryRestoreUnit(ctx context.Context, opID, phrase s
 
 // recoveryPhraseHandoffPath is the tmpfs phrase handoff consumed by
 // `omahab recovery apply --apply-staged`. /run is the daemon's declared
-// ReadWritePaths root and is wiped at boot.
+// ReadWritePaths root and is wiped at boot. The file exists because the
+// apply unit runs after omahabd stops: no process holds the phrase in
+// memory across that gap. It is 0600 root in a 0700 tmpfs directory and
+// removed by the CLI first thing; it is readable by root during the apply
+// window — the same trust boundary as master.key on a running host.
 func recoveryPhraseHandoffPath() string {
 	if v := strings.TrimSpace(os.Getenv("OMAHAB_RUNTIME_DIR")); v != "" {
 		return filepath.Join(v, "recovery-phrase")
