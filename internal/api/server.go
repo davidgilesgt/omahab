@@ -262,6 +262,7 @@ func (s *Server) buildRouter() chi.Router {
 		r.Post("/api/v1/bundles", s.withBodyLimit(defaultBodyLimit, s.handleCreateBundle))
 		r.Delete("/api/v1/bundles/{id}", s.handleDeleteBundle)
 		r.Post("/api/v1/bundles/{id}/disable", s.handleDisableBundle)
+		r.Post("/api/v1/bundles/{id}/health", s.handleProbeBundleHealth)
 		r.Post("/api/v1/bundles/{id}/enable", s.handleEnableBundle)
 		r.Post("/api/v1/bundles/apply", s.handleApplyBundles)
 		r.Get("/api/v1/bundles/apply/{id}", s.handleGetBundleApply)

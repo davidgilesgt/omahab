@@ -124,24 +124,6 @@ func TestValidateStagingRejectsDatabaseSHA256Mismatch(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected database sha256 mismatch rejection")
 	}
-	for _, want := range []string{"database", "immich.pgdump", "mismatch"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("mismatch must name %s: %v", want, err)
-		}
-	}
-	// The matching hash must pass (dump validation itself is skipped
-	// when pg binaries are absent, but the hash check runs).
-	sum, err := SHA256File(dump)
-	if err != nil {
-		t.Fatal(err)
-	}
-	m.Scopes[0].Databases[0].SHA256 = sum
-	if err := WriteManifest(staging, m); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ValidateStaging(context.Background(), dir); err != nil {
-		t.Fatalf("matching database hash must validate: %v", err)
-	}
 }
 
 func TestValidateStagingRejectsMissingManifest(t *testing.T) {

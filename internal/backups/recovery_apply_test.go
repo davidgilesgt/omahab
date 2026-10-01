@@ -487,3 +487,112 @@ func TestRecoverySourceNeverInArgs(t *testing.T) {
 		t.Fatal("password must reach the runner unmodified")
 	}
 }
+
+func TestApplyServerConfigSwapReentryAfterInterruptedSwap(t *testing.T) {
+	ctx := context.Background()
+	staging := t.TempDir()
+	stateDir := t.TempDir()
+	manifest := recoveryTestManifest("")
+	template := t.TempDir()
+	writeServerConfigSnapshot(t, template, stateDir, manifest)
+	runner := &fakeRecoveryRunner{snapshots: map[string]string{"s": template}}
+	if err := StageRecoverySnapshot(ctx, runner, RecoverySource{Location: "sftp://u@h:23/omahab", Password: "pw"}, "s", staging); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	plan, err := PlanServerConfigSwap(staging, stateDir, manifest)
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	live := filepath.Join(stateDir, "control.db")
+	if err := os.WriteFile(live, []byte("old-live-db"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	master := make([]byte, 32)
+	for i := range master {
+		master[i] = byte(i)
+	}
+	// First attempt: a partial swap that leaves the rollback directory
+	// behind, exactly like an interruption between the index write and
+	// the completed swap (or a crash during rollback).
+	sabotage := plan.files[len(plan.files)-1]
+	if err := os.RemoveAll(sabotage.source); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ApplyServerConfigSwap(ctx, plan, master); err == nil {
+		t.Fatal("expected the sabotaged swap to fail")
+	}
+	if _, err := os.Stat(serverConfigRollbackDir(staging)); err != nil {
+		t.Fatalf("interrupted swap must leave its rollback copy: %v", err)
+	}
+	// Re-plan (a resume rebuilds the plan from the staged tree) and
+	// re-apply: the leftover rollback directory must be recovered from,
+	// not an EEXIST failure, and the re-run must complete.
+	plan, err = PlanServerConfigSwap(staging, stateDir, manifest)
+	if err != nil {
+		t.Fatalf("re-plan: %v", err)
+	}
+	rollback, cleanup, err := ApplyServerConfigSwap(ctx, plan, master)
+	if err != nil {
+		t.Fatalf("re-entry after interrupted swap: %v", err)
+	}
+	defer cleanup()
+	got, err := os.ReadFile(live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) == "old-live-db" || len(got) == 0 {
+		t.Fatalf("re-entry did not swap control.db in: %q", got)
+	}
+	if err := rollback(); err != nil {
+		t.Fatalf("rollback after re-entry: %v", err)
+	}
+	got, err = os.ReadFile(live)
+	if err != nil || string(got) != "old-live-db" {
+		t.Fatalf("rollback after re-entry left %q, want the preserved live db: %v", got, err)
+	}
+}
+
+func TestRollbackServerConfigSwapReentrySucceeds(t *testing.T) {
+	ctx := context.Background()
+	staging := t.TempDir()
+	stateDir := t.TempDir()
+	manifest := recoveryTestManifest("")
+	template := t.TempDir()
+	writeServerConfigSnapshot(t, template, stateDir, manifest)
+	runner := &fakeRecoveryRunner{snapshots: map[string]string{"s": template}}
+	if err := StageRecoverySnapshot(ctx, runner, RecoverySource{Location: "sftp://u@h:23/omahab", Password: "pw"}, "s", staging); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	plan, err := PlanServerConfigSwap(staging, stateDir, manifest)
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	live := filepath.Join(stateDir, "control.db")
+	if err := os.WriteFile(live, []byte("old-live-db"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	master := make([]byte, 32)
+	if _, _, err := ApplyServerConfigSwap(ctx, plan, master); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	// First rollback interrupted after swapping the earliest file back:
+	// reproduce by rolling back one entry, then re-running the whole
+	// rollback — it must converge, not fail on the removed index.
+	rollbackDir := serverConfigRollbackDir(staging)
+	if _, err := os.Stat(filepath.Join(rollbackDir, "index.json")); err != nil {
+		t.Fatalf("rollback index missing: %v", err)
+	}
+	if err := RollbackServerConfigSwap(staging, stateDir); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	got, err := os.ReadFile(live)
+	if err != nil || string(got) != "old-live-db" {
+		t.Fatalf("rollback left %q, want the preserved live db: %v", got, err)
+	}
+	// A second rollback call (re-entry after a crash between the last
+	// file restore and the directory removal) is a no-op success: the
+	// rollback directory is gone and no live state remains to undo.
+	if err := RollbackServerConfigSwap(staging, stateDir); err != nil {
+		t.Fatalf("rollback re-entry: %v", err)
+	}
+}

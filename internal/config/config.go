@@ -65,6 +65,7 @@ func Load() (Config, error) {
 		Listen:           envOr("OMAHAB_LISTEN", DefaultListen),
 		ShutdownGrace:    15 * time.Second,
 		CatalogPath:      envOr("OMAHAB_CATALOG", DefaultCatalogPath),
+		NativeLayoutPath: envOr("OMAHAB_NATIVE_LAYOUT", ""),
 		AdminUser:        envOr("OMAHAB_ADMIN_USER", "omahab"),
 		CustomBundlesDir: envOr("OMAHAB_CUSTOM_BUNDLES", DefaultCustomBundlesDir),
 	}

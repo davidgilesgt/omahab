@@ -50,6 +50,22 @@ func probeHTTPWith(ctx context.Context, client *http.Client, hc HealthCheck) (do
 	return domain.HealthUnhealthy, nil
 }
 
+// ProbeHealth runs one HTTP health check against 127.0.0.1:<port><path>
+// (or the absolute/unix URL in hc.Path). It is the observation logic the
+// systemd runner applies, exposed for callers that probe a bundle's
+// configured service without an application row (control-plane fresh
+// bundle probes). A failing endpoint reports unhealthy, not an error.
+func ProbeHealth(ctx context.Context, hc HealthCheck, port int) (domain.Health, error) {
+	if strings.Contains(hc.Path, "://") {
+		return probeHTTPURL(ctx, hc.Path)
+	}
+	if port <= 0 {
+		return domain.HealthUnknown, fmt.Errorf("%w: http health check has no port", ErrInvalid)
+	}
+	hc.Port = port
+	return probeHTTP(ctx, hc, port)
+}
+
 // probeHTTPURL probes an absolute health URL. It exists for Unix-socket
 // probes (unix:// scheme served by native services such as the embedding
 // worker), which the loopback-port shape cannot express.

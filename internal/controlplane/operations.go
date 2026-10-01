@@ -147,6 +147,9 @@ func (b *Backend) GetOperation(ctx context.Context, id string) (Operation, error
 			op.Status = status
 			op.Error = detail
 			_ = writeOperationJournal(b.cfg.StateDir, op)
+			if op.Status != OpRunning {
+				b.releaseBundleApply(op.ID)
+			}
 			if op.Status == OpCompleted {
 				// The switch installed a new merged view; reload it so
 				// new/removed/disabled custom bundles show without a

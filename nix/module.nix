@@ -343,7 +343,7 @@ in
           "/run/omahab-embedding"
           "/home/${cfg.adminUser}/.ssh"
           "/home/${cfg.adminUser}/.config/omahab"
-        ];
+        ] ++ map (entry: "-${entry.path}") (lib.concatMap (layout: layout.data or [ ]) (builtins.attrValues nativeLayout));
         BindPaths = [
           "/home/${cfg.adminUser}/.ssh"
           "/home/${cfg.adminUser}/.config/omahab"
@@ -359,6 +359,7 @@ in
           "@system-service"
           "~@privileged @resources"
           "@chown"
+          "@setuid"
         ];
         SecureBits = "keep-caps";
         LimitNOFILE = 65536;
@@ -399,6 +400,7 @@ in
           then builtins.hashFile "sha256" (self.outPath + "/flake.lock")
           else "";
         OMAHAB_PG_MAJOR = lib.versions.major config.services.postgresql.finalPackage.version;
+        OMAHAB_PG_PRELOAD_LIBRARIES = config.services.postgresql.settings.shared_preload_libraries or "";
         DEVPOD_HOME = "${stateDir}/devpod";
         HOME = "${stateDir}/devpod";
       };
@@ -527,12 +529,12 @@ in
     # ------------------------------------------------------------------
     # Offline disaster recovery (DESIGN §5.4, §24.6): the setup-UI
     # "Restore from backup" flow stages + validates through the daemon,
-    # then triggers this unit. It stops omahabd, applies the staged
-    # server-config swap as root (`omahab recovery apply --staged <op>`),
-    # and restarts omahabd so setup reconverges apps.
+    # then triggers this unit. It stops omahabd and restores the selected
+    # configuration and application payloads as root, then restarts
+    # omahabd after the shared recovery executor finishes.
     # ------------------------------------------------------------------
     systemd.services.omahab-restore = {
-      description = "Omahab disaster recovery restore (server-config swap)";
+      description = "Omahab disaster recovery restore";
       documentation = [ "https://github.com/davidgilesgt/omahab" ];
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
@@ -541,21 +543,27 @@ in
         ConditionPathExists = "${stateDir}/recovery-restore-staging";
         # Never started at boot: only on demand from the panel/CLI.
       };
+      path = [ pkgs.git pkgs.restic pkgs.systemd config.services.postgresql.finalPackage pkgs.util-linux pkgs.rsync pkgs.sqlite pkgs.gnutar ];
+      environment = {
+        OMAHAB_STATE_DIR = stateDir;
+        OMAHAB_DATA_DIR = dataDir;
+        OMAHAB_CATALOG = "${nativeCatalog}";
+        OMAHAB_NATIVE_LAYOUT = "${nativeLayoutFile}";
+        OMAHAB_PG_MAJOR = lib.versions.major config.services.postgresql.finalPackage.version;
+        OMAHAB_PG_PRELOAD_LIBRARIES = config.services.postgresql.settings.shared_preload_libraries or "";
+      };
       serviceConfig = hardenBase // {
         Type = "oneshot";
         # The swap replaces the daemon's own database: stop omahabd
         # first, and always restart it afterwards (even on failure) so
         # the panel comes back with the journal state visible.
-        ExecStartPre = "/usr/bin/systemctl stop omahabd.service";
-        ExecStopPost = "/usr/bin/systemctl start omahabd.service";
-        ExecStart = "${cfg.package}/bin/omahab recovery apply --apply-staged";
-        User = "root";
+        ExecStartPre = "${pkgs.systemd}/bin/systemctl stop omahabd.service";
+        ExecStopPost = "${pkgs.systemd}/bin/systemctl start omahabd.service";
         Group = "root";
-        ReadWritePaths = [
-          stateDir
-          dataDir
-          "/run/omahab"
-        ];
+        # Atomic state-directory swaps need writable parents, not bind mounts
+        # on the directory being renamed. Native payload roots stay in place.
+        ReadWritePaths = [ "/var/lib" "/srv" "/run/omahab" ];
+        SystemCallFilter = [ "@system-service" "~@privileged @resources" "@chown" "@setuid" ];
         ProtectKernelTunables = true;
         ProtectControlGroups = true;
         RestrictAddressFamilies = [
@@ -595,6 +603,7 @@ in
       serviceConfig = {
         Type = "oneshot";
         ExecStart = "${cfg.package}/bin/omahab bundle apply --apply-staged";
+        ExecStartPost = "/usr/bin/systemctl restart omahabd.service";
         User = "root";
         Group = "root";
         ReadWritePaths = [
@@ -1071,6 +1080,14 @@ in
     systemd.oomd.enableSystemSlice = true;
     # Release ref for `omahab system upgrade` (nixos-rebuild --flake).
     environment.etc."omahab-release".text = cfg.releaseRef;
+
+    # Stable installed-system links to the native catalog and layout the
+    # daemon services consume via OMAHAB_CATALOG/OMAHAB_NATIVE_LAYOUT.
+    # An interactive recovery shell (root console) has none of the
+    # service environment; `omahab recovery apply` resolves these paths
+    # so a standalone restore still plans with native metadata.
+    environment.etc."omahab/catalog/catalog.json".source = "${nativeCatalog}/catalog.json";
+    environment.etc."omahab/native-layout.json".source = nativeLayoutFile;
 
     # Nightly update discovery.
     systemd.services.omahab-update-check = {

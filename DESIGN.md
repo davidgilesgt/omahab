@@ -284,8 +284,10 @@ loader-assigned, never present in files) and `bundles/<id>/module.nix`
 the same layout (Forgejo is only a mirror; pushes are best-effort). The
 daemon merges committed custom `bundle.json` files into the runtime
 catalog (read at HEAD via `git show`, never the dirty worktree) and
-rebuilds pass `--override-input bundles git+file:///var/lib/omahab/bundles`
-so only committed files are built. Custom validation: ids and units must
+rebuilds pass `--override-input bundles git+file:///var/lib/omahab/bundles?rev=<revision>`.
+Apply validates intended changes before commit and the immutable revision after commit.
+Build, switch, failure attribution, and health selection use that revision.
+Custom validation: ids and units must
 not collide with curated entries; ports must be unique and inside the
 reserved custom range 20000–20999; `name`, `units`, `port`,
 `health_check.kind`, and `module.nix` are required. Secrets never appear
@@ -296,13 +298,13 @@ authenticated) drive the same `internal/bundles` service. A custom bundle
 whose module fails a rebuild is reported by id, disabled via a committed
 `bundles/<id>/disabled` marker, and the build retried once.
 
-Applying runs out-of-process for the same reason `omahab system upgrade`
-does — the switch restarts `omahabd`, so the daemon must not health-gate
-its own restart. The panel's POST `/api/v1/bundles/apply` stages an
-operation journal plus a tmpfs handoff and starts the
-`omahab-bundle-apply` oneshot unit, which runs `omahab bundle apply
---apply-staged` as root through the same `internal/bundles` apply path;
-the daemon converges the journal on poll after it restarts.
+Panel applies run outside the daemon because a switch can restart `omahabd`.
+POST `/api/v1/bundles/apply` saves the operation journal before nonblocking unit dispatch.
+The `omahab-bundle-apply` unit runs `omahab bundle apply --apply-staged` as root.
+Both CLI paths use the same `internal/bundles` apply implementation.
+The journal records completion, failure, or successful rollback.
+A successful unit apply restarts the daemon to load the committed catalog.
+Failed CLI applies preserve a nonzero exit code in JSON mode.
 
 ### 6.2 Project applications
 
@@ -916,6 +918,27 @@ Initial objectives:
 - first backup and first verified restore complete during setup (Hetzner repo configured immediately after the recovery phrase → scoped capture then `Verify` so `recovery_tested` passes on day one; timers enabled via `enableBackupTimers`).
 
 Restore contract: staged extraction validates the v2 manifest and refuses any artifact whose sha256 does not match the staged bytes before anything live is touched. Live app-scope restores additionally refuse dumps captured with a newer PostgreSQL major than the running cluster (`postgres_major` in the manifest names the dump source). Server-config restores run offline through the recovery executor, never in the live daemon.
+
+Scope selection is explicit: operator-picked `scopes` win, `include_apps`
+restores every non-config scope the manifest carries, and a config-only
+restore touches no app or data scope; excluded scopes are never touched
+by construction. Promoted destinations sync with `rsync -aHAX
+--numeric-ids --delete`, so a selected scope ends up exactly the captured
+bytes — post-capture files do not survive a re-restore. Server-config
+always restores and always promotes the inseparable Pocket ID identity
+checkpoint with it; snapshot-carried custom bundle definitions are
+written into the custom-bundles repo and activated with health probes
+skipped exactly for restore-paused bundles. The attach step reuses a
+matching recovered repository row instead of duplicating it, and the
+repository password precedence is: caller-supplied (generic), recovered
+from the matching row, then phrase-derived.
+
+Generic (non-Hetzner) SFTP locations default to port 22 — an explicit
+port in the URL always wins, and Hetzner Storage Box locations are
+always generated with an explicit `:23`. Path markers mirror restic's
+sftp URL handling: `/./x` is home-relative (resolved against the login
+directory) and `//x` is absolute; both pass through verbatim so listing
+opens exactly the directory a restic client with the same URL would.
 
 A backup is not healthy until Omahab has demonstrated that it can restore the relevant data.
 

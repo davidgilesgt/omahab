@@ -13,8 +13,10 @@
 #
 # Default-clean: without --keep the guest disk and ephemeral secrets are
 # removed on success AND failure (EXIT trap); only logs stay behind.
-#
-# Usage: scripts/e2e-iso-install.sh [--skip-build] [--keep] [--workdir DIR] [--interactive] [--interactive-installer] [--firmware bios|uefi] [--data-disks 0|1|2]
+# Usage: scripts/e2e-iso-install.sh [--skip-build] [--keep] [--workdir DIR] [--interactive] [--interactive-installer] [--firmware bios|uefi] [--data-disks 0|1|2] [--recovery]
+#   --recovery     run the full local-restic backup → fresh-state recovery
+#                  campaign (capture, fresh-disk reinstall, real restore,
+#                  interrupted+resumed restore, activation rollback)
 #   --skip-build   reuse dist/iso when its marker matches HEAD (else rebuild)
 #   --keep         keep the workdir (disk image, logs) after the run
 #   --workdir DIR  workdir for disk/logs/markers [dist/e2e]
@@ -35,9 +37,11 @@ KEEP=0
 INTERACTIVE=0
 INTERACTIVE_INSTALLER=0
 FIRMWARE="bios"
+RECOVERY=0
 DATA_DISKS=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --recovery) RECOVERY=1; shift ;;
     --skip-build) SKIP_BUILD=1; shift ;;
     --keep) KEEP=1; shift ;;
     --workdir) WORKDIR="${2:?--workdir needs a directory}"; shift 2 ;;
@@ -45,7 +49,7 @@ while [[ $# -gt 0 ]]; do
     --interactive-installer) INTERACTIVE_INSTALLER=1; shift ;;
     --firmware) FIRMWARE="${2:?--firmware needs bios|uefi}"; shift 2 ;;
     --data-disks) DATA_DISKS="${2:?--data-disks needs 0|1|2}"; shift 2 ;;
-    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
     *) echo "unknown flag: $1 (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -464,11 +468,220 @@ if curl -sf -m 15 -H "Authorization: Bearer $PANEL_TOKEN" "$BASE/api/v1/setup" |
 else
   die "FAILED: setup checklist flips recovery_key (recovery_key not ok after confirm)"
 fi
-check "restore skip (start new server)" -X POST "$BASE/api/v1/recovery/restore/skip" -- ''
-if curl -sf -m 15 -H "Authorization: Bearer $PANEL_TOKEN" "$BASE/api/v1/setup" | python3 -c 'import json,sys; checks = json.load(sys.stdin)["checks"]; sys.exit(0 if any(c["id"] == "restore" and c["status"] == "skipped" for c in checks) else 1)'; then
-  log "ok: setup checklist records restore skipped"
+
+CAMPAIGN="$ROOT/scripts/e2e-recovery-campaign.sh"
+
+if [[ $RECOVERY -eq 1 ]]; then
+  # Full campaign: capture on this boot, then reinstall the SAME disk
+  # fresh (proving the fresh-state recovery, never booted-stale state),
+  # restore, interrupt+resume, and prove the activation rollback.
+  log "recovery campaign: capture phase"
+  "$CAMPAIGN" capture "$BASE" "$PANEL_TOKEN" "$SSH_PORT" "$SSH_KEY" "$WORKDIR"
+
+  # --- Phase 3: fresh-disk reinstall. The disk is ALWAYS recreated
+  # (never reuse installed state); the local restic repository lives in
+  # the guest's /srv, so it must be exported off the old disk before it
+  # is wiped: fetch it through the SSH channel into the workdir, then
+  # push it back after the reinstall. The recovery phrase and repo
+  # password already live in the workdir.
+  log "recovery campaign: exporting restic repository off the old disk"
+  REPO_TAR="$WORKDIR/recovery-secrets/e2e-repo.tar"
+  ssh -T -i "$SSH_KEY" -p "$SSH_PORT" \
+    -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    admin@127.0.0.1 "printf '%s\n' \"${E2E_ADMIN_PASS:-e2e-test-pass-01}\" | sudo -S -p '' tar -cf - -C /srv/omahab/backups/repos e2e-recovery" \
+    > "$REPO_TAR" 2>/dev/null || die "could not export the restic repository"
+  [[ -s "$REPO_TAR" ]] || die "exported restic repository is empty"
+
+  # Stop the VM and recreate the disk fresh.
+  if [[ -n "$QEMU_PID" ]] && kill -0 "$QEMU_PID" 2>/dev/null; then
+    kill "$QEMU_PID" 2>/dev/null || true
+    sleep 3
+    kill -9 "$QEMU_PID" 2>/dev/null || true
+  fi
+  if [[ -n "$TUNNEL_PID" ]] && kill -0 "$TUNNEL_PID" 2>/dev/null; then
+    kill "$TUNNEL_PID" 2>/dev/null || true
+    TUNNEL_PID=""
+  fi
+  QEMU_PID=""
+  rm -f "$DISK"
+  "$QEMU_IMG" create -f qcow2 "$DISK" "${DISK_GB}G" >/dev/null
+  log "recovery campaign: fresh disk recreated (no stale installed state)"
+
+  # Reinstall from the SAME ISO (the rebuild-on-HEAD marker still holds).
+  log "recovery campaign: phase 3 reinstall (install)"
+  "$QEMU" -enable-kvm -cpu host -m "$MEM_MB" -smp 4 \
+    -cdrom "$ISO_FILE" \
+    -drive "file=$DISK,format=qcow2,if=none,id=system" \
+    -device "virtio-blk-pci,drive=system,serial=omahab-system" \
+    "${DATA_ARGS[@]}" "${FIRMWARE_ARGS[@]}" \
+    -boot order=d -display none -daemonize \
+    -pidfile "$WORKDIR/qemu-install.pid" \
+    -serial "tcp:127.0.0.1:$SERIAL_PORT,server,nowait" \
+    -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
+    || die "qemu failed to start (recovery reinstall phase)"
+  QEMU_PID="$(cat "$WORKDIR/qemu-install.pid")"
+  SERIAL_LOG="$WORKDIR/serial-reinstall.log"
+  INSTALL_EXIT=0
+  python3 - "$SERIAL_PORT" "$SERIAL_LOG" "$INSTALL_TIMEOUT" "http://10.0.2.2:$CACHE_PORT" "$CACHE_PUB" "$E2E_ADMIN_PASS" "$E2E_SSH_PUB" <<'PYEOF' || INSTALL_EXIT=$?
+import re, socket, sys, time
+
+port, logpath, timeout = int(sys.argv[1]), sys.argv[2], int(sys.argv[3])
+cache_url, cache_pub, admin_pass, ssh_pub = sys.argv[4], sys.argv[5], sys.argv[6], sys.argv[7]
+deadline = time.time() + timeout
+
+log = open(logpath, "w", buffering=1)
+
+def connect():
+    while time.time() < deadline:
+        try:
+            s = socket.create_connection(("127.0.0.1", port), timeout=5)
+            s.settimeout(5)
+            return s
+        except OSError:
+            time.sleep(2)
+    raise SystemExit("serial: qemu never opened the port")
+
+s = connect()
+buf = b""
+PROMPT = re.compile(rb"\[root@[A-Za-z0-9-]+:[^\]]*\]# ")
+ESC = re.compile(rb"\x1b\][^\x07]*\x07|\x1b\[[0-9;?]*[A-Za-z]|\x07|\r")
+
+def read_until(pat, timeout_s, send_nl=True):
+    global buf
+    end = time.time() + timeout_s
+    last_nl = 0.0
+    while time.time() < end:
+        if send_nl and time.time() - last_nl > 10:
+            try:
+                s.sendall(b"\n")
+            except OSError:
+                pass
+            last_nl = time.time()
+        try:
+            chunk = s.recv(65536)
+        except socket.timeout:
+            continue
+        if not chunk:
+            time.sleep(1)
+            continue
+        log.write(chunk.decode("utf-8", "replace"))
+        buf += chunk
+        clean = ESC.sub(b"", buf)
+        m = pat.search(clean)
+        if m:
+            out = clean[:m.start()]
+            buf = b""
+            return out
+    raise SystemExit(f"serial: timeout waiting for {pat.pattern!r}\n--- tail ---\n" + ESC.sub(b"", buf[-4000:]).decode("utf-8", "replace"))
+
+def run(cmd, timeout_s, expect_exit=None):
+    global buf
+    buf = b""
+    s.sendall(cmd.encode() + b"\n")
+    out = read_until(PROMPT, timeout_s, send_nl=False).decode("utf-8", "replace")
+    print(f"$ {cmd}\n{out[-1500:]}")
+    if expect_exit is not None:
+        s.sendall(b"echo E2E_EXIT:$?\n")
+        echo = read_until(PROMPT, 30, send_nl=False).decode("utf-8", "replace")
+        m = re.search(r"E2E_EXIT:(\d+)", echo)
+        code = int(m.group(1)) if m else -1
+        if code != expect_exit:
+            raise SystemExit(f"command {cmd!r} exited {code}, want {expect_exit}\n{echo[-2000:]}")
+
+read_until(PROMPT, 600)
+run("lsblk -dn -o NAME,TYPE | grep -q vda", 30, expect_exit=0)
+run(f"umask 077; mkpasswd --method=yescrypt '{admin_pass}' > /run/pwhash && chmod 600 /run/pwhash", 30, expect_exit=0)
+run(f"umask 077; printf '%s\\n' '{ssh_pub}' > /run/e2e-authorized-keys && chmod 600 /run/e2e-authorized-keys", 30, expect_exit=0)
+install_cmd = (
+    f"OMAHAB_EXTRA_SUBSTITUTERS={cache_url} "
+    f"OMAHAB_EXTRA_TRUSTED_KEYS='{cache_pub}' "
+    "${OMAHAB_INSTALL_DISK:-omahab-install-disk} --disk /dev/vda --hostname e2e --username admin --password-hash-file /run/pwhash --authorized-keys-file /run/e2e-authorized-keys --yes"
+)
+run(install_cmd, timeout, expect_exit=0)
+s.sendall(b"poweroff\n")
+print("reinstall complete, guest powering off")
+PYEOF
+  QEMU_PID=""
+  for _ in $(seq 1 60); do
+    pkill -F "$WORKDIR/qemu-install.pid" 2>/dev/null || true
+    sleep 2
+    pgrep -F "$WORKDIR/qemu-install.pid" >/dev/null 2>&1 || break
+  done
+  pkill -F "$WORKDIR/qemu-install.pid" 2>/dev/null && die "guest did not power off after recovery reinstall"
+  [[ $INSTALL_EXIT -eq 0 ]] || die "recovery reinstall phase failed (see $SERIAL_LOG)"
+  log "recovery campaign: phase 3 reinstalled"
+
+  # --- Phase 4: boot the fresh machine, push the repository back, and
+  # run the real restore + interrupt + rollback proofs.
+  log "recovery campaign: phase 4 booting fresh system"
+  "$QEMU" -enable-kvm -cpu host -m "$MEM_MB" -smp 4 \
+    -drive "file=$DISK,format=qcow2,if=none,id=system" \
+    -device "virtio-blk-pci,drive=system,serial=omahab-system" \
+    "${DATA_ARGS[@]}" "${FIRMWARE_ARGS[@]}" \
+    -boot order=c -display none -daemonize \
+    -pidfile "$WORKDIR/qemu-test.pid" \
+    -serial "file:$WORKDIR/serial-fresh.log" \
+    -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$SSH_PORT-:22" \
+    -device virtio-net-pci,netdev=n0 \
+    || die "qemu failed to start (fresh boot phase)"
+  QEMU_PID="$(cat "$WORKDIR/qemu-test.pid")"
+  ok=0
+  for _ in $(seq 1 "$BOOT_TIMEOUT"); do
+    banner="$(timeout 8 bash -c 'exec 3<>/dev/tcp/127.0.0.1/'"$SSH_PORT"' && IFS= read -r -t 5 -u 3 line && printf %s "$line"' 2>/dev/null)" || true
+    if [[ "$banner" == SSH-* ]]; then ok=1; break; fi
+    sleep 2
+  done
+  [[ $ok -eq 1 ]] || die "fresh system sshd never came up (see $WORKDIR/serial-fresh.log)"
+  ok=0
+  for attempt in 1 2 3 4 5; do
+    if [[ -n "$TUNNEL_PID" ]] && kill -0 "$TUNNEL_PID" 2>/dev/null; then kill "$TUNNEL_PID" 2>/dev/null || true; fi
+    setsid ssh -N -i "$SSH_KEY" \
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+      -o ExitOnForwardFailure=yes -o ServerAliveInterval=10 -o ConnectTimeout=15 \
+      -L "127.0.0.1:$HTTP_PORT:127.0.0.1:8484" -p "$SSH_PORT" admin@127.0.0.1 &
+    TUNNEL_PID=$!
+    sleep 8
+    if (echo > /dev/tcp/127.0.0.1/$HTTP_PORT) 2>/dev/null && kill -0 "$TUNNEL_PID" 2>/dev/null; then ok=1; break; fi
+    log "tunnel attempt $attempt failed; retrying"
+  done
+  [[ $ok -eq 1 ]] || die "SSH tunnel never established on the fresh boot (see $WORKDIR/serial-fresh.log)"
+  ok=0
+  for _ in $(seq 1 "$BOOT_TIMEOUT"); do
+    if curl -sf -m 5 "$BASE/up" | grep -q '"status":"up"'; then ok=1; break; fi
+    sleep 1
+  done
+  [[ $ok -eq 1 ]] || die "fresh system never served $BASE/up (see $WORKDIR/serial-fresh.log)"
+  PANEL_TOKEN="$(ssh -T -i "$SSH_KEY" -p "$SSH_PORT" \
+    -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    admin@127.0.0.1 'cat ~/.config/omahab/token' 2>/dev/null)" || die "could not read fresh-boot administrator token"
+  [[ "$PANEL_TOKEN" =~ ^[a-z0-9]{8}$ ]] || die "fresh-boot administrator token is missing or invalid"
+  log "recovery campaign: fresh system up (token provisioned)"
+
+  # Push the exported repository back into the fresh machine's local
+  # repo path BEFORE the restore staging: the recovery flow reads the
+  # repository from this exact location.
+  log "recovery campaign: importing restic repository onto the fresh disk"
+  ssh -T -i "$SSH_KEY" -p "$SSH_PORT" \
+    -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    admin@127.0.0.1 "printf '%s\n' \"${E2E_ADMIN_PASS:-e2e-test-pass-01}\" | sudo -S -p '' bash -c 'mkdir -p /srv/omahab/backups/repos && tar -xf - -C /srv/omahab/backups/repos'" \
+    < "$REPO_TAR" 2>/dev/null || die "could not import the restic repository"
+
+  log "recovery campaign: restore phase"
+  "$CAMPAIGN" restore "$BASE" "$PANEL_TOKEN" "$SSH_PORT" "$SSH_KEY" "$WORKDIR"
+  log "recovery campaign: selected subset phase"
+  "$CAMPAIGN" subset "$BASE" "$PANEL_TOKEN" "$SSH_PORT" "$SSH_KEY" "$WORKDIR"
+  log "recovery campaign: interruption phase"
+  "$CAMPAIGN" interrupt "$BASE" "$PANEL_TOKEN" "$SSH_PORT" "$SSH_KEY" "$WORKDIR"
+  log "recovery campaign: activation rollback phase"
+  "$CAMPAIGN" rollback "$BASE" "$PANEL_TOKEN" "$SSH_PORT" "$SSH_KEY" "$WORKDIR"
+  log "recovery campaign: all phases passed"
 else
-  die "FAILED: setup checklist records restore skipped"
+  check "restore skip (start new server)" -X POST "$BASE/api/v1/recovery/restore/skip" -- ''
+  if curl -sf -m 15 -H "Authorization: Bearer $PANEL_TOKEN" "$BASE/api/v1/setup" | python3 -c 'import json,sys; checks = json.load(sys.stdin)["checks"]; sys.exit(0 if any(c["id"] == "restore" and c["status"] == "skipped" for c in checks) else 1)'; then
+    log "ok: setup checklist records restore skipped"
+  else
+    die "FAILED: setup checklist records restore skipped"
+  fi
 fi
 log "phase 2: all probes passed"
 if [[ $KEEP -eq 0 ]]; then

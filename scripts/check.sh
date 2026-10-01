@@ -9,11 +9,11 @@ fail=0
 pass() { echo "PASS: $*"; }
 fail_check() { echo "FAIL: $*" >&2; fail=1; }
 
-bash -n install.sh scripts/build.sh scripts/check.sh scripts/install-disk.sh scripts/e2e-iso-install.sh scripts/check-secureboot.sh scripts/test-install-server.sh && pass "bash syntax" || fail_check "bash syntax"
+bash -n install.sh scripts/build.sh scripts/check.sh scripts/install-disk.sh scripts/e2e-iso-install.sh scripts/e2e-recovery-campaign.sh scripts/check-secureboot.sh scripts/test-install-server.sh && pass "bash syntax" || fail_check "bash syntax"
 # Shell entrypoints are linted with ShellCheck instead of a homegrown
 # variable detector: real shell diagnostics over source-text heuristics.
 if command -v shellcheck >/dev/null 2>&1; then
-  shellcheck -S warning install.sh scripts/build.sh scripts/check.sh scripts/install-disk.sh scripts/e2e-iso-install.sh scripts/check-secureboot.sh scripts/test-install-server.sh && pass "shellcheck" || fail_check "shellcheck"
+  shellcheck -S warning install.sh scripts/build.sh scripts/check.sh scripts/install-disk.sh scripts/e2e-iso-install.sh scripts/e2e-recovery-campaign.sh scripts/check-secureboot.sh scripts/test-install-server.sh && pass "shellcheck" || fail_check "shellcheck"
 else
   fail_check "shellcheck not found (nix develop provides it)"
 fi
@@ -33,6 +33,24 @@ if command -v nix >/dev/null 2>&1; then
     grep -qF "$rule" <<<"$ruleset" && pass "nftables rule: $rule" || fail_check "nftables rule missing: $rule"
   done
   ! grep -q 'tcp dport 8485' <<<"$ruleset" && pass "no 8485 listener" || fail_check "8485 still present (should be removed)"
+  if command -v jq >/dev/null 2>&1 && command -v shellcheck >/dev/null 2>&1; then
+    storage_scripts="$ROOT/dist/check/storage-scripts"
+    mkdir -p "$storage_scripts"
+    if nix eval --json .#nixosConfigurations.omahab-installed.config.systemd.services \
+      --apply 'services: builtins.map (name: { inherit name; script = builtins.readFile services.${name}.serviceConfig.ExecStart; }) (builtins.filter (name: builtins.match "omahab-storage-.*" name != null) (builtins.attrNames services))' \
+      > "$storage_scripts/scripts.json" && jq -e 'length > 0' "$storage_scripts/scripts.json" >/dev/null; then
+      storage_shell_ok=1
+      while IFS= read -r unit; do
+        jq -r --arg unit "$unit" '.[] | select(.name == $unit) | .script' "$storage_scripts/scripts.json" > "$storage_scripts/$unit"
+        shellcheck -S warning "$storage_scripts/$unit" || storage_shell_ok=0
+      done < <(jq -r '.[].name' "$storage_scripts/scripts.json")
+      [[ $storage_shell_ok -eq 1 ]] && pass "generated storage shellcheck" || fail_check "generated storage shellcheck"
+    else
+      fail_check "generated storage scripts could not be evaluated"
+    fi
+  else
+    fail_check "jq and shellcheck required for generated storage scripts"
+  fi
 else
   fail_check "nix not found (evaluated firewall checks require nix)"
 fi

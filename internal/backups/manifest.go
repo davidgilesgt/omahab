@@ -200,6 +200,11 @@ const backupStagingDir = "backup-staging"
 // restore-facing error messages.
 const backupStagingDirPath = "/var/lib/omahab/backup-staging"
 
+// backupStagingDirPathParent is the production state directory: captures
+// stage at <stateDir>/backup-staging, so an extracted snapshot reproduces
+// that absolute path below the extraction target.
+const backupStagingDirPathParent = "/var/lib/omahab"
+
 // ScopeNames lists the captured scope names in manifest order.
 func (m SnapshotManifest) ScopeNames() []string {
 	out := make([]string, 0, len(m.Scopes))

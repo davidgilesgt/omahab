@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -68,6 +69,15 @@ type unwrapMasterKey struct {
 	kitPath string
 	// dest is the live master.key path.
 	dest string
+}
+
+type swapRollbackEntry struct {
+	Dest        string `json:"dest"`
+	HadOriginal bool   `json:"had_original"`
+}
+
+func serverConfigRollbackDir(staging string) string {
+	return filepath.Join(filepath.Dir(staging), "rollback-"+filepath.Base(staging))
 }
 
 const (
@@ -225,7 +235,10 @@ func PlanServerConfigSwap(staging, stateDir string, manifest SnapshotManifest) (
 		return nil, err
 	}
 	stateStaged := filepath.Join(staging, filepath.Clean(stateDir))
-	stagedBase := filepath.Join(staging, backupStagingDir)
+	stagedBase, err := StagedManifestDirFor(staging, stateDir)
+	if err != nil {
+		return nil, err
+	}
 	if _, err := os.Stat(filepath.Join(stagedBase, "control.db")); err != nil {
 		return nil, fmt.Errorf("%w: staged snapshot has no control.db under %s", ErrInvalid, backupStagingDirPath)
 	}
@@ -284,21 +297,71 @@ func ApplyServerConfigSwap(ctx context.Context, plan *serverConfigSwap, masterKe
 	if plan == nil {
 		return nil, nil, fmt.Errorf("%w: nil swap plan", ErrInvalid)
 	}
-	rollbackDir, err := os.MkdirTemp(filepath.Dir(plan.stagingRoot), "rollback-")
+	rollbackDir := serverConfigRollbackDir(plan.stagingRoot)
+	stateDir := filepath.Dir(plan.files[0].dest)
+	// Re-entry after an interrupted swap (or an interrupted rollback of
+	// one) leaves the rollback directory behind. It is the sole record
+	// of what the partial swap replaced, so undo from it first instead
+	// of failing with EEXIST; a rollback directory with no index never
+	// touched live state and is simply removed.
+	if err := os.Mkdir(rollbackDir, 0o700); err != nil {
+		if !os.IsExist(err) {
+			return nil, nil, err
+		}
+		if err := RollbackServerConfigSwap(plan.stagingRoot, stateDir); err != nil {
+			return nil, nil, fmt.Errorf("recover previous swap attempt: %w", err)
+		}
+		if err := os.Mkdir(rollbackDir, 0o700); err != nil {
+			return nil, nil, err
+		}
+	}
+	plan.rollbackDir = rollbackDir
+	entries := make([]swapRollbackEntry, 0, len(plan.files)+1)
+	for _, f := range plan.files {
+		_, err := os.Lstat(f.dest)
+		if err != nil && !os.IsNotExist(err) {
+			return nil, nil, err
+		}
+		entries = append(entries, swapRollbackEntry{Dest: f.dest, HadOriginal: err == nil})
+	}
+	if plan.unwrap != nil {
+		_, err := os.Lstat(plan.unwrap.dest)
+		if err != nil && !os.IsNotExist(err) {
+			return nil, nil, err
+		}
+		entries = append(entries, swapRollbackEntry{Dest: plan.unwrap.dest, HadOriginal: err == nil})
+	}
+	raw, err := json.Marshal(entries)
 	if err != nil {
 		return nil, nil, err
 	}
-	plan.rollbackDir = rollbackDir
-	var done []swapFile
+	index, err := os.OpenFile(filepath.Join(rollbackDir, "index.json"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, nil, err
+	}
+	_, writeErr := index.Write(raw)
+	if writeErr == nil {
+		writeErr = index.Sync()
+	}
+	closeErr := index.Close()
+	if writeErr != nil || closeErr != nil {
+		return nil, nil, fmt.Errorf("persist swap rollback index: %v %v", writeErr, closeErr)
+	}
+	// The index must survive a power cut before any live file moves: the
+	// rollback directory entry itself and its parent need the same
+	// fsync-before-rename discipline the manifest writer uses.
+	if err := syncDirEntries(rollbackDir, filepath.Dir(rollbackDir)); err != nil {
+		return nil, nil, fmt.Errorf("persist swap rollback directory: %w", err)
+	}
+	rollback = func() error { return RollbackServerConfigSwap(plan.stagingRoot, stateDir) }
+	cleanup = func() { _ = os.RemoveAll(rollbackDir) }
 	fail := func(cause error) (func() error, func(), error) {
-		undo := undoServerConfigSwap(done, plan.rollbackDir)
-		return undo, func() { _ = os.RemoveAll(plan.rollbackDir) }, fmt.Errorf("server-config swap failed: %w", cause)
+		return rollback, cleanup, fmt.Errorf("server-config swap failed: %w", cause)
 	}
 	for _, f := range plan.files {
-		if err := swapOneFile(ctx, f, plan.rollbackDir); err != nil {
+		if err := swapOneFile(ctx, f, rollbackDir); err != nil {
 			return fail(err)
 		}
-		done = append(done, f)
 	}
 	if plan.unwrap != nil {
 		// Preserve a pre-existing master.key in the rollback copy before
@@ -312,10 +375,30 @@ func ApplyServerConfigSwap(ctx context.Context, plan *serverConfigSwap, masterKe
 		if err := writeMasterKey(plan.unwrap.dest, masterKey); err != nil {
 			return fail(err)
 		}
-		done = append(done, swapFile{source: plan.unwrap.kitPath, dest: plan.unwrap.dest})
 	}
-	cleanup = func() { _ = os.RemoveAll(plan.rollbackDir) }
-	return undoServerConfigSwap(done, plan.rollbackDir), cleanup, nil
+	return rollback, cleanup, nil
+}
+
+// syncDirEntries fsyncs each directory so freshly created entries (the
+// rollback directory and its index) are durable before live mutation
+// begins. Failures are returned: an undurable rollback record must stop
+// the swap, not proceed.
+func syncDirEntries(dirs ...string) error {
+	for _, dir := range dirs {
+		d, err := os.Open(dir)
+		if err != nil {
+			return err
+		}
+		err = d.Sync()
+		closeErr := d.Close()
+		if err != nil {
+			return err
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+	}
+	return nil
 }
 
 // swapOneFile moves the live path aside into rollbackDir (same filesystem
@@ -354,27 +437,44 @@ func rollbackKeepPath(rollbackDir, dest string) string {
 	return filepath.Join(rollbackDir, filepath.Base(filepath.Dir(dest))+"-"+filepath.Base(dest))
 }
 
-func undoServerConfigSwap(done []swapFile, rollbackDir string) func() error {
-	return func() error {
-		for i := len(done) - 1; i >= 0; i-- {
-			f := done[i]
-			keep := rollbackKeepPath(rollbackDir, f.dest)
-			if _, err := os.Lstat(keep); err == nil {
-				if err := os.RemoveAll(f.dest); err != nil {
-					return err
-				}
-				if err := moveOrCopy(context.Background(), keep, f.dest); err != nil {
-					return fmt.Errorf("rollback %s: %w", f.dest, err)
-				}
-				continue
+// RollbackServerConfigSwap undoes only this staged operation's partial swap.
+// The index records original existence before any live file is changed.
+func RollbackServerConfigSwap(staging, stateDir string) error {
+	rollbackDir := serverConfigRollbackDir(staging)
+	raw, err := os.ReadFile(filepath.Join(rollbackDir, "index.json"))
+	if os.IsNotExist(err) {
+		return os.RemoveAll(rollbackDir)
+	}
+	if err != nil {
+		return err
+	}
+	var entries []swapRollbackEntry
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		return err
+	}
+	for i := len(entries) - 1; i >= 0; i-- {
+		entry := entries[i]
+		rel, err := filepath.Rel(stateDir, entry.Dest)
+		if err != nil || rel == "." || !filepath.IsLocal(rel) {
+			return fmt.Errorf("%w: rollback destination escapes state directory", ErrInvalid)
+		}
+		keep := rollbackKeepPath(rollbackDir, entry.Dest)
+		if _, err := os.Lstat(keep); err == nil {
+			if err := os.RemoveAll(entry.Dest); err != nil {
+				return err
 			}
-			// Nothing existed before: remove what the swap added.
-			if err := os.RemoveAll(f.dest); err != nil {
+			if err := moveOrCopy(context.Background(), keep, entry.Dest); err != nil {
+				return fmt.Errorf("rollback %s: %w", entry.Dest, err)
+			}
+		} else if !os.IsNotExist(err) {
+			return err
+		} else if !entry.HadOriginal {
+			if err := os.RemoveAll(entry.Dest); err != nil {
 				return err
 			}
 		}
-		return nil
 	}
+	return os.RemoveAll(rollbackDir)
 }
 
 func moveOrCopy(ctx context.Context, src, dst string) error {

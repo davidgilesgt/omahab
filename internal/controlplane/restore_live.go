@@ -45,6 +45,15 @@ func (b *Backend) runLiveRestore(opID string) {
 			return err
 		}
 		ctx := context.Background()
+		// Stage-aware resume: a journal past staging (an apply ID, a
+		// safety snapshot, or stopped writers recorded) resumes from its
+		// recorded stage against the existing tree — never re-extract,
+		// never restage, never abandon the paused apps.
+		if resumableLiveStage(j.Operation.Stage) && j.StagingDir != "" {
+			if fi, err := os.Stat(j.StagingDir); err == nil && fi.IsDir() {
+				return b.resumeLiveRestore(ctx, j)
+			}
+		}
 		// Stage first: extraction + isolated validation before anything live.
 		staging, err := os.MkdirTemp(restoreStagingRoot(b.cfg.StateDir), "op-")
 		if err != nil {
@@ -115,96 +124,169 @@ func (b *Backend) runLiveRestore(opID string) {
 		}
 		j.Operation.Stage = RestoreSafetySaved
 		_ = writeRestoreJournal(b.cfg.StateDir, j)
-		// Stop writers: restore-owned maintenance (generic resume cannot
-		// clear these), dependents first.
-		for _, bundle := range plan.stopOrder {
-			rows, err := b.appsByBundle(ctx, bundle)
-			if err != nil {
-				continue
-			}
-			if len(rows) == 0 {
-				if _, err := b.apps.PauseForMaintenance(ctx, bundle, apps.MaintenanceRestore, opID); err != nil {
-					_ = b.rollbackLiveRestore(ctx, plan, safety, opID)
-					return failRestoreOp(b.cfg.StateDir, &j, err.Error())
-				}
-				if err := writeMarker(b.appMarkerPath(bundle)); err != nil {
-					_ = b.rollbackLiveRestore(ctx, plan, safety, opID)
-					return failRestoreOp(b.cfg.StateDir, &j, err.Error())
-				}
-				continue
-			}
-			if _, err := b.pauseAppLocked(ctx, rows[0].ID, apps.MaintenanceRestore); err != nil {
-				_ = b.rollbackLiveRestore(ctx, plan, safety, opID)
-				return failRestoreOp(b.cfg.StateDir, &j, err.Error())
-			}
-		}
-		j.Operation.Stage = RestoreWritersStop
-		_ = writeRestoreJournal(b.cfg.StateDir, j)
-		// Custom bundle definitions travel with the snapshot: write
-		// them back into the bundles repo and commit before any data
-		// promotion, so the modules that own the restored data exist
-		// when apps resume. The activation switch runs in the same
-		// omahab-bundle-apply oneshot unit the panel apply uses (the
-		// switch restarts omahabd); the restore journal resumes from
-		// this stage after the restart exactly like a failed live
-		// restore, and runLiveRestore is a no-op re-write once the
-		// definitions are already committed.
-		if err := b.restoreCustomBundles(ctx, plan, staged, opID); err != nil {
-			_ = b.rollbackLiveRestore(ctx, plan, safety, opID)
-			return failRestoreOp(b.cfg.StateDir, &j, "custom bundles: "+err.Error())
-		}
-		j.Operation.Stage = RestoreBundlesWritten
-		_ = writeRestoreJournal(b.cfg.StateDir, j)
-		// Promote staged files with ownership intact.
-		if err := promoteStagedFiles(plan, staged); err != nil {
-			_ = b.rollbackLiveRestore(ctx, plan, safety, opID)
-			return failRestoreOp(b.cfg.StateDir, &j, "promote: "+err.Error())
-		}
-		j.Operation.Stage = RestoreFilesPromoted
-		_ = writeRestoreJournal(b.cfg.StateDir, j)
-		// Restore only selected PostgreSQL databases; the cluster stays up.
-		if err := restoreSelectedDatabases(ctx, plan, staged); err != nil {
-			_ = b.rollbackLiveRestore(ctx, plan, safety, opID)
-			return failRestoreOp(b.cfg.StateDir, &j, "databases: "+err.Error())
-		}
-		j.Operation.Stage = RestoreDBsRestored
-		_ = writeRestoreJournal(b.cfg.StateDir, j)
-		// Verify app secrets resolve in the current control state (they
-		// persist across app restores; a missing one is actionable, not
-		// silently regenerated).
-		if err := checkRestoreSecrets(ctx, b, manifest, scopes); err != nil {
-			_ = b.rollbackLiveRestore(ctx, plan, safety, opID)
-			return failRestoreOp(b.cfg.StateDir, &j, err.Error())
-		}
-		// Restart in dependency order, only previously running dependents.
-		j.Operation.Stage = RestoreValidating
-		_ = writeRestoreJournal(b.cfg.StateDir, j)
-		if err := b.resumeRestoreApps(ctx, plan); err != nil {
-			_ = b.rollbackLiveRestore(ctx, plan, safety, opID)
-			return failRestoreOp(b.cfg.StateDir, &j, "resume: "+err.Error())
-		}
-		// App health plus an app-level read of the restored fixture.
-		if err := checkRestoredHealth(ctx, b, plan); err != nil {
-			_ = b.rollbackLiveRestore(ctx, plan, safety, opID)
-			return failRestoreOp(b.cfg.StateDir, &j, "health: "+err.Error())
-		}
-		// Success: clear restore-owned maintenance, drop markers, restart
-		// storage-independent units already resumed.
-		for _, bundle := range plan.stopOrder {
-			_, _ = b.db.ExecContext(ctx, `DELETE FROM app_maintenance WHERE bundle_id = ? AND reason = 'restore'`, bundle)
-			_ = os.Remove(b.appMarkerPath(bundle))
-		}
-		j.Operation.Stage = OpCompleted
-		j.Operation.Status = OpCompleted
-		j.Operation.Progress = 100
-		_ = writeRestoreJournal(b.cfg.StateDir, j)
-		// Record a completed live restore run for the restore-tested proof.
-		_ = b.recordRestoreRun(ctx, j)
-		return nil
+		return b.runLiveRestoreStages(ctx, j, plan, safety)
 	})
 	if err != nil {
 		log.Printf("live restore %q: %v", opID, err)
 	}
+}
+
+// resumableLiveStage reports whether a journal stage can resume the live
+// flow against the kept staging tree: anything at or past the bundle
+// activation stage has applied side effects (paused apps, staged apply,
+// promoted data) that re-extraction would destroy or duplicate.
+func resumableLiveStage(stage string) bool {
+	switch stage {
+	case RestoreBundlesWritten, RestoreFilesPromoted, RestoreDBsRestored, RestoreValidating:
+		return true
+	}
+	return false
+}
+
+// resumeLiveRestore resumes a live restore from its journaled stage: the
+// staging tree is re-validated (corruption is a fail-closed error, not a
+// silent restage), the plan rebuilt from the manifest, and the remaining
+// stages executed. The paused apps are never abandoned: writer stops are
+// idempotent and promotion/database restores are safe to re-run against
+// the safety snapshot.
+func (b *Backend) resumeLiveRestore(ctx context.Context, j restoreJournal) error {
+	opID := j.Operation.ID
+	rep, err := backups.ValidateStaging(ctx, j.StagingDir)
+	if err != nil {
+		return failRestoreOp(b.cfg.StateDir, &j, "staging revalidation: "+err.Error())
+	}
+	manifest, err := stagedManifest(rep)
+	if err != nil {
+		return failRestoreOp(b.cfg.StateDir, &j, err.Error())
+	}
+	scopes := j.Scopes
+	if len(scopes) == 0 {
+		scopes = manifest.ScopeNames()
+	}
+	plan, err := b.planLiveRestore(ctx, manifest, scopes, j.StagingDir)
+	if err != nil {
+		return failRestoreOp(b.cfg.StateDir, &j, err.Error())
+	}
+	// The safety snapshot already exists; saveRestoreSafety reuses it.
+	safety, err := b.saveRestoreSafety(ctx, plan, opID)
+	if err != nil {
+		return failRestoreOp(b.cfg.StateDir, &j, err.Error())
+	}
+	return b.runLiveRestoreStages(ctx, j, plan, safety)
+}
+
+// runLiveRestoreStages executes the live flow from writer stops onward.
+// Stages already completed per the journal are skipped: re-entry is
+// idempotent (WriteBundleDir overwrites identically, the apply converges
+// through its recorded outcome, promotion and logical restores are safe to
+// re-run against the same staging tree).
+func (b *Backend) runLiveRestoreStages(ctx context.Context, j restoreJournal, plan *livePlan, safety string) error {
+	opID := j.Operation.ID
+	scopes := j.Scopes
+	if len(scopes) == 0 {
+		scopes = plan.manifest.ScopeNames()
+	}
+	staged := j.StagingDir
+	// Stop writers: restore-owned maintenance (generic resume cannot
+	// clear these), dependents first. Pausing an already-paused bundle
+	// is a no-op, so re-entry never abandons the paused set.
+	for _, bundle := range plan.stopOrder {
+		rows, err := b.appsByBundle(ctx, bundle)
+		if err != nil {
+			continue
+		}
+		if len(rows) == 0 {
+			if _, err := b.apps.PauseForMaintenance(ctx, bundle, apps.MaintenanceRestore, opID); err != nil {
+				_ = b.rollbackLiveRestore(ctx, plan, safety, opID)
+				return failRestoreOp(b.cfg.StateDir, &j, err.Error())
+			}
+			if err := writeMarker(b.appMarkerPath(bundle)); err != nil {
+				_ = b.rollbackLiveRestore(ctx, plan, safety, opID)
+				return failRestoreOp(b.cfg.StateDir, &j, err.Error())
+			}
+			continue
+		}
+		if _, err := b.pauseAppLocked(ctx, rows[0].ID, apps.MaintenanceRestore); err != nil {
+			_ = b.rollbackLiveRestore(ctx, plan, safety, opID)
+			return failRestoreOp(b.cfg.StateDir, &j, err.Error())
+		}
+	}
+	if j.Operation.Stage != RestoreWritersStop && j.Operation.Stage != RestoreBundlesWritten &&
+		j.Operation.Stage != RestoreFilesPromoted && j.Operation.Stage != RestoreDBsRestored &&
+		j.Operation.Stage != RestoreValidating {
+		j.Operation.Stage = RestoreWritersStop
+		_ = writeRestoreJournal(b.cfg.StateDir, j)
+	}
+	// Custom bundle definitions travel with the snapshot: write them back
+	// into the bundles repo and commit before any data promotion, so the
+	// modules that own the restored data exist when apps resume. The
+	// activation switch runs in the omahab-bundle-apply oneshot unit (the
+	// switch restarts omahabd); the apply ID and resumable stage are
+	// journaled before the unit starts, so the interruption resumes this
+	// exact apply. Health gates are skipped for the restore-paused bundles
+	// during definition activation only; the fresh health proof happens
+	// after promotion and writer restart.
+	if err := b.restoreCustomBundles(ctx, plan, staged, opID); err != nil {
+		if ctx.Err() != nil {
+			// Daemon restart or cancellation: the journal already
+			// holds the resumable stage and apply ID — keep the
+			// paused apps, never roll back and abandon them.
+			_ = writeRestoreJournal(b.cfg.StateDir, j)
+			return ctx.Err()
+		}
+		_ = b.rollbackLiveRestore(ctx, plan, safety, opID)
+		return failRestoreOp(b.cfg.StateDir, &j, "custom bundles: "+err.Error())
+	}
+	j.Operation.Stage = RestoreBundlesWritten
+	_ = writeRestoreJournal(b.cfg.StateDir, j)
+	// Promote staged files with ownership intact.
+	if err := promoteStagedFiles(plan, staged); err != nil {
+		_ = b.rollbackLiveRestore(ctx, plan, safety, opID)
+		return failRestoreOp(b.cfg.StateDir, &j, "promote: "+err.Error())
+	}
+	j.Operation.Stage = RestoreFilesPromoted
+	_ = writeRestoreJournal(b.cfg.StateDir, j)
+	// Restore only selected PostgreSQL databases; the cluster stays up.
+	if err := restoreSelectedDatabases(ctx, plan, staged); err != nil {
+		_ = b.rollbackLiveRestore(ctx, plan, safety, opID)
+		return failRestoreOp(b.cfg.StateDir, &j, "databases: "+err.Error())
+	}
+	j.Operation.Stage = RestoreDBsRestored
+	_ = writeRestoreJournal(b.cfg.StateDir, j)
+	// Verify app secrets resolve in the current control state (they
+	// persist across app restores; a missing one is actionable, not
+	// silently regenerated).
+	if err := checkRestoreSecrets(ctx, b, plan.manifest, scopes); err != nil {
+		_ = b.rollbackLiveRestore(ctx, plan, safety, opID)
+		return failRestoreOp(b.cfg.StateDir, &j, err.Error())
+	}
+	// Restart in dependency order, only previously running dependents.
+	j.Operation.Stage = RestoreValidating
+	_ = writeRestoreJournal(b.cfg.StateDir, j)
+	if err := b.resumeRestoreApps(ctx, plan); err != nil {
+		_ = b.rollbackLiveRestore(ctx, plan, safety, opID)
+		return failRestoreOp(b.cfg.StateDir, &j, "resume: "+err.Error())
+	}
+	// Fresh health proof after files, databases, and the writer restart:
+	// never skipped, even though definition activation ran health-free
+	// for these paused bundles.
+	if err := checkRestoredHealth(ctx, b, plan); err != nil {
+		_ = b.rollbackLiveRestore(ctx, plan, safety, opID)
+		return failRestoreOp(b.cfg.StateDir, &j, "health: "+err.Error())
+	}
+	// Success: clear restore-owned maintenance, drop markers, restart
+	// storage-independent units already resumed.
+	for _, bundle := range plan.stopOrder {
+		_, _ = b.db.ExecContext(ctx, `DELETE FROM app_maintenance WHERE bundle_id = ? AND reason = 'restore'`, bundle)
+		_ = os.Remove(b.appMarkerPath(bundle))
+	}
+	j.Operation.Stage = OpCompleted
+	j.Operation.Status = OpCompleted
+	j.Operation.Progress = 100
+	_ = writeRestoreJournal(b.cfg.StateDir, j)
+	// Record a completed live restore run for the restore-tested proof.
+	_ = b.recordRestoreRun(ctx, j)
+	return nil
 }
 
 // livePlan is the resolved live-restore set.
@@ -313,6 +395,10 @@ func (b *Backend) planLiveRestore(ctx context.Context, manifest backups.Snapshot
 	}
 	plan.started = append([]string{}, reverseStrings(plan.stopOrder)...)
 	// Map staged files: restic restores absolute source paths under staging.
+	manifestDir, err := backups.StagedManifestDir(staged)
+	if err != nil {
+		return nil, err
+	}
 	for id := range want {
 		scope, ok := byScope[backups.AppScope(id)]
 		if !ok {
@@ -330,7 +416,7 @@ func (b *Backend) planLiveRestore(ctx context.Context, manifest backups.Snapshot
 			plan.stagedFiles[v.Path] = src
 		}
 		for _, db := range scope.Databases {
-			dump := findStagedDump(staged, db.Name)
+			dump := findStagedDump(manifestDir, staged, db.Name)
 			if dump == "" {
 				return nil, fmt.Errorf("%w: staged dump missing for database %q", store.ErrValidation, db.Name)
 			}
@@ -537,12 +623,19 @@ func restoreSelectedDatabases(ctx context.Context, plan *livePlan, staged string
 	return nil
 }
 
-func findStagedDump(staged, dbName string) string {
-	candidates := []string{
-		filepath.Join(staged, dbName+".pgdump"),
+// findStagedDump locates the staged pg dump for one database: the capture
+// stages dumps next to the manifest, so the manifest directory is the
+// first and authoritative candidate; a bounded walk under the restore
+// root is the fallback for trees where restic reproduced the captured
+// absolute path. The manifest-declared file name must still match, so a
+// stray dump never satisfies the plan.
+func findStagedDump(manifestDir, root, dbName string) string {
+	primary := filepath.Join(manifestDir, dbName+".pgdump")
+	if _, err := os.Stat(primary); err == nil {
+		return primary
 	}
 	var found string
-	_ = filepath.Walk(staged, func(path string, info os.FileInfo, err error) error {
+	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() || found != "" {
 			return nil
 		}
@@ -551,7 +644,6 @@ func findStagedDump(staged, dbName string) string {
 		}
 		return nil
 	})
-	_ = candidates
 	return found
 }
 
@@ -760,15 +852,20 @@ func stagedManifestFromDir(staging string) (backups.SnapshotManifest, error) {
 // restoreCustomBundles writes snapshot-carried custom bundle definitions
 // back into the custom-bundles repo (bundles/<id>/) and commits them, so
 // the restored app scopes' owning modules exist before data promotion.
+// The definitions live next to the manifest in the extracted tree, so the
+// source path resolves through StagedManifestDir (extracted absolute
+// captures reproduce /var/lib/omahab/backup-staging under the restore
+// root; the old <staged>/bundles join missed every real capture).
+//
 // The apply (build + switch + health gate) runs in the omahab-bundle-apply
-// oneshot unit through the same staging path as a panel apply: operation
-// journal plus tmpfs handoff, then `systemctl start`. The switch restarts
-// omahabd — it cannot health-gate its own restart — so the restore journal
-// stays at bundles_written across the restart and the stage-based resume
-// (POST /operations/{id}/actions resume) converges the apply outcome before
-// promotion continues. Re-entry is idempotent: WriteBundleDir overwrites
-// identically and waitRestoreBundleApply only re-triggers when no apply
-// outcome exists yet.
+// oneshot unit through the same staged path as a panel apply. Health gates
+// are skipped for exactly the bundles this restore paused — their apps are
+// stopped for the restore and cannot answer probes during definition
+// activation; the fresh health proof happens after payload promotion and
+// writer restart in checkRestoredHealth. The apply ID and resumable stage
+// are journaled BEFORE the unit starts, so an interruption (including the
+// omahabd restart the switch causes) resumes the apply instead of
+// restaging or abandoning the paused apps.
 func (b *Backend) restoreCustomBundles(ctx context.Context, plan *livePlan, staged, opID string) error {
 	if len(plan.customBundles) == 0 {
 		return nil
@@ -780,10 +877,18 @@ func (b *Backend) restoreCustomBundles(ctx context.Context, plan *livePlan, stag
 	if err := svc.EnsureRepo(ctx); err != nil {
 		return fmt.Errorf("ensure custom bundles repo: %w", err)
 	}
+	manifestDir, err := backups.StagedManifestDir(staged)
+	if err != nil {
+		return err
+	}
 	for _, mb := range plan.customBundles {
-		// Same layout the capture wrote: staging bundles/<id>/ holds
-		// the committed files (bundle.json, module.nix, assets).
-		src := filepath.Join(staged, "bundles", mb.ID)
+		// Same layout the capture wrote: <manifest-dir>/bundles/<id>/
+		// holds the committed files (bundle.json, module.nix, assets).
+		src := filepath.Join(manifestDir, "bundles", mb.ID)
+		if _, err := os.Stat(src); err != nil {
+			return fmt.Errorf("%w: staged snapshot has no definition for custom bundle %q (want %s)",
+				store.ErrValidation, mb.ID, src)
+		}
 		if err := svc.WriteBundleDir(ctx, mb.ID, src); err != nil {
 			return fmt.Errorf("write custom bundle %q: %w", mb.ID, err)
 		}
@@ -791,48 +896,52 @@ func (b *Backend) restoreCustomBundles(ctx context.Context, plan *livePlan, stag
 	if _, err := svc.Commit(ctx, "omahab restore "+opID+": custom bundle definitions"); err != nil {
 		return fmt.Errorf("commit restored custom bundles: %w", err)
 	}
-	return b.waitRestoreBundleApply(ctx, opID)
+	return b.waitRestoreBundleApply(ctx, plan, opID)
 }
 
 // waitRestoreBundleApply converges the restore-driven bundle apply. It
-// finds the apply operation this restore staged (restore journal field
-// bundle_apply), triggers the oneshot unit when the apply has not started
-// yet, and waits for the CLI outcome marker the unit run writes next to
-// the journal. The switch restarts omahabd; when the wait is cut by the
-// restart the restore stays resumable at bundles_written and the next
-// resume re-enters here: a recorded outcome is returned immediately, a
-// failed or rolled-back apply fails the restore, and only a healthy
-// switch lets promotion continue.
-func (b *Backend) waitRestoreBundleApply(ctx context.Context, opID string) error {
+// stages the apply (skipping health gates only for the paused-in-restore
+// bundle IDs), persists the apply ID and the resumable bundles_written
+// stage in the restore journal BEFORE starting the unit, then waits for
+// the CLI outcome marker the unit run writes next to the journal. The
+// switch restarts omahabd; when the wait is cut by the restart the journal
+// already holds everything the resume needs: a recorded outcome is
+// returned immediately, a failed or rolled-back apply fails the restore,
+// and only a completed switch lets promotion continue.
+func (b *Backend) waitRestoreBundleApply(ctx context.Context, plan *livePlan, opID string) error {
 	j, err := loadRestoreJournal(b.cfg.StateDir, opID)
 	if err != nil {
 		return err
 	}
 	applyID := j.BundleApplyID
 	if applyID == "" {
-		// Stage the apply exactly like TriggerBundleApply: journal,
-		// tmpfs handoff with the operation id, unit start.
-		op := newOperation(bundleApplyJournalKind, nil)
-		op.Stage = "unit-started"
-		op.Status = OpRunning
-		if err := writeOperationJournal(b.cfg.StateDir, op); err != nil {
-			return fmt.Errorf("stage bundle apply: %w", err)
-		}
-		if err := writeBundleApplyHandoff(op.ID); err != nil {
-			return fmt.Errorf("stage bundle apply: %w", err)
-		}
-		out, err := execCommand("systemctl", "start", "omahab-bundle-apply.service")
+		// Stage the apply through the shared panel path so concurrent
+		// operations are rejected before any handoff is written.
+		skipHealth := append([]string{}, plan.stopOrder...)
+		op, err := b.stageBundleApply(ctx, skipHealth)
 		if err != nil {
-			_ = os.Remove(bundleApplyHandoffPath())
-			op.Status = OpFailed
-			op.Error = fmt.Sprintf("start omahab-bundle-apply.service: %v: %s", err, strings.TrimSpace(out))
-			_ = writeOperationJournal(b.cfg.StateDir, op)
-			return fmt.Errorf("activate restored custom bundles: %s", op.Error)
+			return fmt.Errorf("stage bundle apply for restore %s: %w", opID, err)
 		}
-		_ = writeOperationJournal(b.cfg.StateDir, op)
+		// Persist apply ID and resumable stage first: if the unit or
+		// the switch kills this daemon, the resume must converge this
+		// exact apply, never stage a second one.
 		j.BundleApplyID = op.ID
+		j.Operation.Stage = RestoreBundlesWritten
+		j.Operation.CanResume = true
+		if err := writeRestoreJournal(b.cfg.StateDir, j); err != nil {
+			return fmt.Errorf("journal bundle apply for restore %s: %w", opID, err)
+		}
+		if err := b.startStagedBundleApply(op); err != nil {
+			return fmt.Errorf("activate restored custom bundles: %w", err)
+		}
 		applyID = op.ID
-		_ = writeRestoreJournal(b.cfg.StateDir, j)
+	}
+	// A startStagedBundleApply failure marks the apply journal failed
+	// without an outcome marker; a resume converging this apply must fail
+	// fast on that terminal journal instead of waiting out the timeout.
+	if applyOp, aerr := readBundleApplyJournal(b.cfg.StateDir, applyID); aerr == nil &&
+		applyOp.Status == OpFailed && applyOp.Stage != "staged" {
+		return fmt.Errorf("bundle apply for restore %s failed: %s", opID, applyOp.Error)
 	}
 	// The switch may restart this daemon mid-wait; the outcome marker
 	// survives on disk, so poll it rather than holding in-memory state.
@@ -853,8 +962,8 @@ func (b *Backend) waitRestoreBundleApply(ctx context.Context, opID string) error
 		}
 		select {
 		case <-ctx.Done():
-			// Daemon restart cuts the context: keep the journal at
-			// bundles_written so the resume re-enters here.
+			// Daemon restart cuts the context: the journal already
+			// holds the apply ID and the resumable stage.
 			return ctx.Err()
 		case <-time.After(2 * time.Second):
 		}

@@ -152,7 +152,6 @@ type VerificationDepth struct {
 	SQLiteOK       int       `json:"sqlite_ok"`
 	PGChecked      int       `json:"pg_checked"`
 	PGOK           int       `json:"pg_ok"`
-	PGSkipped      string    `json:"pg_skipped,omitempty"`
 	CheckedAt      time.Time `json:"checked_at"`
 }
 

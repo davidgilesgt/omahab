@@ -63,7 +63,11 @@ func stubPostgres(t *testing.T) {
 
 func startHindsightWorkerFake(t *testing.T, healthy bool) string {
 	t.Helper()
-	dir := t.TempDir()
+	dir, err := os.MkdirTemp(os.TempDir(), "embedding-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	sock := filepath.Join(dir, "embedding.sock")
 	_ = os.Remove(sock)
 	ln, err := net.Listen("unix", sock)

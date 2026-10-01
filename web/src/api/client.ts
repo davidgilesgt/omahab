@@ -214,8 +214,8 @@ export class ApiClient {
     this.request<{ snapshots: RecoverySnapshot[] }>("/recovery/restore/snapshots", { method: "POST", body: JSON.stringify(input) });
   prepareRecoveryRestore = (input: RecoveryRestoreRequest) =>
     this.request<Operation>("/recovery/restore", { method: "POST", body: JSON.stringify(input) });
-  applyRecoveryRestore = (id: string, phrase: string) =>
-    this.request<Operation>(`/recovery/restore/${encodeURIComponent(id)}/apply`, { method: "POST", body: JSON.stringify({ phrase }) });
+  applyRecoveryRestore = (id: string, phrase: string, password?: string) =>
+    this.request<Operation>(`/recovery/restore/${encodeURIComponent(id)}/apply`, { method: "POST", body: JSON.stringify({ phrase, ...(password ? { password } : {}) }) });
   recoveryRestoreStatus = (id: string) =>
     this.request<Operation>(`/recovery/restore/${encodeURIComponent(id)}`);
   skipRecoveryRestore = () =>

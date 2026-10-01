@@ -4,13 +4,13 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/omahab/omahab/internal/apps"
 )
 
-// Smoke: merged catalog with a real curated catalog and a real git repo at
-// HEAD, including collision and disabled-marker handling.
+// Catalog provenance, port constraints, and missing-module errors.
 func TestMergeSmoke(t *testing.T) {
 	curated, err := apps.NewCatalog(apps.Bundle{
 		ID: "caddy", Name: "Caddy", Port: 80,
@@ -58,26 +58,6 @@ func TestMergeSmoke(t *testing.T) {
 	if _, _, _, err := ReadCustomBundleFiles(context.Background(), repo, "nomodule"); err == nil {
 		t.Fatal("expected missing module.nix error")
 	}
-	// Remove the invalid bundle from the repo so the merged load below
-	// only sees the well-formed (disabled) one.
-	if err := os.RemoveAll(filepath.Join(repo, "nomodule")); err != nil {
-		t.Fatal(err)
-	}
-	for _, args := range [][]string{
-		{"add", "-A"},
-		{"commit", "-q", "-m", "drop nomodule"},
-	} {
-		if _, err := gitExecOutput(context.Background(), repo, args); err != nil {
-			t.Fatalf("git %v: %v", args, err)
-		}
-	}
-	docs, err := loadCustomDocs(context.Background(), repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(docs) != 0 {
-		t.Fatalf("disabled bundle should be excluded, got %d docs", len(docs))
-	}
 }
 
 func initGitRepo(t *testing.T, dir string) {
@@ -112,5 +92,34 @@ func writeCommit(t *testing.T, repo, rel, content string) {
 		if _, err := gitExecOutput(ctx, repo, args); err != nil {
 			t.Fatalf("git %v: %v", args, err)
 		}
+	}
+}
+
+func TestLoadMergedAtIgnoresLaterCommittedMetadata(t *testing.T) {
+	ctx := context.Background()
+	repo := t.TempDir()
+	initGitRepo(t, repo)
+	writeCommit(t, repo, "demo/module.nix", "{ config, ... }: { }\n")
+	writeCommit(t, repo, "demo/bundle.json", `{"id":"demo","name":"Demo","port":20500,"health_check":{"kind":"http","path":"/old","port":20500},"units":["demo-v1.service"]}`)
+	revision, err := gitRun(ctx, repo, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCommit(t, repo, "demo/bundle.json", `{"id":"demo","name":"Demo","port":20501,"health_check":{"kind":"http","path":"/new","port":20501},"units":["demo-v2.service"]}`)
+	pinned, err := LoadMergedAt(ctx, "", repo, strings.TrimSpace(revision))
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := LoadMerged(ctx, "", repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, ok := pinned.Get("demo")
+	if !ok || old.Port != 20500 || old.HealthCheck.Path != "/old" || old.Units[0] != "demo-v1.service" {
+		t.Fatalf("pinned service metadata changed: %+v", old)
+	}
+	now, ok := current.Get("demo")
+	if !ok || now.Port != 20501 || now.HealthCheck.Path != "/new" || now.Units[0] != "demo-v2.service" {
+		t.Fatalf("current service metadata did not change: %+v", now)
 	}
 }

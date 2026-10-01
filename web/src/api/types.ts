@@ -349,6 +349,7 @@ export interface SetupCheck {
   status: "ok" | "pending" | "failed" | "skipped";
   detail?: string;
   action?: string;
+  operation_id?: string;
   apps?: { bundle_id: string; status: string; detail?: string }[];
   passkey_count?: number;
   target?: number;

@@ -81,7 +81,6 @@ CREATE TABLE IF NOT EXISTS verification_depth (
 	sqlite_ok INTEGER NOT NULL DEFAULT 0,
 	pg_checked INTEGER NOT NULL DEFAULT 0,
 	pg_ok INTEGER NOT NULL DEFAULT 0,
-	pg_skipped TEXT NOT NULL DEFAULT '',
 	checked_at TEXT NOT NULL
 );
 

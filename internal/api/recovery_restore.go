@@ -68,14 +68,15 @@ func (s *Server) handleRecoveryPrepareRestore(w http.ResponseWriter, r *http.Req
 // serving.
 func (s *Server) handleRecoveryApplyRestore(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Phrase string `json:"phrase"`
+		Phrase   string `json:"phrase"`
+		Password string `json:"password,omitempty"`
 	}
 	if r.ContentLength != 0 {
 		if !decodeJSON(w, r, &req) {
 			return
 		}
 	}
-	op, err := s.backend.TriggerRecoveryRestoreUnit(r.Context(), chi.URLParam(r, "id"), req.Phrase)
+	op, err := s.backend.TriggerRecoveryRestoreUnit(r.Context(), chi.URLParam(r, "id"), req.Phrase, req.Password)
 	if err != nil {
 		writeError(w, r, err)
 		return

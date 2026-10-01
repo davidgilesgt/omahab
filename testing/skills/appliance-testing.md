@@ -51,6 +51,29 @@ exclusive operations, backup, restore, and recovery.
   `--interactive-installer`, `--firmware bios|uefi`, `--data-disks 0|1|2`.
   Defaults remain automatic installation, BIOS, zero data disks.
 
+## Recovery campaign
+
+- `bash scripts/e2e-iso-install.sh --recovery` with `E2E_MEM_MB=10240`
+  runs the full local-restic disaster-recovery chain on one VM:
+  phrase generate/confirm, repository configure, custom bundle add +
+  real apply, scoped capture, fresh-disk reinstall, full restore,
+  selected-scope restore, SIGKILL interrupt at a persisted stage plus
+  resume, and a switch-error rollback proof.
+- Prerequisites are the capacity gate above (at least 12288 MiB
+  available RAM), KVM, and 40 GiB of free disk. The harness exports the
+  restic repository off the old disk before wiping it and imports it
+  onto the fresh install.
+- The interrupt phase kills the live `omahab-restore` MainPID only at a
+  persisted journal stage. A missed kill window fails the campaign; it
+  never counts as passed.
+- The rollback phase commits a deliberately failing activation snippet
+  and requires the terminal `rolled_back` outcome with the previous
+  generation serving again.
+- The recovery phrase and repository password live only in the
+  owner-only `recovery-secrets/` workdir directory. Never print them,
+  put them in evidence files, or capture them in browser sessions.
+  Never record the campaign cases passed without this VM run executing.
+
 ## Secret-safe enrollment
 
 - Never print credential values during validation or enrollment.

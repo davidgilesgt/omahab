@@ -30,8 +30,9 @@ const (
 	setupNodeRunning   = "running"
 	setupNodeSucceeded = "succeeded"
 	setupNodeFailed    = "failed"
-	setupNodeWaiting   = "waiting" // operator action needed
-	setupNodeBlocked   = "blocked" // a dependency did not succeed; node skipped
+	setupNodeWaiting   = "waiting"  // operator action needed
+	setupNodeBlocked   = "blocked"  // a dependency did not succeed; node skipped
+	setupNodeCanceled  = "canceled" // run context ended before convergence
 )
 
 // errSetupNodeWaiting marks a node outcome as waiting: the operator must act
@@ -181,8 +182,11 @@ func (b *Backend) setupNodeStates(ctx context.Context) map[string]string {
 //	  bundles whose OIDC operation runs whenever the bundle is a catalog
 //	  default (forgejo, technitium, jellyfin — see the needX fallbacks in
 //	  setupPhaseOIDC), those apps must be up first. Bundles with a strict
-//	  running check (immich, paperless, karakeep, litellm) need no edge:
-//	  their OIDC op is skipped when they are not running.
+//	  running check (immich, paperless, karakeep, litellm) also depend on
+//	  their install node: with MaxConcurrency 1 the scheduler happens to
+//	  order them before oidc, but that is not a dependency — a future
+//	  scheduling change must never silently skip their OIDC setup when
+//	  they are not yet observed running at oidc's start.
 //	oidc → login_exposure, dependent_apps, dependent_apps:woodpecker
 //	  login_exposure publishes id.<domain> + dashboard routes once Pocket
 //	  ID is configured; the dependent tier needs OIDC client ids; the
@@ -228,6 +232,16 @@ func (b *Backend) buildSetupDAG(ctx context.Context) (*flow.Workflow, []*setupNo
 				run.anyWaiting = true
 				run.mu.Unlock()
 				return flow.Skip(fmt.Errorf("%w: %s", errSetupNodeWaiting, detail))
+			case nctx.Err() != nil:
+				// Cancellation is not failure: the node stopped because the
+				// run's context ended (shutdown or reconcile timeout), not
+				// because convergence failed. Persist canceled so a status
+				// read during/after cancellation never shows "failed", and a
+				// retried run resets and reconverges. The write uses a fresh
+				// context: the run context is already canceled and would
+				// fail the upsert.
+				setupNodeUpsert(context.WithoutCancel(nctx), b.db, setupNodeRecord{ID: id, State: setupNodeCanceled, Error: "", Owner: "system", Code: "canceled", UpdatedAt: now})
+				return err
 			default:
 				owner, code := nodeOwnerCode(id, err)
 				setupNodeUpsert(nctx, b.db, setupNodeRecord{ID: id, State: setupNodeFailed, Error: health.RedactDetail(err.Error()), Owner: owner, Code: code, UpdatedAt: now})
@@ -299,8 +313,14 @@ func (b *Backend) buildSetupDAG(ctx context.Context) (*flow.Workflow, []*setupNo
 	}
 
 	oidc := newNode("oidc", b.setupPhaseOIDC)
+	// The OIDC phase gates per-app operations on the app being observed
+	// running (immich, paperless-ngx, karakeep, litellm) or on it being a
+	// catalog default (forgejo, technitium, jellyfin, hermes). Every such
+	// app's install node must therefore be an explicit dependency: the
+	// running check then observes the install the same graph ordered, and
+	// no scheduler reordering can silently skip sign-in setup.
 	oidcDeps := []flow.Steper{}
-	for _, id := range []string{"pocket-id", "forgejo", "technitium", "jellyfin"} {
+	for _, id := range []string{"pocket-id", "forgejo", "technitium", "jellyfin", "immich", "paperless-ngx", "karakeep", "litellm"} {
 		if n, ok := coreByID[id]; ok {
 			oidcDeps = append(oidcDeps, n)
 		}
@@ -669,6 +689,7 @@ func (b *Backend) runReservedSetup(ctx context.Context) error {
 	// Node wrappers already persisted running/succeeded/failed/waiting.
 	var failedErrs []error
 	anyWaiting := false
+	anyCanceled := false
 	for _, n := range nodes {
 		res := w.StateOf(n).GetStepResult()
 		switch res.Status {
@@ -692,7 +713,22 @@ func (b *Backend) runReservedSetup(ctx context.Context) error {
 				anyWaiting = true
 			}
 		case flow.Failed, flow.Canceled:
-			failedErrs = append(failedErrs, res.Err)
+			// A canceled node is not a step failure, and res.Err can be
+			// nil (condition path) or ctx.Err() — never feed nil into
+			// errors.Join below: an all-nil Join returns nil and Error()
+			// on it would panic.
+			if res.Status == flow.Canceled {
+				anyCanceled = true
+				// Condition-canceled nodes never ran their wrapper, so
+				// their persisted row still says pending/running.
+				// Persist canceled (wrapper-canceled nodes are already
+				// there). Detached context: the run context is canceled.
+				setupNodeUpsert(context.WithoutCancel(ctx), b.db, setupNodeRecord{ID: n.id, State: setupNodeCanceled, Owner: "system", Code: "canceled", UpdatedAt: time.Now().UTC()})
+				continue
+			}
+			if res.Err != nil {
+				failedErrs = append(failedErrs, res.Err)
+			}
 		}
 	}
 	run.mu.Lock()
@@ -704,7 +740,7 @@ func (b *Backend) runReservedSetup(ctx context.Context) error {
 	// Success only when every node succeeded. A nil workflow error can
 	// still hide skipped (waiting/blocked) nodes: go-workflow treats
 	// "AllSucceededOrSkipped" as a clean finish, so the aggregates decide.
-	allSucceeded := err == nil && len(allFailed) == 0 && !allWaiting
+	allSucceeded := err == nil && len(allFailed) == 0 && !allWaiting && !anyCanceled
 	for _, n := range nodes {
 		if s := w.StateOf(n).GetStatus(); s != flow.Succeeded {
 			allSucceeded = false
@@ -714,6 +750,14 @@ func (b *Backend) runReservedSetup(ctx context.Context) error {
 	switch {
 	case allSucceeded:
 		return b.finishSetupSuccess(ctx)
+	case anyCanceled:
+		// Preserve meaningful cancellation state without claiming failure:
+		// the run did not fail, and stale success from a prior run must
+		// not survive a canceled reconcile either.
+		b.setupMu.Lock()
+		b.setupLastErr = ""
+		b.setupMu.Unlock()
+		return nil
 	case len(allFailed) > 0:
 		b.setupMu.Lock()
 		b.setupLastErr = health.RedactDetail(errors.Join(allFailed...).Error())
@@ -726,7 +770,9 @@ func (b *Backend) runReservedSetup(ctx context.Context) error {
 		return nil
 	default:
 		b.setupMu.Lock()
-		b.setupLastErr = health.RedactDetail(err.Error())
+		if err != nil {
+			b.setupLastErr = health.RedactDetail(err.Error())
+		}
 		b.setupMu.Unlock()
 		return nil
 	}

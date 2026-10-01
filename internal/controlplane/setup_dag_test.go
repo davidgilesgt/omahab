@@ -6,11 +6,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	flow "github.com/Azure/go-workflow"
 	"github.com/omahab/omahab/internal/apps"
 	"github.com/omahab/omahab/internal/domain"
+	"github.com/omahab/omahab/internal/events"
 )
 
 // failingRunner fails Deploy/Start for the given bundle IDs; everything else
@@ -49,8 +52,13 @@ func (r *failingRunner) Check(_ context.Context, _ domain.Application, _ apps.De
 // isolation: caddy; pocket-id (dep caddy); failme (dep caddy); fine (dep
 // caddy); needs-failme (dep failme).
 func newDAGRunBackend(t *testing.T, runner apps.Runner) *Backend {
+	b, _ := newDAGRunBackendWithEvents(t, runner)
+	return b
+}
+
+func newDAGRunBackendWithEvents(t *testing.T, runner apps.Runner) (*Backend, *events.Service) {
 	t.Helper()
-	b, _ := newSetupBackend(t, nil)
+	b, ev := newSetupBackend(t, nil)
 
 	b.cfg.StateDir = t.TempDir()
 	b.cfg.DataDir = t.TempDir()
@@ -73,7 +81,7 @@ func newDAGRunBackend(t *testing.T, runner apps.Runner) *Backend {
 		t.Fatal(err)
 	}
 	b.apps = svc
-	return b
+	return b, ev
 }
 
 // TestSetupDAGFailingAppDoesNotBlockUnrelated proves the per-bundle split: a
@@ -200,6 +208,213 @@ func TestSetupDAGStorageBlocksCoreApps(t *testing.T) {
 	for _, id := range runner.deploys {
 		if id != "" {
 			t.Fatalf("deploy ran before storage converged: %v", runner.deploys)
+		}
+	}
+}
+
+// blockableRunner blocks Deploy for one bundle until its release channel
+// closes (or the deploy context ends), so a setup run can be canceled
+// mid-node.
+type blockableRunner struct {
+	health   domain.Health
+	block    string // bundle ID whose Deploy blocks
+	released chan struct{}
+	deploys  []string
+	mu       sync.Mutex
+}
+
+func (r *blockableRunner) Deploy(ctx context.Context, app domain.Application, _ apps.DeploySpec) error {
+	r.mu.Lock()
+	r.deploys = append(r.deploys, app.BundleID)
+	block := r.block == app.BundleID
+	r.mu.Unlock()
+	if block {
+		select {
+		case <-r.released:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
+func (r *blockableRunner) Start(context.Context, domain.Application, apps.DeploySpec) error {
+	return nil
+}
+func (r *blockableRunner) Stop(context.Context, domain.Application, apps.DeploySpec) error {
+	return nil
+}
+func (r *blockableRunner) Remove(context.Context, domain.Application, apps.DeploySpec) error {
+	return nil
+}
+
+func (r *blockableRunner) Check(_ context.Context, _ domain.Application, _ apps.DeploySpec) (domain.Health, error) {
+	if r.health == "" {
+		return domain.HealthHealthy, nil
+	}
+	return r.health, nil
+}
+
+// TestSetupDAGCanceledRunReleasesLockAndPreservesState proves the three
+// cancellation contracts: a canceled run returns (no nil-error panic, no
+// stuck single-flight), the next setup run can reserve the lock, and the
+// canceled node persists "canceled" — never "failed".
+func TestSetupDAGCanceledRunReleasesLockAndPreservesState(t *testing.T) {
+	ctx := context.Background()
+	runner := &blockableRunner{health: domain.HealthHealthy, block: "caddy", released: make(chan struct{})}
+	b := newDAGRunBackend(t, runner)
+	if _, err := b.secrets.Put(ctx, "platform-app", "cloudflare_dns", "dns-token"); err != nil {
+		t.Fatal(err)
+	}
+
+	runCtx, cancel := context.WithCancel(ctx)
+	go func() {
+		// Cancel while the caddy install node is blocked inside Deploy.
+		runner.mu.Lock()
+		started := len(runner.deploys) > 0
+		runner.mu.Unlock()
+		for !started {
+			time.Sleep(time.Millisecond)
+			runner.mu.Lock()
+			started = len(runner.deploys) > 0
+			runner.mu.Unlock()
+		}
+		cancel()
+	}()
+	// A canceled run must return (no panic, no hang holding setupMu).
+	done := make(chan error, 1)
+	go func() { done <- b.RunSetupReconciler(runCtx) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("canceled setup run did not return")
+	}
+	if b.IsSetupRunning() {
+		t.Fatal("setup still running after canceled run; single-flight lock leaked")
+	}
+	// Subsequent setup/status can obtain the lock: the retry reserves the
+	// single-flight and completes its own pass (node outcomes reflect the
+	// half-installed app from the interrupted first run; what matters is
+	// that the lock was free and the run returned cleanly).
+	close(runner.released)
+	if err := b.RunSetupReconciler(ctx); err != nil {
+		t.Fatalf("retry after canceled run: %v", err)
+	}
+	if b.IsSetupRunning() {
+		t.Fatal("setup still running after retry; single-flight lock leaked")
+	}
+	// A canceled run persists canceled state — never failed.
+	runStates := b.setupNodeStates(ctx)
+	for id, st := range runStates {
+		_ = id
+		if st == setupNodeCanceled {
+			t.Fatalf("node %s still canceled after a retry reset it (states: %v)", id, runStates)
+		}
+	}
+}
+
+// TestSetupDAGCanceledNodesPersistCanceledNotFailed pins the persisted
+// node state during a canceled run: the interrupted node itself and every
+// condition-canceled downstream node read "canceled", never "failed", and
+// no setup.step_failed events fire.
+func TestSetupDAGCanceledNodesPersistCanceledNotFailed(t *testing.T) {
+	ctx := context.Background()
+	runner := &blockableRunner{health: domain.HealthHealthy, block: "caddy", released: make(chan struct{})}
+	b, ev := newDAGRunBackendWithEvents(t, runner)
+	if _, err := b.secrets.Put(ctx, "platform-app", "cloudflare_dns", "dns-token"); err != nil {
+		t.Fatal(err)
+	}
+
+	runCtx, cancel := context.WithCancel(ctx)
+	go func() {
+		runner.mu.Lock()
+		started := len(runner.deploys) > 0
+		runner.mu.Unlock()
+		for !started {
+			time.Sleep(time.Millisecond)
+			runner.mu.Lock()
+			started = len(runner.deploys) > 0
+			runner.mu.Unlock()
+		}
+		cancel()
+	}()
+	done := make(chan error, 1)
+	go func() { done <- b.RunSetupReconciler(runCtx) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("canceled setup run did not return")
+	}
+	states := b.setupNodeStates(ctx)
+	if states["core_apps:caddy"] != setupNodeCanceled {
+		t.Fatalf("interrupted node caddy = %q, want canceled (states: %v)", states["core_apps:caddy"], states)
+	}
+	canceledCount := 0
+	for _, st := range states {
+		switch st {
+		case setupNodeCanceled:
+			canceledCount++
+		case setupNodeFailed:
+			t.Fatalf("canceled run persisted a failed node (states: %v)", states)
+		}
+	}
+	if canceledCount == 0 {
+		t.Fatalf("expected canceled node states, got %v", states)
+	}
+	if evts := eventTypes(t, ev, "setup.step_failed"); len(evts) != 0 {
+		t.Fatalf("canceled run emitted setup.step_failed events: %v", evts)
+	}
+}
+
+// TestSetupDAGOIDCDependsOnRunningCheckInstalls pins the oidc node's
+// upstream set: the install nodes of every bundle whose OIDC operation is
+// gated on observed-running state (immich, paperless-ngx, karakeep,
+// litellm) must be explicit dependencies, so first setup can never
+// silently miss sign-in configuration because the scheduler happened to
+// run oidc before those apps were running.
+func TestSetupDAGOIDCDependsOnRunningCheckInstalls(t *testing.T) {
+	b, _ := newSetupBackend(t, nil)
+	digest := "sha256:" + strings.Repeat("a", 64)
+	cat, err := apps.NewCatalog(
+		testSetupBundle("caddy", digest, domain.ExposurePublic, "", nil),
+		testSetupBundle("pocket-id", digest, domain.ExposurePrivate, "id", []string{"caddy"}),
+		testSetupBundle("immich", digest, domain.ExposurePrivate, "photos", []string{"caddy", "pocket-id"}),
+		testSetupBundle("paperless-ngx", digest, domain.ExposurePrivate, "paperless", []string{"caddy"}),
+		testSetupBundle("karakeep", digest, domain.ExposurePrivate, "karakeep", []string{"caddy"}),
+		testSetupBundle("litellm", digest, domain.ExposurePrivate, "litellm", []string{"caddy"}),
+		testSetupBundle("forgejo", digest, domain.ExposurePrivate, "git", []string{"caddy"}),
+		testSetupBundle("technitium", digest, domain.ExposurePrivate, "dns", []string{"caddy"}),
+		testSetupBundle("jellyfin", digest, domain.ExposurePrivate, "media", []string{"caddy"}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := apps.NewService(b.db, apps.Options{Catalog: cat, Runner: &failingRunner{health: domain.HealthHealthy}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.apps = svc
+	w, nodes := b.buildSetupDAG(context.Background())
+	byID := map[string]*setupNode{}
+	for _, n := range nodes {
+		byID[n.id] = n
+	}
+	oidc, ok := byID["oidc"]
+	if !ok {
+		t.Fatal("oidc node missing from DAG")
+	}
+	ups := w.UpstreamOf(oidc)
+	want := []string{
+		"core_apps:pocket-id", "core_apps:forgejo", "core_apps:technitium", "core_apps:jellyfin",
+		"core_apps:immich", "core_apps:paperless-ngx", "core_apps:karakeep", "core_apps:litellm",
+	}
+	got := map[string]bool{}
+	for up := range ups {
+		got[flow.String(up)] = true
+	}
+	for _, id := range want {
+		if !got[id] {
+			t.Fatalf("oidc upstream missing %s (got %v)", id, got)
 		}
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/omahab/omahab/internal/apitypes"
 	"github.com/omahab/omahab/internal/apps"
 	"github.com/omahab/omahab/internal/bundles"
+	"github.com/omahab/omahab/internal/domain"
 	"github.com/omahab/omahab/internal/events"
 )
 
@@ -190,7 +191,15 @@ func (b *Backend) ListBundles(ctx context.Context) ([]apitypes.BundleAdmin, erro
 
 // AddCustomBundle validates and writes a new custom bundle into the repo
 // and commits it. The bundle is not active until an apply.
+//
+// Mutations are refused while a bundle apply is staged or running: the
+// apply builds from a pinned revision, so a commit landing mid-apply
+// would desynchronize the merged catalog (and the fresh health probes
+// read by the apply's health gate) from the generation being activated.
 func (b *Backend) AddCustomBundle(ctx context.Context, req apitypes.CreateBundleRequest) (apitypes.BundleAdmin, error) {
+	if err := b.refuseMutationsDuringApply(); err != nil {
+		return apitypes.BundleAdmin{}, err
+	}
 	svc := b.bundlesSvc()
 	if svc == nil {
 		return apitypes.BundleAdmin{}, translateError(fmt.Errorf("%w: custom bundles are not configured", ErrNotConfigured))
@@ -226,8 +235,12 @@ func (b *Backend) AddCustomBundle(ctx context.Context, req apitypes.CreateBundle
 }
 
 // RemoveCustomBundle deletes bundles/<id>/ from the repo and commits the
-// removal. Activation happens on the next apply.
+// removal. Activation happens on the next apply. Refused while a bundle
+// apply is in flight (see AddCustomBundle).
 func (b *Backend) RemoveCustomBundle(ctx context.Context, id string) error {
+	if err := b.refuseMutationsDuringApply(); err != nil {
+		return err
+	}
 	svc := b.bundlesSvc()
 	if svc == nil {
 		return translateError(fmt.Errorf("%w: custom bundles are not configured", ErrNotConfigured))
@@ -243,11 +256,25 @@ func (b *Backend) RemoveCustomBundle(ctx context.Context, id string) error {
 
 // SetCustomBundleDisabled adds or removes the disabled marker and commits.
 // Disabling takes effect at the next rebuild (the marker is committed, so
-// rebuild-time exclusion and the merged catalog agree).
+// rebuild-time exclusion and the merged catalog agree). Refused while a
+// bundle apply is in flight (see AddCustomBundle).
+//
+// Re-enabling a disabled bundle validates the would-be merged result first
+// (bundle.json at HEAD, full collision and custom-contract checks): an
+// invalid or colliding enablement is rejected before anything is written,
+// so the previously valid committed state survives untouched.
 func (b *Backend) SetCustomBundleDisabled(ctx context.Context, id string, disabled bool) error {
+	if err := b.refuseMutationsDuringApply(); err != nil {
+		return err
+	}
 	svc := b.bundlesSvc()
 	if svc == nil {
 		return translateError(fmt.Errorf("%w: custom bundles are not configured", ErrNotConfigured))
+	}
+	if !disabled {
+		if err := b.validateEnableCustom(ctx, svc, id); err != nil {
+			return translateError(err)
+		}
 	}
 	if err := svc.SetDisabled(ctx, id, disabled); err != nil {
 		return translateError(err)
@@ -262,18 +289,291 @@ func (b *Backend) SetCustomBundleDisabled(ctx context.Context, id string, disabl
 	return nil
 }
 
+// validateEnableCustom checks that enabling the disabled custom bundle id
+// yields a valid merged catalog. It reads the bundle's committed files (the
+// same HEAD view an apply would build from), so a broken bundle.json, a
+// missing module.nix, or an id/unit/port collision with the curated catalog
+// or another custom bundle is rejected before the disabled marker is
+// removed.
+func (b *Backend) validateEnableCustom(ctx context.Context, svc *bundles.Service, id string) error {
+	if err := svc.EnsureRepo(ctx); err != nil {
+		return err
+	}
+	bundleJSON, hasModule, _, err := bundles.ReadCustomBundleFiles(ctx, svc.Repo(), id)
+	if err != nil {
+		return err
+	}
+	if !hasModule {
+		return fmt.Errorf("%w: bundle %q is missing module.nix", apitypes.ErrValidation, id)
+	}
+	parsed, err := apps.ParseBundleBytes(bundleJSON)
+	if err != nil {
+		return fmt.Errorf("%w: bundle %q: %v", apitypes.ErrValidation, id, err)
+	}
+	if parsed.ID != id {
+		return fmt.Errorf("%w: bundle %q holds bundle.json id %q", apitypes.ErrValidation, id, parsed.ID)
+	}
+	committed, err := committedCustomDocs(ctx, svc.Repo())
+	if err != nil {
+		return err
+	}
+	enabled := append([]bundles.CustomDoc{}, committed...)
+	enabled = append(enabled, bundles.CustomDoc{Dir: id, Bundle: parsed})
+	if _, err := bundles.Merge(curatedCatalogForMerge(b.cfg.CatalogPath), enabled); err != nil {
+		return err
+	}
+	return nil
+}
+
+// probeUnitActiveFunc is the unit-state check behind ProbeBundleHealth
+// (test seam; production uses systemctl is-active).
+var probeUnitActiveFunc = func(ctx context.Context, unit string) (bool, error) {
+	out, err := execCommand("systemctl", "is-active", "--quiet", unit)
+	if err != nil {
+		_ = out
+		return false, nil
+	}
+	return true, nil
+}
+
+// probeHTTPHealthFunc is the loopback HTTP probe behind ProbeBundleHealth
+// (test seam; production uses the shared apps probe).
+var probeHTTPHealthFunc = func(ctx context.Context, hc apps.HealthCheck, port int) (domain.Health, error) {
+	return apps.ProbeHealth(ctx, hc, port)
+}
+
+// ProbeBundleHealth runs one fresh health probe of the bundle's currently
+// configured services. It answers POST /api/v1/bundles/{id}/health: 204
+// only when the probe succeeds right now. It deliberately does NOT touch
+// the applications database — no application row is required (the probe
+// runs for freshly defined bundles that were never installed through the
+// apps service) and no stored health value is consulted or updated.
+//
+// An empty revision probes the current committed service configuration
+// (the plain panel use). A nonempty revision must be a full 40-hex commit
+// hash of the custom-bundles repo: the probe then uses the bundle's
+// definition pinned at exactly that immutable revision — the one the
+// apply built — so a commit landing after the build cannot change which
+// units and health check the gate observes.
+//
+// The probe loads the merged view fresh on every call, so it observes
+// the currently configured services even right after a daemon restart or
+// mid-restore. Every declared unit must be active; an HTTP health check
+// (with the native-port override and unix-socket probes, exactly like
+// the systemd runner's observation logic) must answer 2xx.
+func (b *Backend) ProbeBundleHealth(ctx context.Context, id, revision string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return fmt.Errorf("%w: bundle id is required", apitypes.ErrValidation)
+	}
+	merged, err := bundles.LoadMergedAt(ctx, b.cfg.CatalogPath, b.cfg.CustomBundlesDir, strings.TrimSpace(revision))
+	if err != nil {
+		return translateError(err)
+	}
+	bundle, ok := merged.Get(id)
+	if !ok {
+		return fmt.Errorf("%w: bundle %q not found in the merged catalog", apitypes.ErrNotFound, id)
+	}
+	if len(bundle.Units) == 0 {
+		return fmt.Errorf("%w: bundle %q declares no units", apitypes.ErrValidation, id)
+	}
+	for _, unit := range bundle.Units {
+		active, err := probeUnitActiveFunc(ctx, unit)
+		if err != nil {
+			return err
+		}
+		if !active {
+			return fmt.Errorf("probe bundle %q: unit %s is not active", id, unit)
+		}
+	}
+	if hc := bundle.HealthCheck; hc.Kind == apps.CheckHTTP {
+		port := hc.Port
+		if p, ok := apps.NativePort(id); ok {
+			port = p
+		}
+		health, err := probeHTTPHealthFunc(ctx, hc, port)
+		if err != nil {
+			return fmt.Errorf("probe bundle %q: %w", id, err)
+		}
+		if health != domain.HealthHealthy {
+			return fmt.Errorf("probe bundle %q: health check reports %q", id, health)
+		}
+	}
+	return nil
+}
+
+// refuseMutationsDuringApply rejects custom-bundle repo mutations while
+// an apply reservation is live. Applies build from a pinned immutable
+// revision of the bundles repo; a commit landing between stage and
+// outcome would make the merged catalog (and the fresh health probes the
+// apply's health gate reads) disagree with the generation being
+// activated. Direct root CLI edits of the repo remain outside the
+// daemon's control by design.
+func (b *Backend) refuseMutationsDuringApply() error {
+	if res := b.holdBundleApply(); res != nil {
+		return translateError(fmt.Errorf("%w: a bundle apply operation (%s) is in progress", apitypes.ErrConflict, res.OperationID))
+	}
+	return nil
+}
+
 // --- apply operations ---
 
 const bundleApplyJournalKind = "bundle-apply"
 
-// TriggerBundleApply stages an apply operation and starts the
-// omahab-bundle-apply oneshot unit, which runs `omahab bundle apply
-// --apply-staged` as root. The switch inside restarts omahabd, so the
-// daemon must not run Apply itself (it would health-gate its own
-// restart): the operation id travels through a tmpfs handoff file (same
-// pattern as omahab-restore) and the journal under the state dir records
-// progress for polling after the restart.
+// bundleApplyReservation is the unique live-apply guarantee: at most one
+// bundle apply may be staged, started, or running at a time. It is held in
+// memory (the daemon serializes staging; the oneshot unit serializes runs)
+// and keyed by operation id so outcomes can be attributed without phantom
+// accepts. A daemon restart loses the memory slot, but /run is wiped at
+// boot and reconcileBundleApplyReservation reconstructs the state from the
+// journal + handoff at startup, so a stale running apply is still honored
+// and no new stage can replace it.
+type bundleApplyReservation struct {
+	OperationID string
+}
+
+// reserveBundleApply claims the single apply slot for op. It fails with
+// ErrConflict when any other apply reservation is live.
+func (b *Backend) reserveBundleApply(opID string) error {
+	b.bundleApplyMu.Lock()
+	defer b.bundleApplyMu.Unlock()
+	if b.bundleApplyRes != nil && b.bundleApplyRes.OperationID != "" {
+		return fmt.Errorf("%w: a bundle apply operation (%s) is already in progress", apitypes.ErrConflict, b.bundleApplyRes.OperationID)
+	}
+	b.bundleApplyRes = &bundleApplyReservation{OperationID: opID}
+	return nil
+}
+
+// releaseBundleApply frees the reservation held by opID. Unknown or foreign
+// ids are ignored (an outcome for an apply that was never reserved cannot
+// strand a newer reservation).
+func (b *Backend) releaseBundleApply(opID string) {
+	b.bundleApplyMu.Lock()
+	defer b.bundleApplyMu.Unlock()
+	if b.bundleApplyRes == nil || b.bundleApplyRes.OperationID != opID {
+		return
+	}
+	b.bundleApplyRes = nil
+}
+
+// holdBundleApply reports whether any apply reservation is live.
+func (b *Backend) holdBundleApply() *bundleApplyReservation {
+	b.bundleApplyMu.Lock()
+	defer b.bundleApplyMu.Unlock()
+	return b.bundleApplyRes
+}
+
+// reconcileBundleApplyReservation runs at daemon startup: a leftover tmpfs
+// handoff with a matching running journal is a mid-flight staged apply the
+// restart cut short — adopt its reservation so a fresh stage cannot replace
+// the operation the unit may still pick up. A handoff with no journal is a
+// phantom (the CLI rejects it too) and is removed; a running journal with
+// no handoff means the unit already consumed the handoff — adopt the
+// reservation until the outcome converges.
+func (b *Backend) reconcileBundleApplyReservation() {
+	raw, err := os.ReadFile(bundleApplyHandoffPath())
+	if err != nil {
+		// No handoff on disk. Any running journal without a handoff was
+		// already consumed by the unit; adopt it so concurrent stages
+		// stay rejected while it converges.
+		if res := b.runningApplyJournal(); res != nil {
+			b.bundleApplyMu.Lock()
+			b.bundleApplyRes = res
+			b.bundleApplyMu.Unlock()
+		}
+		return
+	}
+	var h struct {
+		OperationID string `json:"operation_id"`
+	}
+	_ = json.Unmarshal(raw, &h)
+	handoffID := strings.TrimSpace(h.OperationID)
+	if handoffID == "" {
+		_ = os.Remove(bundleApplyHandoffPath())
+		return
+	}
+	journal, err := readBundleApplyJournal(b.cfg.StateDir, handoffID)
+	if err != nil || journal.Status != OpRunning {
+		// Phantom handoff: no live operation behind it.
+		_ = os.Remove(bundleApplyHandoffPath())
+		return
+	}
+	b.bundleApplyMu.Lock()
+	b.bundleApplyRes = &bundleApplyReservation{OperationID: handoffID}
+	b.bundleApplyMu.Unlock()
+}
+
+// runningApplyJournal scans the apply journals for one still running.
+// The newest running journal wins (the applies are serialized by the
+// reservation, so at most one can be running).
+func (b *Backend) runningApplyJournal() *bundleApplyReservation {
+	dir := operationsDir(b.cfg.StateDir, bundleApplyJournalKind)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var newest string
+	var newestAt int64 = -1
+	for _, e := range entries {
+		info, err := e.Info()
+		if err != nil || !e.IsDir() {
+			continue
+		}
+		j, err := readBundleApplyJournal(b.cfg.StateDir, e.Name())
+		if err != nil || j.Status != OpRunning {
+			continue
+		}
+		if info.ModTime().Unix() > newestAt {
+			newestAt = info.ModTime().Unix()
+			newest = e.Name()
+		}
+	}
+	if newest == "" {
+		return nil
+	}
+	return &bundleApplyReservation{OperationID: newest}
+}
+
+// readBundleApplyJournal loads one apply journal (lightweight, unshared
+// with GetBundleApplyStatus so no outcome convergence happens here).
+func readBundleApplyJournal(stateDir, opID string) (Operation, error) {
+	raw, err := os.ReadFile(operationJournalPath(stateDir, bundleApplyJournalKind, opID))
+	if err != nil {
+		return Operation{}, err
+	}
+	var op Operation
+	if err := json.Unmarshal(raw, &op); err != nil {
+		return Operation{}, err
+	}
+	if op.ID == "" {
+		return Operation{}, fmt.Errorf("bundle apply journal %q has no id", opID)
+	}
+	return op, nil
+}
+
+// TriggerBundleApply stages a panel apply and starts the oneshot unit.
+// The panel never supplies health-check skips: only trusted internal
+// callers (restore) stage with skipHealth.
 func (b *Backend) TriggerBundleApply(ctx context.Context) (Operation, error) {
+	op, err := b.stageBundleApply(ctx, nil)
+	if err != nil {
+		return op, err
+	}
+	if err := b.startStagedBundleApply(op); err != nil {
+		return op, err
+	}
+	return op, nil
+}
+
+// stageBundleApply validates the staged apply, reserves the unique apply
+// slot, writes the operation journal, and drops the tmpfs handoff (with
+// the trusted skip_health bundle IDs, if any) for the oneshot unit's CLI
+// run. It does NOT start the unit; the caller persists whatever state it
+// needs (e.g. the apply id in a restore journal) between this and
+// startStagedBundleApply. Concurrent operations are rejected before the
+// handoff is replaced, so a second stage can never strand the first
+// operation's journal.
+func (b *Backend) stageBundleApply(ctx context.Context, skipHealth []string) (Operation, error) {
 	svc := b.bundlesSvc()
 	if svc == nil {
 		return Operation{}, translateError(fmt.Errorf("%w: custom bundles are not configured", ErrNotConfigured))
@@ -281,31 +581,68 @@ func (b *Backend) TriggerBundleApply(ctx context.Context) (Operation, error) {
 	if err := svc.EnsureRepo(ctx); err != nil {
 		return Operation{}, translateError(err)
 	}
-	op := newOperation(bundleApplyJournalKind, nil)
-	op.Stage = "unit-started"
+	// Validate the committed merged view before reserving: a broken
+	// committed bundle fails the stage here, not inside the build unit.
+	merged, err := bundles.LoadMerged(ctx, b.cfg.CatalogPath, b.cfg.CustomBundlesDir)
+	if err != nil {
+		return Operation{}, translateError(err)
+	}
+	skip := normalizeSkipHealth(skipHealth)
+	// A skip is only honored for bundles that actually exist in the
+	// committed merged view; skipping an unknown bundle id would silently
+	// mask nothing while pretending the caller's list was accepted.
+	for _, id := range skip {
+		if _, ok := merged.Get(id); !ok {
+			return Operation{}, translateError(fmt.Errorf("%w: skip_health bundle %q is not in the merged catalog", apitypes.ErrValidation, id))
+		}
+	}
+	op := newOperation(bundleApplyJournalKind, skip)
+	op.Stage = "staged"
 	op.Status = OpRunning
+	if err := b.reserveBundleApply(op.ID); err != nil {
+		return Operation{}, translateError(err)
+	}
 	if err := writeOperationJournal(b.cfg.StateDir, op); err != nil {
+		b.releaseBundleApply(op.ID)
 		return Operation{}, translateError(err)
 	}
-	if err := writeBundleApplyHandoff(op.ID); err != nil {
+	if err := writeBundleApplyHandoff(op.ID, skip); err != nil {
+		b.releaseBundleApply(op.ID)
 		return Operation{}, translateError(err)
 	}
-	out, err := execCommand("systemctl", "start", "omahab-bundle-apply.service")
+	return op, nil
+}
+
+// startStagedBundleApply starts the omahab-bundle-apply oneshot unit for
+// an operation staged by stageBundleApply. systemctl --no-block returns
+// once the start job is queued, so the daemon replies promptly instead of
+// blocking on the nix build inside the unit. A failed start releases the
+// reservation, removes the handoff, and marks the journal failed —
+// nothing is left staged.
+func (b *Backend) startStagedBundleApply(op Operation) error {
+	if res := b.holdBundleApply(); res == nil || res.OperationID != op.ID {
+		return translateError(fmt.Errorf("%w: operation %s is not the staged bundle apply", apitypes.ErrConflict, op.ID))
+	}
+	out, err := execCommand("systemctl", "--no-block", "start", "omahab-bundle-apply.service")
 	if err != nil {
 		_ = os.Remove(bundleApplyHandoffPath())
 		detail := fmt.Sprintf("start omahab-bundle-apply.service: %v: %s", err, strings.TrimSpace(out))
 		op.Status = OpFailed
 		op.Error = detail
 		_ = writeOperationJournal(b.cfg.StateDir, op)
-		return op, translateError(fmt.Errorf("%s", detail))
+		b.releaseBundleApply(op.ID)
+		return translateError(fmt.Errorf("%s", detail))
 	}
+	op.Stage = "unit-started"
 	_ = writeOperationJournal(b.cfg.StateDir, op)
-	return op, nil
+	return nil
 }
 
 // GetBundleApplyStatus polls one bundle apply operation by id. When the
 // daemon restarted mid-apply (the switch does exactly that), the journal
-// still says running until the CLI run records its outcome next to it.
+// still says running until the CLI run records its outcome next to it;
+// converging a terminal outcome releases the apply reservation so the
+// next apply can be staged.
 func (b *Backend) GetBundleApplyStatus(ctx context.Context, id string) (Operation, error) {
 	raw, err := os.ReadFile(operationJournalPath(b.cfg.StateDir, bundleApplyJournalKind, strings.TrimSpace(id)))
 	if err != nil {
@@ -320,6 +657,9 @@ func (b *Backend) GetBundleApplyStatus(ctx context.Context, id string) (Operatio
 			op.Status = status
 			op.Error = detail
 			_ = writeOperationJournal(b.cfg.StateDir, op)
+			if op.Status != OpRunning {
+				b.releaseBundleApply(op.ID)
+			}
 		}
 	}
 	return op, nil
@@ -358,15 +698,42 @@ func (b *Backend) lastBundleApplyStatus() string {
 	return op.Status
 }
 
-// writeBundleApplyHandoff drops the operation id on tmpfs for the oneshot
-// unit's CLI run. /run is the daemon's declared ReadWritePaths root and is
-// wiped at boot; the file holds no secret material.
-func writeBundleApplyHandoff(opID string) error {
+// normalizeSkipHealth trims, deduplicates, and drops empty skip entries.
+func normalizeSkipHealth(ids []string) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// writeBundleApplyHandoff drops the trusted staging handoff on tmpfs for
+// the oneshot unit's CLI run: the operation id plus, for internal
+// restore-driven applies only, the bundle IDs whose post-switch health
+// probes are skipped (restore-paused scopes mid-restore). /run is the
+// daemon's declared ReadWritePaths root and is wiped at boot; the file
+// holds no secret material.
+func writeBundleApplyHandoff(opID string, skipHealth []string) error {
 	path := bundleApplyHandoffPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create runtime dir: %w", err)
 	}
-	body, err := json.Marshal(map[string]string{"operation_id": opID})
+	body, err := json.Marshal(struct {
+		OperationID string   `json:"operation_id"`
+		SkipHealth  []string `json:"skip_health,omitempty"`
+	}{OperationID: opID, SkipHealth: skipHealth})
 	if err != nil {
 		return err
 	}

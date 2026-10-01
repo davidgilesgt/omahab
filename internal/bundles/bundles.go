@@ -213,18 +213,22 @@ func ValidateCustom(b apps.Bundle, dir string) (apps.Bundle, error) {
 // It never reads the dirty worktree. The returned bundle is unvalidated;
 // callers pass it through ValidateCustom/Merge.
 func ReadCustomBundleFiles(ctx context.Context, repo, id string) (bundleJSON []byte, hasModuleNix, disabled bool, err error) {
+	return readCustomBundleFilesAt(ctx, repo, id, "HEAD")
+}
+
+func readCustomBundleFilesAt(ctx context.Context, repo, id, revision string) (bundleJSON []byte, hasModuleNix, disabled bool, err error) {
 	if !idDirRe.MatchString(id) {
 		return nil, false, false, &apps.ValidationError{Problems: []string{fmt.Sprintf("bundle id %q is not a valid directory name", id)}}
 	}
-	bundleJSON, err = gitShow(ctx, repo, fmt.Sprintf("%s/%s", id, bundleJSONName))
+	bundleJSON, err = gitShow(ctx, repo, revision, fmt.Sprintf("%s/%s", id, bundleJSONName))
 	if err != nil {
 		return nil, false, false, err
 	}
-	hasModuleNix, err = gitPathExists(ctx, repo, fmt.Sprintf("%s/%s", id, moduleNixName))
+	hasModuleNix, err = gitPathExists(ctx, repo, revision, fmt.Sprintf("%s/%s", id, moduleNixName))
 	if err != nil {
 		return nil, false, false, err
 	}
-	disabled, err = gitPathExists(ctx, repo, fmt.Sprintf("%s/%s", id, disabledName))
+	disabled, err = gitPathExists(ctx, repo, revision, fmt.Sprintf("%s/%s", id, disabledName))
 	if err != nil {
 		return nil, false, false, err
 	}
@@ -238,7 +242,11 @@ func ReadCustomBundleFiles(ctx context.Context, repo, id string) (bundleJSON []b
 
 // ListCustomIDs lists committed bundle directories in the repo at HEAD.
 func ListCustomIDs(ctx context.Context, repo string) ([]string, error) {
-	out, err := gitRun(ctx, repo, "ls-tree", "--name-only", "-d", "HEAD")
+	return listCustomIDsAt(ctx, repo, "HEAD")
+}
+
+func listCustomIDsAt(ctx context.Context, repo, revision string) ([]string, error) {
+	out, err := gitRun(ctx, repo, "ls-tree", "--name-only", "-d", revision)
 	if err != nil {
 		return nil, err
 	}
@@ -260,6 +268,30 @@ func ListCustomIDs(ctx context.Context, repo string) ([]string, error) {
 // at a higher level); custom bundle problems fail the load loudly.
 // Disabled custom bundles (bundles/<id>/disabled) are excluded.
 func LoadMerged(ctx context.Context, catalogPath, repoPath string) (*Merged, error) {
+	return loadMerged(ctx, catalogPath, repoPath, "HEAD")
+}
+
+// LoadMergedAt loads metadata from one immutable custom-bundles commit.
+// An empty revision selects the current committed catalog.
+func LoadMergedAt(ctx context.Context, catalogPath, repoPath, revision string) (*Merged, error) {
+	if revision == "" {
+		return LoadMerged(ctx, catalogPath, repoPath)
+	}
+	if len(revision) != 40 {
+		return nil, &apps.ValidationError{Problems: []string{"revision must be a full commit hash"}}
+	}
+	for _, c := range revision {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return nil, &apps.ValidationError{Problems: []string{"revision must be a full commit hash"}}
+		}
+	}
+	if kind, err := gitRun(ctx, repoPath, "cat-file", "-t", revision); err != nil || strings.TrimSpace(kind) != "commit" {
+		return nil, &apps.ValidationError{Problems: []string{"revision does not identify a custom-bundles commit"}}
+	}
+	return loadMerged(ctx, catalogPath, repoPath, revision)
+}
+
+func loadMerged(ctx context.Context, catalogPath, repoPath, revision string) (*Merged, error) {
 	var curated *apps.Catalog
 	if catalogPath != "" {
 		c, err := apps.LoadCatalogFile(catalogPath)
@@ -275,14 +307,14 @@ func LoadMerged(ctx context.Context, catalogPath, repoPath string) (*Merged, err
 		curated = &apps.Catalog{}
 	}
 
-	docs, err := loadCustomDocs(ctx, repoPath)
+	docs, err := loadCustomDocs(ctx, repoPath, revision)
 	if err != nil {
 		return nil, err
 	}
 	return Merge(curated, docs)
 }
 
-func loadCustomDocs(ctx context.Context, repoPath string) ([]CustomDoc, error) {
+func loadCustomDocs(ctx context.Context, repoPath, revision string) ([]CustomDoc, error) {
 	if repoPath == "" {
 		return nil, nil
 	}
@@ -293,13 +325,13 @@ func loadCustomDocs(ctx context.Context, repoPath string) ([]CustomDoc, error) {
 		}
 		return nil, err
 	}
-	ids, err := ListCustomIDs(ctx, repoPath)
+	ids, err := listCustomIDsAt(ctx, repoPath, revision)
 	if err != nil {
 		return nil, err
 	}
 	docs := make([]CustomDoc, 0, len(ids))
 	for _, id := range ids {
-		raw, hasModule, disabled, err := ReadCustomBundleFiles(ctx, repoPath, id)
+		raw, hasModule, disabled, err := readCustomBundleFilesAt(ctx, repoPath, id, revision)
 		if err != nil {
 			return nil, fmt.Errorf("custom bundle %q: %w", id, err)
 		}
@@ -318,16 +350,70 @@ func loadCustomDocs(ctx context.Context, repoPath string) ([]CustomDoc, error) {
 	return docs, nil
 }
 
-func gitShow(ctx context.Context, repo, path string) ([]byte, error) {
-	out, err := gitExecOutput(ctx, repo, []string{"show", "HEAD:" + path})
+// loadCustomDocsWorktree reads custom bundle documents from the dirty
+// worktree (the intended view, before Commit). Used to validate a dirty
+// change set before it can reach HEAD; never used to serve or build.
+func loadCustomDocsWorktree(ctx context.Context, repoPath string) ([]CustomDoc, error) {
+	if repoPath == "" {
+		return nil, nil
+	}
+	if _, err := os.Stat(repoPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	entries, err := os.ReadDir(repoPath)
 	if err != nil {
-		return nil, fmt.Errorf("git show HEAD:%s in %s: %w", path, repo, err)
+		return nil, err
+	}
+	var ids []string
+	for _, e := range entries {
+		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		if !idDirRe.MatchString(e.Name()) {
+			continue
+		}
+		ids = append(ids, e.Name())
+	}
+	sort.Strings(ids)
+	docs := make([]CustomDoc, 0, len(ids))
+	for _, id := range ids {
+		raw, err := os.ReadFile(filepath.Join(repoPath, id, bundleJSONName))
+		if err != nil {
+			return nil, fmt.Errorf("custom bundle %q: %w", id, err)
+		}
+		if _, err := os.Stat(filepath.Join(repoPath, id, disabledName)); err == nil {
+			continue // disabled: excluded from the intended view too
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+		if _, err := os.Stat(filepath.Join(repoPath, id, moduleNixName)); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil, fmt.Errorf("custom bundle %q: missing module.nix", id)
+			}
+			return nil, err
+		}
+		b, err := apps.ParseBundleBytes(raw)
+		if err != nil {
+			return nil, fmt.Errorf("custom bundle %q: %w", id, err)
+		}
+		docs = append(docs, CustomDoc{Dir: id, Bundle: b})
+	}
+	return docs, nil
+}
+
+func gitShow(ctx context.Context, repo, revision, path string) ([]byte, error) {
+	out, err := gitExecOutput(ctx, repo, []string{"show", revision + ":" + path})
+	if err != nil {
+		return nil, fmt.Errorf("git show %s:%s in %s: %w", revision, path, repo, err)
 	}
 	return out, nil
 }
 
-func gitPathExists(ctx context.Context, repo, path string) (bool, error) {
-	err := gitExecRun(ctx, repo, "cat-file", "-e", "HEAD:"+path)
+func gitPathExists(ctx context.Context, repo, revision, path string) (bool, error) {
+	err := gitExecRun(ctx, repo, "cat-file", "-e", revision+":"+path)
 	return err == nil, nil
 }
 

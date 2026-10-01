@@ -46,10 +46,10 @@ type InstanceDirLister interface {
 }
 
 // manifestDumpPath is the fixed in-snapshot path of the v2 manifest:
-// snapshots capture the staging tree at its absolute path, so the
-// manifest always sits at backup-staging/manifest.json below the
-// repository root.
-const manifestDumpPath = "/" + backupStagingDir + "/" + manifestFileName
+// captures snapshot the staging tree at its absolute system path
+// (/var/lib/omahab/backup-staging), so `restic dump` must ask for that
+// full absolute path — not a repository-root-relative one.
+const manifestDumpPath = backupStagingDirPath + "/" + manifestFileName
 
 // instanceDirRe accepts exactly one safe path component: an alphanumeric
 // first character, then alphanumerics, dots, underscores, or dashes.

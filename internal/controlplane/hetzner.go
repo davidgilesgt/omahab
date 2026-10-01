@@ -25,6 +25,10 @@ import (
 // protocol is preserved; there is no SSH-exec fallback.
 const backupSSHPort = "23"
 
+// genericSSHPort is the default SSH/SFTP port for non-Hetzner (generic)
+// SFTP locations. Explicit ports in the URL always win.
+const genericSSHPort = "22"
+
 // knownHostPatterns lists every known_hosts first-field form that refers to
 // host: the legacy bare form, the JoinHostPort form, and the bracketed
 // OpenSSH form written for hosts with a port.
@@ -378,6 +382,15 @@ type sftpInstanceLister struct {
 // ListInstanceDirs returns the subdirectory names of dir on the backup
 // account host. Only directories are returned; the account home itself
 // (".", "..", dotfiles like .ssh) never surfaces.
+//
+// Path semantics mirror restic's sftp URL handling: "/./x" is
+// home-relative (resolved by the server's sftp subsystem against the
+// login directory) and "//x" is absolute; both marker forms are passed
+// through verbatim, never cleaned away, so the listing targets exactly
+// the directory a restic client with the same URL would open. An
+// explicit URL port wins; a portless URL defaults to 22 for generic SFTP
+// hosts. Hetzner Storage Box URLs are always generated with an
+// explicit :23.
 func (l sftpInstanceLister) ListInstanceDirs(ctx context.Context, location string) ([]string, error) {
 	u, err := url.Parse(strings.TrimSpace(location))
 	if err != nil || u.Host == "" {
@@ -396,12 +409,9 @@ func (l sftpInstanceLister) ListInstanceDirs(ctx context.Context, location strin
 	}
 	port := u.Port()
 	if port == "" {
-		port = backupSSHPort
+		port = genericSSHPort
 	}
-	dir := strings.TrimSuffix(path.Clean("/"+u.Path), "/")
-	if dir == "" || dir == "/" {
-		return nil, fmt.Errorf("backup location %q has no directory to list", location)
-	}
+	dir := sftpDirPath(u.Path)
 
 	knownHosts := filepath.Join(l.stateDir, "backup_ssh", "known_hosts")
 	pinned, err := loadPinnedHostKey(knownHosts, host)
@@ -469,6 +479,12 @@ func (l sftpInstanceLister) ListInstanceDirs(ctx context.Context, location strin
 		out = append(out, name)
 	}
 	return out, nil
+}
+
+// sftpDirPath removes the connection/path separator from a Restic URL.
+// One URL slash selects a home-relative path; two select an absolute path.
+func sftpDirPath(p string) string {
+	return path.Clean(strings.TrimPrefix(p, "/"))
 }
 
 // validSSHFragment rejects shell metacharacters and leading dashes in

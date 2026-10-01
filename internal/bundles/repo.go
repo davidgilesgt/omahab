@@ -252,6 +252,20 @@ func (s *Service) Dirty(ctx context.Context) (bool, error) {
 	return strings.TrimSpace(out) != "", nil
 }
 
+// RevParseHead returns the exact commit hash HEAD points at: the
+// immutable revision every build/switch is pinned to after a commit.
+func (s *Service) RevParseHead(ctx context.Context) (string, error) {
+	out, err := s.git(ctx, "rev-parse", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse HEAD: %w", err)
+	}
+	rev := strings.TrimSpace(out)
+	if rev == "" {
+		return "", fmt.Errorf("git rev-parse HEAD in %s: empty revision", s.repo)
+	}
+	return rev, nil
+}
+
 // Commit commits any staged changes with a timestamped message and pushes
 // to the `mirror` remote when one exists (Forgejo is only a mirror: push
 // failure is reported, never fatal).

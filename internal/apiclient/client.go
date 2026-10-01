@@ -226,6 +226,29 @@ func (c *Client) ListApplications(ctx context.Context) ([]domain.Application, er
 	return env.Items, nil
 }
 
+// ProbeBundleHealth asks the daemon to run one fresh health probe of a
+// bundle's currently configured services (POST /api/v1/bundles/{id}/health
+// with optional body {"revision": "..."}). An empty revision probes the
+// current committed service configuration; a full 40-hex commit hash
+// probes the bundle's definition pinned at exactly that immutable
+// custom-bundles revision (what an apply built). It returns nil only when
+// the daemon answers 204 after the live probe succeeded; an unhealthy or
+// stopped service, an unknown bundle or revision, or any transport/API
+// error is a probe failure. It never reflects stored health.
+func (c *Client) ProbeBundleHealth(ctx context.Context, id, revision string) error {
+	var body any
+	if revision != "" {
+		body = struct {
+			Revision string `json:"revision"`
+		}{Revision: revision}
+	}
+	req, err := c.newRequest(ctx, http.MethodPost, "/bundles/"+url.PathEscape(id)+"/health", body)
+	if err != nil {
+		return err
+	}
+	return c.do(req, nil)
+}
+
 func (c *Client) GetApplication(ctx context.Context, id string) (*domain.Application, error) {
 	var out domain.Application
 	if err := c.get(ctx, "/applications/"+url.PathEscape(id), &out); err != nil {

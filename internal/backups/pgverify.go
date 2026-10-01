@@ -7,8 +7,11 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -63,7 +66,7 @@ func ValidateStaging(ctx context.Context, target string) (StagingReport, error) 
 	}
 	rep.SQLiteChecked, rep.SQLiteOK = checked, ok
 	dumps := findPGDumps(target)
-	pgChecked, pgOK, _, err := checkPGDumps(ctx, dumps)
+	pgChecked, pgOK, err := checkPGDumps(ctx, dumps)
 	if err != nil {
 		return rep, fmt.Errorf("disposable pg validation: %w", err)
 	}
@@ -71,39 +74,84 @@ func ValidateStaging(ctx context.Context, target string) (StagingReport, error) 
 	return rep, nil
 }
 
-// stagingDirCandidates lists where a restored tree can hold the manifest:
-// every capture used the fixed backup-staging path, so the manifest
-// lives at <target>/<that absolute path>/manifest.json. The staging root
-// itself (target == staging dir) is also accepted for in-place checks.
-func stagingDirCandidates(target string) []string {
-	return []string{
+// stagingManifestCandidates lists the exact locations a restored tree can
+// hold the v2 manifest. Real captures snapshot the staging directory at
+// its absolute path, so an extracted snapshot puts the manifest at
+// <target>/<stateDir>/backup-staging/manifest.json; an in-place
+// backup-staging tree puts it at <target>/backup-staging/manifest.json
+// (target being the restore root) or <target>/manifest.json (target being
+// the staging directory itself). No other depth is accepted: scope
+// boundaries are the restore contract, not a directory-listing guess.
+func stagingManifestCandidates(target, stateDir string) []string {
+	candidates := []string{
 		filepath.Join(target, backupStagingDir, manifestFileName),
-		filepath.Join(target, manifestFileName),
 	}
+	if stateDir != "" {
+		candidates = append(candidates, filepath.Join(target, filepath.Clean("/"+stateDir), backupStagingDir, manifestFileName))
+	}
+	return append(candidates, filepath.Join(target, manifestFileName))
+}
+
+// StagedManifestDirFor returns the absolute directory holding the v2
+// manifest for one restored or staged tree, resolving the extracted
+// absolute-capture layout with the stateDir the capture ran with
+// (<target>/<stateDir>/backup-staging) plus the in-place backup-staging
+// shapes. All artifact, custom-definition, and checkpoint paths resolve
+// relative to the returned directory. Exactly one manifest must exist;
+// ambiguity, absence, and directories escaping the target are refused.
+func StagedManifestDirFor(target, stateDir string) (string, error) {
+	clean := filepath.Clean(target)
+	if !filepath.IsAbs(clean) {
+		return "", fmt.Errorf("%w: staging target %q must be absolute", ErrInvalid, target)
+	}
+	var found string
+	for _, p := range stagingManifestCandidates(clean, stateDir) {
+		if fi, err := os.Lstat(p); err != nil || fi.IsDir() {
+			continue
+		}
+		if found != "" {
+			return "", fmt.Errorf("%w: staged tree holds more than one manifest (%s, %s)", ErrInvalid, found, p)
+		}
+		found = p
+	}
+	if found == "" {
+		return "", fmt.Errorf("%w: snapshot has no v2 manifest under %s (pre-v2 snapshots are not restoreable; use manual recovery)",
+			ErrInvalid, clean)
+	}
+	dir := filepath.Dir(found)
+	if dir != clean && !strings.HasPrefix(dir, clean+string(filepath.Separator)) {
+		return "", fmt.Errorf("%w: manifest directory %s escapes staging %s", ErrInvalid, dir, clean)
+	}
+	return dir, nil
+}
+
+// StagedManifestDir is StagedManifestDirFor with the production state
+// directory: every installed capture stages at
+// /var/lib/omahab/backup-staging, so an extracted snapshot carries the
+// manifest at <target>/var/lib/omahab/backup-staging/manifest.json.
+func StagedManifestDir(target string) (string, error) {
+	return StagedManifestDirFor(target, backupStagingDirPathParent)
 }
 
 // ReadStagedManifest reads and validates the v2 manifest from a restored
 // or staged tree. Exactly one manifest is expected; its absence is an
 // error naming the v2 contract.
 func ReadStagedManifest(target string) (SnapshotManifest, error) {
-	var (
-		found string
-		m     SnapshotManifest
-	)
-	for _, p := range stagingDirCandidates(target) {
-		if _, err := os.Stat(p); err != nil {
-			continue
-		}
-		if found != "" {
-			return SnapshotManifest{}, fmt.Errorf("%w: staged tree holds more than one manifest (%s, %s)", ErrInvalid, found, p)
-		}
-		found = p
+	m, err := readStagedManifestFor(target, backupStagingDirPathParent)
+	if err != nil {
+		return SnapshotManifest{}, err
 	}
-	if found == "" {
-		return SnapshotManifest{}, fmt.Errorf("%w: snapshot has no v2 manifest at %s (pre-v2 snapshots are not restoreable; use manual recovery)",
-			ErrInvalid, backupStagingDirPath+"/manifest.json")
+	return m, nil
+}
+
+// readStagedManifestFor is ReadStagedManifest with an explicit capture
+// stateDir for non-default state layouts (tests, relocated state).
+func readStagedManifestFor(target, stateDir string) (SnapshotManifest, error) {
+	dir, err := StagedManifestDirFor(target, stateDir)
+	if err != nil {
+		return SnapshotManifest{}, err
 	}
-	m, err := ReadManifest(filepath.Dir(found))
+	m, err := ReadManifest(dir)
 	if err != nil {
 		return SnapshotManifest{}, fmt.Errorf("manifest: %w", err)
 	}
@@ -115,14 +163,18 @@ func ReadStagedManifest(target string) (SnapshotManifest, error) {
 // directory and are refused when they escape the staging tree. Database
 // dumps get the same treatment through verifyStagedManifestFile.
 func verifyManifestArtifacts(target string, m SnapshotManifest) error {
+	dir, err := StagedManifestDir(target)
+	if err != nil {
+		return err
+	}
 	for _, scope := range m.Scopes {
 		for _, a := range scope.Artifacts {
-			if err := verifyStagedManifestFile(target, scope.Name, "artifact", a.File, a.SHA256); err != nil {
+			if err := verifyStagedManifestFile(dir, target, scope.Name, "artifact", a.File, a.SHA256); err != nil {
 				return err
 			}
 		}
 		for _, d := range scope.Databases {
-			if err := verifyStagedManifestFile(target, scope.Name, "database", d.File, d.SHA256); err != nil {
+			if err := verifyStagedManifestFile(dir, target, scope.Name, "database", d.File, d.SHA256); err != nil {
 				return err
 			}
 		}
@@ -131,11 +183,15 @@ func verifyManifestArtifacts(target string, m SnapshotManifest) error {
 }
 
 // verifyStagedManifestFile is the scope-aware core of the hash check;
-func verifyStagedManifestFile(target, scope, kind, file, sha string) error {
-	base := filepath.Join(target, backupStagingDir)
+// base is the manifest directory, target the tree root that bounds it.
+func verifyStagedManifestFile(base, target, scope, kind, file, sha string) error {
 	path := filepath.Join(base, filepath.FromSlash(file))
 	if !strings.HasPrefix(filepath.Clean(path), filepath.Clean(base)+string(filepath.Separator)) &&
 		filepath.Clean(path) != filepath.Clean(base) {
+		return fmt.Errorf("%w: scope %s %s %q escapes staging", ErrInvalid, scope, kind, file)
+	}
+	if !strings.HasPrefix(filepath.Clean(path), filepath.Clean(target)+string(filepath.Separator)) &&
+		filepath.Clean(path) != filepath.Clean(target) {
 		return fmt.Errorf("%w: scope %s %s %q escapes staging", ErrInvalid, scope, kind, file)
 	}
 	got, err := SHA256File(path)
@@ -246,54 +302,142 @@ func findPGDumps(target string) []string {
 	return out
 }
 
-func pgBinariesPresent() (initdb, pgCtl, pgRestore string, ok bool) {
-	initdb, err1 := exec.LookPath("initdb")
-	pgCtl, err2 := exec.LookPath("pg_ctl")
-	pgRestore, err3 := exec.LookPath("pg_restore")
-	return initdb, pgCtl, pgRestore, err1 == nil && err2 == nil && err3 == nil
+// pgBinariesPresent locates the PostgreSQL tooling: initdb, pg_ctl, and
+// pg_restore. A single missing binary is a hard error — a validator that
+// silently skips database proof is not a validator.
+func pgBinariesPresent() (initdb, pgCtl, pgRestore string, err error) {
+	var missing []string
+	if initdb, err = exec.LookPath("initdb"); err != nil {
+		missing = append(missing, "initdb")
+	}
+	if pgCtl, err = exec.LookPath("pg_ctl"); err != nil {
+		missing = append(missing, "pg_ctl")
+	}
+	if pgRestore, err = exec.LookPath("pg_restore"); err != nil {
+		missing = append(missing, "pg_restore")
+	}
+	if len(missing) > 0 {
+		return "", "", "", fmt.Errorf("%w: postgresql binaries required for dump validation but not found: %s",
+			ErrInvalid, strings.Join(missing, ", "))
+	}
+	return initdb, pgCtl, pgRestore, nil
 }
 
-// checkPGDumps restores every staged dump into a disposable validation
-// database inside an isolated temporary cluster on a Unix socket with no TCP
-// listener, including the installed app extensions. A backup's SQL is never
-// loaded into the running production cluster merely to verify it.
-func checkPGDumps(ctx context.Context, dumps []string) (checked, ok int, skipped string, err error) {
-	if len(dumps) == 0 {
-		return 0, 0, "", nil
+// pgVerifyUser is the OS account the disposable cluster runs as: initdb
+// refuses to run as root, and the postgres user already owns the
+// production cluster data with a readable PostgreSQL installation.
+const pgVerifyUser = "postgres"
+
+// runPgCommand executes one cluster command with stdout/stderr captured in
+// a log file instead of in-memory pipes: pg_ctl and its postgres child
+// inherit the descriptors and hold them for the server's lifetime, which
+// deadlocks CombinedOutput pipes.
+func runPgCommand(ctx context.Context, logDir string, input io.Reader, name string, args ...string) (string, error) {
+	logFile := filepath.Join(logDir, fmt.Sprintf("%s-%d.log", filepath.Base(name), time.Now().UnixNano()))
+	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return "", err
 	}
-	initdb, pgCtl, pgRestore, okBins := pgBinariesPresent()
-	if !okBins {
-		return 0, 0, "postgresql binaries not available", nil
+	defer f.Close()
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Stdin = input
+	cmd.Env = append(os.Environ(), "HOME="+filepath.Dir(logDir), "LC_ALL=C")
+	cmd.Dir = filepath.Dir(logDir)
+	cmd.Stdout = f
+	cmd.Stderr = f
+	runErr := cmd.Run()
+	out, _ := os.ReadFile(logFile)
+	detail := strings.TrimSpace(string(out))
+	if len(detail) > 2000 {
+		detail = detail[:2000]
+	}
+	return detail, runErr
+}
+
+// dropToPostgres wraps args so the command runs as the postgres OS user:
+// setpriv is in util-linux, present on every installed system.
+func dropToPostgres(ctx context.Context, logDir string, input io.Reader, name string, args ...string) (string, error) {
+	setpriv, err := exec.LookPath("setpriv")
+	if err != nil {
+		return "", fmt.Errorf("%w: setpriv (util-linux) required to run %s as %s: %v", ErrInvalid, name, pgVerifyUser, err)
+	}
+	full := append([]string{"--reuid", pgVerifyUser, "--regid", pgVerifyUser, "--init-groups", "--"}, name)
+	full = append(full, args...)
+	return runPgCommand(ctx, logDir, input, setpriv, full...)
+}
+
+// checkPGDumps restores dump-declared schemas and extensions in a disposable
+// PostgreSQL cluster. The running cluster is never used for validation.
+// Root opens each private dump before dropping to the postgres account.
+func checkPGDumps(ctx context.Context, dumps []string) (checked, ok int, err error) {
+	if len(dumps) == 0 {
+		return 0, 0, nil
+	}
+	initdb, pgCtl, pgRestore, err := pgBinariesPresent()
+	if err != nil {
+		return 0, 0, err
+	}
+	account, err := user.Lookup(pgVerifyUser)
+	if err != nil {
+		return 0, 0, fmt.Errorf("%w: %s OS user required for disposable validation: %v", ErrInvalid, pgVerifyUser, err)
+	}
+	uid, err := strconv.Atoi(account.Uid)
+	if err != nil {
+		return 0, 0, err
+	}
+	gid, err := strconv.Atoi(account.Gid)
+	if err != nil {
+		return 0, 0, err
 	}
 	tmp, err := os.MkdirTemp("", "omahab-pgverify-*")
 	if err != nil {
-		return 0, 0, "", err
+		return 0, 0, err
 	}
 	defer os.RemoveAll(tmp)
 	dataDir := filepath.Join(tmp, "data")
-	if out, err := exec.CommandContext(ctx, initdb, "-D", dataDir, "-E", "UTF8").CombinedOutput(); err != nil {
-		return 0, 0, "", fmt.Errorf("initdb: %v: %s", err, strings.TrimSpace(string(out)))
-	}
 	sockDir := filepath.Join(tmp, "sock")
-	if err := os.MkdirAll(sockDir, 0o700); err != nil {
-		return 0, 0, "", err
+	logDir := filepath.Join(tmp, "logs")
+	for _, dir := range []string{tmp, dataDir, sockDir, logDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return 0, 0, err
+		}
+		if err := os.Chown(dir, uid, gid); err != nil {
+			return 0, 0, err
+		}
 	}
-	if out, err := exec.CommandContext(ctx, pgCtl, "-D", dataDir, "-o", "-k "+sockDir+" -c listen_addresses=''", "-w", "start").CombinedOutput(); err != nil {
-		return 0, 0, "", fmt.Errorf("pg_ctl start: %v: %s", err, strings.TrimSpace(string(out)))
+	if detail, err := dropToPostgres(ctx, logDir, nil, initdb, "-D", dataDir, "-E", "UTF8", "--no-locale", "--auth=trust"); err != nil {
+		return 0, 0, fmt.Errorf("initdb: %v: %s", err, detail)
 	}
 	defer func() {
-		_, _ = exec.CommandContext(context.WithoutCancel(ctx), pgCtl, "-D", dataDir, "-m", "immediate", "stop").CombinedOutput()
+		stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		_, _ = dropToPostgres(stopCtx, logDir, nil, pgCtl, "-D", dataDir, "-m", "immediate", "-w", "stop")
 	}()
+	serverOptions := "-k " + strconv.Quote(sockDir) + " -c listen_addresses=''"
+	if preload := os.Getenv("OMAHAB_PG_PRELOAD_LIBRARIES"); preload != "" {
+		serverOptions += " -c shared_preload_libraries=" + strconv.Quote(preload)
+	}
+	if detail, err := dropToPostgres(ctx, logDir, nil, pgCtl, "-D", dataDir,
+		"-l", filepath.Join(tmp, "postgres.log"), "-o", serverOptions, "-w", "start"); err != nil {
+		return 0, 0, fmt.Errorf("pg_ctl start: %v: %s", err, detail)
+	}
+	createdb := filepath.Join(filepath.Dir(pgRestore), "createdb")
 	for _, dump := range dumps {
 		checked++
-		dbName := "verify" + fmt.Sprint(checked)
-		if out, err := exec.CommandContext(ctx, "createdb", "-h", sockDir, dbName).CombinedOutput(); err != nil {
-			return checked, ok, "", fmt.Errorf("createdb: %v: %s", err, strings.TrimSpace(string(out)))
+		dbName := "verify" + strconv.Itoa(checked)
+		if detail, err := dropToPostgres(ctx, logDir, nil, createdb, "-h", sockDir, dbName); err != nil {
+			return checked, ok, fmt.Errorf("createdb: %v: %s", err, detail)
 		}
-		if out, err := exec.CommandContext(ctx, pgRestore, "-h", sockDir, "-d", dbName, "--exit-on-error", dump).CombinedOutput(); err != nil {
-			return checked, ok, "", fmt.Errorf("pg_restore %s: %v: %s", dump, err, strings.TrimSpace(string(out)))
+		input, err := os.Open(dump)
+		if err != nil {
+			return checked, ok, err
+		}
+		detail, restoreErr := dropToPostgres(ctx, logDir, input, pgRestore, "-h", sockDir, "-d", dbName, "--no-owner", "--no-privileges", "--exit-on-error")
+		_ = input.Close()
+		if restoreErr != nil {
+			return checked, ok, fmt.Errorf("pg_restore %s: %v: %s", dump, restoreErr, detail)
 		}
 		ok++
 	}
-	return checked, ok, "", nil
+	return checked, ok, nil
 }

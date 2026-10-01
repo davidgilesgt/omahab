@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../auth";
 import { useToast } from "../components/toast";
 import { CopyButton } from "../components/copyButton";
@@ -23,6 +23,7 @@ interface OperationStatus {
   stage: string;
   error?: string;
   preview?: string;
+  can_resume?: boolean;
 }
 
 type RestoreChoice = "everything" | "some";
@@ -42,7 +43,7 @@ async function postJSON<T>(path: string, token: string, body: unknown): Promise<
   return data;
 }
 
-export function RestoreFromBackupControl({ onStartNew }: { onStartNew: () => void }) {
+export function RestoreFromBackupControl({ onStartNew, operationId }: { onStartNew: () => void; operationId?: string }) {
   const { client, token: authToken } = useAuth();
   const toast = useToast();
   const queryClient = useQueryClient();
@@ -60,7 +61,8 @@ export function RestoreFromBackupControl({ onStartNew }: { onStartNew: () => voi
   const [choice, setChoice] = useState<RestoreChoice>("everything");
   const [appPicks, setAppPicks] = useState<string[]>([]);
   const [operation, setOperation] = useState<OperationStatus | null>(null);
-  const [applyStarted, setApplyStarted] = useState(false);
+  const [currentOperationId, setCurrentOperationId] = useState(operationId ?? "");
+  const [applyRequested, setApplyRequested] = useState(false);
 
   const token = authToken ?? "";
   const phraseWords = phrase.trim().split(/\s+/).filter(Boolean);
@@ -69,6 +71,29 @@ export function RestoreFromBackupControl({ onStartNew }: { onStartNew: () => voi
     repoKind === "hetzner_storagebox"
       ? !!username.trim() && !!host.trim()
       : !!location.trim() && !!password;
+
+  useEffect(() => {
+    if (operationId) setCurrentOperationId(operationId);
+  }, [operationId]);
+  const operationQuery = useQuery<OperationStatus>({
+    queryKey: ["recovery-restore", currentOperationId],
+    enabled: !!currentOperationId,
+    queryFn: async () => {
+      const res = await fetch(`/api/v1/recovery/restore/${encodeURIComponent(currentOperationId)}`, { headers: authHeaders(token) });
+      if (!res.ok) throw new Error(`Restore status: HTTP ${res.status}`);
+      return res.json() as Promise<OperationStatus>;
+    },
+    refetchInterval: (query) => {
+      const op = query.state.data;
+      if (op?.stage === "completed" && op.status === "completed") return false;
+      if (op?.stage === "staged" && op.status === "completed" && !applyRequested) return false;
+      return 2000;
+    },
+    retry: false,
+  });
+  useEffect(() => {
+    if (operationQuery.data) setOperation(operationQuery.data);
+  }, [operationQuery.data]);
 
   // The chosen snapshot drives the app-scope picker; server-config is always
   // restored and never appears as an optional checkbox.
@@ -133,27 +158,36 @@ export function RestoreFromBackupControl({ onStartNew }: { onStartNew: () => voi
     },
     onSuccess: (op) => {
       setOperation(op);
+      setCurrentOperationId(op.id);
+      queryClient.setQueryData(["recovery-restore", op.id], op);
       setSubPass("");
-      setPassword("");
-      toast.success("Restore staged and validated — applying will restart the server");
+      toast.success("Restore staged and validated");
       void queryClient.invalidateQueries({ queryKey: ["setup"] });
     },
     onError: (err) => toast.error(err instanceof Error ? err.message : "Staging failed"),
   });
 
   const applyMutation = useMutation({
+    onMutate: () => setApplyRequested(true),
     mutationFn: async () => {
       if (!operation) throw new Error("No staged restore");
       return postJSON<OperationStatus>(`/api/v1/recovery/restore/${encodeURIComponent(operation.id)}/apply`, token, {
         phrase: phrase.trim(),
+        ...(password ? { password } : {}),
       });
     },
     onSuccess: (op) => {
-      setApplyStarted(true);
       setOperation(op);
-      toast.success("Restore running — the server restarts and this page reconnects");
+      setPhrase("");
+      setPassword("");
+      queryClient.setQueryData(["recovery-restore", op.id], op);
+      void queryClient.invalidateQueries({ queryKey: ["setup"] });
+      toast.success("Restore running. This page will reconnect after the server restarts.");
     },
-    onError: (err) => toast.error(err instanceof Error ? err.message : "Apply failed"),
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Apply failed");
+      void queryClient.invalidateQueries({ queryKey: ["recovery-restore", currentOperationId] });
+    },
   });
 
   // "Start new instead": record the choice server-side so the checklist
@@ -172,38 +206,39 @@ export function RestoreFromBackupControl({ onStartNew }: { onStartNew: () => voi
     onError: (err) => toast.error(err instanceof Error ? err.message : "Could not record the choice"),
   });
 
-  if (applyStarted) {
-    return (
-      <div className="form-stack">
-        <p>
-          Restore is running in the <span className="mono">omahab-restore</span> system unit: omahabd
-          stops, the validated state is swapped in atomically (rollback copy kept), and omahabd restarts.
-        </p>
-        <p className="muted">
-          This page will lose the connection briefly. After the restart, reopen the panel — the
-          checklist reconverges apps from the restored state; remaining app data restores through the
-          normal per-app restore.
-        </p>
-        <p>
-          Progress: <span className="mono">{operation?.stage ?? "unit-started"}</span>
-        </p>
-      </div>
-    );
-  }
 
+  if (currentOperationId && !operation) {
+    return <p className="muted">Loading restore progress…</p>;
+  }
   if (operation) {
     return (
       <div className="form-stack">
-        <p>
-          Snapshot staged and validated (<span className="mono">{operation.stage}</span>). Applying stops and
-          restarts this server now.
-        </p>
+        <p>Restore stage: <span className="mono">{operation.stage}</span>. Status: {operation.status}.</p>
+        {(operation.status === "running" || operation.status === "pending") && (
+          <p className="muted">The server can restart during restore. This page checks progress automatically.</p>
+        )}
         {operation.preview && (
           <p className="inline-error" role="alert">{operation.preview}</p>
         )}
-        <button className="button danger" type="button" onClick={() => void applyMutation.mutate()} disabled={applyMutation.isPending}>
-          {applyMutation.isPending ? "Applying…" : "Apply restore and restart"}
-        </button>
+        {(operation.stage === "staged" || operation.can_resume) && (
+          <>
+            <label className="field">
+              <span>Recovery phrase</span>
+              <textarea value={phrase} onChange={(e) => setPhrase(e.target.value)} autoComplete="off" spellCheck={false} rows={3} />
+            </label>
+            <p className="muted">Enter the phrase again after a page reload. The browser does not save it.</p>
+            <label className="field">
+              <span>Repository password (optional)</span>
+              <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="new-password" />
+            </label>
+            <p className="muted">For a generic repository, enter its password if it is not in the restored configuration.</p>
+            <button className="button danger" type="button" onClick={() => void applyMutation.mutate()} disabled={!phraseOk || applyMutation.isPending}>
+              {applyMutation.isPending ? "Sending request…" : operation.stage === "staged" ? "Apply restore and restart" : "Resume restore"}
+            </button>
+          </>
+        )}
+        {operation.error && <p className="inline-error" role="alert">{operation.error}</p>}
+        {operationQuery.isError && <p className="muted">Connection unavailable. Progress will be checked again.</p>}
         {applyMutation.isError && (
           <p className="inline-error" role="alert">{applyMutation.error instanceof Error ? applyMutation.error.message : "Apply failed"}</p>
         )}

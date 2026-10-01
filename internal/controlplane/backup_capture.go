@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -335,9 +336,8 @@ func dumpControlDB(ctx context.Context, db *sql.DB, dest string) error {
 }
 
 // dumpPostgresDB dumps one logical database as the postgres OS user with
-// pg_dump --format=custom. The staging file is pre-created root-owned, handed
-// to the dump writer, then locked back to root-only. Any error fails the
-// backup; there is no raw-copy fallback and no empty-dump success.
+// pg_dump writes through a root-opened descriptor into private staging.
+// The postgres account never needs access to the staging directory.
 func dumpPostgresDB(ctx context.Context, database, dest string) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
 		return err
@@ -346,23 +346,17 @@ func dumpPostgresDB(ctx context.Context, database, dest string) error {
 	if err != nil {
 		return err
 	}
-	_ = f.Close()
-	if err := os.Chown(dest, postgresUID(), -1); err != nil {
-		return fmt.Errorf("stage pg dump: %w", err)
+	defer f.Close()
+	cmd := exec.CommandContext(ctx, "setpriv", "--reuid", "postgres", "--regid", "postgres", "--init-groups", "--",
+		"pg_dump", "--format=custom", "--dbname="+database)
+	cmd.Stdout = f
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("pg_dump %s: %v: %s", database, err, strings.TrimSpace(stderr.String()))
 	}
-	defer func() {
-		_ = os.Chown(dest, 0, 0)
-		_ = os.Chmod(dest, 0o600)
-	}()
-	runner := "runuser"
-	args := []string{"-u", "postgres", "--", "pg_dump", "--format=custom", "--dbname=" + database, "--file=" + dest}
-	if _, err := exec.LookPath(runner); err != nil {
-		runner = "su"
-		args = []string{"postgres", "-s", "/bin/sh", "-c", "pg_dump --format=custom --dbname=" + shellQuoteArg(database) + " --file=" + shellQuoteArg(dest)}
-	}
-	out, err := exec.CommandContext(ctx, runner, args...).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("pg_dump %s: %v: %s", database, err, strings.TrimSpace(string(out)))
+	if err := f.Sync(); err != nil {
+		return err
 	}
 	if st, err := os.Stat(dest); err != nil || st.Size() == 0 {
 		return fmt.Errorf("pg_dump %s: empty dump", database)

@@ -52,6 +52,7 @@ let
           SLUG=${lib.escapeShellArg v.slug}
           CANONICAL=${lib.escapeShellArg v.canonical}
           CFG=${lib.escapeShellArg "${stateDir}/storage.json"}
+          MNTBASE=/mnt/omahab-disks
           UUID=""
           if [ -f "$CFG" ]; then
             if ${pkgs.jq}/bin/jq -e 'type == "object"' "$CFG" >/dev/null 2>&1; then

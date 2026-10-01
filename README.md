@@ -58,9 +58,9 @@ At daemon startup, it is copied to `~/.config/omahab/token` for the configured a
 Then work through the setup checklist at `http://<lan-ip>:8484/setup`:
 
 1. **Backups** — the first step asks: do you have a recovery phrase from an earlier Omahab server?
-   - **Yes (restore):** enter the phrase plus Hetzner Storage Box credentials (or a generic restic URL). The panel lists earlier server instances under `./omahab/`, their snapshots, and restores — server configuration always, then all app scopes or a chosen subset. After the swap the repository is attached so backups continue into the same instance path.
+   - **Yes (restore):** enter the phrase plus Hetzner Storage Box credentials (or a generic restic URL). The panel lists earlier server instances under `./omahab/`, their snapshots, and restores — server configuration plus the inseparable Pocket ID identity checkpoint always, then all app scopes or a chosen subset (`rsync --delete` makes selected destinations exactly match the snapshot; excluded scopes are never touched). An interrupted restore resumes from its persisted journal stage — re-enter the phrase after a reload. After the swap the source repository is attached (or its matching restored row reconfigured in place) so backups continue into the same instance path.
    - **No (new server):** generate the 24-word recovery phrase (saved-ack ritual), then connect the Hetzner Storage Box (username, host, sub-account password once) or a generic restic URL. The repository initializes and the first backup + verify run in the background.
-   Before Tailscale is up the panel is plain HTTP on the LAN — the sub-account password crosses the LAN unencrypted, and the step says so. The SSH alternative is `sudo omahab recovery apply --repository <url>`.
+   Before Tailscale is up the panel is plain HTTP on the LAN — the sub-account password crosses the LAN unencrypted, and the step says so. The SSH alternative is `sudo omahab recovery apply --repository <url>` (add `--password-file` for a generic repository whose password is not phrase-derived).
 2. **SSH keys** — the installer writes the `--authorized-keys-file` contents (when given) for the configured admin account (`services.omahab.adminUser`, default `omahab`); add more here if needed.
 3. **Tailscale** — approve the server into your tailnet.
 4. Everything after (domain, Cloudflare, storage, AI providers) happens on the panel.
@@ -79,7 +79,7 @@ It walks Tailscale enrollment and Cloudflare domain/token entry in the terminal,
 
 After the handoff, complete enrollment at `http://<tailscale-ip>:8484`:
 
-- **Backups (first step)** — the checklist opens with backups. **Restore path:** 24-word phrase + Hetzner credentials (or generic repo) → `POST /api/v1/recovery/instances` lists earlier servers under `./omahab/` (locked entries mark a phrase mismatch) → snapshot list → restore everything or some apps (server-config always included) → the staged `omahab-restore` unit swaps state and restarts the daemon; the repository is then attached (`mode:attach`, exact instance location) so backups continue into the same path. During the apply window (no daemon process alive) the phrase transits once through a 0600 root-owned file on tmpfs, read and removed by the unit — root already holds equivalent capability; tmpfs never reaches disk. **New-server path:** 24 words shown once with the saved-ack ritual; the phrase wraps the master key into `/var/lib/omahab/recovery.kit` (fingerprint `recovery_fingerprint`). Then the Hetzner Storage Box (recommended, ~€4/mo): create a sub-account with SSH enabled; enter its username and password once. The system generates an ed25519 key at `/var/lib/omahab/backup_ssh/id_ed25519` (0600) and appends it to `.ssh/authorized_keys` via SFTP:23 (`golang.org/x/crypto/ssh` + `github.com/pkg/sftp`, `known_hosts` recorded, password discarded, location `sftp://<user>@<host>:23/./omahab/<instanceID>` with `-o sftp.command=...`, restic password `HKDF-SHA256(seed, salt "omahab-recovery-v1", info "restic-password")` so the phrase alone opens the repository, stored as `platform-app/backup_repo_credentials`); first backup + verify run immediately so “Verify a restore” passes on day one; then daily backup + weekly verify timers are enabled.
+- **Backups (first step)** — the checklist opens with backups. **Restore path:** 24-word phrase + Hetzner credentials (or generic repo) → `POST /api/v1/recovery/instances` lists earlier servers under `./omahab/` (locked entries mark a phrase mismatch) → snapshot list → restore everything or some apps (server-config always included) → the staged `omahab-restore` unit swaps state and restarts the daemon; the repository is then attached (`mode:attach`, exact instance location) so backups continue into the same path. An interrupted restore resumes from its persisted journal stage (the re-run CLI command skips re-listing and continues the original snapshot). During the apply window (no daemon process alive) the phrase and the optional generic repository password transit once through a 0600 root-owned file on tmpfs, read and removed by the unit — root already holds equivalent capability; tmpfs never reaches disk. **New-server path:** 24 words shown once with the saved-ack ritual; the phrase wraps the master key into `/var/lib/omahab/recovery.kit` (fingerprint `recovery_fingerprint`). Then the Hetzner Storage Box (recommended, ~€4/mo): create a sub-account with SSH enabled; enter its username and password once. The system generates an ed25519 key at `/var/lib/omahab/backup_ssh/id_ed25519` (0600) and appends it to `.ssh/authorized_keys` via SFTP:23 (`golang.org/x/crypto/ssh` + `github.com/pkg/sftp`, `known_hosts` recorded, password discarded, location `sftp://<user>@<host>:23/./omahab/<instanceID>` with `-o sftp.command=...`, restic password `HKDF-SHA256(seed, salt "omahab-recovery-v1", info "restic-password")` so the phrase alone opens the repository, stored as `platform-app/backup_repo_credentials`); first backup + verify run immediately so “Verify a restore” passes on day one; then daily backup + weekly verify timers are enabled.
 - **Backup retention** — snapshots never grow forever: each snapshot is tagged with its scopes (`scope:server-config`, `scope:app:<id>`, …) and a weekly `restic forget --prune` pass (`omahab backup prune`, timer `omahab-backup-prune`, also considered after scheduled backups) retains 7 daily / 4 weekly / 12 monthly / 2 yearly snapshots **per scope group**, so chatty app scopes can never thin the control-plane history. The newest verified-restorable snapshot is never forgotten; failures publish `backup.retention_failed` (warning), a low-space local repository publishes `backup.repo_space_low`.
 - **Storage placement** *(optional)* — dedicate a disk to media (photos) or data; the `omahab-storage` unit orders the mount before `postgresql`, `immich-server`, and `syncthing` (not every app unit).
 - **AI providers** — provider credentials/OAuth and model aliases.
@@ -125,8 +125,10 @@ The directory is a git repo (Forgejo is only a mirror — pushes there are
 best-effort and never required). Only **committed** files are built: the
 daemon reads `bundle.json` at HEAD (`git show`, never the dirty worktree)
 and every rebuild passes
-`--override-input bundles git+file:///var/lib/omahab/bundles`, so a file
-edited over SSH but not committed never reaches the system.
+`--override-input bundles git+file:///var/lib/omahab/bundles?rev=<revision>`
+pinned to the exact committed revision, so a file edited over SSH but not
+committed never reaches the system and a concurrent commit cannot change
+what a running apply evaluates.
 
 Commands (run on the server):
 
@@ -151,14 +153,18 @@ reserved custom range **20000–20999** (curated native ports are below it);
 env flows through `/var/lib/omahab/appenv/<id>.env` with
 `ConditionPathExists`, exactly like curated gated bundles.
 
-Apply (panel or CLI) rebuilds and switches a new generation. Because the
-switch restarts `omahabd`, the apply runs in the `omahab-bundle-apply`
-oneshot unit: commit staged changes, build with the bundles override,
-switch, health-gate the panel `/up` plus each newly-enabled custom
-bundle's `health_check`, and roll back to the previous generation on
-failure. A custom bundle whose module fails the build is disabled via a
-committed `bundles/<id>/disabled` marker, reported by id, and the build is
-retried once without it — the panel can re-enable it later.
+The panel starts the `omahab-bundle-apply` unit without waiting for the rebuild.
+The unit validates intended changes, commits them, then validates one exact Git revision.
+Build and switch use that revision through the bundles input override.
+Health checks use `/up` and fresh custom service probes, not stored application health.
+Failed activation or health checks restore the previous generation.
+A successful unit apply restarts `omahabd` to load the current catalog.
+The direct CLI uses the same apply path.
+Failed CLI applies return a nonzero exit code, including with `--json`.
+
+A custom bundle whose module fails the build gets a committed `bundles/<id>/disabled` marker.
+The build is retried once at the new revision without that bundle.
+The panel can re-enable it after validation.
 
 ## AI tools (Hermes via MCP)
 
@@ -253,6 +259,10 @@ nix run .#vm               # boot the dev VM (omahabd, caddy, postgres, ...)
 nix build .#checks.x86_64-linux.integration   # NixOS integration tests (install + installer-disk)
 ```
 
+The repository checks run ShellCheck on source scripts and generated storage units.
+Storage units mount each selected filesystem below `/mnt/omahab-disks/<UUID>`.
+They bind the volume onto its canonical application path.
+
 Repository layout:
 
 | Directory | Content |
@@ -277,7 +287,7 @@ Repository layout:
 ## Building images
 
 ```sh
-nix build .#image-iso    # bootable installer ISO (console wizard on first boot)
+nix build .#image-iso -o dist/iso    # bootable installer ISO (console wizard on first boot)
 ```
 
 ## Installing to disk

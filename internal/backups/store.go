@@ -679,10 +679,10 @@ func boolToInt(v bool) int {
 
 func (s *Service) saveVerificationDepth(ctx context.Context, d VerificationDepth) error {
 	_, err := s.st.DB().ExecContext(ctx,
-		`INSERT INTO verification_depth (verification_id, manifest_found, sqlite_checked, sqlite_ok, pg_checked, pg_ok, pg_skipped, checked_at)
-		 VALUES (?,?,?,?,?,?,?,?)`,
+		`INSERT INTO verification_depth (verification_id, manifest_found, sqlite_checked, sqlite_ok, pg_checked, pg_ok, checked_at)
+		 VALUES (?,?,?,?,?,?,?)`,
 		d.VerificationID, boolToInt(d.ManifestFound),
-		d.SQLiteChecked, d.SQLiteOK, d.PGChecked, d.PGOK, d.PGSkipped, fmtTime(d.CheckedAt))
+		d.SQLiteChecked, d.SQLiteOK, d.PGChecked, d.PGOK, fmtTime(d.CheckedAt))
 	return err
 }
 
@@ -691,11 +691,11 @@ func (s *Service) getVerificationDepth(ctx context.Context, verificationID strin
 	var manifestFound int
 	var checked string
 	err := s.st.DB().QueryRowContext(ctx,
-		`SELECT verification_id, manifest_found, sqlite_checked, sqlite_ok, pg_checked, pg_ok, pg_skipped, checked_at
+		`SELECT verification_id, manifest_found, sqlite_checked, sqlite_ok, pg_checked, pg_ok, checked_at
 		 FROM verification_depth WHERE verification_id = ?`, verificationID).
 		Scan(&d.VerificationID, &manifestFound,
 			&d.SQLiteChecked, &d.SQLiteOK,
-			&d.PGChecked, &d.PGOK, &d.PGSkipped, &checked)
+			&d.PGChecked, &d.PGOK, &checked)
 	if err != nil {
 		return VerificationDepth{}, err
 	}

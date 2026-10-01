@@ -739,6 +739,7 @@ type SetupCheck struct {
 	Status       string           `json:"status"`
 	Detail       string           `json:"detail,omitempty"`
 	Action       string           `json:"action,omitempty"`
+	OperationID  string           `json:"operation_id,omitempty"`
 	Apps         []SetupAppStatus `json:"apps,omitempty"`
 	PasskeyCount *int             `json:"passkey_count,omitempty"`
 	Target       *int             `json:"target,omitempty"`

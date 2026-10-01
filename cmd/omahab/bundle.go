@@ -15,7 +15,6 @@ import (
 	"github.com/omahab/omahab/internal/apiclient"
 	"github.com/omahab/omahab/internal/apps"
 	"github.com/omahab/omahab/internal/bundles"
-	"github.com/omahab/omahab/internal/domain"
 )
 
 // bundleRepoPath is overridable in tests.
@@ -24,6 +23,17 @@ var bundleRepoPath = bundles.RepoPath
 // bundleCatalogPath is the assembled curated catalog (OMAHAB_CATALOG on
 // the installed system); overridable in tests.
 var bundleCatalogPath = os.Getenv("OMAHAB_CATALOG")
+
+// stableCatalogPath and stableNativeLayoutPath are the declarative links
+// nix/module.nix writes into /etc/omahab: an interactive root shell (the
+// recovery console) has none of omahabd's service-only environment, so
+// `omahab recovery apply` resolves the installed native catalog and
+// layout through them when the env vars are unset. nix/module.nix keeps
+// them pointed at the exact store paths the daemon services use.
+const (
+	stableCatalogPath      = "/etc/omahab/catalog/catalog.json"
+	stableNativeLayoutPath = "/etc/omahab/native-layout.json"
+)
 
 // newBundleCmd builds `omahab bundle`.
 func newBundleCmd() *cobra.Command {
@@ -65,6 +75,37 @@ func newBundleSvc() (*bundles.Service, error) {
 	return bundles.NewService(bundleRepoPath, nil, nil)
 }
 
+// mergeBundlesForCLI is the merged-view loader shared by commands that
+// need the committed merged catalog.
+func mergeBundlesForCLI(ctx context.Context) (*bundles.Merged, error) {
+	return bundles.LoadMerged(ctx, bundleCatalogPath, bundleRepoPath)
+}
+
+// mergeCustomDocsCLI is the apply-time merge function: it loads the
+// curated catalog fresh and merges the given custom docs through the
+// full collision and custom-contract validation.
+func mergeCustomDocsCLI(ctx context.Context, docs []bundles.CustomDoc) (*bundles.Merged, error) {
+	curated, err := loadCuratedCatalogCLI()
+	if err != nil {
+		return nil, err
+	}
+	return bundles.Merge(curated, docs)
+}
+
+func loadCuratedCatalogCLI() (*apps.Catalog, error) {
+	if bundleCatalogPath == "" {
+		return &apps.Catalog{}, nil
+	}
+	c, err := apps.LoadCatalogFile(bundleCatalogPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &apps.Catalog{}, nil
+		}
+		return nil, err
+	}
+	return c, nil
+}
+
 func newBundleListCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
@@ -97,6 +138,13 @@ func newBundleListCmd() *cobra.Command {
 	}
 }
 
+// validateIntendedCLI runs the full custom + collision and module
+// validation over the intended dirty worktree so an invalid bundle fails
+// before it can reach the committed catalog (and from there a build).
+func validateIntendedCLI(ctx context.Context, svc *bundles.Service) error {
+	return svc.ValidateIntended(ctx, mergeCustomDocsCLI)
+}
+
 func newBundleAddCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "add <dir>",
@@ -112,6 +160,13 @@ func newBundleAddCmd() *cobra.Command {
 			}
 			id, err := svc.Add(cmd.Context(), args[0])
 			if err != nil {
+				return handleFailure(err)
+			}
+			// The full custom contract (collisions against the merged
+			// catalog, port range, module presence) must hold before the
+			// add is committed: an invalid definition must never reach
+			// the committed catalog.
+			if err := validateIntendedCLI(cmd.Context(), svc); err != nil {
 				return handleFailure(err)
 			}
 			if commit, err := svc.Commit(cmd.Context(), "omahab bundle add "+id); err != nil && commit == "" {
@@ -163,12 +218,12 @@ func newBundleApplyCmd() *cobra.Command {
 			if flake == "" {
 				flake = filepath.Join(canonicalFlakeDir, "#omahab-installed")
 			}
-			res, err := runBundleApply(cmd.Context(), flake)
-			if flagJSON {
-				return printJSON(res)
-			}
+			res, err := runBundleApply(cmd.Context(), flake, nil)
 			if err != nil {
 				return handleFailure(err)
+			}
+			if flagJSON {
+				return printJSON(res)
 			}
 			fmt.Println("Bundles applied; system healthy.")
 			return nil
@@ -179,9 +234,14 @@ func newBundleApplyCmd() *cobra.Command {
 	return cmd
 }
 
+// osGeteuid is overridable in tests (the staged path requires root).
+var osGeteuid = os.Geteuid
+
 // runBundleApply is the single apply flow shared by the interactive CLI
-// and the staged (unit-run) path.
-func runBundleApply(ctx context.Context, flake string) (*bundles.ApplyResult, error) {
+// and the staged (unit-run) path. skipHealth lists bundle IDs whose
+// post-switch health probes are skipped; only the trusted staged
+// handoff (restore-paused scopes) ever supplies it.
+func runBundleApply(ctx context.Context, flake string, skipHealth []string) (*bundles.ApplyResult, error) {
 	svc, err := newBundleSvc()
 	if err != nil {
 		return nil, err
@@ -189,23 +249,32 @@ func runBundleApply(ctx context.Context, flake string) (*bundles.ApplyResult, er
 	if err := svc.EnsureRepo(ctx); err != nil {
 		return nil, err
 	}
-	m, err := bundles.LoadMerged(ctx, bundleCatalogPath, bundleRepoPath)
-	if err != nil {
-		return nil, err
+	probe := probeCustomBundleHealth
+	if len(skipHealth) > 0 {
+		skip := make(map[string]bool, len(skipHealth))
+		for _, id := range skipHealth {
+			skip[strings.TrimSpace(id)] = true
+		}
+		probe = func(ctx context.Context, id, revision string) error {
+			if skip[id] {
+				return nil
+			}
+			return probeCustomBundleHealth(ctx, id, revision)
+		}
 	}
 	return svc.Apply(ctx, flake, bundles.ApplyHooks{
-		Build: func(ctx context.Context, flakeArg, repo string) ([]byte, error) {
-			full := append([]string{"build", "--flake", flakeArg}, bundles.OverrideInputArg()...)
+		Build: func(ctx context.Context, flakeArg, repo, rev string) ([]byte, error) {
+			full := append([]string{"build", "--flake", flakeArg}, bundles.OverrideInputArgs(repo, rev)...)
 			return exec.Command("nixos-rebuild", full...).CombinedOutput()
 		},
-		Switch: func(ctx context.Context, flakeArg, repo string) ([]byte, error) {
-			full := append([]string{"switch", "--flake", flakeArg}, bundles.OverrideInputArg()...)
+		Switch: func(ctx context.Context, flakeArg, repo, rev string) ([]byte, error) {
+			full := append([]string{"switch", "--flake", flakeArg}, bundles.OverrideInputArgs(repo, rev)...)
 			return exec.Command("nixos-rebuild", full...).CombinedOutput()
 		},
 		HealthGate:        waitPanelHealthy,
 		Rollback:          func() error { _, err := runNixosRebuildRollbackFunc(); return err },
-		ProbeBundleHealth: probeCustomBundleHealth,
-	}, m)
+		ProbeBundleHealth: probe,
+	}, mergeCustomDocsCLI)
 }
 
 // runBundleApplyStaged applies the bundle operation staged by the panel:
@@ -214,16 +283,16 @@ func runBundleApply(ctx context.Context, flake string) (*bundles.ApplyResult, er
 // runBundleApply flow, then records the outcome next to the journal so the
 // daemon (restarted by the switch) converges the operation on poll.
 func runBundleApplyStaged(ctx context.Context) error {
-	if os.Geteuid() != 0 {
+	if osGeteuid() != 0 {
 		return fmt.Errorf("--apply-staged requires root (the omahab-bundle-apply unit runs it)")
 	}
-	opID, err := readBundleApplyHandoffCLI()
+	opID, skipHealth, err := readBundleApplyHandoffCLI()
 	if err != nil {
 		return err
 	}
 	stateDir := defaultStateDir()
 	jPath := filepath.Join(stateDir, "bundle-apply-operations", opID, "journal.json")
-	res, applyErr := runBundleApply(ctx, filepath.Join(canonicalFlakeDir, "#omahab-installed"))
+	res, applyErr := runBundleApply(ctx, filepath.Join(canonicalFlakeDir, "#omahab-installed"), skipHealth)
 	status, detail := "completed", ""
 	if res != nil && res.Detail != "" {
 		detail = res.Detail
@@ -231,7 +300,7 @@ func runBundleApplyStaged(ctx context.Context) error {
 	switch {
 	case applyErr == nil:
 		// status stays completed
-	case strings.Contains(applyErr.Error(), "rollback"):
+	case res != nil && res.RolledBack:
 		status = "rolled_back"
 		detail = applyErr.Error()
 	default:
@@ -260,6 +329,9 @@ func runBundleApplyStaged(ctx context.Context) error {
 		}
 	}
 	if flagJSON {
+		if applyErr != nil {
+			return handleFailure(applyErr)
+		}
 		return printJSON(map[string]string{"operation": opID, "status": status})
 	}
 	fmt.Printf("bundle apply %s (operation %s)\n", status, opID)
@@ -270,27 +342,29 @@ func runBundleApplyStaged(ctx context.Context) error {
 }
 
 // readBundleApplyHandoffCLI consumes (and removes) the tmpfs handoff
-// holding the staged operation id.
-func readBundleApplyHandoffCLI() (string, error) {
+// holding the staged operation id and the optional trusted skip_health
+// bundle IDs (restore-paused scopes only).
+func readBundleApplyHandoffCLI() (string, []string, error) {
 	path := "/run/omahab/bundle-apply"
 	if v := strings.TrimSpace(os.Getenv("OMAHAB_RUNTIME_DIR")); v != "" {
 		path = filepath.Join(v, "bundle-apply")
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return "", fmt.Errorf("read bundle apply handoff %s: %w (stage an apply from the panel first)", path, err)
+		return "", nil, fmt.Errorf("read bundle apply handoff %s: %w (stage an apply from the panel first)", path, err)
 	}
 	_ = os.Remove(path)
 	var h struct {
-		OperationID string `json:"operation_id"`
+		OperationID string   `json:"operation_id"`
+		SkipHealth  []string `json:"skip_health,omitempty"`
 	}
 	if err := json.Unmarshal(raw, &h); err != nil {
-		return "", fmt.Errorf("parse bundle apply handoff: %w", err)
+		return "", nil, fmt.Errorf("parse bundle apply handoff: %w", err)
 	}
 	if strings.TrimSpace(h.OperationID) == "" {
-		return "", fmt.Errorf("bundle apply handoff has no operation_id")
+		return "", nil, fmt.Errorf("bundle apply handoff has no operation_id")
 	}
-	return strings.TrimSpace(h.OperationID), nil
+	return strings.TrimSpace(h.OperationID), h.SkipHealth, nil
 }
 
 // writeBundleApplyOutcome records the CLI outcome marker the daemon
@@ -314,34 +388,21 @@ var (
 	panelTokenPath = apiTokenPath
 )
 
-// probeCustomBundleHealth runs one bundle health check via the omahabd
-// API surface on the loopback panel (single probe, no grace: the unit
-// already started during switch). A request/decode failure, no application
-// for the bundle, or any of its applications not reporting health "healthy"
-// fails the probe so the apply health-gate rolls the generation back.
-func probeCustomBundleHealth(ctx context.Context, id string) error {
+// probeCustomBundleHealth runs one bundle health probe through the
+// omahabd API surface on the loopback panel: the daemon probes the
+// currently configured service for the bundle (no application database
+// row, no stored health) and answers 204 only when the fresh probe
+// succeeds. Any non-2xx fails the probe so the apply health-gate rolls
+// the generation back.
+func probeCustomBundleHealth(ctx context.Context, id, revision string) error {
 	raw, err := os.ReadFile(panelTokenPath)
 	if err != nil {
 		return fmt.Errorf("probe bundle %q: read panel token: %w", id, err)
 	}
 	c := apiclient.New(panelAPIBase, strings.TrimSpace(string(raw)))
 	c.HTTPClient.Timeout = 10 * time.Second
-	all, err := c.ListApplications(ctx)
-	if err != nil {
+	if err := c.ProbeBundleHealth(ctx, id, revision); err != nil {
 		return fmt.Errorf("probe bundle %q: %w", id, err)
-	}
-	found := false
-	for _, app := range all {
-		if app.BundleID != id {
-			continue
-		}
-		found = true
-		if app.Health != domain.HealthHealthy {
-			return fmt.Errorf("probe bundle %q: application %q reports health %q", id, app.ID, app.Health)
-		}
-	}
-	if !found {
-		return fmt.Errorf("probe bundle %q: no application found for bundle", id)
 	}
 	return nil
 }
@@ -374,10 +435,3 @@ func newBundleStatusCmd() *cobra.Command {
 		},
 	}
 }
-
-// mergeBundlesForCLI is a helper for other commands needing the merged view.
-func mergeBundlesForCLI(ctx context.Context) (*bundles.Merged, error) {
-	return bundles.LoadMerged(ctx, bundleCatalogPath, bundleRepoPath)
-}
-
-var _ = apps.Bundle{} // keep import while the command set grows

@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/omahab/omahab/internal/bundles"
 )
 
 // Paths for upgrade. Vars so tests can override to temp dirs.
@@ -233,13 +235,31 @@ func defaultRunNixosRebuildSwitch(flakeArg string) ([]byte, error) {
 }
 
 // bundlesOverrideArgs returns the nixos-rebuild flag set pinning the
-// `bundles` flake input to the committed custom-bundles repo, or nil when
-// the repo does not exist (fresh installs before any custom bundle).
+// `bundles` flake input to the committed custom-bundles repo at its
+// exact HEAD commit, or nil when the repo does not exist (fresh
+// installs before any custom bundle). Pinning the revision matters as
+// much here as in `omahab bundle apply`: without it a commit landing
+// between evaluation and activation would switch an unvalidated tree.
 func bundlesOverrideArgs() []string {
-	if _, err := fsStat("/var/lib/omahab/bundles"); err != nil {
+	if _, err := fsStat(bundleRepoPath); err != nil {
 		return nil
 	}
-	return []string{"--override-input", "bundles", "git+file:///var/lib/omahab/bundles"}
+	rev, err := bundlesRevParseHead()
+	if err != nil || rev == "" {
+		// No commit yet (fresh repo) or a broken HEAD: pinning fails
+		// closed rather than evaluating a floating ref.
+		return nil
+	}
+	return bundles.OverrideInputArgs(bundleRepoPath, rev)
+}
+
+// bundlesRevParseHead reads the custom-bundles repo HEAD commit.
+func bundlesRevParseHead() (string, error) {
+	out, err := exec.Command("git", "-C", bundleRepoPath, "rev-parse", "HEAD").Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 func defaultRunNixosRebuildRollback() ([]byte, error) {

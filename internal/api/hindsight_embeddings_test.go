@@ -102,7 +102,11 @@ func (f *embeddingFakeWorker) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 
 func startEmbeddingFake(t *testing.T, fake *embeddingFakeWorker) string {
 	t.Helper()
-	dir := t.TempDir()
+	dir, err := os.MkdirTemp(os.TempDir(), "embedding-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	sock := filepath.Join(dir, "embedding.sock")
 	_ = os.Remove(sock)
 	ln, err := net.Listen("unix", sock)
@@ -186,9 +190,9 @@ func TestHindsightEmbeddings_ValidFloatAndBase64(t *testing.T) {
 		Object string `json:"object"`
 		Model  string `json:"model"`
 		Data   []struct {
-			Object    string      `json:"object"`
-			Index     int         `json:"index"`
-			Embedding []float32   `json:"embedding"`
+			Object    string    `json:"object"`
+			Index     int       `json:"index"`
+			Embedding []float32 `json:"embedding"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(floatRec.Body.Bytes(), &floatResp); err != nil {
@@ -248,16 +252,16 @@ func TestHindsightEmbeddings_RejectsBadRequests(t *testing.T) {
 	fake := &embeddingFakeWorker{}
 	srv, token := newHindsightTestSetup(t, fake)
 	cases := map[string]string{
-		"wrong model":      `{"model":"omahab-embed-worldwide","input":"hi"}`,
-		"null input":       `{"model":"omahab-embed-english","input":null}`,
-		"token ids":        `{"model":"omahab-embed-english","input":[1,2,3]}`,
-		"bad dims":         `{"model":"omahab-embed-english","input":"hi","dimensions":1024}`,
-		"bad format":       `{"model":"omahab-embed-english","input":"hi","encoding_format":"hex"}`,
-		"unknown field":    `{"model":"omahab-embed-english","input":"hi","foo":1}`,
-		"empty string":     `{"model":"omahab-embed-english","input":""}`,
-		"empty array":      `{"model":"omahab-embed-english","input":[]}`,
-		"too many":         `{"model":"omahab-embed-english","input":["a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a"]}`,
-		"missing model":    `{"input":"hi"}`,
+		"wrong model":   `{"model":"omahab-embed-worldwide","input":"hi"}`,
+		"null input":    `{"model":"omahab-embed-english","input":null}`,
+		"token ids":     `{"model":"omahab-embed-english","input":[1,2,3]}`,
+		"bad dims":      `{"model":"omahab-embed-english","input":"hi","dimensions":1024}`,
+		"bad format":    `{"model":"omahab-embed-english","input":"hi","encoding_format":"hex"}`,
+		"unknown field": `{"model":"omahab-embed-english","input":"hi","foo":1}`,
+		"empty string":  `{"model":"omahab-embed-english","input":""}`,
+		"empty array":   `{"model":"omahab-embed-english","input":[]}`,
+		"too many":      `{"model":"omahab-embed-english","input":["a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a"]}`,
+		"missing model": `{"input":"hi"}`,
 	}
 	for name, body := range cases {
 		if rec := doHindsightPost(t, srv, token, body); rec.Code != http.StatusBadRequest {

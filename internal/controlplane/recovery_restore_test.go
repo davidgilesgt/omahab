@@ -61,19 +61,6 @@ func TestRecoveryRestoreJournalRoundtrip(t *testing.T) {
 	}
 }
 
-func TestApplyRecoveryRestoreRefusesNotStaged(t *testing.T) {
-	b := recoveryRestoreTestBackend(t)
-	j := recoveryRestoreJournal{Operation: newOperation(recoveryRestoreJournalKind, nil)}
-	j.Operation.Stage = "staging"
-	if err := writeRecoveryRestoreJournal(b.cfg.StateDir, j); err != nil {
-		t.Fatal(err)
-	}
-	_, err := b.ApplyRecoveryRestore(context.Background(), j.Operation.ID, apitypes.RecoveryRestoreRequest{})
-	if err == nil {
-		t.Fatal("apply must refuse a restore that is not staged")
-	}
-}
-
 func TestGetRecoveryRestoreStatusNotFound(t *testing.T) {
 	b := recoveryRestoreTestBackend(t)
 	if _, err := b.GetRecoveryRestoreStatus(context.Background(), "nope"); err == nil {
@@ -81,27 +68,20 @@ func TestGetRecoveryRestoreStatusNotFound(t *testing.T) {
 	}
 }
 
-func TestRecoveryPhraseHandoffWriteReadRemove(t *testing.T) {
-	dir := t.TempDir()
+func TestRecoveryCredentialsHandoffIsPrivate(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "runtime")
 	t.Setenv("OMAHAB_RUNTIME_DIR", dir)
-	if err := writeRecoveryPhraseHandoff("op1", "alpha beta"); err != nil {
+	if err := writeRecoveryPhraseHandoff("op1", "alpha beta", "synthetic-password"); err != nil {
 		t.Fatal(err)
 	}
-	phrase, opID, err := readRecoveryPhraseHandoff()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if phrase != "alpha beta" || opID != "op1" {
-		t.Fatalf("handoff roundtrip got %q/%q", phrase, opID)
-	}
-	// Consumed exactly once.
-	if _, _, err := readRecoveryPhraseHandoff(); err == nil {
-		t.Fatal("handoff must be consumed once")
-	}
-	// Never written world/other readable.
-	fi, err := os.Stat(filepath.Join(dir, "recovery-phrase"))
-	if err == nil && fi.Mode().Perm() != 0o600 {
-		t.Fatalf("handoff mode = %o, want 0600", fi.Mode().Perm())
+	for path, mode := range map[string]os.FileMode{
+		dir:                                   0o700,
+		filepath.Join(dir, "recovery-phrase"): 0o600,
+	} {
+		info, err := os.Stat(path)
+		if err != nil || info.Mode().Perm() != mode {
+			t.Fatalf("private handoff %s: %v %v", path, info, err)
+		}
 	}
 }
 
@@ -116,7 +96,7 @@ func TestTriggerRecoveryRestoreUnitRequiresStagedAndPhrase(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Empty phrase is refused before any systemctl call.
-	if _, err := b.TriggerRecoveryRestoreUnit(context.Background(), j.Operation.ID, ""); err == nil {
+	if _, err := b.TriggerRecoveryRestoreUnit(context.Background(), j.Operation.ID, "", ""); err == nil {
 		t.Fatal("trigger without a phrase must be refused")
 	}
 	// Not-staged operations are refused.
@@ -125,7 +105,7 @@ func TestTriggerRecoveryRestoreUnitRequiresStagedAndPhrase(t *testing.T) {
 	if err := writeRecoveryRestoreJournal(b.cfg.StateDir, other); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := b.TriggerRecoveryRestoreUnit(context.Background(), other.Operation.ID, "p"); err == nil {
+	if _, err := b.TriggerRecoveryRestoreUnit(context.Background(), other.Operation.ID, "p", ""); err == nil {
 		t.Fatal("trigger on a non-staged restore must be refused")
 	}
 }

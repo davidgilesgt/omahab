@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/omahab/omahab/internal/apitypes"
@@ -28,6 +30,8 @@ import (
 // recoveryRestoreJournalKind names the journal family for offline recovery
 // restores so the shared operation polling surface can observe progress.
 const recoveryRestoreJournalKind = "recovery-restore"
+
+var recoveryDispatchMu sync.Mutex
 
 // RecoveryRestoreStatus is the observable progress of one offline restore.
 type RecoveryRestoreStatus = apitypes.RecoveryRestoreStatus
@@ -239,6 +243,10 @@ func (b *Backend) PrepareRecoveryRestore(ctx context.Context, req apitypes.Recov
 			return RecoveryRestoreStatus{}, err
 		}
 	}
+	// The phrase-derived repository password resolves BEFORE any source
+	// validation touches the repository: Hetzner-style locations have no
+	// explicit password, and validating the location without the derived
+	// credential would reject the exact repository the phrase opens.
 	src, err := deriveRecoverySource(req, seed)
 	if err != nil {
 		return RecoveryRestoreStatus{}, translateError(err)
@@ -248,7 +256,7 @@ func (b *Backend) PrepareRecoveryRestore(ctx context.Context, req apitypes.Recov
 	}
 	op := newOperation(recoveryRestoreJournalKind, nil)
 	op.Status = OpRunning
-	op.Stage = "listing"
+	op.Stage = recoveryStageListing
 	staging := filepath.Join(recoveryStagingDir(b.cfg.StateDir), op.ID)
 	j := recoveryRestoreJournal{
 		Operation: op,
@@ -274,41 +282,15 @@ func (b *Backend) PrepareRecoveryRestore(ctx context.Context, req apitypes.Recov
 		return b.failRecoveryRestore(&j, "select snapshot: "+err.Error())
 	}
 	j.Source.SnapshotID = snap.ID
-	j.Operation.Stage = "staging"
-	_ = writeRecoveryRestoreJournal(b.cfg.StateDir, j)
-	if err := backups.StageRecoverySnapshot(ctx, recoveryRunner(b.cfg.StateDir), src, snap.ID, staging); err != nil {
-		return b.failRecoveryRestore(&j, "extract snapshot: "+err.Error())
+	rt := offlineRecoveryRuntime{
+		stateDir:   b.cfg.StateDir,
+		dataDir:    b.cfg.DataDir,
+		catalog:    b.cfg.CatalogPath,
+		layoutPath: b.cfg.NativeLayoutPath,
 	}
-	rep, err := backups.ValidateStaging(ctx, staging)
-	if err != nil {
-		return b.failRecoveryRestore(&j, "staging validation: "+err.Error())
-	}
-	_ = rep
-	manifest, err := backups.ServerConfigManifest(staging)
-	if err != nil {
+	if err := offlineStageAndValidate(ctx, rt, recoveryRunner(b.cfg.StateDir), src, snap.ID, staging, &j); err != nil {
 		return b.failRecoveryRestore(&j, err.Error())
 	}
-	if err := backups.CheckRecoveryFingerprint(manifest, fp); err != nil {
-		return b.failRecoveryRestore(&j, err.Error())
-	}
-	scopes := j.Source.Scopes
-	if len(scopes) == 0 {
-		scopes = manifest.ScopeNames()
-	}
-	if err := checkRestoreScopes(manifest, scopes); err != nil {
-		return b.failRecoveryRestore(&j, err.Error())
-	}
-	if _, err := backups.PlanServerConfigSwap(staging, b.cfg.StateDir, manifest); err != nil {
-		return b.failRecoveryRestore(&j, "swap plan: "+err.Error())
-	}
-	j.Operation.Stage = "staged"
-	j.Operation.Status = OpCompleted
-	j.Operation.Progress = 100
-	if detail := restoreReleaseRefNote(manifest); detail != "" {
-		j.Operation.Preview = detail
-	}
-	j.Manifest = &manifest
-	_ = writeRecoveryRestoreJournal(b.cfg.StateDir, j)
 	return j.Operation, nil
 }
 
@@ -328,63 +310,6 @@ func restoreReleaseRefNote(manifest backups.SnapshotManifest) string {
 	return ""
 }
 
-// ApplyRecoveryRestore performs the offline swap half. It must run with
-// omahabd stopped (the CLI refuses otherwise; the omahab-restore unit
-// stops it). The phrase is re-validated against the staged snapshot
-// before any live path changes: fingerprint mismatch refuses the swap.
-func (b *Backend) ApplyRecoveryRestore(ctx context.Context, opID string, req apitypes.RecoveryRestoreRequest) (RecoveryRestoreStatus, error) {
-	j, err := loadRecoveryRestoreJournal(b.cfg.StateDir, strings.TrimSpace(opID))
-	if err != nil {
-		return RecoveryRestoreStatus{}, err
-	}
-	if j.Operation.Status != OpCompleted || j.Operation.Stage != "staged" {
-		return RecoveryRestoreStatus{}, translateError(fmt.Errorf("%w: recovery restore %q is not staged (stage %q)", store.ErrConflict, opID, j.Operation.Stage))
-	}
-	seed, err := phraseSeedFromRequest(req.Phrase)
-	if err != nil {
-		return RecoveryRestoreStatus{}, err
-	}
-	fp := recoverySeedFingerprint(seed)
-	if !strings.EqualFold(fp, j.Source.PhraseFP) {
-		return RecoveryRestoreStatus{}, translateError(fmt.Errorf("%w: phrase fingerprint changed between staging and apply; re-stage with the original phrase", store.ErrValidation))
-	}
-	manifest, err := backups.ServerConfigManifest(j.StagingDir)
-	if err != nil {
-		return b.failRecoveryRestore(&j, err.Error())
-	}
-	if err := backups.CheckRecoveryFingerprint(manifest, fp); err != nil {
-		return b.failRecoveryRestore(&j, err.Error())
-	}
-	// Unwrap the master key from the staged kit before touching anything.
-	master, err := unwrapStagedMasterKey(j.StagingDir, b.cfg.StateDir, seed)
-	if err != nil {
-		return b.failRecoveryRestore(&j, err.Error())
-	}
-	defer zeroBytes(master[:])
-	plan, err := backups.PlanServerConfigSwap(j.StagingDir, b.cfg.StateDir, manifest)
-	if err != nil {
-		return b.failRecoveryRestore(&j, "swap plan: "+err.Error())
-	}
-	j.Operation.Stage = "swapping"
-	_ = writeRecoveryRestoreJournal(b.cfg.StateDir, j)
-	rollback, cleanup, err := backups.ApplyServerConfigSwap(ctx, plan, master[:])
-	if err != nil {
-		j.Operation.Stage = "rolling_back"
-		_ = writeRecoveryRestoreJournal(b.cfg.StateDir, j)
-		if rbErr := rollback(); rbErr != nil {
-			return b.failRecoveryRestore(&j, fmt.Sprintf("swap failed (%v) and rollback failed (%v); state may be partially swapped — inspect %s", err, rbErr, j.StagingDir))
-		}
-		return b.failRecoveryRestore(&j, "swap failed and rolled back: "+err.Error())
-	}
-	defer cleanup()
-	j.Operation.Stage = "completed"
-	j.Operation.Status = OpCompleted
-	j.Operation.Progress = 100
-	b.markRestoreSetupState("completed", j.Operation.ID, "")
-	_ = writeRecoveryRestoreJournal(b.cfg.StateDir, j)
-	return j.Operation, nil
-}
-
 // SkipRecoveryRestore records the operator's explicit "start a new server"
 // choice: the setup checklist's restore check turns skipped. It never
 // touches staged restores or journals.
@@ -394,43 +319,6 @@ func (b *Backend) SkipRecoveryRestore(ctx context.Context) error {
 	}
 	b.markRestoreSetupState("skipped", "", "")
 	return nil
-}
-
-// ApplyStagedRecoveryRestore is the entry point for the omahab-restore
-// oneshot unit and `omahab recovery apply --apply-staged`: it reads the
-// tmpfs phrase handoff written at trigger time, applies the staged swap,
-// and removes the handoff first thing regardless of outcome. omahabd is
-// expected to be stopped by the unit (ExecStartPre).
-func (b *Backend) ApplyStagedRecoveryRestore(ctx context.Context, opID string) (RecoveryRestoreStatus, error) {
-	phrase, stagedOpID, err := readRecoveryPhraseHandoff()
-	if err != nil {
-		return RecoveryRestoreStatus{}, err
-	}
-	if opID == "" {
-		opID = stagedOpID
-	}
-	op, err := b.ApplyRecoveryRestore(ctx, opID, apitypes.RecoveryRestoreRequest{Phrase: phrase})
-	return op, err
-}
-
-// readRecoveryPhraseHandoff consumes (and removes) the tmpfs phrase file.
-func readRecoveryPhraseHandoff() (phrase, opID string, err error) {
-	path := recoveryPhraseHandoffPath()
-	raw, rerr := os.ReadFile(path)
-	// Remove first: the phrase must never survive the read, success or
-	// not.
-	_ = os.Remove(path)
-	if rerr != nil {
-		return "", "", fmt.Errorf("%w: recovery phrase handoff missing (expected %s from the trigger)", store.ErrNotFound, path)
-	}
-	var h struct {
-		OperationID string `json:"operation_id"`
-		Phrase      string `json:"phrase"`
-	}
-	if err := json.Unmarshal(raw, &h); err != nil {
-		return "", "", fmt.Errorf("%w: parse phrase handoff: %v", store.ErrValidation, err)
-	}
-	return h.Phrase, h.OperationID, nil
 }
 
 // GetRecoveryRestoreStatus polls one offline restore by operation id.
@@ -443,39 +331,63 @@ func (b *Backend) GetRecoveryRestoreStatus(ctx context.Context, opID string) (Re
 }
 
 // TriggerRecoveryRestoreUnit is the daemon-side handoff for the setup UI:
-// the restore has been staged and validated; this starts the
-// omahab-restore oneshot unit (defined in nix/module.nix) which stops
-// omahabd, applies the swap as root, and restarts omahabd. Progress is
-// observable afterwards through GetRecoveryRestoreStatus once the daemon
-// is back.
-func (b *Backend) TriggerRecoveryRestoreUnit(ctx context.Context, opID, phrase string) (RecoveryRestoreStatus, error) {
+// the restore has been staged and validated; this writes the tmpfs phrase
+// handoff, persists the dispatched state, and starts the omahab-restore
+// oneshot unit NONBLOCKING (systemctl --no-block). The unit stops
+// omahabd, runs the shared offline executor as root, and restarts
+// omahabd; progress stays observable through GetRecoveryRestoreStatus
+// after the daemon is back. Persisting the started state BEFORE the
+// dispatch means a lost API response (the unit stops this daemon) never
+// hides an in-flight restore from a reload.
+func (b *Backend) TriggerRecoveryRestoreUnit(ctx context.Context, opID, phrase, password string) (RecoveryRestoreStatus, error) {
+	recoveryDispatchMu.Lock()
+	defer recoveryDispatchMu.Unlock()
 	j, err := loadRecoveryRestoreJournal(b.cfg.StateDir, strings.TrimSpace(opID))
 	if err != nil {
 		return RecoveryRestoreStatus{}, err
 	}
-	if j.Operation.Stage != "staged" || j.Operation.Status != OpCompleted {
-		return RecoveryRestoreStatus{}, translateError(fmt.Errorf("%w: recovery restore %q is not staged", store.ErrConflict, opID))
+	if j.Operation.Stage == recoveryStageCompleted && j.Operation.Status == OpCompleted {
+		return j.Operation, nil
 	}
-	// Phrase handoff: the oneshot unit runs as root after this daemon
-	// stops, so the phrase travels through a 0600 file on /run (tmpfs —
-	// RAM-backed, never disk) that the apply step reads and removes
-	// first thing. The journal never stores it. This is a deliberate
-	// exception to "phrase in memory only": root on the host could read
-	// the file during the apply window. Root already has equivalent
-	// access to master.key and control.db on a running host (DESIGN
-	// secret-storage boundary), so this grants no new capability.
-	if err := writeRecoveryPhraseHandoff(j.Operation.ID, phrase); err != nil {
+	if !(j.Operation.Stage == recoveryStageStaged && j.Operation.Status == OpCompleted) && !j.Operation.CanResume {
+		return RecoveryRestoreStatus{}, translateError(fmt.Errorf("%w: recovery restore %q cannot resume; stage it again", store.ErrConflict, opID))
+	}
+	if strings.TrimSpace(phrase) == "" {
+		return RecoveryRestoreStatus{}, translateError(fmt.Errorf("%w: recovery phrase is required to apply the staged restore", store.ErrValidation))
+	}
+	unitState, err := exec.CommandContext(ctx, "systemctl", "show", "omahab-restore.service", "--property=ActiveState", "--value").Output()
+	if err != nil {
 		return RecoveryRestoreStatus{}, translateError(err)
 	}
-	out, err := execCommand("systemctl", "start", "omahab-restore.service")
+	switch strings.TrimSpace(string(unitState)) {
+	case "active", "activating", "reloading", "deactivating":
+		return RecoveryRestoreStatus{}, translateError(fmt.Errorf("%w: recovery restore unit is already running", store.ErrConflict))
+	}
+	// The phrase and optional password pass through a root-only tmpfs
+	// handoff because the unit starts after this daemon stops.
+	// The CLI consumes the file first. Neither secret enters the journal.
+	// This is an exception to memory-only handling: root can read the file
+	// during the apply window. Root already has equivalent
+	// access to master.key and control.db on a running host (DESIGN
+	// secret-storage boundary), so this grants no new capability.
+	if err := writeRecoveryPhraseHandoff(j.Operation.ID, phrase, password); err != nil {
+		return RecoveryRestoreStatus{}, translateError(err)
+	}
+	// Save the pending operation before dispatch can stop this daemon.
+	j.Operation.Status = OpPending
+	j.Operation.CanResume = true
+	if err := writeRecoveryRestoreJournal(b.cfg.StateDir, j); err != nil {
+		_ = os.Remove(recoveryPhraseHandoffPath())
+		return RecoveryRestoreStatus{}, translateError(err)
+	}
+	out, err := exec.Command("systemctl", "--no-block", "start", "omahab-restore.service").CombinedOutput()
 	if err != nil {
 		_ = os.Remove(recoveryPhraseHandoffPath())
-		return RecoveryRestoreStatus{}, translateError(fmt.Errorf("start omahab-restore.service: %v: %s", err, strings.TrimSpace(out)))
+		j.Operation.Status = OpFailed
+		j.Operation.Error = fmt.Sprintf("start omahab-restore.service: %v: %s", err, strings.TrimSpace(string(out)))
+		_ = writeRecoveryRestoreJournal(b.cfg.StateDir, j)
+		return RecoveryRestoreStatus{}, translateError(fmt.Errorf("%s", j.Operation.Error))
 	}
-	j.Operation.Stage = "unit-started"
-	j.Operation.Status = OpRunning
-	j.Operation.CanResume = false
-	_ = writeRecoveryRestoreJournal(b.cfg.StateDir, j)
 	return j.Operation, nil
 }
 
@@ -493,15 +405,16 @@ func recoveryPhraseHandoffPath() string {
 	return "/run/omahab/recovery-phrase"
 }
 
-func writeRecoveryPhraseHandoff(opID, phrase string) error {
-	if strings.TrimSpace(phrase) == "" {
-		return fmt.Errorf("%w: recovery phrase is required to apply the staged restore", store.ErrValidation)
-	}
+func writeRecoveryPhraseHandoff(opID, phrase, password string) error {
 	path := recoveryPhraseHandoffPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create runtime dir: %w", err)
 	}
-	body, err := json.Marshal(map[string]string{"operation_id": opID, "phrase": phrase})
+	body, err := json.Marshal(struct {
+		OperationID string `json:"operation_id"`
+		Phrase      string `json:"phrase"`
+		Password    string `json:"password,omitempty"`
+	}{OperationID: opID, Phrase: phrase, Password: password})
 	if err != nil {
 		return err
 	}
@@ -515,11 +428,17 @@ func writeRecoveryPhraseHandoff(opID, phrase string) error {
 // daemon restart the swap itself causes. It never holds the phrase, seed,
 // or repository password — only the fingerprint and paths.
 type recoveryRestoreJournal struct {
-	Operation  Operation                 `json:"operation"`
-	Source     recoveryJournalSource     `json:"source"`
-	StagingDir string                    `json:"staging_dir"`
-	Manifest   *backups.SnapshotManifest `json:"manifest,omitempty"`
-	Error      string                    `json:"error,omitempty"`
+	Operation  Operation             `json:"operation"`
+	Source     recoveryJournalSource `json:"source"`
+	StagingDir string                `json:"staging_dir"`
+	// BundleApplyID is the bundle-apply operation this restore staged to
+	// activate snapshot-carried custom bundle definitions. It is
+	// persisted before the omahab-bundle-apply unit starts so an
+	// interruption converges the exact apply instead of staging a
+	// second one.
+	BundleApplyID string                    `json:"bundle_apply_id,omitempty"`
+	Manifest      *backups.SnapshotManifest `json:"manifest,omitempty"`
+	Error         string                    `json:"error,omitempty"`
 }
 
 type recoveryJournalSource struct {

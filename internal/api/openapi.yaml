@@ -336,6 +336,7 @@ paths:
               required: [phrase]
               properties:
                 phrase: { type: string, description: "24-word recovery phrase; re-validated against the staged snapshot's fingerprint" }
+                password: { type: string, description: "Optional generic repository password; held only in memory and the consumed root-only tmpfs handoff, never journaled" }
       responses:
         '202':
           description: Unit started
@@ -1139,6 +1140,7 @@ paths:
       responses:
         '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/BundleAdmin' } } } }
         '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
 
   /api/v1/bundles/{id}:
     parameters: [{ $ref: '#/components/parameters/IdPath' }]
@@ -1150,6 +1152,7 @@ paths:
         '204': { description: Removed }
         '400': { $ref: '#/components/responses/BadRequest' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
 
   /api/v1/bundles/{id}/disable:
     parameters: [{ $ref: '#/components/parameters/IdPath' }]
@@ -1160,29 +1163,59 @@ paths:
         '200': { description: Disabled }
         '400': { $ref: '#/components/responses/BadRequest' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
 
   /api/v1/bundles/{id}/enable:
     parameters: [{ $ref: '#/components/parameters/IdPath' }]
     post:
       summary: Enable a custom bundle
+      description: Validates the enabled catalog for id, unit, and port collisions before removing the disabled marker.
       operationId: enableBundle
       responses:
         '200': { description: Enabled }
         '400': { $ref: '#/components/responses/BadRequest' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/bundles/{id}/health:
+    parameters: [{ $ref: '#/components/parameters/IdPath' }]
+    post:
+      summary: Check current bundle services
+      description: >-
+        Requires the administrator bearer token. Reads the committed bundle
+        definition and checks every declared unit and its HTTP health endpoint.
+        No application row or stored health value is used. An optional revision
+        selects the exact custom-bundles commit built by a bundle apply.
+      operationId: probeBundleHealth
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                revision: { type: string, pattern: '^[0-9a-f]{40}$', description: "Full custom-bundles commit hash; omitted means current committed metadata" }
+      responses:
+        '204': { description: All declared services are healthy }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/Error' }
 
   /api/v1/bundles/apply:
     post:
       summary: Apply bundles (rebuild + switch)
       description: >-
-        Starts the omahab-bundle-apply oneshot unit which runs the same
-        bundles.Service.Apply flow as the CLI. Returns 202 with an
-        operation; poll GET /api/v1/operations/{id}. The switch restarts
-        omahabd; the journal converges from the CLI outcome marker.
+        Saves a unique operation before nonblocking systemd dispatch.
+        The unit runs the same bundles.Service.Apply flow as the CLI.
+        Validation, build, switch, and health checks use one immutable commit.
+        Concurrent applies and repository mutations return 409 until completion.
+        Poll GET /api/v1/operations/{id} across daemon restarts.
       operationId: applyBundles
       responses:
         '202': { description: Accepted, content: { application/json: { schema: { $ref: '#/components/schemas/Operation' } } } }
         '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
 
   /api/v1/bundles/apply/{id}:
     parameters: [{ $ref: '#/components/parameters/IdPath' }]

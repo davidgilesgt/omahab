@@ -32,6 +32,7 @@ func (b *Backend) GetSetupStatus(ctx context.Context) (apitypes.SetupStatus, err
 		restoreCheck.Status = "failed"
 		restoreCheck.Detail = "restore state unreadable: " + err.Error()
 	} else {
+		restoreCheck.OperationID = st.Operation
 		switch st.State {
 		case "completed":
 			restoreCheck.Status = "ok"

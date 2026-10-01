@@ -774,13 +774,16 @@
       "steps": [
         "Open the setup flow on a fresh install with no recovery phrase.",
         "Check the box position against SSH keys and Domain.",
-        "Watch the restore state through a staged restore.",
+        "Stage a restore, then invalidate setup queries and reload the page.",
+        "Reload again mid-apply (daemon down) and re-enter the phrase (and optional repository password) to resume.",
         "Complete the recovery step on a different fresh install and reopen the flow."
       ],
       "expected": [
         "The Backups box is the first checklist step, before SSH keys, Tailscale, and Domain.",
         "The box stays available regardless of the recovery_key state (no doneMap.recovery gate).",
         "The restore check reports not_started, in_progress, completed, or failed and the box's done state follows it or recovery_key+backups_configured.",
+        "A staged restore survives query invalidation and reload: the stage and resume controls reappear with a phrase re-entry prompt; the browser never stores the phrase.",
+        "Mid-apply reloads reconnect and poll progress automatically; an empty phrase or wrong word count disables apply with an inline error.",
         "A new install can choose start-new with no penalty; the box is done once the phrase and repository are configured."
       ],
       "evidence_types": [
@@ -5374,23 +5377,31 @@
         "manual:life-storage-move"
       ],
       "sources": [
-        "scripts/install-disk.sh",
-        "internal/diskinstall/disks.go"
+        "internal/controlplane/storage.go",
+        "nix/storage.nix",
+        "nix/app-data.nix"
       ],
       "requires": [
         "enrolled"
       ],
       "steps": [
-        "Prepare the Storage movement scenario on a disposable guest.",
-        "Execute the supported operation and verify the observable result."
+        "Attach one disposable data disk.",
+        "Place a Syncthing volume on its filesystem UUID through the Storage page.",
+        "Write a file through the canonical volume path.",
+        "Restart the storage unit.",
+        "Restart the guest.",
+        "Read the file through the canonical volume path."
       ],
       "expected": [
-        "The Storage movement behaves as specified.",
-        "Failures are reported with recovery steps."
+        "The filesystem mounts below /mnt/omahab-disks using its UUID.",
+        "The canonical path is a bind mount onto the selected disk.",
+        "The file persists after the unit restart and guest restart.",
+        "The storage unit fails when the selected disk is unavailable."
       ],
       "evidence_types": [
         "BROWSER",
-        "LIVE_CLI"
+        "LIVE_CLI",
+        "INTEGRATION"
       ]
     },
     {
@@ -5585,55 +5596,69 @@
     {
       "id": "life.offline",
       "area": "lifecycle",
-      "title": "Prove Offline recovery",
+      "title": "Prove full offline recovery on the ISO harness",
       "covers": [
         "manual:life-offline"
       ],
       "sources": [
-        "scripts/install-disk.sh",
-        "internal/diskinstall/disks.go"
+        "scripts/e2e-iso-install.sh",
+        "scripts/e2e-recovery-campaign.sh",
+        "internal/controlplane/recovery_offline.go"
       ],
       "requires": [
-        "enrolled"
+        "enrolled",
+        "vm-campaign"
       ],
       "steps": [
-        "Prepare the Offline recovery scenario on a disposable guest.",
-        "Execute the supported operation and verify the observable result."
+        "Run scripts/e2e-iso-install.sh --recovery with E2E_MEM_MB=10240 on a host with at least 12288 MiB available RAM.",
+        "Follow the campaign phases: capture, fresh-disk reinstall, full restore, subset, interrupt/resume, activation rollback.",
+        "Record the phase log lines and the restored/excluded sentinel checks."
       ],
       "expected": [
-        "The Offline recovery behaves as specified.",
-        "Failures are reported with recovery steps."
+        "Capture generates and confirms the recovery phrase, configures a local restic repository, installs caddy, adds and activates a custom bundle, and completes a scoped capture with the excluded .cache sentinel left out.",
+        "The reinstall recreates the disk fresh and exports the restic repository off the old disk before the wipe.",
+        "The full restore returns the app sentinel with exact bytes, restores server-sync and the custom bundle, and the excluded and post-capture content stays absent.",
+        "The subset phase restores only the selected app scopes; the unselected captured server-sync scope keeps its changed live bytes.",
+        "The interruption phase SIGKILLs the omahab-restore MainPID at a persisted stage (a missed window fails, never passes), proves journal and staging survived, and resumes to completion.",
+        "The rollback phase poisons a committed activation script, requires the terminal rolled_back outcome with the old generation restored and panel plus custom service healthy.",
+        "Never record this case passed without the VM campaign actually running."
       ],
       "evidence_types": [
-        "BROWSER",
-        "LIVE_CLI"
+        "LIVE_CLI",
+        "INTEGRATION"
       ]
     },
     {
       "id": "life.restore-reject",
       "area": "lifecycle",
-      "title": "Prove Restore rejection",
+      "title": "Prove restore rejection paths",
       "covers": [
         "manual:life-restore-reject"
       ],
       "sources": [
-        "scripts/install-disk.sh",
-        "internal/diskinstall/disks.go"
+        "internal/backups/recovery_apply.go",
+        "internal/controlplane/recovery_offline.go",
+        "internal/controlplane/recovery_restore.go"
       ],
       "requires": [
-        "enrolled"
+        "recovery-material"
       ],
       "steps": [
-        "Prepare the Restore rejection scenario on a disposable guest.",
-        "Execute the supported operation and verify the observable result."
+        "Attempt a restore with a foreign 24-word phrase (fingerprint mismatch) and inspect the state directory.",
+        "Attempt staging against a tree with no v2 manifest and one with a tampered artifact.",
+        "Attempt an sftp location without a repository password.",
+        "Attempt a second concurrent apply while the restore unit is running."
       ],
       "expected": [
-        "The Restore rejection behaves as specified.",
-        "Failures are reported with recovery steps."
+        "The fingerprint check fails before any state change; no file under the state directory changes.",
+        "Pre-v2 trees are refused: scope selection is never guessed from a directory listing; sha256 mismatches are refused during staging validation naming the scope and file.",
+        "The missing sftp password is a validation error naming the phrase-derived alternative.",
+        "The concurrent apply is a 409 conflict; no second restore unit runs."
       ],
       "evidence_types": [
-        "BROWSER",
-        "LIVE_CLI"
+        "LIVE_API",
+        "LIVE_CLI",
+        "UNIT"
       ]
     },
     {
@@ -5702,24 +5727,92 @@
       "sources": [
         "cmd/omahab/recovery_apply.go",
         "internal/backups/recovery_apply.go",
-        "internal/controlplane/recovery_restore.go"
+        "internal/controlplane/recovery_offline.go"
       ],
       "requires": [
         "recovery-material"
       ],
       "steps": [
         "Boot a fresh appliance with a repository that holds server state.",
-        "Run the recovery apply command with the repository URL.",
-        "Enter the recovery phrase and confirm the daemon stop."
+        "Run omahab recovery apply --repository <url> and enter the 24-word phrase.",
+        "Confirm the daemon stop and wait for completion.",
+        "Confirm omahabd is running again after a deliberate failure (bad repository path) and after a config-only restore."
       ],
       "expected": [
         "Snapshots are listed and the newest server snapshot is staged and validated.",
         "State files swap atomically with a rollback copy kept.",
-        "The daemon restarts on the restored state."
+        "The same code path serves the CLI and the omahab-restore unit: one shared offline executor.",
+        "An interactive apply restarts omahabd on success and on failure alike; restart errors propagate, not warning-only.",
+        "The installed catalog and layout resolve through /etc/omahab when the service environment is absent."
       ],
       "evidence_types": [
         "LIVE_CLI",
         "INTEGRATION"
+      ]
+    },
+    {
+      "id": "recovery.apply.resume",
+      "area": "lifecycle",
+      "title": "Re-enter the same CLI command after interruption",
+      "covers": [
+        "manual:recovery-apply-resume"
+      ],
+      "sources": [
+        "cmd/omahab/recovery_apply.go",
+        "internal/controlplane/recovery_offline.go"
+      ],
+      "requires": [
+        "recovery-material"
+      ],
+      "steps": [
+        "Start omahab recovery apply and interrupt it mid-apply (SIGKILL at a persisted stage).",
+        "Re-run the same command with the same repository, phrase, and scope selection.",
+        "Repeat with the repository temporarily unreachable.",
+        "Repeat while a different explicit --snapshot is pinned."
+      ],
+      "expected": [
+        "The re-run resumes the recorded operation from its journalled stage, keeping the original snapshot, staging tree, and rollback copy.",
+        "The remote snapshot listing is skipped when a matching unfinished operation exists, so an unreachable repository does not block the resume.",
+        "An interrupted listing or staging continues the same operation; the listing only runs when no match, --list, or no recorded pick exists.",
+        "A --snapshot that differs from the unfinished operation's recorded snapshot returns a conflict, never a second staged restore.",
+        "Journal and staging survive the interruption and are not cleaned."
+      ],
+      "evidence_types": [
+        "LIVE_CLI",
+        "UNIT"
+      ]
+    },
+    {
+      "id": "recovery.apply.password",
+      "area": "lifecycle",
+      "title": "Supply a generic repository password safely",
+      "covers": [
+        "manual:recovery-apply-password"
+      ],
+      "sources": [
+        "cmd/omahab/recovery_apply.go",
+        "internal/controlplane/recovery_offline.go",
+        "internal/api/recovery_restore.go"
+      ],
+      "requires": [
+        "recovery-material"
+      ],
+      "steps": [
+        "Stage a restore of a generic (non-phrase-derived) repository through the panel and apply it with the optional password field.",
+        "Apply the same staged restore again (resume) and re-enter the password.",
+        "On the CLI, run the apply with --password-file.",
+        "Inspect the tmpfs handoff file, the operation journal, and process arguments during the apply."
+      ],
+      "expected": [
+        "The explicit password wins over the phrase-derived value and over a recovered matching repository row.",
+        "The password travels through the request body, the root-only tmpfs handoff, and process memory only; never argv, journals, or logs.",
+        "The handoff (phrase plus optional password) is consumed and removed first thing; a malformed handoff is deleted so a trigger never loops.",
+        "--password-file reads the same value into the attach; an sftp location without a password is refused with a validation error."
+      ],
+      "evidence_types": [
+        "LIVE_API",
+        "LIVE_CLI",
+        "UNIT"
       ]
     },
     {
@@ -5788,7 +5881,8 @@
         "manual:recovery-rollback"
       ],
       "sources": [
-        "internal/backups/recovery_apply.go"
+        "internal/backups/recovery_apply.go",
+        "internal/controlplane/recovery_offline.go"
       ],
       "requires": [
         "recovery-material"
@@ -5796,12 +5890,15 @@
       "steps": [
         "Stage a restore, then corrupt one staged file.",
         "Apply the staged restore.",
-        "Compare every swapped file with the pre-restore state."
+        "Compare every swapped file with the pre-restore state.",
+        "Interrupt an apply mid-swap and mid-rollback, then re-enter the same command."
       ],
       "expected": [
         "The swap fails and reports the damaged file.",
         "Every swapped file returns to its exact prior bytes.",
-        "The daemon restarts on the old state."
+        "The daemon restarts on the old state.",
+        "The rollback index (original existence per path) is persisted before any live file changes, so an interrupted rollback re-enters and converges.",
+        "A journal at swapping or rolling_back sorts before swapped: re-entry undoes the partial swap from the rollback copy before redoing it."
       ],
       "evidence_types": [
         "LIVE_CLI",
@@ -5817,20 +5914,21 @@
       ],
       "sources": [
         "internal/controlplane/recovery_restore.go",
+        "cmd/omahab/recovery_apply.go",
         "nix/module.nix"
       ],
       "requires": [
         "recovery-material"
       ],
       "steps": [
-        "Trigger the restore unit through the panel.",
+        "Trigger the restore unit through the panel with the optional generic repository password.",
         "Inspect the handoff file during and after the run.",
         "Read the operation journal."
       ],
       "expected": [
-        "The handoff file is root-only on the memory filesystem.",
-        "The file is removed once the unit reads it.",
-        "The journal stores only the phrase fingerprint."
+        "The handoff file is root-only on the memory filesystem and holds the operation id, phrase, and optional password.",
+        "The file is removed once the unit reads it, regardless of outcome; a malformed handoff is deleted so a trigger never loops.",
+        "The journal stores only the phrase fingerprint, never the phrase or repository password."
       ],
       "evidence_types": [
         "LIVE_CLI"
@@ -5889,14 +5987,17 @@
       "steps": [
         "Call every restore route without the panel token.",
         "List instances with valid recovery material, then snapshots for one instance location.",
-        "Stage a restore (full and app-scoped), poll the operation, and apply it.",
+        "Stage a restore (full and app-scoped), poll the operation, and apply it with the phrase (plus the optional generic password).",
+        "Reload the setup page during staging and mid-apply.",
+        "Apply with an empty phrase and with a unit already running.",
         "Call the skip route on a fresh instance and read the setup checklist."
       ],
       "expected": [
         "Unauthorized calls receive 401 with no data.",
         "Instance listing returns exact server-side locations; a wrong phrase marks subdirectories locked, not an error.",
         "Snapshot listing marks server-state snapshots and carries scope tags for the picker.",
-        "Staging answers with an operation (preview warns on release-ref mismatch), and apply starts the restore unit.",
+        "Staging answers with an operation (preview warns on release-ref mismatch); the staged control survives query invalidation and page reload, and the apply request is nonblocking (202).",
+        "An empty phrase is a validation error; a second apply while the restore unit is running is a 409 conflict.",
         "Skip marks the restore check skipped and the checklist stops offering a restore."
       ],
       "evidence_types": [
@@ -5957,6 +6058,127 @@
       "expected": [
         "The restore check reports skipped (new server, no restore) and the checklist stops offering a restore.",
         "The posture survives the daemon restart; staging trees and journals are untouched by skipping."
+      ],
+      "evidence_types": [
+        "LIVE_API",
+        "UNIT"
+      ]
+    },
+    {
+      "id": "recovery.scopes.selection",
+      "area": "lifecycle",
+      "title": "Restore selected scopes with explicit precedence",
+      "covers": [
+        "manual:recovery-scopes"
+      ],
+      "sources": [
+        "internal/controlplane/recovery_offline.go",
+        "cmd/omahab/recovery_apply.go",
+        "web/src/views/restoreFromBackup.tsx"
+      ],
+      "requires": [
+        "recovery-material"
+      ],
+      "steps": [
+        "Capture a snapshot with server-config, two app scopes, and server-sync.",
+        "Change live data under one app scope and under server-sync.",
+        "Restore with explicit scopes naming only server-config and one app scope.",
+        "Restore the same snapshot with include_apps (everything).",
+        "Restore with no app selection (config only)."
+      ],
+      "expected": [
+        "Explicit scopes win: exactly the selected app scopes plus server-config restore; captured-but-unselected scopes keep their current live bytes (rsync --delete applies only to selected destinations).",
+        "include_apps restores every non-config scope the manifest carries.",
+        "A config-only restore touches no app or data scope; excluded scopes are never touched by construction.",
+        "The panel picker offers app scopes from the chosen snapshot's scope tags; server-config is always included and never a checkbox."
+      ],
+      "evidence_types": [
+        "LIVE_API",
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "recovery.identity.checkpoint",
+      "area": "lifecycle",
+      "title": "Promote the PocketID checkpoint with server-config",
+      "covers": [
+        "manual:recovery-identity"
+      ],
+      "sources": [
+        "internal/controlplane/recovery_offline.go",
+        "internal/controlplane/backup_capture.go"
+      ],
+      "requires": [
+        "recovery-material"
+      ],
+      "steps": [
+        "Capture a server-config snapshot on a system with PocketID passkeys enrolled.",
+        "Restore it config-only (no app scopes) onto a fresh machine.",
+        "Inspect the PocketID data directory and sign in with a previously enrolled passkey."
+      ],
+      "expected": [
+        "server-config always captures the inseparable PocketID identity data; a config-only restore still promotes the identity checkpoint.",
+        "The pocket-id service stays paused until the resume stage, then restarts healthy.",
+        "The restored control plane authenticates restored passkeys and OIDC clients."
+      ],
+      "evidence_types": [
+        "LIVE_CLI",
+        "LIVE_API"
+      ]
+    },
+    {
+      "id": "recovery.custom-definitions",
+      "area": "lifecycle",
+      "title": "Restore custom bundle definitions and services",
+      "covers": [
+        "manual:recovery-custom-definitions"
+      ],
+      "sources": [
+        "internal/controlplane/recovery_offline.go",
+        "internal/controlplane/backup_capture_manifest.go"
+      ],
+      "requires": [
+        "recovery-material"
+      ],
+      "steps": [
+        "Add a custom bundle with a healthy service and capture its app scope.",
+        "Restore onto a machine that does not know the bundle.",
+        "Inspect the custom-bundles repo, the bundle list, and the service after the restore."
+      ],
+      "expected": [
+        "The snapshot carries the committed definition files (staged bundles/<id>/) with the repo revision recorded in the scope's bundle record.",
+        "The restore writes the definition into the custom-bundles repo and commits it (idempotent on re-entry).",
+        "The bundle apply runs with health probes skipped exactly for restore-paused bundles; after resume the service answers a fresh health probe and the panel lists the bundle as custom.",
+        "A journaled apply that never dispatched restarts its unit on resume; a terminally failed apply is retried through fresh staging, never waited on forever."
+      ],
+      "evidence_types": [
+        "LIVE_API",
+        "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "recovery.repository.attach",
+      "area": "lifecycle",
+      "title": "Attach the recovered source repository exactly once",
+      "covers": [
+        "manual:recovery-attach"
+      ],
+      "sources": [
+        "internal/controlplane/recovery_offline.go"
+      ],
+      "requires": [
+        "recovery-material"
+      ],
+      "steps": [
+        "Complete a full recovery from a snapshot's source repository.",
+        "Inspect the restored control database's repository rows and secrets.",
+        "Run a scheduled backup afterwards."
+      ],
+      "expected": [
+        "A matching restored repository row at the exact discovered location is reconfigured in place, never duplicated; schedules keep selecting the one source row.",
+        "Without a matching row the attach runs exactly once (restic snapshots, never init) and the staging credential is removed afterwards.",
+        "Password precedence: explicit caller-supplied, then recovered from a matching row, then phrase-derived.",
+        "Backups continue into the same instance path and the setup checklist records restore ok."
       ],
       "evidence_types": [
         "LIVE_API",
@@ -7345,19 +7567,26 @@
       ],
       "sources": [
         "internal/api/server.go",
-        "internal/api/openapi.yaml"
+        "internal/api/openapi.yaml",
+        "internal/projects/projects_test.go"
       ],
       "requires": [],
       "steps": [
         "Exercise Cover projects through authenticated API calls.",
-        "Verify success, validation, permission, and missing-state paths."
+        "Verify success, validation, permission, and missing-state paths.",
+        "Update a project name by slug.",
+        "Read the updated project by slug.",
+        "Run TestGetBySlugAfterTimestampPrecisionChange."
       ],
       "expected": [
         "Responses match the OpenAPI contract.",
-        "Errors are stable JSON envelopes."
+        "Errors are stable JSON envelopes.",
+        "The renamed project remains readable by its original slug.",
+        "Stored timestamps remain readable with seconds, milliseconds, microseconds, or nanoseconds."
       ],
       "evidence_types": [
-        "LIVE_API"
+        "LIVE_API",
+        "UNIT"
       ]
     },
     {
@@ -8085,6 +8314,7 @@
         "api:DELETE /api/v1/bundles/{id}",
         "api:POST /api/v1/bundles/{id}/disable",
         "api:POST /api/v1/bundles/{id}/enable",
+        "api:POST /api/v1/bundles/{id}/health",
         "api:POST /api/v1/bundles/apply",
         "api:GET /api/v1/bundles/apply/{id}"
       ],
@@ -8098,12 +8328,17 @@
       "steps": [
         "Exercise the bundle routes through authenticated API calls.",
         "Verify success, validation, permission, and missing-state paths.",
-        "Start an apply and poll its operation to a terminal status."
+        "Start an apply and poll its operation to a terminal status.",
+        "While an apply is staged or running, call add, remove, disable, enable, and a second apply.",
+        "Probe a bundle's health with no body, with a valid 40-hex revision, and with malformed input."
       ],
       "expected": [
         "Responses match the OpenAPI contract.",
         "Errors are stable JSON envelopes.",
-        "Unauthorized callers receive 401 without bundle data."
+        "Unauthorized callers receive 401 without bundle data.",
+        "Apply and repository mutations during a live apply reservation return 409 naming the operation.",
+        "The health probe answers 204 only when every declared unit is active and the HTTP check passes right now; it never reflects stored health or an application row. A non-2xx rejection surfaces the current error status (500 by default; malformed input is 400, unknown bundle 404).",
+        "The optional revision pins the probe to the exact custom-bundles commit an apply built."
       ],
       "evidence_types": [
         "LIVE_API"
@@ -8126,12 +8361,16 @@
       "steps": [
         "Run omahab bundle list and confirm curated plus custom entries with sources.",
         "Stage a bundle directory and run omahab bundle add <dir>.",
+        "Try adding a directory with only an id in bundle.json.",
+        "Try adding a bundle without module.nix.",
+        "Try adding a bundle with an invalid port or a colliding unit.",
         "Run omahab bundle remove <id>.",
         "Run omahab bundle status and omahab bundle list --json.",
         "Edit a committed file over SSH without committing and run list and status again."
       ],
       "expected": [
-        "add validates ids, ports, and the module.nix sibling before writing.",
+        "add applies complete bundle validation before committing.",
+        "Rejected additions leave the committed catalog unchanged.",
         "add and remove commit their change; status reports clean afterwards.",
         "Uncommitted SSH edits are reported as dirty and never appear in list."
       ],
@@ -8189,16 +8428,48 @@
         "Add a custom bundle that builds but whose health_check never answers.",
         "Run omahab bundle apply.",
         "Watch the switch, the health gate, and the outcome.",
-        "Confirm the previous generation is serving again afterwards."
+        "Confirm the previous generation is serving again afterwards.",
+        "Poison a committed module with a valid NixOS activation snippet that exits nonzero during activation, then apply again."
       ],
       "expected": [
         "The switch completes and the panel /up gate passes.",
         "The bundle health probe fails, the apply reports unhealthy, and the previous generation is restored.",
+        "The activation-error path also terminates as rolled_back with the old generation serving again and the custom service still healthy.",
+        "The journal records completion, failure, or successful rollback; failed CLI applies keep a nonzero exit code including with --json.",
         "The bundle list and event feed report the failed apply."
       ],
       "evidence_types": [
         "LIVE_CLI",
         "LIVE_API"
+      ]
+    },
+    {
+      "id": "bundles.enable.collision",
+      "area": "lifecycle",
+      "title": "Validate enablement before removing the disabled marker",
+      "covers": [
+        "manual:bundles-enable-collision"
+      ],
+      "sources": [
+        "internal/controlplane/bundles_ops.go"
+      ],
+      "requires": [
+        "enrolled"
+      ],
+      "steps": [
+        "Disable a custom bundle, then edit its committed bundle.json over SSH into a state that collides with a curated entry.",
+        "Enable it through the panel and the CLI.",
+        "Inspect the repo and the merged catalog afterwards.",
+        "Repeat with a broken bundle.json and a missing module.nix."
+      ],
+      "expected": [
+        "Enablement validates the would-be merged result first and rejects an invalid or colliding state before anything is written.",
+        "The committed disabled marker and the previous valid state survive untouched.",
+        "Mutations are refused while a bundle apply reservation is live (409 naming the operation)."
+      ],
+      "evidence_types": [
+        "LIVE_API",
+        "LIVE_CLI"
       ]
     },
     {
@@ -8236,7 +8507,7 @@
     {
       "id": "bundles.uncommitted.not-built",
       "area": "lifecycle",
-      "title": "Never build uncommitted bundle files",
+      "title": "Keep one immutable bundle revision through apply",
       "covers": [
         "manual:bundles-head-only"
       ],
@@ -8249,14 +8520,18 @@
         "enrolled"
       ],
       "steps": [
-        "Edit a committed custom bundle's module.nix over SSH and do not commit.",
+        "Use a disposable custom module with a slow build step.",
+        "Edit the tracked module over SSH without committing.",
         "Start an apply from the panel.",
-        "Inspect which files the rebuild evaluated and the repo state afterwards."
+        "Record the revision committed for that apply.",
+        "Change the tracked module again while its build is running.",
+        "Inspect the switched result and repo state."
       ],
       "expected": [
-        "The apply commits staged changes first, then builds exactly the committed tree.",
-        "The edited content is absent from the switched generation until committed.",
-        "SSH-edited uncommitted files never reach the build."
+        "Initial intended changes are validated and committed before building.",
+        "Build and switch use the same exact committed revision.",
+        "The later uncommitted edit is absent from the switched generation.",
+        "Invalid intended changes are rejected before any build."
       ],
       "evidence_types": [
         "LIVE_API",

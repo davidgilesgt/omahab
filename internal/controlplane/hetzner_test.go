@@ -174,12 +174,16 @@ type sshFixture struct {
 	password string
 
 	rejectSubsystem bool
-	fs              *fixtureFS
+	// publicKey, when set, is an authorized_keys line also accepted for
+	// this user (the SFTP lister authenticates with the backup SSH key).
+	publicKey     string
+	serverOptions []sftp.RequestServerOption
+	fs            *fixtureFS
 
 	wg sync.WaitGroup
 }
 
-func newSSHPot(t *testing.T, username, password string) *sshFixture {
+func newSSHPot(t *testing.T, username, password string, serverOptions ...sftp.RequestServerOption) *sshFixture {
 	t.Helper()
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -195,13 +199,14 @@ func newSSHPot(t *testing.T, username, password string) *sshFixture {
 		t.Fatal(err)
 	}
 	fx := &sshFixture{
-		t:        t,
-		listener: ln,
-		dir:      dir,
-		signer:   signer,
-		username: username,
-		password: password,
-		fs:       &fixtureFS{root: dir},
+		t:             t,
+		listener:      ln,
+		dir:           dir,
+		signer:        signer,
+		username:      username,
+		password:      password,
+		fs:            &fixtureFS{root: dir},
+		serverOptions: serverOptions,
 	}
 	config := &ssh.ServerConfig{
 		PasswordCallback: func(conn ssh.ConnMetadata, pass []byte) (*ssh.Permissions, error) {
@@ -209,6 +214,19 @@ func newSSHPot(t *testing.T, username, password string) *sshFixture {
 				return nil, nil
 			}
 			return nil, errors.New("access denied")
+		},
+		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+			if fx.publicKey == "" || conn.User() != username {
+				return nil, errors.New("access denied")
+			}
+			want, _, _, _, err := ssh.ParseAuthorizedKey([]byte(fx.publicKey))
+			if err != nil {
+				return nil, errors.New("access denied")
+			}
+			if !samePublicKey(want, key) {
+				return nil, errors.New("access denied")
+			}
+			return nil, nil
 		},
 	}
 	config.AddHostKey(signer)
@@ -263,7 +281,7 @@ func (fx *sshFixture) serve(raw net.Conn, config *ssh.ServerConfig) {
 						FilePut:  fx.fs,
 						FileCmd:  fx.fs,
 						FileList: fx.fs,
-					})
+					}, fx.serverOptions...)
 					_ = srv.Serve()
 					// Complete the SSH channel close handshake so the
 					// client's teardown does not wait on our end.
@@ -550,5 +568,138 @@ func TestCreateBackupRepositoryFailsClosedOnUploadError(t *testing.T) {
 	}
 	if len(repos) != 0 {
 		t.Fatalf("no repository may be configured on failure: %v", repos)
+	}
+}
+
+// --- sftpInstanceLister ---
+
+// captureDial records the address the lister asked to dial and forwards to
+// the fixture listener.
+type captureDial struct {
+	fx   *sshFixture
+	mu   sync.Mutex
+	addr string
+}
+
+func (c *captureDial) dial(ctx context.Context, _, addr string) (net.Conn, error) {
+	c.mu.Lock()
+	c.addr = addr
+	c.mu.Unlock()
+	var d net.Dialer
+	return d.DialContext(ctx, "tcp", c.fx.listener.Addr().String())
+}
+
+// newListerFixture boots an SSH/SFTP fixture that authenticates the backup
+// SSH key (publickey), seeds a home-relative and an absolute instance
+// tree, and pins the fixture host key under stateDir so the lister
+// handshake succeeds.
+func newListerFixture(t *testing.T, stateDir, host string, serverOptions ...sftp.RequestServerOption) (*sshFixture, *captureDial) {
+	t.Helper()
+	_, pubLine, err := ensureBackupSSHKey(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fx := newSSHPot(t, "u12345", "secret-pass", serverOptions...)
+	fx.publicKey = pubLine
+	if err := pinHostKey(filepath.Join(stateDir, "backup_ssh", "known_hosts"), host, fx.signer.PublicKey()); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{
+		"omahab/inst-root",
+		"omahab/other-root",
+		"omahab/.hidden",
+		"abs/omahab-abs/inst-abs",
+		"backups",
+	} {
+		if err := os.MkdirAll(filepath.Join(fx.dir, dir), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(fx.dir, "omahab", "not-a-file"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return fx, &captureDial{fx: fx}
+}
+
+// TestSFTPListerGenericDefaultsToPort22 proves a portless generic SFTP
+// location dials port 22 (not the Hetzner 23) and lists the requested
+// directory.
+func TestSFTPListerGenericDefaultsToPort22(t *testing.T) {
+	stateDir := t.TempDir()
+	_, cd := newListerFixture(t, stateDir, "backup.example.com")
+	l := sftpInstanceLister{stateDir: stateDir, dial: cd.dial}
+	dirs, err := l.ListInstanceDirs(context.Background(), "sftp://u12345@backup.example.com/backups")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cd.addr; got != "backup.example.com:22" {
+		t.Fatalf("dialed = %q, want backup.example.com:22", got)
+	}
+	if len(dirs) != 0 {
+		t.Fatalf("dirs = %v, want none under /backups", dirs)
+	}
+}
+
+// TestSFTPListerExplicitPortWins pins that an explicit URL port (Hetzner's
+// generated :23, or any user-specified port) is used verbatim instead of
+// any default.
+func TestSFTPListerExplicitPortWins(t *testing.T) {
+	stateDir := t.TempDir()
+	_, cd := newListerFixture(t, stateDir, "u123.your-storagebox.de")
+	l := sftpInstanceLister{stateDir: stateDir, dial: cd.dial}
+	if _, err := l.ListInstanceDirs(context.Background(), "sftp://u12345@u123.your-storagebox.de:23/./omahab"); err != nil {
+		t.Fatal(err)
+	}
+	if got := cd.addr; got != "u123.your-storagebox.de:23" {
+		t.Fatalf("dialed = %q, want u123.your-storagebox.de:23", got)
+	}
+	if _, err := l.ListInstanceDirs(context.Background(), "sftp://u12345@backup.example.com:2222/backups"); err != nil {
+		t.Fatal(err)
+	}
+	if got := cd.addr; got != "backup.example.com:2222" {
+		t.Fatalf("dialed = %q, want backup.example.com:2222", got)
+	}
+}
+
+func TestSFTPListerDistinguishesHomeAndAbsolutePaths(t *testing.T) {
+	stateDir := t.TempDir()
+	fx, cd := newListerFixture(t, stateDir, "backup.example.com", sftp.WithStartDirectory("/home/backup"))
+	home := filepath.Join(fx.dir, "home", "backup", "omahab")
+	for _, dir := range []string{"home-only", ".hidden"} {
+		if err := os.MkdirAll(filepath.Join(home, dir), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(home, "plain-file"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l := sftpInstanceLister{stateDir: stateDir, dial: cd.dial}
+	for _, tc := range []struct {
+		path string
+		want string
+	}{
+		{"/omahab", "home-only"},
+		{"/./omahab", "home-only"},
+		{"/omahab/../omahab", "home-only"},
+		{"", "omahab"},
+		{"/", "omahab"},
+		{"//abs/omahab-abs", "inst-abs"},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			dirs, err := l.ListInstanceDirs(context.Background(), "sftp://u12345@backup.example.com"+tc.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(dirs) != 1 || dirs[0] != tc.want {
+				t.Fatalf("listed %v, want only %s", dirs, tc.want)
+			}
+		})
+	}
+	dirs, err := l.ListInstanceDirs(context.Background(), "sftp://u12345@backup.example.com//omahab")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dirs) != 2 || dirs[0] != "inst-root" || dirs[1] != "other-root" {
+		t.Fatalf("absolute root selected wrong instances: %v", dirs)
 	}
 }

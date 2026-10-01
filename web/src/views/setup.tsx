@@ -757,9 +757,9 @@ export function SetupPage() {
   const restoreCheck = checkById("restore");
   const restoreDone = restoreCheck?.status === "ok";
   const restoreFailed = restoreCheck?.status === "failed";
-  const restoreInProgress = restoreCheck?.status === "pending" && (restoreCheck.detail?.includes("in progress") ?? false);
+  const restoreInProgress = restoreCheck?.status === "pending" && !!restoreCheck.operation_id;
   const doneMap: Record<BoxId, boolean> = {
-    backups: (isOk("recovery_key") && isOk("backups_configured")) || restoreDone,
+    backups: restoreDone || (!restoreInProgress && !restoreFailed && isOk("recovery_key") && isOk("backups_configured")),
     ssh: isOk("ssh_keys"),
     tailscale: tailscaleRunning || isOk("tailscale"),
     domain: domainValid && isOk("domain"),
@@ -825,10 +825,10 @@ export function SetupPage() {
               {restoreInProgress && (
                 <p className="muted">{restoreCheck?.detail}</p>
               )}
+              <h3>Yes — restore an earlier server</h3>
+              <RestoreFromBackupControl operationId={restoreCheck?.operation_id} onStartNew={() => setOpenOverride("backups")} />
               {!restoreInProgress && (
                 <>
-                  <h3>Yes — restore an earlier server</h3>
-                  <RestoreFromBackupControl onStartNew={() => setOpenOverride("backups")} />
                   <hr className="setup-divider" />
                   <h3>No — start fresh</h3>
                   {!recovery ? (

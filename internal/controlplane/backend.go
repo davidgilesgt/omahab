@@ -53,28 +53,32 @@ type Backend struct {
 	version   string
 	startedAt time.Time
 
-	apps          *apps.Service
-	bundles       *bundles.Service
-	projects      *projects.Service
-	secrets       *secrets.Service
-	events        *events.Service
-	health        *health.Service
-	syncer        *syncer.Service
-	workspaces    *workspaces.Service
-	providers     *providers.Service
-	gateway       providers.GatewayAdmin
-	environments  *companion.Service
-	emailing      *emailing.Service
-	backups       *backups.Service
-	hermes        *hermes.Service
-	scm           *scm.Service
-	knowledge     *knowledge.Service
-	identity      *identity.Service
-	integrations  *integrations.Service
-	exposure      *exposure.Service
-	exposureMu    sync.Mutex
-	hermesTokenMu sync.Mutex
-	mcpServer     *mcp.Server
+	apps    *apps.Service
+	bundles *bundles.Service
+	// bundleApplyRes is the unique in-flight bundle apply reservation
+	// (see bundles_ops.go): one staged/started/running apply at a time.
+	bundleApplyMu  sync.Mutex
+	bundleApplyRes *bundleApplyReservation
+	projects       *projects.Service
+	secrets        *secrets.Service
+	events         *events.Service
+	health         *health.Service
+	syncer         *syncer.Service
+	workspaces     *workspaces.Service
+	providers      *providers.Service
+	gateway        providers.GatewayAdmin
+	environments   *companion.Service
+	emailing       *emailing.Service
+	backups        *backups.Service
+	hermes         *hermes.Service
+	scm            *scm.Service
+	knowledge      *knowledge.Service
+	identity       *identity.Service
+	integrations   *integrations.Service
+	exposure       *exposure.Service
+	exposureMu     sync.Mutex
+	hermesTokenMu  sync.Mutex
+	mcpServer      *mcp.Server
 	// updateTracker surfaces the nightly check-update marker in status and
 	// publishes one service.update_available event per new version.
 	updates *updateTracker
@@ -179,6 +183,10 @@ func New(ctx context.Context, st *store.Store, opts Options) (*Backend, error) {
 	if b.startedAt.IsZero() {
 		b.startedAt = time.Now().UTC()
 	}
+	// Adopt or clear any bundle-apply state left by a restart mid-apply
+	// (see bundles_ops.go): a live staged/running apply keeps rejecting
+	// concurrent stages; phantom handoffs are removed.
+	b.reconcileBundleApplyReservation()
 	if err := b.initServices(ctx); err != nil {
 		return nil, err
 	}
@@ -977,6 +985,23 @@ func (b *Backend) EmailHMACKey() []byte {
 func translateError(err error) error {
 	if err == nil {
 		return nil
+	}
+	// Errors already carrying an API sentinel keep their identity: the
+	// mappings below exist to attach sentinels, not to re-wrap ones that
+	// are present (the message heuristics at the bottom would otherwise
+	// turn a conflict into an already-exists, changing the API shape).
+	for _, sentinel := range []error{
+		apitypes.ErrNotFound,
+		apitypes.ErrAlreadyExists,
+		apitypes.ErrValidation,
+		apitypes.ErrUnauthorized,
+		apitypes.ErrForbidden,
+		apitypes.ErrConflict,
+		apitypes.ErrServiceUnavailable,
+	} {
+		if errors.Is(err, sentinel) {
+			return err
+		}
 	}
 	// Map known store/controller errors to api sentinels for correct HTTP codes
 	if errors.Is(err, store.ErrNotFound) {

@@ -81,7 +81,7 @@ func TestBundlesRoutesRequireAuth(t *testing.T) {
 		{http.MethodPost, "/api/v1/bundles/foo/disable"},
 		{http.MethodPost, "/api/v1/bundles/foo/enable"},
 		{http.MethodPost, "/api/v1/bundles/apply"},
-		{http.MethodGet, "/api/v1/bundles/apply/op"},
+		{http.MethodPost, "/api/v1/bundles/foo/health"},
 	}
 	for _, p := range paths {
 		res := httptest.NewRecorder()
@@ -245,5 +245,37 @@ func TestDeleteBundleCustomOKCuratedRejected(t *testing.T) {
 	srv.Handler().ServeHTTP(res3, req)
 	if res3.Code != http.StatusBadRequest && res3.Code != http.StatusNotFound {
 		t.Fatalf("delete curated: %d %s, want 400 or 404", res3.Code, res3.Body.String())
+	}
+}
+
+// The probe route fails while the bundle's service is not running and
+// never fabricates health from stored application state: no application
+// row exists for the bundle at probe time.
+func TestProbeBundleHealthRouteFreshServiceState(t *testing.T) {
+	srv := newBundlesServer(t)
+	res := doPost(t, srv, "/api/v1/bundles", map[string]string{
+		"bundle_json": `{"id":"probeapp","name":"probeapp","units":["probeapp.service"],"port":20530,"health_check":{"kind":"none","port":20530,"path":"/"},"resources":{"memory_mb":128}}`,
+		"module_nix":  "{ config, ... }: { }\n",
+	})
+	if res.Code != http.StatusCreated {
+		t.Fatalf("create bundle: status %d body %s", res.Code, res.Body.String())
+	}
+	// No application row exists for probeapp; the probe is a pure live
+	// service observation and must fail while the unit is not running.
+	res = doPost(t, srv, "/api/v1/bundles/probeapp/health", nil)
+	if res.Code == http.StatusNoContent {
+		t.Fatalf("probe must fail while the unit is not running, got %d", res.Code)
+	}
+	if res.Code != http.StatusServiceUnavailable && res.Code != http.StatusInternalServerError {
+		t.Fatalf("stopped service probe status = %d body %s", res.Code, res.Body.String())
+	}
+}
+
+// The probe route 404s for bundles that are not in the merged catalog.
+func TestProbeBundleHealthRouteUnknownBundle(t *testing.T) {
+	srv := newBundlesServer(t)
+	res := doPost(t, srv, "/api/v1/bundles/ghost/health", nil)
+	if res.Code != http.StatusNotFound {
+		t.Fatalf("unknown bundle probe status = %d body %s", res.Code, res.Body.String())
 	}
 }

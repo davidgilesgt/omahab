@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/omahab/omahab/internal/apps"
 	"github.com/omahab/omahab/internal/backups"
+	"github.com/omahab/omahab/internal/store"
 )
 
 func TestCheckRestoreScopes(t *testing.T) {
@@ -39,17 +41,25 @@ func restorePlanBackend(t *testing.T) (*Backend, string, string) {
 	if _, err := b.apps.Install(ctx, apps.InstallRequest{BundleID: "immich"}); err != nil {
 		t.Fatal(err)
 	}
-	// Staged tree mirroring the canonical layout plus a dump.
+	// Staged tree mirroring the real capture layout: app data at its
+	// captured absolute path, the dump and manifest in the in-place
+	// backup-staging directory.
 	staged := t.TempDir()
 	immichRoot := filepath.Join(root, "apps", "immich")
 	src := filepath.Join(staged, immichRoot)
-	if err := os.MkdirAll(src, 0o755); err != nil {
-		t.Fatal(err)
+	stagingDir := filepath.Join(staged, "backup-staging")
+	for _, d := range []string{src, stagingDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := os.WriteFile(filepath.Join(src, "photo.jpg"), []byte("img"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(staged, "immich.pgdump"), []byte("dump"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(stagingDir, "immich.pgdump"), []byte("dump"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := backups.WriteManifest(stagingDir, restoreTestManifest(t, staged)); err != nil {
 		t.Fatal(err)
 	}
 	return b, staged, immichRoot
@@ -73,14 +83,14 @@ func restoreTestManifestWithDumpSHA(dumpSHA string) backups.SnapshotManifest {
 
 // restoreTestManifest stamps the fixture tree's real dump hash so the
 // manifest's database integrity contract holds for the staged fixture.
-func restoreTestManifest() backups.SnapshotManifest {
-	return restoreTestManifestWithDumpSHA(strings.Repeat("a", 64))
+func restoreTestManifest(t *testing.T, staged string) backups.SnapshotManifest {
+	return restoreTestManifestWithDumpSHA(stagedDumpSHA(t, staged))
 }
 
 // stagedDumpSHA hashes the immich dump of the fixture tree.
 func stagedDumpSHA(t *testing.T, staged string) string {
 	t.Helper()
-	sum, err := backups.SHA256File(filepath.Join(staged, "immich.pgdump"))
+	sum, err := backups.SHA256File(filepath.Join(staged, "backup-staging", "immich.pgdump"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,8 +119,8 @@ func TestPlanLiveRestoreMapsStagedFiles(t *testing.T) {
 }
 
 func TestPlanLiveRestoreRejectsServerDataScopes(t *testing.T) {
-	b, _, _ := restorePlanBackend(t)
-	manifest := restoreTestManifest()
+	b, staged, _ := restorePlanBackend(t)
+	manifest := restoreTestManifest(t, staged)
 	manifest.Scopes[0].Name = backups.ScopeServerProjects
 	if _, err := b.planLiveRestore(context.Background(), manifest, []string{"server-projects"}, t.TempDir()); err == nil {
 		t.Fatal("server-projects must restore through server-config recovery, not live")
@@ -125,14 +135,13 @@ func TestPlanLiveRestoreRefusesDatabaseHashMismatch(t *testing.T) {
 	// The manifest vouches for different content than what is staged.
 	manifest := restoreTestManifestWithDumpSHA(strings.Repeat("b", 64))
 	_, err := b.planLiveRestore(context.Background(), manifest, []string{"app:immich"}, staged)
-	if err == nil || !strings.Contains(err.Error(), "sha256 mismatch") {
+	if !errors.Is(err, store.ErrValidation) {
 		t.Fatalf("err = %v, want dump sha256 mismatch refusal", err)
 	}
 	// A manifest naming a different file than the located dump also fails.
 	manifest = restoreTestManifestWithDumpSHA(stagedDumpSHA(t, staged))
 	manifest.Scopes[0].Databases[0].File = "other.pgdump"
-	if _, err := b.planLiveRestore(context.Background(), manifest, []string{"app:immich"}, staged); err == nil ||
-		!strings.Contains(err.Error(), "manifest declares dump") {
+	if _, err := b.planLiveRestore(context.Background(), manifest, []string{"app:immich"}, staged); !errors.Is(err, store.ErrValidation) {
 		t.Fatalf("err = %v, want declared-file mismatch refusal", err)
 	}
 }
@@ -157,7 +166,7 @@ func TestPlanLiveRestoreRefusesDowngrade(t *testing.T) {
 // a snapshot dumped on a newer PostgreSQL major must never restore into
 // the running cluster.
 func TestPlanLiveRestoreRefusesNewerPostgresMajor(t *testing.T) {
-	manifest := restoreTestManifest()
+	manifest := restoreTestManifestWithDumpSHA(strings.Repeat("a", 64))
 	manifest.Scopes[0].PostgresMajor = 17
 	t.Setenv("OMAHAB_PG_MAJOR", "16")
 	if err := checkPostgresMajor(manifest); err == nil ||

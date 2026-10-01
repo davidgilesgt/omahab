@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -69,6 +70,29 @@ func (s *Server) handleApplyBundles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, op)
+}
+
+// handleProbeBundleHealth answers POST /api/v1/bundles/{id}/health with
+// 204 only after a fresh probe of the bundle's currently configured
+// services succeeds. The optional JSON body {"revision": "<40-hex>"}
+// probes the bundle definition pinned at that immutable custom-bundles
+// commit (the one an apply built); no body probes the current committed
+// configuration. It works without an application row and never reflects
+// stored health values.
+func (s *Server) handleProbeBundleHealth(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Revision string `json:"revision"`
+	}
+	if r.ContentLength > 0 {
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+	}
+	if err := s.backend.ProbeBundleHealth(r.Context(), chi.URLParam(r, "id"), strings.TrimSpace(req.Revision)); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleGetBundleApply(w http.ResponseWriter, r *http.Request) {
