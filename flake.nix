@@ -66,6 +66,7 @@
             "cmd/omahabd"
             "cmd/omahab-clientd"
           ];
+          nativeCheckInputs = [ pkgs.git ];
           env.CGO_ENABLED = "0";
           ldflags = ldflagsBase;
         };
@@ -247,8 +248,7 @@ EOF
             checkPhase = "go vet ./...";
             installPhase = "touch $out";
           });
-          go-test = omahab.overrideAttrs (old: {
-            nativeCheckInputs = (old.nativeCheckInputs or [ ]) ++ [ pkgs.git ];
+          go-test = omahab.overrideAttrs (_: {
             name = "go-test";
             doCheck = true;
             checkPhase = "go test ./...";

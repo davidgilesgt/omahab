@@ -260,6 +260,7 @@ nix build .#checks.x86_64-linux.integration   # NixOS integration tests (install
 ```
 
 The repository checks run ShellCheck on source scripts and generated storage units.
+Nix supplies Git to package tests, including installer image builds.
 Storage units mount each selected filesystem below `/mnt/omahab-disks/<UUID>`.
 They bind the volume onto its canonical application path.
 
