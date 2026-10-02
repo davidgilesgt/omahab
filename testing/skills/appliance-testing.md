@@ -71,6 +71,9 @@ exclusive operations, backup, restore, and recovery.
   40 GiB of free disk. The harness exports the
   restic repository off the old disk before wiping it and imports it
   onto the fresh install.
+- Upload the exported archive with mode `0600` before root extraction.
+- Keep archive bytes separate from sudo authentication input.
+- Remove the uploaded archive when extraction ends.
 - Check required scopes in the saved restic manifest, not the backup API response.
 - Repository creation starts a backup. Wait for it before a separate capture request.
 - Bundle apply must pass the installed unit's panel health gate and daemon restart.

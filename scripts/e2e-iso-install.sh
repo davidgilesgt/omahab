@@ -731,8 +731,12 @@ PYEOF
   log "recovery campaign: importing restic repository onto the fresh disk"
   ssh -T -i "$SSH_KEY" -p "$SSH_PORT" \
     -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-    admin@127.0.0.1 "printf '%s\n' \"${E2E_ADMIN_PASS:-e2e-test-pass-01}\" | sudo -S -p '' bash -c 'mkdir -p /srv/omahab/backups/repos && tar -xf - -C /srv/omahab/backups/repos'" \
-    < "$REPO_TAR" 2>/dev/null || die "could not import the restic repository"
+    admin@127.0.0.1 'umask 077; cat > "$HOME/e2e-repo.tar"' \
+    < "$REPO_TAR" 2>/dev/null || die "could not upload the restic repository"
+  printf '%s\n' "$E2E_ADMIN_PASS" | ssh -T -i "$SSH_KEY" -p "$SSH_PORT" \
+    -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    admin@127.0.0.1 "sudo -k -S -p '' bash -c 'set -eu; trap \"rm -f /home/admin/e2e-repo.tar\" EXIT; mkdir -p /srv/omahab/backups/repos; tar -xf /home/admin/e2e-repo.tar -C /srv/omahab/backups/repos'" \
+    2>/dev/null || die "could not import the restic repository"
 
   log "recovery campaign: restore phase"
   "$CAMPAIGN" restore "$BASE" "$PANEL_TOKEN" "$SSH_PORT" "$SSH_KEY" "$WORKDIR"
