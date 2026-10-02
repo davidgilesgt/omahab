@@ -565,6 +565,7 @@ in
       };
       serviceConfig = hardenBase // {
         Type = "oneshot";
+        ExecStart = "${cfg.package}/bin/omahab recovery apply --apply-staged";
         # The swap replaces the daemon's own database: stop omahabd
         # first, and always restart it afterwards (even on failure) so
         # the panel comes back with the journal state visible.
@@ -616,19 +617,6 @@ in
         SystemCallFilter = [
           "@system-service"
           "@mount"
-          "@chown"
-          "setxattr"
-          "fsetxattr"
-          "lsetxattr"
-          "getxattr"
-          "lgetxattr"
-          "fgetxattr"
-          "listxattr"
-          "llistxattr"
-          "flistxattr"
-          "removexattr"
-          "lremovexattr"
-          "fremovexattr"
         ];
         SystemCallArchitectures = "native";
         RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" ];

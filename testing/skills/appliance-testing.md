@@ -77,6 +77,8 @@ exclusive operations, backup, restore, and recovery.
 - Check required scopes in the saved restic manifest, not the backup API response.
 - Repository creation starts a backup. Wait for it before a separate capture request.
 - Bundle apply must pass the installed unit's panel health gate and daemon restart.
+- The installed restore unit runs `omahab recovery apply --apply-staged`.
+- Verify its main command before recovery execution.
 - Keep the accepted browser operation ID in secret-free evidence.
 - Stop on a wrong terminal apply outcome instead of waiting for the timeout.
 - The interrupt phase kills the live `omahab-restore` MainPID only at a
