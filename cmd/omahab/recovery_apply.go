@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -88,7 +89,10 @@ apply is resumable: re-running the same command continues the ORIGINAL
 operation from its persisted journal stage, keeping the staged snapshot,
 scope selection and rollback tree.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, cancel := newContext()
+			// The shared executor moves gigabytes of payload data,
+			// restarts the daemon, and probes app health for minutes;
+			// the per-request --timeout must not cap the whole apply.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
 			defer cancel()
 			if applyStaged {
 				return runApplyStaged(ctx)
