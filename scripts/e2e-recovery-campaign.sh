@@ -87,17 +87,6 @@ rc_ssh_root() {
     admin@127.0.0.1 "sudo -k -S -p '' bash -c $quoted" 2>/dev/null
 }
 
-# rc_wait_until <timeout-seconds> <description> <command...> — poll until
-# the command succeeds (exit 0) or the timeout elapses.
-rc_wait_until() {
-  local timeout="$1" desc="$2"; shift 2
-  local deadline=$(( SECONDS + timeout ))
-  while (( SECONDS < deadline )); do
-    if "$@" >/dev/null 2>&1; then return 0; fi
-    sleep 3
-  done
-  rc_die "timed out waiting for: $desc"
-}
 
 # rc_setup_check <id> <status> — assert one setup checklist check state.
 rc_setup_check() {
@@ -112,14 +101,54 @@ sys.exit(1)
 ' "$want_id" "$want_status"
 }
 
-# rc_restore_stage <op-id> — echo the persisted operation stage.
-rc_restore_stage() {
-  rc_api GET "/api/v1/recovery/restore/$1" | python3 -c 'import json,sys; print(json.load(sys.stdin)["stage"])'
+# rc_wait_until <timeout-seconds> <description> <command...> — poll until
+# the command succeeds (exit 0) or the timeout elapses. A terminal
+# restore failure fails immediately with diagnostics.
+rc_wait_until() {
+  local timeout="$1" desc="$2"; shift 2
+  local deadline=$(( SECONDS + timeout ))
+  while (( SECONDS < deadline )); do
+    if "$@" >/dev/null 2>&1; then return 0; fi
+    if [[ -n "$RC_OP_ID" ]]; then
+      local failure
+      failure="$(rc_restore_failure "$RC_OP_ID")"
+      if [[ -n "$failure" ]]; then
+        rc_restore_diagnose "$RC_OP_ID"
+        rc_die "restore failed during: $desc ($failure)"
+      fi
+    fi
+    sleep 3
+  done
+  [[ -z "${RC_OP_ID:-}" ]] || rc_restore_diagnose "$RC_OP_ID"
+  rc_die "timed out waiting for: $desc"
 }
 
 # rc_restore_status <op-id> — echo the persisted operation status.
 rc_restore_status() {
   rc_api GET "/api/v1/recovery/restore/$1" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])'
+}
+
+# rc_restore_stage <op-id> — echo the persisted operation stage.
+rc_restore_stage() {
+  rc_api GET "/api/v1/recovery/restore/$1" | python3 -c 'import json,sys; print(json.load(sys.stdin)["stage"])'
+}
+
+# rc_restore_failure <op-id> — echo the journaled error when the
+# operation terminally failed; empty otherwise.
+rc_restore_failure() {
+  rc_api GET "/api/v1/recovery/restore/$1" | python3 -c 'import json,sys; op=json.load(sys.stdin); print(op.get("error","") if op.get("status")=="failed" else "")'
+}
+
+# rc_restore_diagnose <op-id> — dump unit state, unit journal, and the
+# operation journal into the campaign log before a restore wait fails.
+rc_restore_diagnose() {
+  rc_log "restore diagnostics for $1:"
+  rc_ssh_root 'systemctl status omahab-restore.service --no-pager || true; journalctl -u omahab-restore.service --no-pager -n 100 || true' \
+    || rc_log "could not read the restore unit journal"
+  rc_ssh_root "cat /var/lib/omahab/recovery-restore-operations/$1/journal.json 2>/dev/null || ls /var/lib/omahab/recovery-restore-operations 2>/dev/null || true" \
+    || rc_log "could not read the operation journal"
+  rc_ssh_root 'journalctl -u omahabd.service --no-pager -n 100 || true' \
+    || rc_log "could not read the daemon journal"
 }
 
 # rc_restore_staged — the current restore operation is fully staged.

@@ -123,7 +123,8 @@ func TestUnwrapStagedMasterKeyRefusesMismatchedPhrase(t *testing.T) {
 	for i := range master {
 		master[i] = byte(i + 7)
 	}
-	kit := writeTestRecoveryKit(t, staging, seed, master)
+	kit := writeTestRecoveryKit(t, staging, b.cfg.StateDir, seed, master)
+	writeTestStagedManifest(t, staging, b.cfg.StateDir)
 	if kit.Fingerprint != recoverySeedFingerprint(seed) {
 		t.Fatalf("kit fingerprint %q does not match seed", kit.Fingerprint)
 	}
@@ -151,9 +152,9 @@ func generateTestPhrase(t *testing.T) ([]string, [32]byte, error) {
 }
 
 // writeTestRecoveryKit persists a kit wrapping master under seed at the
-// v2 staged location dir/backup-staging/recovery.kit and returns the
-// decoded kit.
-func writeTestRecoveryKit(t *testing.T, dir string, seed, master [32]byte) recoveryKitFile {
+// extracted snapshot layout <dir>/<stateDir>/backup-staging/recovery.kit
+// and returns the decoded kit.
+func writeTestRecoveryKit(t *testing.T, dir, stateDir string, seed, master [32]byte) recoveryKitFile {
 	t.Helper()
 	rk := secrets.DeriveRecoveryKey(seed)
 	wrapped := secrets.WrapMasterKey(master, rk)
@@ -167,7 +168,7 @@ func writeTestRecoveryKit(t *testing.T, dir string, seed, master [32]byte) recov
 	if err != nil {
 		t.Fatal(err)
 	}
-	staged := filepath.Join(dir, "backup-staging")
+	staged := filepath.Join(dir, filepath.Clean("/"+stateDir), "backup-staging")
 	if err := os.MkdirAll(staged, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -175,6 +176,29 @@ func writeTestRecoveryKit(t *testing.T, dir string, seed, master [32]byte) recov
 		t.Fatal(err)
 	}
 	return kit
+}
+
+// writeTestStagedManifest drops a minimal v2 manifest beside a staged kit
+// so StagedManifestDirFor resolves the extracted layout.
+func writeTestStagedManifest(t *testing.T, dir, stateDir string) {
+	t.Helper()
+	staged := filepath.Join(dir, filepath.Clean("/"+stateDir), "backup-staging")
+	if err := os.MkdirAll(staged, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := map[string]any{
+		"format_version": 2,
+		"instance":       map[string]any{"id": "test", "domain": "example.com", "placement": "lan"},
+		"created_at":     "2026-09-27T00:00:00Z",
+		"scopes":         []any{map[string]any{"name": "server-config", "artifacts": []any{}}},
+	}
+	raw, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staged, "manifest.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // JSON marshal shape sanity: the request types never carry a phrase into

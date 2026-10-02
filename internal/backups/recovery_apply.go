@@ -276,10 +276,16 @@ func PlanServerConfigSwap(staging, stateDir string, manifest SnapshotManifest) (
 	return plan, nil
 }
 
-// StagedRecoveryKitPath returns the staged recovery.kit path for the
-// layout PlanServerConfigSwap resolves: the fixed backup-staging base.
-func StagedRecoveryKitPath(staging, _ string) (string, error) {
-	p := filepath.Join(staging, backupStagingDir, "recovery.kit")
+// StagedRecoveryKitPath returns the staged recovery.kit path in the same
+// directory PlanServerConfigSwap resolves through StagedManifestDirFor:
+// restic reproduces the captured absolute staging path
+// (<staging>/<stateDir>/backup-staging) below the extraction target.
+func StagedRecoveryKitPath(staging, stateDir string) (string, error) {
+	stagedBase, err := StagedManifestDirFor(staging, stateDir)
+	if err != nil {
+		return "", err
+	}
+	p := filepath.Join(stagedBase, "recovery.kit")
 	if _, err := os.Stat(p); err == nil {
 		return p, nil
 	}
