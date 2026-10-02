@@ -153,6 +153,8 @@ rc_restore_diagnose() {
     || rc_log "could not read the operation journal"
   rc_ssh_root 'journalctl -u omahabd.service --no-pager -n 100 || true' \
     || rc_log "could not read the daemon journal"
+  rc_ssh_root 'journalctl -u omahab-bundle-apply.service --no-pager -n 120 || true; ls /var/lib/omahab/bundle-apply-operations 2>/dev/null || true' \
+    || rc_log "could not read the bundle-apply journal"
 }
 
 # rc_restore_staged — the current restore operation is fully staged.
