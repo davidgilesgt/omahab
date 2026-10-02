@@ -176,6 +176,17 @@ func (b *Backend) planBackupCapture(ctx context.Context, scopes []string) (*capt
 	// Server-config always carries the inseparable PocketID identity
 	// checkpoint alongside the control dump.
 	if wantConfig {
+		// Server-config also captures the rendered configuration subtrees
+		// the restore swaps back (appenv gates every native unit start;
+		// caddy and cloudflared hold rendered reverse-proxy state).
+		// Capturing the whole state dir would pull in runtime scratch, so
+		// take exactly the subtrees PlanServerConfigSwap restores.
+		for _, name := range strings.Split(backups.RecoveryStateDirs(), ",") {
+			src := filepath.Join(b.cfg.StateDir, name)
+			if entries, err := os.ReadDir(src); err == nil && len(entries) > 0 {
+				plan.sources = append(plan.sources, src)
+			}
+		}
 		if _, ok := bundleByID["pocket-id"]; ok {
 			wantApp["pocket-id"] = true
 		}

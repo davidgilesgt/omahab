@@ -90,6 +90,14 @@ const (
 	recoveryStateDirs = "appenv,caddy,cloudflared"
 )
 
+// RecoveryStateDirs returns the comma-separated state subtrees the
+// server-config capture must include so the restore swap can put them
+// back (PlanServerConfigSwap reads the same list).
+func RecoveryStateDirs() string { return recoveryStateDirs }
+
+const (
+)
+
 // listRecoverySnapshots returns restic snapshots newest-first, marking the
 // ones whose paths cover the server-config scope (the state directory).
 // Server-config restores never select app-only snapshots.
