@@ -1063,7 +1063,9 @@ func offlineWriteCustomBundles(ctx context.Context, rt offlineRecoveryRuntime, d
 			return fmt.Errorf("write custom bundle %q: %w", mb.ID, err)
 		}
 	}
-	if _, err := svc.Commit(ctx, "omahab restore "+j.Operation.ID+": custom bundle definitions"); err != nil {
+	// Mirror push failure is reported, never fatal: the commit hash is
+	// the authority (Forgejo may be absent on a fresh machine).
+	if commit, err := svc.Commit(ctx, "omahab restore "+j.Operation.ID+": custom bundle definitions"); err != nil && commit == "" {
 		return fmt.Errorf("commit restored custom bundles: %w", err)
 	}
 	return nil
