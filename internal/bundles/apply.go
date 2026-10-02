@@ -144,8 +144,8 @@ func (s *Service) Apply(ctx context.Context, flakeArg string, hooks ApplyHooks, 
 	// 6. Switch. A failed switch may still have activated a generation
 	// (activation and unit reload run before some failures surface), so
 	// roll back before reporting instead of leaving it running.
-	if _, err := hooks.Switch(ctx, flakeArg, s.repo, rev); err != nil {
-		switchErr := fmt.Errorf("nixos-rebuild switch: %w", err)
+	if out, err := hooks.Switch(ctx, flakeArg, s.repo, rev); err != nil {
+		switchErr := fmt.Errorf("nixos-rebuild switch: %v: %s", err, lastLines(string(out), 10))
 		if hooks.Rollback == nil {
 			return nil, switchErr
 		}
