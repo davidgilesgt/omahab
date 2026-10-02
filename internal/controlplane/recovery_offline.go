@@ -554,6 +554,11 @@ func runOfflineRecoveryRestoreLocked(ctx context.Context, opts offlineRecoveryOp
 	if identity != "" && !slices.Contains(pausedBundles, identity) {
 		pausedBundles = append(pausedBundles, identity)
 	}
+	// dispatchedByThisRun marks applies this executor staged itself. An
+	// inherited journaled apply may fail because the interruption killed
+	// the restore unit under the orphaned apply's switch; a fresh one
+	// cannot (this unit is active while this executor runs).
+	dispatchedByThisRun := false
 
 	// Dispatch the bundle apply through the shared staged path (journal +
 	// trusted tmpfs handoff + systemctl --no-block), skipping health
@@ -568,6 +573,7 @@ func runOfflineRecoveryRestoreLocked(ctx context.Context, opts offlineRecoveryOp
 		}
 		j.BundleApplyID = op.ID
 		j.Operation.CanResume = true
+		dispatchedByThisRun = true
 		if err := writeRecoveryRestoreJournal(rt.stateDir, j); err != nil {
 			return offlineFailRestore(rt.stateDir, &j, "journal bundle apply: "+err.Error())
 		}
@@ -595,6 +601,7 @@ func runOfflineRecoveryRestoreLocked(ctx context.Context, opts offlineRecoveryOp
 			}
 			j.BundleApplyID = retry.ID
 			j.Operation.CanResume = true
+			dispatchedByThisRun = true
 			if err := writeRecoveryRestoreJournal(rt.stateDir, j); err != nil {
 				return offlineFailRestore(rt.stateDir, &j, "journal bundle apply: "+err.Error())
 			}
@@ -623,9 +630,43 @@ func runOfflineRecoveryRestoreLocked(ctx context.Context, opts offlineRecoveryOp
 	}
 	if stageIndex(j.Operation.Stage) < stageIndex(recoveryStageBundlesWritten) && len(pausedBundles) > 0 {
 		if err := offlineWaitBundleApply(ctx, rt.stateDir, j.BundleApplyID); err != nil {
-			// Resumable: the journal already holds the apply ID.
+			// An apply inherited from an interrupted run can fail from
+			// the interruption itself: the killed omahab-restore unit
+			// sits in failed state while the orphaned apply's switch
+			// scans for failed units, so the switch exits 4 and rolls
+			// back. This run dispatched nothing (the restore unit is
+			// active while this executor runs), so retry once through a
+			// fresh staging. A retry that fails the same way is the
+			// apply's own verdict, not the interruption's.
+			inherited := j.BundleApplyID != "" && !dispatchedByThisRun
+			if !inherited {
+				// Resumable: the journal already holds the apply ID.
+				j.Operation.CanResume = true
+				return offlineFailRestore(rt.stateDir, &j, "bundle apply: "+err.Error())
+			}
+			done, status, _ := readBundleApplyOutcome(rt.stateDir, j.BundleApplyID)
+			if !done || status == OpCompleted {
+				j.Operation.CanResume = true
+				return offlineFailRestore(rt.stateDir, &j, "bundle apply: "+err.Error())
+			}
+			b := &Backend{cfg: configForRuntime(rt), db: restoredDB}
+			retry, serr := b.stageBundleApply(ctx, pausedBundles)
+			if serr != nil {
+				j.Operation.CanResume = true
+				return offlineFailRestore(rt.stateDir, &j, "retry bundle apply: "+serr.Error())
+			}
+			j.BundleApplyID = retry.ID
 			j.Operation.CanResume = true
-			return offlineFailRestore(rt.stateDir, &j, "bundle apply: "+err.Error())
+			if werr := writeRecoveryRestoreJournal(rt.stateDir, j); werr != nil {
+				return offlineFailRestore(rt.stateDir, &j, "journal bundle apply: "+werr.Error())
+			}
+			if serr := b.startStagedBundleApply(retry); serr != nil {
+				return offlineFailRestore(rt.stateDir, &j, "activate restored custom bundles: "+serr.Error())
+			}
+			if werr := offlineWaitBundleApply(ctx, rt.stateDir, retry.ID); werr != nil {
+				j.Operation.CanResume = true
+				return offlineFailRestore(rt.stateDir, &j, "bundle apply: "+werr.Error())
+			}
 		}
 		j.Operation.Stage = recoveryStageBundlesWritten
 		if err := writeRecoveryRestoreJournal(rt.stateDir, j); err != nil {
