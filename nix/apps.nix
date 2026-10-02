@@ -127,15 +127,11 @@ in
       # installed host.
       settings.include_if_exists = "/etc/postgresql-omahab/tuning.conf";
     };
-    # Writes /etc/postgresql-omahab/tuning.conf from /proc/meminfo before
-    # postgres starts: shared_buffers = clamp(25% RAM, 128MB, 8GB),
-    # effective_cache_size = clamp(50% RAM, 256MB, 16GB) (planner
-    # hint, no allocation), maintenance_work_mem = clamp(5% RAM, 64MB,
-    # 512MB), work_mem = 8MB fixed (per-sort per-connection; bounded
-    # worst case with homelab connection counts). Values recompute at
-    # each boot, so the same generation fits a 19 GiB box and a larger
-    # Proxmox VM. Rewriting the same content does not restart postgres:
-    # the file is not store-tracked (no restart trigger).
+    # Shared database on a multi-app host: shared_buffers = clamp(12.5%
+    # RAM, 128MB, 2GB), effective_cache_size = clamp(50% RAM, 256MB,
+    # 16GB) (planner hint, not an allocation), maintenance_work_mem =
+    # clamp(1.5625% RAM, 64MB, 256MB), work_mem = 4MB per sort.
+    # Recompute at boot without a store-tracked restart trigger.
     systemd.services.omahab-postgres-tuning = {
       description = "Omahab PostgreSQL memory tuning";
       before = [ "postgresql.service" ];
@@ -161,12 +157,12 @@ in
             [ "$v" -gt "$hi" ] && v=$hi
             echo "$v"
           }
-          SHARED=$(( MEM_MB / 4 ))
-          SHARED=$(clamp "$SHARED" 128 8192)
+          SHARED=$(( MEM_MB / 8 ))
+          SHARED=$(clamp "$SHARED" 128 2048)
           ECS=$(( MEM_MB / 2 ))
           ECS=$(clamp "$ECS" 256 16384)
-          MAINT=$(( MEM_MB / 20 ))
-          MAINT=$(clamp "$MAINT" 64 512)
+          MAINT=$(( MEM_MB / 64 ))
+          MAINT=$(clamp "$MAINT" 64 256)
           install -d -m 0755 /etc/postgresql-omahab
           tmp=$(mktemp /etc/postgresql-omahab/tuning.conf.XXXXXX)
           {
@@ -174,7 +170,7 @@ in
             echo "shared_buffers = ''${SHARED}MB"
             echo "effective_cache_size = ''${ECS}MB"
             echo "maintenance_work_mem = ''${MAINT}MB"
-            echo "work_mem = 8MB"
+            echo "work_mem = 4MB"
           } > "$tmp"
           chmod 0644 "$tmp"
           chown root:postgres "$tmp"

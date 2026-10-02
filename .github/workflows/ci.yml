@@ -30,7 +30,8 @@ jobs:
         working-directory: web
         env:
           PLAYWRIGHT_BROWSERS_PATH: ../dist/playwright/browsers
-      - run: npm run e2e
+      - name: Simulated browser presentation checks
+        run: npm run test:ui
         working-directory: web
       - run: npm ci
         working-directory: workers/email

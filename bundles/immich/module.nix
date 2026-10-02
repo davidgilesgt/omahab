@@ -36,24 +36,26 @@ in
       environment.IMMICH_CONFIG_FILE = "${dataDir}/apps/immich/immich.json";
       serviceConfig.BindReadOnlyPaths = [ "${dataDir}/apps/immich/immich.json" ];
     } // (gate "immich");
-    # Immich ML workers = clamp(nproc/2, 1, 4) (MACHINE_LEARNING_WORKERS;
-    # module default 1, each worker loads its own model copy). Runtime-
+    # Immich ML uses the CPU formula with the shared RAM cap
+    # Each worker loads its own model copy. Runtime-
     # derived; see resourceEnvScript. The nixpkgs unit sets
     # MACHINE_LEARNING_WORKERS="1" as static Environment= — the generated
     # EnvironmentFile wins (read later). ML is a bursty, restartable
     # workload: raise it as an OOM candidate so the killer takes it (and
     # systemd restarts it) instead of postgres/caddy/omahabd.
-    systemd.services.immich-machine-learning.serviceConfig = {
-      ExecStartPre = [
-        "+${
-          resourceEnvScript "immich-machine-learning" [
-            "W=$(( NPROC / 2 )); [ $W -lt 1 ] && W=1; [ $W -gt 4 ] && W=4 || true; echo \"MACHINE_LEARNING_WORKERS=$W\""
-          ]
-        }"
-      ];
-      EnvironmentFile = [ "/run/omahab-resenv/immich-machine-learning.env" ];
-      OOMScoreAdjust = 600;
-    };
+    systemd.services.immich-machine-learning = {
+      serviceConfig = {
+        ExecStartPre = [
+          "+${
+            resourceEnvScript "immich-machine-learning" [
+              "echo \"MACHINE_LEARNING_WORKERS=$(worker_count $(( NPROC / 2 )))\""
+            ]
+          }"
+        ];
+        EnvironmentFile = [ "-/run/omahab-resenv/immich-machine-learning.env" ];
+        OOMScoreAdjust = 600;
+      };
+    } // (gate "immich");
     systemd.tmpfiles.rules = [
       # Immich uses a non-default mediaLocation the module never creates
       # (its `e` rule only repairs existing dirs): pre-create config +
@@ -64,6 +66,9 @@ in
       "z ${dataDir}/apps/immich/immich.json 0600 immich immich - -"
     ];
     # Env-gate activation path unit (see nix/bundle-lib.nix envPathUnit).
-    systemd.paths = builtins.listToAttrs [ (envPathUnit "immich-server" "immich") ];
+    systemd.paths = builtins.listToAttrs [
+      (envPathUnit "immich-server" "immich")
+      (envPathUnit "immich-machine-learning" "immich")
+    ];
   };
 }

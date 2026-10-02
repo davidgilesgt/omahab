@@ -163,20 +163,20 @@ in
           Group = "litellm";
           SupplementaryGroups = [ "litellm-cfg" ];
           ReadOnlyPaths = [ litellmConfigDir ];
-          # Uvicorn workers = clamp(nproc/2, 1, 4) (litellm --num_workers
-          # reads the NUM_WORKERS env var at CLI parse; module default 1).
-          # Each worker holds its own DB connection pool — cap at 4.
+          # Uvicorn workers use the CPU formula with the shared RAM cap.
+          # litellm reads NUM_WORKERS at CLI parse. Each worker owns a
+          # database connection pool.
           # Runtime-derived; see resourceEnvScript. Also: the module's
           # ExecStartPre list merges (lists concatenate), so the
           # tokenizer-cache seed still runs.
           ExecStartPre = [
             "+${
               resourceEnvScript "litellm" [
-                "W=$(( NPROC / 2 )); [ $W -lt 1 ] && W=1; [ $W -gt 4 ] && W=4 || true; echo \"NUM_WORKERS=$W\""
+                "echo \"NUM_WORKERS=$(worker_count $(( NPROC / 2 )))\""
               ]
             }"
           ];
-          EnvironmentFile = [ "/run/omahab-resenv/litellm.env" ];
+          EnvironmentFile = [ "-/run/omahab-resenv/litellm.env" ];
           ExecStart = mkForce (
             let l = config.services.litellm; in
             # --use_prisma_db_push: without it the gateway takes the

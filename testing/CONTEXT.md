@@ -49,14 +49,22 @@ Standard harness mode on a separate fresh disk verifies unchanged recovery
 checks before the final interactive campaign.
 If test-tool changes require commits, complete repository commit gates first.
 Run the final ISO campaign from the resulting source state.
-Run the recovery campaign (`scripts/e2e-iso-install.sh --recovery`,
-`E2E_MEM_MB=10240`) only on a host with at least 12288 MiB available RAM.
-It chains: capture (phrase, repository, custom bundle, scoped snapshot),
+Run the local recovery campaign (`scripts/e2e-iso-install.sh --recovery`)
+with the default 4096 MiB guest and at least 6144 MiB available host RAM.
+Full-application campaigns still use `E2E_MEM_MB=10240` and need at least
+12288 MiB available host RAM. The local tier does not prove their capacity.
+The local recovery campaign chains: capture (phrase, repository, custom bundle, scoped snapshot),
 fresh-disk reinstall, full restore, selected subset, interrupt/resume at
 a persisted stage, and activation rollback. The phrase and repository
 password stay in the run's owner-only workdir directory; never echo them
 into evidence, logs, or browser capture. Mark the campaign cases
 blocked while capacity is short; never claim a VM proof that did not run.
+The harness writes separate `runs/<run-id>/evidence/` artifacts for each run.
+Verify `SHA256SUMS` in that directory. `report.json` identifies source
+content, ISO, settings, checks, memory observations, and the repeat command.
+Never distribute serial logs or recovery-secrets with this evidence.
+Source changes during execution invalidate the run. Complete code changes
+and commit gates before the final campaign.
 
 Every administrator API request needs the panel bearer token, including
 requests from the LAN, tailnet, and the ISO harness loopback tunnel.

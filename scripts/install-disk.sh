@@ -1774,20 +1774,20 @@ install_stage() {
   # whose per-build overhead dominates at low parallelism (traced: builds
   # span +76s..+234s at jobs=2 while copies finish by +169s). Trivial
   # builds are fork+exec+write (~tens of MB), so jobs scale with RAM
-  # (~2 GiB per job, clamped 2..8 and by vCPU count): small boxes keep
-  # jobs=2 exactly as before, capable hardware builds wider. The few heavy
-  # ones (initrd compress) still use both cores via --cores 2.
+  # (~2 GiB per job, clamped 1..8 and by vCPU count). Small machines
+  # serialize builds instead of forcing two concurrent allocations.
+  # The few heavy builds still use two cores via --cores 2.
   # OMAHAB_MAX_JOBS overrides the detection (debugging).
-  local jobs="2"
+  local jobs="1"
   if [[ -n "${OMAHAB_MAX_JOBS:-}" ]]; then
     jobs="$OMAHAB_MAX_JOBS"
   elif read -r _ mem_kb _ < /proc/meminfo 2>/dev/null; then
     jobs=$((mem_kb / 1024 / 1024 / 2))
-    if ((jobs < 2)); then jobs=2; fi
+    if ((jobs < 1)); then jobs=1; fi
     if ((jobs > 8)); then jobs=8; fi
     ncpu=$(nproc 2>/dev/null || echo 2)
     if ((ncpu < jobs)); then jobs=$ncpu; fi
-    if ((jobs < 2)); then jobs=2; fi
+    if ((jobs < 1)); then jobs=1; fi
   fi
   log "nixos-install parallelism: --max-jobs $jobs --cores 2"
   # Optional extra binary cache (e.g. a host serving its store so the

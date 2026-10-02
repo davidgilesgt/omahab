@@ -7,25 +7,31 @@ exclusive operations, backup, restore, and recovery.
 
 - Run tests from the repository root with `scripts/e2e-iso-install.sh`.
 - Never substitute `nix run .#vm` or NixOS unit tests for ISO installation.
-- The harness defaults to 6144 MiB RAM, four virtual CPUs, 40 GiB disk.
+- The harness defaults to 4096 MiB RAM, two CPUs, a 40 GiB system disk, and one 4 GiB scratch disk.
 - Default ports are HTTP 8485, SSH 2229, serial 4445, binary cache 8490.
-- Each new commit requires a fresh ISO test. The harness recreates the VM
-  disk and rebuilds the ISO when HEAD moved.
+- Each new commit or source change requires a fresh ISO test. The harness
+  checks source content and ISO store identity before reuse.
 - Never touch the root-level `nixos.qcow2` dev-VM state.
 - All generated test files and build results belong under `dist/`.
 - The harness reads the disposable panel token through the installed admin
   account over SSH. It checks that anonymous setup requests return 401.
 - Authenticate every administrator API probe, including loopback probes.
 - Never record the token, request headers, or response bodies with secrets.
+- Every run writes `runs/<run-id>/evidence/` under its workdir.
+- Verify `SHA256SUMS` there. Read `report.json` for source, ISO, settings,
+  checks, memory observations, and repeat command.
+- Keep serial logs and recovery-secrets out of distributed evidence.
+- Standard mode uses the installed browser journey, not simulated routes.
+- Interactive mode does not claim an automatic campaign PASS.
 
 ## Capacity gate
 
 - Recheck KVM access, free storage, available RAM, required commands
-  (Nix, Python 3, curl, SSH, ssh-keygen, QEMU, qemu-img), and ports.
+  (Nix, Python 3, Node, Chromium, curl, SSH, ssh-keygen, QEMU, qemu-img), and ports.
 - Full application runs use `E2E_MEM_MB=10240` and require at least
   12288 MiB available host RAM.
-- Use the 6144 MiB floor only for installation checks without the full
-  workload.
+- Local setup and recovery runs use 4096 MiB guests with at least
+  6144 MiB available host RAM. Do not claim full-application capacity.
 - If capacity is insufficient, stop VM execution until memory is available
   or a suitable machine is supplied. Continue source accounting and
   isolated checks meanwhile. Never disable installed applications to hide
@@ -37,7 +43,7 @@ exclusive operations, backup, restore, and recovery.
 
 - Interactive runs use:
   `bash scripts/e2e-iso-install.sh --interactive --keep --workdir dist/deep-test/<run-id>/vm`
-  with `E2E_MEM_MB=10240` in the process environment.
+  with `E2E_MEM_MB=10240` for full application work, or the default for local setup only.
 - Wait for `E2E INTERACTIVE READY` and HTTP port 8485.
 - Open `http://127.0.0.1:8485/setup` and confirm recovery is not completed.
 - In interactive mode browser cases own recovery generation and
@@ -49,20 +55,27 @@ exclusive operations, backup, restore, and recovery.
 - `--keep` preserves files for investigation but never orphans processes.
 - Full installer variants extend the same harness with
   `--interactive-installer`, `--firmware bios|uefi`, `--data-disks 0|1|2`.
-  Defaults remain automatic installation, BIOS, zero data disks.
+  Defaults remain automatic installation, BIOS, one data disk.
+  Standard mode formats only the harness scratch disk for the storage campaign.
+  `--data-disks 0` explicitly skips migration and missing-UUID checks.
 
 ## Recovery campaign
 
-- `bash scripts/e2e-iso-install.sh --recovery` with `E2E_MEM_MB=10240`
+- `bash scripts/e2e-iso-install.sh --recovery` with the default allocation
   runs the full local-restic disaster-recovery chain on one VM:
   phrase generate/confirm, repository configure, custom bundle add +
   real apply, scoped capture, fresh-disk reinstall, full restore,
   selected-scope restore, SIGKILL interrupt at a persisted stage plus
   resume, and a switch-error rollback proof.
-- Prerequisites are the capacity gate above (at least 12288 MiB
-  available RAM), KVM, and 40 GiB of free disk. The harness exports the
+- Prerequisites are at least 6144 MiB available host RAM, KVM, and
+  40 GiB of free disk. The harness exports the
   restic repository off the old disk before wiping it and imports it
   onto the fresh install.
+- Check required scopes in the saved restic manifest, not the backup API response.
+- Repository creation starts a backup. Wait for it before a separate capture request.
+- Bundle apply must pass the installed unit's panel health gate and daemon restart.
+- Keep the accepted browser operation ID in secret-free evidence.
+- Stop on a wrong terminal apply outcome instead of waiting for the timeout.
 - The interrupt phase kills the live `omahab-restore` MainPID only at a
   persisted journal stage. A missed kill window fails the campaign; it
   never counts as passed.

@@ -233,10 +233,13 @@ func rollbackProposals(j storageJournal) []StoragePlacement {
 	return out
 }
 
-// validatePlacementUUID checks a UUID against lsblk: known device, supported
-// filesystem, not a system disk, with capacity and read/write access probed on
-// the mounted filesystem.
-func validatePlacementUUID(ctx context.Context, uuid string, needBytes int64) (apitypes.Disk, error) {
+// validatePlacementUUID checks a UUID against a read-only lsblk scan:
+// known device, supported filesystem, not a system disk. Mounting,
+// capacity and write probes run in the privileged migration unit, which
+// owns /mnt/omahab-disks in the host mount namespace; the sandboxed
+// daemon cannot mkdir/mount there (EROFS from ProtectSystem=strict, plus
+// mount(2) is outside its syscall allow-list).
+func validatePlacementIdentity(ctx context.Context, uuid string) (apitypes.Disk, error) {
 	disks, err := listDisksWithSystem(ctx)
 	if err != nil {
 		return apitypes.Disk{}, err
@@ -251,24 +254,6 @@ func validatePlacementUUID(ctx context.Context, uuid string, needBytes int64) (a
 			return apitypes.Disk{}, fmt.Errorf("%w: filesystem %q (%s) does not retain ACLs/xattrs/ownership; use ext4, btrfs or xfs",
 				apitypes.ErrValidation, d.UUID, d.FSType)
 		}
-		mnt := diskMountpoint(d.UUID)
-		if err := ensureDiskMounted(ctx, d, mnt); err != nil {
-			return apitypes.Disk{}, err
-		}
-		var st syscall.Statfs_t
-		if err := syscall.Statfs(mnt, &st); err != nil {
-			return apitypes.Disk{}, fmt.Errorf("statfs %q: %w", mnt, err)
-		}
-		avail := int64(st.Bavail) * int64(st.Bsize)
-		if needBytes > 0 && avail < needBytes {
-			return apitypes.Disk{}, fmt.Errorf("%w: disk %q has %d bytes free, need %d",
-				apitypes.ErrValidation, uuid, avail, needBytes)
-		}
-		probe := filepath.Join(mnt, ".omahab-write-probe")
-		if err := os.WriteFile(probe, []byte("probe"), 0o600); err != nil {
-			return apitypes.Disk{}, fmt.Errorf("%w: disk %q is not writable: %v", apitypes.ErrValidation, uuid, err)
-		}
-		_ = os.Remove(probe)
 		return d, nil
 	}
 	if disks.systemUUIDs[strings.ToUpper(uuid)] || disks.systemUUIDs[strings.ToLower(uuid)] {
@@ -278,14 +263,50 @@ func validatePlacementUUID(ctx context.Context, uuid string, needBytes int64) (a
 	return apitypes.Disk{}, fmt.Errorf("%w: unknown disk uuid %q", apitypes.ErrValidation, uuid)
 }
 
+// validatePlacementUUID is the full device validation the privileged
+// migration executor runs before anything changes: identity (read-only
+// scan), then mount at the omahab mountpoint, statfs capacity for the
+// populated source, and a write probe on the mounted filesystem. The
+// sandboxed daemon must not call this (see validatePlacementIdentity).
+func validatePlacementUUID(ctx context.Context, uuid string, needBytes int64) (apitypes.Disk, error) {
+	d, err := validatePlacementIdentity(ctx, uuid)
+	if err != nil {
+		return apitypes.Disk{}, err
+	}
+	mnt := diskMountpoint(d.UUID)
+	if err := ensureDiskMounted(ctx, d, mnt); err != nil {
+		return apitypes.Disk{}, err
+	}
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(mnt, &st); err != nil {
+		return apitypes.Disk{}, fmt.Errorf("statfs %q: %w", mnt, err)
+	}
+	avail := int64(st.Bavail) * int64(st.Bsize)
+	if needBytes > 0 && avail < needBytes {
+		return apitypes.Disk{}, fmt.Errorf("disk %q has %d bytes free, need %d", uuid, avail, needBytes)
+	}
+	probe := filepath.Join(mnt, ".omahab-write-probe")
+	if err := os.WriteFile(probe, []byte("probe"), 0o600); err != nil {
+		return apitypes.Disk{}, fmt.Errorf("disk %q is not writable: %v", uuid, err)
+	}
+	_ = os.Remove(probe)
+	return d, nil
+}
+
 type diskScan struct {
 	candidates []apitypes.Disk
 	// systemUUIDs holds upper+lower forms of UUIDs backing system mounts.
 	systemUUIDs map[string]bool
 }
 
+var lsblkScan = defaultLSBlockScan
+
+func defaultLSBlockScan(ctx context.Context) ([]byte, error) {
+	return exec.CommandContext(ctx, "lsblk", "-J", "-o", "NAME,SIZE,TYPE,FSTYPE,UUID,MOUNTPOINT").Output()
+}
+
 func listDisksWithSystem(ctx context.Context) (diskScan, error) {
-	out, err := exec.CommandContext(ctx, "lsblk", "-J", "-o", "NAME,SIZE,TYPE,FSTYPE,UUID,MOUNTPOINT").Output()
+	out, err := lsblkScan(ctx)
 	if err != nil {
 		return diskScan{}, fmt.Errorf("lsblk: %w", err)
 	}
@@ -323,17 +344,16 @@ func listDisksWithSystem(ctx context.Context) (diskScan, error) {
 	return scan, nil
 }
 
+// ensureDiskMounted mounts a data disk at its omahab mountpoint. It runs
+// only inside the privileged storage-migration executor (host mount
+// namespace, mount(2) allowed, /mnt writable): the sandboxed daemon can
+// neither mkdir nor mount there.
 func ensureDiskMounted(ctx context.Context, d apitypes.Disk, mnt string) error {
 	if err := os.MkdirAll(mnt, 0o755); err != nil {
 		return err
 	}
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(mnt, &st); err != nil {
-		return err
-	}
-	// mountpoint check via /proc/self/mountinfo device comparison is
-	// overkill; attempt mount only when the dir is empty of mounts by
-	// probing `mountpoint -q`.
+	// attempt mount only when the directory is not already a mountpoint
+	// (probe `mountpoint -q`).
 	if err := exec.CommandContext(ctx, "mountpoint", "-q", mnt).Run(); err == nil {
 		return nil
 	}
@@ -522,18 +542,15 @@ func (b *Backend) ConfigureStorage(ctx context.Context, req apitypes.ConfigureSt
 	if !req.Confirm {
 		return Operation{}, fmt.Errorf("%w: confirm:true is required to migrate existing data", apitypes.ErrValidation)
 	}
-	// Full device validation before any activation: identity, filesystem
-	// support, capacity for populated sources, and read/write access.
+	// Identity validation the sandboxed daemon can do read-only (lsblk):
+	// known device, supported filesystem, not a system disk. Mounting,
+	// free-space and write probes run in the privileged migration unit,
+	// which owns /mnt/omahab-disks in the host mount namespace.
 	for _, p := range req.Placements {
 		if p.FSUUID == nil || strings.TrimSpace(*p.FSUUID) == "" {
 			continue
 		}
-		uuid := strings.TrimSpace(*p.FSUUID)
-		var need int64
-		if cp := known[strings.TrimSpace(p.Volume)]; cp != "" && dirNonEmpty(cp) {
-			need = dirSizeBytes(cp)
-		}
-		if _, err := validatePlacementUUID(ctx, uuid, need); err != nil {
+		if _, err := validatePlacementIdentity(ctx, strings.TrimSpace(*p.FSUUID)); err != nil {
 			return Operation{}, err
 		}
 	}
@@ -543,7 +560,7 @@ func (b *Backend) ConfigureStorage(ctx context.Context, req apitypes.ConfigureSt
 	}
 	op := newOperation("storage", affectedAppIDs(known, req.Placements))
 	op.Status = OpRunning
-	op.Stage = "preflight"
+	op.Stage = "staged"
 	jPlacements := make([]StoragePlacement, 0, len(req.Placements))
 	for _, p := range req.Placements {
 		jPlacements = append(jPlacements, toInternal(p))
@@ -559,7 +576,19 @@ func (b *Backend) ConfigureStorage(ctx context.Context, req apitypes.ConfigureSt
 	if err := writeStorageJournal(b.cfg.StateDir, j); err != nil {
 		return Operation{}, err
 	}
-	go b.runStorageMigration(j.Operation.ID)
+	// The move itself runs in the privileged omahab-storage-migrate unit
+	// (host mount namespace): the sandboxed daemon can neither mount
+	// data disks nor copy xattrs, and mounts made in its namespace would
+	// be invisible to app units.
+	if err := b.startStorageExecutor(j.Operation.ID, "migrate"); err != nil {
+		// The journal (failed by the trigger) is the operation record;
+		// the daemon surfaces its error instead of a zero operation.
+		failed, ferr := loadOperation(b.cfg.StateDir, j.Operation.ID)
+		if ferr == nil {
+			return failed, translateError(err)
+		}
+		return Operation{}, translateError(err)
+	}
 	op, _ = loadOperation(b.cfg.StateDir, j.Operation.ID)
 	return op, nil
 }
@@ -609,7 +638,7 @@ func (b *Backend) setupPhaseStorage(ctx context.Context) error {
 			continue
 		}
 		uuid := strings.TrimSpace(*p.FSUUID)
-		disk, err := validatePlacementUUID(ctx, uuid, 0)
+		disk, err := validatePlacementIdentity(ctx, uuid)
 		if err != nil {
 			// Fail closed: an expected active disk that is missing must
 			// stop setup rather than start apps against wrong root data.
@@ -628,168 +657,182 @@ func (b *Backend) setupPhaseStorage(ctx context.Context) error {
 	return nil
 }
 
-// runStorageMigration executes the journaled move under the global lock:
-// record previous mapping, enter (owned) maintenance, stop writers, rsync
-// copy with --numeric-ids and ACLs/xattrs, checksum-verify while stopped,
-// then atomically persist/activate the new bind mapping. Old data is kept
-// untouched; failures roll back to the old mapping and prior unit state.
-func (b *Backend) runStorageMigration(opID string) {
-	err := withMaintenanceLock(func() error {
-		j, err := loadStorageJournal(b.cfg.StateDir, opID)
-		if err != nil {
-			return err
+// executeStorageMigration executes the journaled move (host mount
+// namespace, privileged): full device validation (mount, capacity, write
+// probe), record previous mapping, enter (owned) maintenance, stop writers,
+// rsync copy with --numeric-ids and ACLs/xattrs, checksum-verify while
+// stopped, then atomically persist/activate the new bind mapping. Old data
+// is kept untouched; failures roll back to the old mapping and prior unit
+// state. The caller holds the global maintenance lock.
+func (b *Backend) executeStorageMigration(j storageJournal) error {
+	opID := j.Operation.ID
+	ctx := context.Background()
+	known, err := b.knownVolumes(ctx)
+	if err != nil {
+		return failStorageOp(b.cfg.StateDir, &j, err.Error())
+	}
+	// Full device validation before anything changes: identity, filesystem,
+	// capacity for populated sources, read/write access on the mounted
+	// filesystem. A missing disk fails the operation closed here, with the
+	// storage file and all live bindings untouched.
+	for _, p := range j.Placements {
+		if p.FSUUID == nil || strings.TrimSpace(*p.FSUUID) == "" {
+			continue
 		}
-		known, err := b.knownVolumes(context.Background())
-		if err != nil {
+		uuid := strings.TrimSpace(*p.FSUUID)
+		var need int64
+		if cp := known[p.Volume]; cp != "" && dirNonEmpty(cp) {
+			need = dirSizeBytes(cp)
+		}
+		if _, err := validatePlacementUUID(ctx, uuid, need); err != nil {
 			return failStorageOp(b.cfg.StateDir, &j, err.Error())
 		}
-		ctx := context.Background()
-		// Enter maintenance for owning bundles (storage-owned: generic
-		// resume cannot clear these).
-		owners := owningBundles(j.Placements)
-		for _, bundle := range owners {
-			appRows, err := b.appsByBundle(ctx, bundle)
-			if err != nil {
-				continue
-			}
-			if len(appRows) == 0 {
-				// Not installed: record maintenance directly so a later
-				// install cannot initialize over the move.
-				if _, err := b.apps.PauseForMaintenance(ctx, bundle, apps.MaintenanceStorage, opID); err != nil {
-					return failStorageOp(b.cfg.StateDir, &j, err.Error())
-				}
-				if err := writeMarker(b.appMarkerPath(bundle)); err != nil {
-					return failStorageOp(b.cfg.StateDir, &j, err.Error())
-				}
-				continue
-			}
-			if _, err := b.pauseAppLocked(ctx, appRows[0].ID, apps.MaintenanceStorage); err != nil {
+	}
+	// Enter maintenance for owning bundles (storage-owned: generic
+	// resume cannot clear these).
+	owners := owningBundles(j.Placements)
+	for _, bundle := range owners {
+		appRows, err := b.appsByBundle(ctx, bundle)
+		if err != nil {
+			continue
+		}
+		if len(appRows) == 0 {
+			// Not installed: record maintenance directly so a later
+			// install cannot initialize over the move.
+			if _, err := b.apps.PauseForMaintenance(ctx, bundle, apps.MaintenanceStorage, opID); err != nil {
 				return failStorageOp(b.cfg.StateDir, &j, err.Error())
 			}
-		}
-		// PostgreSQL special case: stop the cluster for a whole-directory move.
-		pgMove := false
-		for _, p := range j.Placements {
-			if p.Volume == "postgresql" && p.FSUUID != nil {
-				pgMove = true
-			}
-		}
-		var pgWasActive bool
-		if pgMove {
-			if out, err := exec.Command("systemctl", "stop", "postgresql.service").CombinedOutput(); err != nil {
-				_ = resumeStorageApps(b, ctx, j)
-				return failStorageOp(b.cfg.StateDir, &j, fmt.Sprintf("stop postgresql: %v: %s", err, strings.TrimSpace(string(out))))
-			}
-		}
-		j.Operation.Stage = "writers_stopped"
-		_ = writeStorageJournal(b.cfg.StateDir, j)
-
-		// Copy each moved volume.
-		for _, p := range j.Placements {
-			cp := known[p.Volume]
-			if cp == "" || !dirNonEmpty(cp) || p.FSUUID == nil {
-				continue
-			}
-			uuid := strings.TrimSpace(*p.FSUUID)
-			dest := managedSubdir(uuid, p.Volume)
-			if err := os.MkdirAll(dest, 0o755); err != nil {
-				_ = resumeStorageApps(b, ctx, j)
-				if pgMove && pgWasActive {
-					_ = exec.Command("systemctl", "start", "postgresql.service").Run()
-				}
+			if err := writeMarker(b.appMarkerPath(bundle)); err != nil {
 				return failStorageOp(b.cfg.StateDir, &j, err.Error())
 			}
-			// Marker so future runs recognize managed content.
-			_ = os.WriteFile(filepath.Join(dest, ".omahab-volume"), []byte(p.Volume+"\n"), 0o644)
-			if out, err := exec.Command("rsync", "-aHAX", "--numeric-ids", cp+"/", dest+"/").CombinedOutput(); err != nil {
-				_ = resumeStorageApps(b, ctx, j)
-				if pgMove && pgWasActive {
-					_ = exec.Command("systemctl", "start", "postgresql.service").Run()
-				}
-				return failStorageOp(b.cfg.StateDir, &j, fmt.Sprintf("rsync %q: %v: %s", p.Volume, err, strings.TrimSpace(string(out))))
-			}
-			// Checksum verification while stopped: a --checksum dry run
-			// must report no transfers.
-			out, err := exec.Command("rsync", "-aHAX", "--numeric-ids", "--checksum", "--dry-run", "--itemize-changes", cp+"/", dest+"/").CombinedOutput()
-			if err != nil {
-				_ = resumeStorageApps(b, ctx, j)
-				if pgMove && pgWasActive {
-					_ = exec.Command("systemctl", "start", "postgresql.service").Run()
-				}
-				return failStorageOp(b.cfg.StateDir, &j, fmt.Sprintf("verify %q: %v: %s", p.Volume, err, strings.TrimSpace(string(out))))
-			}
-			if strings.TrimSpace(string(out)) != "" {
-				_ = resumeStorageApps(b, ctx, j)
-				if pgMove && pgWasActive {
-					_ = exec.Command("systemctl", "start", "postgresql.service").Run()
-				}
-				return failStorageOp(b.cfg.StateDir, &j, fmt.Sprintf("verify %q: copy differs from source", p.Volume))
-			}
+			continue
 		}
-		j.Operation.Stage = "copied"
-		_ = writeStorageJournal(b.cfg.StateDir, j)
+		if _, err := b.pauseAppLocked(ctx, appRows[0].ID, apps.MaintenanceStorage); err != nil {
+			return failStorageOp(b.cfg.StateDir, &j, err.Error())
+		}
+	}
+	// PostgreSQL special case: stop the cluster for a whole-directory move.
+	pgMove := false
+	for _, p := range j.Placements {
+		if p.Volume == "postgresql" && p.FSUUID != nil {
+			pgMove = true
+		}
+	}
+	var pgWasActive bool
+	if pgMove {
+		pgWasActive = systemctlActive("postgresql.service")
+		if out, err := exec.Command("systemctl", "stop", "postgresql.service").CombinedOutput(); err != nil {
+			_ = resumeStorageApps(b, ctx, j)
+			return failStorageOp(b.cfg.StateDir, &j, fmt.Sprintf("stop postgresql: %v: %s", err, strings.TrimSpace(string(out))))
+		}
+	}
+	j.Operation.Stage = "writers_stopped"
+	_ = writeStorageJournal(b.cfg.StateDir, j)
 
-		// Atomically persist the new mapping: migration targets override
-		// the preserved active set while unmentioned volumes keep their
-		// bindings. Proposals for migrated volumes are consumed; unrelated
-		// proposals are retained.
-		merged := mergeActivePlacements(j.Previous, j.Placements)
-		migrated := map[string]bool{}
-		for _, p := range j.Placements {
-			migrated[p.Volume] = true
+	// Copy each moved volume.
+	for _, p := range j.Placements {
+		cp := known[p.Volume]
+		if cp == "" || !dirNonEmpty(cp) || p.FSUUID == nil {
+			continue
 		}
-		cur, _, _ := loadStorageFile(storageJSONPath(b.cfg.StateDir))
-		var kept []StoragePlacement
-		for _, p := range cur.Proposals {
-			if !migrated[p.Volume] {
-				kept = append(kept, p)
-			}
-		}
-		active := storageFile{Version: storageFileVersion, Placements: merged, Proposals: kept}
-		if err := writeStorageFile(storageJSONPath(b.cfg.StateDir), active); err != nil {
+		uuid := strings.TrimSpace(*p.FSUUID)
+		dest := managedSubdir(uuid, p.Volume)
+		if err := os.MkdirAll(dest, 0o755); err != nil {
 			_ = resumeStorageApps(b, ctx, j)
 			if pgMove && pgWasActive {
 				_ = exec.Command("systemctl", "start", "postgresql.service").Run()
 			}
 			return failStorageOp(b.cfg.StateDir, &j, err.Error())
 		}
-		// Live-activate binds and restart storage units.
-		for _, p := range j.Placements {
-			if p.FSUUID == nil {
-				continue
+		// Marker so future runs recognize managed content.
+		_ = os.WriteFile(filepath.Join(dest, ".omahab-volume"), []byte(p.Volume+"\n"), 0o644)
+		if out, err := exec.Command("rsync", "-aHAX", "--numeric-ids", cp+"/", dest+"/").CombinedOutput(); err != nil {
+			_ = resumeStorageApps(b, ctx, j)
+			if pgMove && pgWasActive {
+				_ = exec.Command("systemctl", "start", "postgresql.service").Run()
 			}
-			cp := known[p.Volume]
-			if cp == "" {
-				continue
-			}
-			uuid := strings.TrimSpace(*p.FSUUID)
-			src := managedSubdir(uuid, p.Volume)
-			if out, err := exec.Command("mount", "--bind", src, cp).CombinedOutput(); err != nil {
-				log.Printf("storage: live bind %q -> %q: %v: %s", src, cp, err, strings.TrimSpace(string(out)))
-			}
-			_ = exec.Command("systemctl", "restart", "omahab-storage-"+volumeSlug(p.Volume)+".service").Run()
+			return failStorageOp(b.cfg.StateDir, &j, fmt.Sprintf("rsync %q: %v: %s", p.Volume, err, strings.TrimSpace(string(out))))
 		}
-		if pgMove && pgWasActive {
-			if out, err := exec.Command("systemctl", "start", "postgresql.service").CombinedOutput(); err != nil {
-				_ = resumeStorageApps(b, ctx, j)
-				return failStorageOp(b.cfg.StateDir, &j, fmt.Sprintf("start postgresql: %v: %s", err, strings.TrimSpace(string(out))))
+		// Checksum verification while stopped: a --checksum dry run
+		// must report no transfers.
+		out, err := exec.Command("rsync", "-aHAX", "--numeric-ids", "--checksum", "--dry-run", "--itemize-changes", cp+"/", dest+"/").CombinedOutput()
+		if err != nil {
+			_ = resumeStorageApps(b, ctx, j)
+			if pgMove && pgWasActive {
+				_ = exec.Command("systemctl", "start", "postgresql.service").Run()
 			}
+			return failStorageOp(b.cfg.StateDir, &j, fmt.Sprintf("verify %q: %v: %s", p.Volume, err, strings.TrimSpace(string(out))))
 		}
-		j.Operation.Stage = "validating"
-		_ = writeStorageJournal(b.cfg.StateDir, j)
-		// Health-check resumed apps.
-		if err := resumeStorageApps(b, ctx, j); err != nil {
-			return failStorageOp(b.cfg.StateDir, &j, err.Error())
+		if strings.TrimSpace(string(out)) != "" {
+			_ = resumeStorageApps(b, ctx, j)
+			if pgMove && pgWasActive {
+				_ = exec.Command("systemctl", "start", "postgresql.service").Run()
+			}
+			return failStorageOp(b.cfg.StateDir, &j, fmt.Sprintf("verify %q: copy differs from source", p.Volume))
 		}
-		j.Operation.Stage = OpCompleted
-		j.Operation.Status = OpCompleted
-		j.Operation.Progress = 100
-		_ = writeStorageJournal(b.cfg.StateDir, j)
-		return nil
-	})
-	if err != nil {
-		log.Printf("storage migration %q: %v", opID, err)
 	}
+	j.Operation.Stage = "copied"
+	_ = writeStorageJournal(b.cfg.StateDir, j)
+
+	// Atomically persist the new mapping: migration targets override
+	// the preserved active set while unmentioned volumes keep their
+	// bindings. Proposals for migrated volumes are consumed; unrelated
+	// proposals are retained.
+	merged := mergeActivePlacements(j.Previous, j.Placements)
+	migrated := map[string]bool{}
+	for _, p := range j.Placements {
+		migrated[p.Volume] = true
+	}
+	cur, _, _ := loadStorageFile(storageJSONPath(b.cfg.StateDir))
+	var kept []StoragePlacement
+	for _, p := range cur.Proposals {
+		if !migrated[p.Volume] {
+			kept = append(kept, p)
+		}
+	}
+	active := storageFile{Version: storageFileVersion, Placements: merged, Proposals: kept}
+	if err := writeStorageFile(storageJSONPath(b.cfg.StateDir), active); err != nil {
+		_ = resumeStorageApps(b, ctx, j)
+		if pgMove && pgWasActive {
+			_ = exec.Command("systemctl", "start", "postgresql.service").Run()
+		}
+		return failStorageOp(b.cfg.StateDir, &j, err.Error())
+	}
+	// Live-activate binds and restart storage units.
+	for _, p := range j.Placements {
+		if p.FSUUID == nil {
+			continue
+		}
+		cp := known[p.Volume]
+		if cp == "" {
+			continue
+		}
+		uuid := strings.TrimSpace(*p.FSUUID)
+		src := managedSubdir(uuid, p.Volume)
+		if out, err := exec.Command("mount", "--bind", src, cp).CombinedOutput(); err != nil {
+			return failStorageOp(b.cfg.StateDir, &j, fmt.Sprintf("bind %q -> %q: %v: %s", src, cp, err, strings.TrimSpace(string(out))))
+		}
+		if out, err := exec.Command("systemctl", "restart", "omahab-storage-"+volumeSlug(p.Volume)+".service").CombinedOutput(); err != nil {
+			return failStorageOp(b.cfg.StateDir, &j, fmt.Sprintf("prepare volume %q: %v: %s", p.Volume, err, strings.TrimSpace(string(out))))
+		}
+	}
+	if pgMove && pgWasActive {
+		if out, err := exec.Command("systemctl", "start", "postgresql.service").CombinedOutput(); err != nil {
+			_ = resumeStorageApps(b, ctx, j)
+			return failStorageOp(b.cfg.StateDir, &j, fmt.Sprintf("start postgresql: %v: %s", err, strings.TrimSpace(string(out))))
+		}
+	}
+	j.Operation.Stage = "validating"
+	_ = writeStorageJournal(b.cfg.StateDir, j)
+	// Health-check resumed apps.
+	if err := resumeStorageApps(b, ctx, j); err != nil {
+		return failStorageOp(b.cfg.StateDir, &j, err.Error())
+	}
+	j.Operation.Stage = OpCompleted
+	j.Operation.Status = OpCompleted
+	j.Operation.Progress = 100
+	_ = writeStorageJournal(b.cfg.StateDir, j)
+	return nil
 }
 
 func owningBundles(placements []StoragePlacement) []string {

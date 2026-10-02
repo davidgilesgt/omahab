@@ -30,12 +30,50 @@ Docker remains for user-project deploys (ONCE) and the Hermes container; CI job 
 One image fits anything from the reference 4-vCPU/19 GiB box to a much larger Proxmox VM: worker counts and memory splits are derived **at boot** from `nproc` and `/proc/meminfo`, not baked in, so resizing the VM resizes the workload on the next start with no rebuild.
 
 - **zram swap** — 50% of RAM as zstd-compressed swap (no disk device), absorbing ML/OCR memory spikes off the data disk.
-- **PostgreSQL** — `shared_buffers` 25% of RAM clamped 128MB–8GB, `effective_cache_size` 50% clamped 256MB–16GB, `maintenance_work_mem` 5% clamped 64MB–512MB, `work_mem` 8MB, written at boot to `/etc/postgresql-omahab/tuning.conf` and included via `include_if_exists`.
-- **Worker counts** — each capped at 4: immich ML `MACHINE_LEARNING_WORKERS`, karakeep `CRAWLER_NUM_WORKERS`, litellm `NUM_WORKERS`, woodpecker `WOODPECKER_MAX_WORKFLOWS` (all `clamp(cores/2, 1, 4)`); paperless celery `PAPERLESS_TASK_WORKERS` = `clamp(cores−1, 1, 4)` and web `GRANIAN_WORKERS` = `clamp(cores/4, 1, 4)`. Values land in `/run/omahab-resenv/*.env` (regenerated each start) and override module defaults.
+- **PostgreSQL** — `shared_buffers` 12.5% of RAM clamped 128MB–2GB, `effective_cache_size` 50% clamped 256MB–16GB (a planner hint, not allocated memory), `maintenance_work_mem` 1/64 of RAM clamped 64MB–256MB, `work_mem` 4MB per sort. Values are written at boot to `/etc/postgresql-omahab/tuning.conf`.
+- **Worker counts** — CPU formulas remain: immich ML, karakeep, litellm, and woodpecker use `cores/2`; paperless tasks use `cores−1`, and its web server uses `cores/4`. All also obey `clamp(floor(MemTotal MiB / 4096), 1, 4)`. Paperless OCR threads obey the same RAM cap. Values in `/run/omahab-resenv/*.env` regenerate at each start.
 - **OOM policy** — systemd-oomd kills under sustained pressure on system-slice; `OOMScoreAdjust` fixes the victim order: postgres/omahabd −900, caddy −500 survive; tika/gotenberg/immich-ML +600 and batch workers +500 die first (systemd restarts them).
 - **journald** — capped at 1 GiB (`SystemMaxUse=1G`), not the default 10%-of-filesystem.
 - **qemu-guest-agent** — enabled; udev-activated only inside VMs (inert on bare metal), giving Proxmox clean shutdowns and guest IP reporting.
 - **fstrim** — weekly trim timer (NixOS default; verified active on the reference host).
+- **Nix builds** — installed updates default to one concurrent derivation and two build cores. The ISO harness uses the same host build limits. The installer uses one job per 2 GiB, clamped 1–8 and limited by CPU count. Lower parallelism can increase build time.
+
+### Local E2E testing
+
+```sh
+node scripts/test-checklist.mjs new
+nix develop --command bash scripts/e2e-iso-install.sh
+# Local recovery chain, including fresh reinstall, subset, resume, and rollback:
+nix develop --command bash scripts/e2e-iso-install.sh --recovery
+```
+
+The harness defaults to 4096 MiB RAM, two CPUs, a 40 GiB system disk, and one 4 GiB scratch disk.
+`E2E_MEM_MB`, `E2E_CPUS`, and `E2E_DISK_GB` change those allocations.
+Allow another 2048 MiB of available host RAM for browser and host processes.
+The ISO already contains custom Go closures.
+`nixos-install` uses temporary storage on the target disk, not a RAM build directory.
+No application is disabled to meet the local allocation.
+This setup/recovery tier does not establish a full-application RAM minimum.
+Full application campaigns still use the larger capacity gate in `testing/skills/appliance-testing.md`.
+
+Standard mode tests the real installed login and recovery setup in Chromium.
+It verifies authorization, rejected confirmation, persisted setup choices, Caddy browser restart, and device credential scope and revocation.
+It migrates Syncthing data after a real safety backup.
+The storage checks verify bytes, ownership, missing UUID failure, filesystem return, and guest reboot.
+`--data-disks 0` explicitly skips that storage campaign.
+Recovery mode triggers bundle activation through the real browser before testing the restore chain.
+Live resource observations include PostgreSQL, worker counts, and Nix build limits.
+Each run writes `dist/e2e/runs/<run-id>/evidence/`.
+The directory contains `report.json`, browser results, resource observations, sanitized screenshots, and `SHA256SUMS`.
+`report.json` records source content, ISO hash, settings, memory observations, and a repeat command.
+Failed runs also produce a report.
+Source changes during a run invalidate its result.
+Verify the artifact with `sha256sum -c SHA256SUMS` from its evidence directory.
+Serial logs and recovery secrets are not included in the artifact.
+
+`nix develop --command npm --prefix web run test:ui` runs simulated presentation checks.
+These checks use one browser worker and do not establish E2E integration coverage.
+
 
 ## First boot: open the panel
 
@@ -263,6 +301,15 @@ The repository checks run ShellCheck on source scripts and generated storage uni
 Nix supplies Git to package tests, including installer image builds.
 Storage units mount each selected filesystem below `/mnt/omahab-disks/<UUID>`.
 They bind the volume onto its canonical application path.
+Confirmed storage moves run in `omahab-storage-migrate@<operation>.service`.
+The API checks disk identity before returning the staged operation.
+The unit checks capacity and write access before it pauses writers.
+It preserves ownership, ACLs, and extended attributes in the host mount namespace.
+The daemon keeps its filesystem and syscall sandbox.
+Each operation has its own protected handoff.
+Resume clears earlier outcomes; unit failures return nonzero and remain in the operation journal.
+Storage preparation units include mount commands on their PATH.
+A failed preparation unit prevents migration completion.
 
 Repository layout:
 

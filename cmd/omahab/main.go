@@ -1138,6 +1138,7 @@ func newStorageCmd() *cobra.Command {
 			return nil
 		},
 	})
+	stor.AddCommand(newStorageMigrateCmd())
 	for _, action := range []string{"resume", "rollback", "dismiss"} {
 		action := action
 		stor.AddCommand(&cobra.Command{

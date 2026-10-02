@@ -14,6 +14,24 @@ dashboard journeys, application interfaces, and clarity measurements.
 - If browser tools are unavailable, mark browser-required cases `BLOCKED`
   with reason `browser tools unavailable`. Never mark them passed via API.
 
+## Automated coverage
+
+- `web/e2e/installed.mjs` runs against the installed ISO guest.
+- It uses real HTTP requests and browser actions without route mocks.
+- Standard mode runs login, start-new, recovery confirmation, reload, and narrow-screen checks.
+- It restarts Caddy through the Applications page and verifies a new live process.
+- It uses the application health action before checking the rendered health state.
+- The harness supplies its SSH key path and port for process observations.
+- It verifies device credential scope and revocation through real API calls.
+- Recovery mode checks login without changing recovery state.
+- Its capture phase applies bundles through the Bundles page and verifies completed activation separately.
+- Screenshots are taken only before phrase generation or after its removal.
+- Evidence waits for finite entrance animations to finish before capture.
+- A screenshot-readiness timeout fails the journey. Infinite status animations do not block it.
+- No trace, HAR, request headers, or secret-bearing DOM is retained.
+- `npm --prefix web run test:ui` runs simulated presentation checks from
+  `web/ui-tests/`. These checks do not establish E2E integration coverage.
+
 ## Passkeys
 
 - Use a fresh browser context with cache disabled before enrollment.

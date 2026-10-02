@@ -50,18 +50,16 @@ in
           PrivateUsers = mkForce false;
           StateDirectory = "woodpecker-agent-docker";
           StateDirectoryMode = "0700";
-          # Per-agent workflow concurrency = clamp(nproc/2, 1, 4)
-          # (WOODPECKER_MAX_WORKFLOWS, upstream default 1). Each workflow
-          # runs a podman build on this host: half the cores, capped.
-          # Runtime-derived; see resourceEnvScript.
+          # Workflow concurrency uses the CPU formula and shared RAM
+          # cap. Each workflow runs a podman build on this host.
           ExecStartPre = [
             "+${
               resourceEnvScript "woodpecker-agent-docker" [
-                "W=$(( NPROC / 2 )); [ $W -lt 1 ] && W=1; [ $W -gt 4 ] && W=4 || true; echo \"WOODPECKER_MAX_WORKFLOWS=$W\""
+                "echo \"WOODPECKER_MAX_WORKFLOWS=$(worker_count $(( NPROC / 2 )))\""
               ]
             }"
           ];
-          EnvironmentFile = [ "/run/omahab-resenv/woodpecker-agent-docker.env" ];
+          EnvironmentFile = [ "-/run/omahab-resenv/woodpecker-agent-docker.env" ];
         };
       }
     ];

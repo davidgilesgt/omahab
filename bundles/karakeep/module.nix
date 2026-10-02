@@ -45,8 +45,7 @@ in
     systemd.services.karakeep-web = {
       partOf = lib.mkForce [ ];
     } // gate "karakeep";
-    # Crawler concurrency = clamp(nproc/2, 1, 4) (CRAWLER_NUM_WORKERS,
-    # upstream default 1). Runtime-derived; see resourceEnvScript.
+    # Crawler uses the CPU formula with the shared RAM cap.
     systemd.services.karakeep-workers = mkMerge [
       {
         partOf = lib.mkForce [ ];
@@ -54,11 +53,11 @@ in
           ExecStartPre = [
             "+${
               resourceEnvScript "karakeep-workers" [
-                "W=$(( NPROC / 2 )); [ $W -lt 1 ] && W=1; [ $W -gt 4 ] && W=4 || true; echo \"CRAWLER_NUM_WORKERS=$W\""
+                "echo \"CRAWLER_NUM_WORKERS=$(worker_count $(( NPROC / 2 )))\""
               ]
             }"
           ];
-          EnvironmentFile = [ "/run/omahab-resenv/karakeep-workers.env" ];
+          EnvironmentFile = [ "-/run/omahab-resenv/karakeep-workers.env" ];
           OOMScoreAdjust = 500;
         };
       }

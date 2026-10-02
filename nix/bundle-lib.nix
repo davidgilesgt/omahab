@@ -73,17 +73,16 @@ rec {
   # counts are computed at unit start from nproc + /proc/meminfo instead
   # of being hardcoded larger. Each consumer unit runs the script below
   # as a root ExecStartPre ("+" prefix) that writes an EnvironmentFile
-  # under /run/omahab-resenv/; systemd reads env files right before
-  # ExecStart, and file values override the unit's static Environment=
-  # (verified: module-set defaults like MACHINE_LEARNING_WORKERS=1
-  # never win against the generated file). /run is tmpfs — values
+  # under /run/omahab-resenv/. Consumers mark that EnvironmentFile
+  # optional: systemd also reads it before ExecStartPre, when it may
+  # not exist yet. The generator must succeed before ExecStart reads
+  # its values, which override static Environment=. /run is tmpfs — values
   # recompute on every boot/restart, so resizing the VM changes them
   # without a rebuild.
   #
-  # Worker-count rule (documented in README "Hardware and the resource
-  # model"): every app is capped at 4 workers regardless of core count —
-  # beyond that, per-worker memory (immich ML models, litellm DB
-  # connections) grows faster than latency shrinks on a homelab.
+  # CPU formulas also share a RAM cap: one worker per 4 GiB, at least
+  # one and at most four. The appliance shares RAM among all bundles;
+  # CPU count alone must not multiply model copies on small machines.
   # Shell body shared by every consumer's root ExecStartPre. Unit PATH
   # on NixOS carries only coreutils/findutils/gnugrep/gnused/systemd —
   # no awk — so MemTotal is parsed with read+case.
@@ -98,6 +97,15 @@ rec {
         esac
       done < /proc/meminfo
       MEM_MB=$(( MEM_KB / 1024 ))
+      WORKER_LIMIT=$(( MEM_MB / 4096 ))
+      [ "$WORKER_LIMIT" -ge 1 ] || WORKER_LIMIT=1
+      [ "$WORKER_LIMIT" -le 4 ] || WORKER_LIMIT=4
+      worker_count() {
+        W=$1
+        [ "$W" -ge 1 ] || W=1
+        [ "$W" -le "$WORKER_LIMIT" ] || W=$WORKER_LIMIT
+        echo "$W"
+      }
       install -d -m 0755 /run/omahab-resenv
       {
 ${concatStringsSep "\n" (map (v: "        ${v}") vars)}

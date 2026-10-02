@@ -36,6 +36,7 @@
 #        old generation restored, and panel + custom service health.
 #
 # All artifacts live under the harness workdir (dist/e2e by default).
+# The parent also supplies E2E_EVIDENCE_DIR for secret-free browser evidence.
 # The phrase never crosses argv: it is piped to the CLI over stdin or
 # posted over the loopback-tunneled API, matching the product contract.
 set -euo pipefail
@@ -80,10 +81,10 @@ RC_SUDO_PASS="${E2E_ADMIN_PASS:-e2e-test-pass-01}"
 rc_ssh_root() {
   local quoted
   printf -v quoted '%q' "$*"
-  printf '%s\n' "$RC_SUDO_PASS" | ssh -T -i "$RC_SSH_KEY" -p "$RC_SSH_PORT" \
+  printf '%s\n' "$RC_SUDO_PASS" "${RC_ROOT_INPUT:-}" | ssh -T -i "$RC_SSH_KEY" -p "$RC_SSH_PORT" \
     -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
     -o ConnectTimeout=15 \
-    admin@127.0.0.1 "sudo -S -p '' bash -c $quoted" 2>/dev/null
+    admin@127.0.0.1 "sudo -k -S -p '' bash -c $quoted" 2>/dev/null
 }
 
 # rc_wait_until <timeout-seconds> <description> <command...> — poll until
@@ -199,7 +200,7 @@ e2e_recovery_capture() {
   #    the app-file sentinel proves app payload restore, not
   #    server-config restore.
   local code
-  code="$(rc_api_code POST /api/v1/applications '{"bundle_id":"caddy"}')"
+  code="$(rc_api_code POST /api/v1/applications '{"bundle_id":"caddy","exposure":"private"}')"
   [[ "$code" == "201" || "$code" == "409" ]] || rc_die "caddy install failed (HTTP $code)"
   rc_log "caddy application installed"
 
@@ -285,14 +286,14 @@ PYEOF
   rc_ssh_root 'mkdir -p /var/lib/omahab/appenv && printf "E2E=1\n" > /var/lib/omahab/appenv/e2e-fixture.env && chmod 600 /var/lib/omahab/appenv/e2e-fixture.env' \
     || rc_die "could not prepare fixture environment"
 
-  # Activate: the real apply path — the oneshot unit builds and switches
-  # with the bundles override. This is a full nixos-rebuild; allow long.
+  # Activate through the real browser action; the campaign then verifies
+  # the completed switch and the healthy custom service.
   local apply_op
-  apply_op="$(rc_api POST /api/v1/bundles/apply '{}')" \
-    || rc_die "bundle apply trigger failed"
+  apply_op="$(printf '%s' "$RC_TOKEN" | node web/e2e/installed.mjs "$RC_BASE" "${E2E_EVIDENCE_DIR:?parent harness evidence directory required}" apply)" \
+    || rc_die "browser bundle apply trigger failed"
   RC_APPLY_ID="$(printf '%s' "$apply_op" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
   [[ -n "$RC_APPLY_ID" ]] || rc_die "bundle apply returned no operation id"
-  rc_wait_until 2400 "bundle apply to activate the custom bundle" rc_apply_completed
+  rc_apply_wait 2400 completed "bundle apply to activate the custom bundle"
   rc_log "custom bundle activated (real nixos-rebuild switch, operation $RC_APPLY_ID)"
   # After the switch, omahabd restarts; make sure the panel is back.
   rc_wait_panel
@@ -310,13 +311,23 @@ PYEOF
   local capture
   capture="$(RC_API_TIMEOUT=900 rc_api POST /api/v1/backups "{\"repository\":\"$RC_REPO_ID\",\"scopes\":[\"server-config\",\"app:caddy\",\"app:$RC_BUNDLE_ID\",\"server-sync\"]}")" \
     || rc_die "backup create failed"
-  printf '%s' "$capture" | python3 -c '
+  local snapshot
+  snapshot="$(printf '%s' "$capture" | python3 -c '
 import json, sys
 run = json.load(sys.stdin)
+if run["status"] != "completed" or not run.get("snapshot_id"):
+    raise SystemExit("Scoped capture did not complete")
+print(run["snapshot_id"])
+')" || rc_die "capture did not complete"
+  local source_location
+  source_location="$(cat "$secrets_dir/source-location")"
+  RC_ROOT_INPUT="$RC_REPO_PASS" rc_ssh_root "read -r RESTIC_PASSWORD; export RESTIC_PASSWORD; restic -r '$source_location' dump '$snapshot' /var/lib/omahab/backup-staging/manifest.json" | python3 -c '
+import json, sys
+manifest = json.load(sys.stdin)
 expected = {"server-config", "app:caddy", "app:" + sys.argv[1], "server-sync"}
-sys.exit(0 if run["status"] == "completed" and run["snapshot_id"] and expected.issubset(set(run["scopes"])) else 1)
-' "$RC_BUNDLE_ID" || rc_die "capture did not complete all requested scopes"
-  rc_log "scoped capture completed"
+sys.exit(0 if expected <= {scope["name"] for scope in manifest["scopes"]} else 1)
+' "$RC_BUNDLE_ID" || rc_die "saved snapshot omitted requested scopes"
+  rc_log "scoped capture completed with verified snapshot manifest"
 
   # A post-capture file must not appear on the fresh restored machine.
   rc_ssh_root "printf 'post-capture-must-not-return\n' > $RC_BUNDLE_DATA_DIR/after-capture.txt" \
@@ -325,14 +336,39 @@ sys.exit(0 if run["status"] == "completed" and run["snapshot_id"] and expected.i
   rc_log "capture phase complete"
 }
 
-# rc_apply_completed — the bundle apply operation finished with
-# status completed (journal converged from the unit-run outcome).
-rc_apply_completed() {
-  rc_api GET "/api/v1/bundles/apply/$RC_APPLY_ID" | python3 -c '
+# rc_apply_wait <timeout-seconds> <want-status> <description> — poll the
+# bundle apply operation until it reaches the wanted terminal status.
+# Any other terminal outcome (completed|failed|rolled_back) fails the
+# campaign immediately with the operation id, status, and stage instead
+# of waiting out the timeout. The switch inside an apply restarts
+# omahabd, so a poll that cannot reach the API yields no body — an
+# unavailable curl result is never fed to the JSON parser.
+rc_apply_wait() {
+  local timeout="$1" want="$2" desc="$3"
+  local deadline=$(( SECONDS + timeout )) body status stage
+  while (( SECONDS < deadline )); do
+    body="$(rc_api GET "/api/v1/bundles/apply/$RC_APPLY_ID" 2>/dev/null || true)"
+    if [[ -n "$body" ]]; then
+      read -r status stage <<< "$(printf '%s' "$body" | python3 -c '
 import json, sys
-op = json.load(sys.stdin)
-sys.exit(0 if op.get("status") == "completed" else 1)
-'
+try:
+    op = json.load(sys.stdin)
+except ValueError:
+    sys.exit(0)
+print(op.get("status", ""), op.get("stage", ""))
+' 2>/dev/null || true)"
+      case "$status" in
+        completed|failed|rolled_back)
+          if [[ "$status" == "$want" ]]; then
+            return 0
+          fi
+          rc_die "bundle apply operation $RC_APPLY_ID ended as $status at stage '$stage' (wanted $want): $desc"
+          ;;
+      esac
+    fi
+    sleep 3
+  done
+  rc_die "timed out waiting for: $desc"
 }
 
 # rc_fixture_probe — the custom bundle's service answers its health
@@ -603,7 +639,7 @@ cd /var/lib/omahab/bundles && git add -A && git commit -m 'e2e: poison fixture a
 
   # --- 4. Require the terminal rolled_back outcome (field-based
   #    contract: status rolled_back, never just an error string).
-  rc_wait_until 2400 "rolled_back terminal outcome" rc_apply_rolled_back
+  rc_apply_wait 2400 rolled_back "rolled_back terminal outcome"
   rc_log "apply terminated as rolled_back (operation $RC_APPLY_ID)"
 
   # --- 5. Old generation restored: the running system is the recorded
@@ -626,16 +662,6 @@ cd /var/lib/omahab/bundles && git add -A && git commit -m 'e2e: poison fixture a
   rc_ssh_root "cd /var/lib/omahab/bundles && git revert --no-edit HEAD >/dev/null 2>&1 || git reset --hard HEAD~1" \
     || rc_die "could not restore the clean fixture definition"
   rc_log "rollback phase complete"
-}
-
-# rc_apply_rolled_back — the bundle apply operation terminated with the
-# rolled_back outcome (field-based contract).
-rc_apply_rolled_back() {
-  rc_api GET "/api/v1/bundles/apply/$RC_APPLY_ID" | python3 -c '
-import json, sys
-op = json.load(sys.stdin)
-sys.exit(0 if op.get("status") == "rolled_back" else 1)
-'
 }
 
 # ---------------------------------------------------------------------------

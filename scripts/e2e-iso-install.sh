@@ -17,15 +17,15 @@
 #   --recovery     run the full local-restic backup → fresh-state recovery
 #                  campaign (capture, fresh-disk reinstall, real restore,
 #                  interrupted+resumed restore, activation rollback)
-#   --skip-build   reuse dist/iso when its marker matches HEAD (else rebuild)
+#   --skip-build   reuse dist/iso only when source and ISO store identity match
 #   --keep         keep the workdir (disk image, logs) after the run
 #   --workdir DIR  workdir for disk/logs/markers [dist/e2e]
 #   --interactive  pause after read-only probes for browser testing; browser owns recovery
 #   --interactive-installer  pause before the serial installer for the real wizard
 #   --firmware bios|uefi  guest firmware [bios]
-#   --data-disks 0|1|2  extra 4 GiB scratch data disks in the workdir [0]
-# Requirements: nix, /dev/kvm, python3, curl. QEMU resolves from PATH or the
-# nix store (see resolve_qemu). All local state lives under dist/ (gitignored).
+#   --data-disks 0|1|2  extra 4 GiB scratch data disks in the workdir [1]
+# Requirements: nix, /dev/kvm, python3, node, Chromium, curl. QEMU resolves
+# from PATH or the nix store. All local state lives under dist/.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -38,7 +38,7 @@ INTERACTIVE=0
 INTERACTIVE_INSTALLER=0
 FIRMWARE="bios"
 RECOVERY=0
-DATA_DISKS=0
+DATA_DISKS=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --recovery) RECOVERY=1; shift ;;
@@ -55,6 +55,8 @@ while [[ $# -gt 0 ]]; do
 done
 case "$FIRMWARE" in bios|uefi) ;; *) echo "unknown --firmware: $FIRMWARE (want bios|uefi)" >&2; exit 2 ;; esac
 case "$DATA_DISKS" in 0|1|2) ;; *) echo "unknown --data-disks: $DATA_DISKS (want 0|1|2)" >&2; exit 2 ;; esac
+WORKDIR="$(realpath -m "$WORKDIR")"
+[[ "$WORKDIR" == "$ROOT/dist/"* ]] || { echo "--workdir must be under dist/" >&2; exit 2; }
 
 DISK="$WORKDIR/disk.qcow2"
 # Guest disk: the installed closure (immich ML, paperless/tika, litellm
@@ -68,11 +70,11 @@ HTTP_PORT="${E2E_HTTP_PORT:-8485}"
 SSH_PORT="${E2E_SSH_PORT:-2229}"
 INSTALL_TIMEOUT=2700
 BOOT_TIMEOUT=300
-# Guest RAM: nixos-install builds flake-local packages (incl. darwin clientds'
-# Go module graph) in sandbox tmpfs, which scales with RAM. 4G starves it
-# ("no space left on device" in go-modules drv); 6G is the floor. Override
-# with E2E_MEM_MB when the host cannot spare it.
-MEM_MB="${E2E_MEM_MB:-6144}"
+# Custom Go closures are now prebuilt on the ISO. nixos-install puts
+# temporary builds on the target disk, not the live ISO's RAM overlay.
+# Keep local setup/recovery runs small; large app campaigns can override.
+MEM_MB="${E2E_MEM_MB:-4096}"
+CPUS="${E2E_CPUS:-2}"
 # Ephemeral binary cache for the guest installer: the guest rebuilds every
 # custom closure from scratch over slirp (the prisma client change took a
 # 4-minute install to 17). Served from the host store at the slirp gateway
@@ -82,14 +84,25 @@ MARKER="$WORKDIR/iso-commit"
 QEMU_PID=""
 CACHE_PID=""
 TUNNEL_PID=""
+REPORT="$ROOT/scripts/e2e-report.py"
+REPORT_READY=0
+LAST_STAGE="preflight"
+REPORT_DIR=""
 # Install-time admin password for the test user (also used for the phase-2
 # SSH tunnel; test-only, appears in the serial log like all install I/O).
 E2E_ADMIN_PASS="${E2E_ADMIN_PASS:-e2e-test-pass-01}"
 
-log() { printf '[e2e] %s\n' "$*"; }
-die() { printf '[e2e] FATAL: %s\n' "$*" >&2; exit 1; }
+log() {
+  LAST_STAGE="$*"
+  printf '[e2e] %s\n' "$*"
+  if [[ "$REPORT_READY" -eq 1 && "$*" == "ok: "* ]]; then
+    python3 "$REPORT" check "$REPORT_DIR" "${*#ok: }"
+  fi
+}
+die() { LAST_STAGE="$*"; printf '[e2e] FATAL: %s\n' "$*" >&2; exit 1; }
 
 cleanup() {
+  local failed=0
   if [[ -n "$QEMU_PID" ]] && kill -0 "$QEMU_PID" 2>/dev/null; then
     kill "$QEMU_PID" 2>/dev/null || true
     sleep 2
@@ -104,10 +117,29 @@ cleanup() {
   # Default-clean covers failure too: without --keep, never leave the
   # multi-GB guest disk or the ephemeral secrets behind. Logs stay.
   if [[ "$KEEP" -eq 0 ]]; then
-    rm -f "$DISK" "$WORKDIR"/qemu-*.pid "$WORKDIR"/cache.sec "$WORKDIR"/e2e-ssh-key "$WORKDIR"/e2e-ssh-key.pub
+    rm -f "$DISK" "$WORKDIR"/qemu-*.pid "$WORKDIR"/cache.sec \
+      "$WORKDIR"/e2e-ssh-key "$WORKDIR"/e2e-ssh-key.pub \
+      "$WORKDIR"/data-*.qcow2 "$WORKDIR"/ovmf-vars.fd || failed=1
+    rm -rf "$WORKDIR/recovery-secrets" || failed=1
   fi
+  return "$failed"
 }
-trap cleanup EXIT
+on_exit() {
+  local code=$?
+  trap - EXIT
+  cleanup || code=1
+  if [[ "$REPORT_READY" -eq 1 ]]; then
+    local mode="automatic"
+    [[ "$INTERACTIVE" -eq 0 ]] || mode="interactive"
+    python3 "$REPORT" finish "$REPORT_DIR" "$code" "$mode" "$LAST_STAGE" || code=1
+    printf '[e2e] evidence: %s/evidence/report.json\n' "$REPORT_DIR"
+    if [[ "$code" -eq 0 && "$mode" == "automatic" ]]; then
+      printf '[e2e] E2E PASS\n'
+    fi
+  fi
+  exit "$code"
+}
+trap on_exit EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
@@ -136,8 +168,19 @@ QEMU_IMG="$(dirname "$QEMU")/qemu-img"
 [[ -x "$QEMU_IMG" ]] || die "qemu-img not found next to $QEMU"
 log "qemu: $QEMU"
 
-HEAD="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+SOURCE_ID="$(python3 "$REPORT" identity)"
 mkdir -p "$WORKDIR"
+REPORT_DIR="$WORKDIR/runs/$(date -u +%Y%m%dT%H%M%S)-$$"
+REPEAT_ARGS=(bash scripts/e2e-iso-install.sh --workdir "${WORKDIR#"$ROOT"/}" --firmware "$FIRMWARE" --data-disks "$DATA_DISKS")
+[[ "$RECOVERY" -eq 0 ]] || REPEAT_ARGS+=(--recovery)
+[[ "$INTERACTIVE" -eq 0 ]] || REPEAT_ARGS+=(--interactive)
+[[ "$INTERACTIVE_INSTALLER" -eq 0 ]] || REPEAT_ARGS+=(--interactive-installer)
+printf -v REPEAT_COMMAND 'E2E_MEM_MB=%q E2E_CPUS=%q E2E_DISK_GB=%q E2E_SERIAL_PORT=%q E2E_HTTP_PORT=%q E2E_SSH_PORT=%q E2E_CACHE_PORT=%q ' "$MEM_MB" "$CPUS" "$DISK_GB" "$SERIAL_PORT" "$HTTP_PORT" "$SSH_PORT" "$CACHE_PORT"
+printf -v REPEAT_FLAGS '%q ' "${REPEAT_ARGS[@]}"
+python3 "$REPORT" init "$REPORT_DIR" \
+  "{\"memory_mib\":$MEM_MB,\"disk_gib\":$DISK_GB,\"cpus\":$CPUS,\"firmware\":\"$FIRMWARE\",\"data_disks\":$DATA_DISKS,\"recovery\":$RECOVERY,\"interactive\":$INTERACTIVE}" \
+  "$REPEAT_COMMAND$REPEAT_FLAGS"
+REPORT_READY=1
 
 # --- Host preflight: fail fast instead of dying mid-install with ENOSPC
 # and leaving a half-written multi-GB disk behind.
@@ -145,25 +188,32 @@ avail_mb="$(df -m --output=avail "$WORKDIR" 2>/dev/null | tail -1 | tr -d ' ')"
 if [[ "$avail_mb" =~ ^[0-9]+$ ]] && (( avail_mb < DISK_GB * 1024 )); then
   die "only ${avail_mb}MiB free under $WORKDIR, want ${DISK_GB}G for the guest disk (free space or lower E2E_DISK_GB)"
 fi
-if command -v free >/dev/null 2>&1; then
-  free_mb="$(free -m | awk '/^Mem:/ {print $7}')"
-  if [[ "$free_mb" =~ ^[0-9]+$ ]] && (( free_mb < MEM_MB )); then
-    log "WARNING: only ${free_mb}MiB RAM available, guest wants ${MEM_MB}MiB; close apps or lower E2E_MEM_MB"
+check_ram() {
+  local available=0 key value
+  while read -r key value _; do
+    if [[ "$key" == MemAvailable: ]]; then available=$((value / 1024)); break; fi
+  done < /proc/meminfo
+  if (( available < MEM_MB + 2048 )); then
+    die "only ${available}MiB RAM available; need ${MEM_MB}MiB guest plus 2048MiB host reserve"
   fi
-fi
+}
+check_ram
 
-# --- ISO (rebuild on new commits; reuse only when the marker matches HEAD).
+# Reuse only the same source content and the same ISO store path.
 ISO="dist/iso"
-if [[ $SKIP_BUILD -eq 1 && -e "$ISO" && -f "$MARKER" && "$(cat "$MARKER")" == "$HEAD" ]]; then
-  log "reusing dist/iso (marker matches HEAD $HEAD)"
+if [[ $SKIP_BUILD -eq 1 && -e "$ISO" && -f "$MARKER" && "$(cat "$MARKER")" == "$SOURCE_ID $(readlink -f "$ISO")" ]]; then
+  log "reusing dist/iso (source and store path match)"
 else
   log "building ISO (nix build .#image-iso -o dist/iso)"
-  nix build .#image-iso -o dist/iso
-  printf '%s' "$HEAD" > "$MARKER"
+  nix build .#image-iso -o dist/iso --max-jobs 1 --cores 2
+  printf '%s %s' "$SOURCE_ID" "$(readlink -f "$ISO")" > "$MARKER"
 fi
 ISO_FILE="$(ls "$(readlink -f "$ISO")"/iso/*.iso 2>/dev/null | head -1 || true)"
 [[ -n "$ISO_FILE" && -f "$ISO_FILE" ]] || die "no ISO image under $ISO (want $ISO/iso/*.iso, cf. release.yml)"
 log "iso: $ISO_FILE"
+python3 "$REPORT" iso "$REPORT_DIR" "$ISO_FILE"
+check_ram
+export E2E_EVIDENCE_DIR="$REPORT_DIR/evidence"
 
 # --- Ephemeral binary cache: sign the host store once and serve it so the
 # guest installer substitutes custom closures instead of rebuilding them
@@ -231,7 +281,7 @@ log "fresh disk: $DISK"
 
 # --- Phase 1: boot the ISO, drive the installer over the serial console.
 log "phase 1: booting ISO (install)"
-"$QEMU" -enable-kvm -cpu host -m "$MEM_MB" -smp 4 \
+"$QEMU" -enable-kvm -cpu host -m "$MEM_MB" -smp "$CPUS" \
   -cdrom "$ISO_FILE" \
   -drive "file=$DISK,format=qcow2,if=none,id=system" \
   -device "virtio-blk-pci,drive=system,serial=omahab-system" \
@@ -360,7 +410,7 @@ fi
 # tunnel lands on guest loopback exactly like real dashboard access.
 # Password auth uses the install-time test password (serial log only).
 log "phase 2: booting installed system"
-"$QEMU" -enable-kvm -cpu host -m "$MEM_MB" -smp 4 \
+"$QEMU" -enable-kvm -cpu host -m "$MEM_MB" -smp "$CPUS" \
   -drive "file=$DISK,format=qcow2,if=none,id=system" \
   -device "virtio-blk-pci,drive=system,serial=omahab-system" \
   "${DATA_ARGS[@]}" "${FIRMWARE_ARGS[@]}" \
@@ -379,23 +429,26 @@ for _ in $(seq 1 "$BOOT_TIMEOUT"); do
   if [[ "$banner" == SSH-* ]]; then ok=1; break; fi
   sleep 2
 done
-# Key-auth tunnel: the guest disables password auth by design, so the
-# ephemeral install-time key is the only way in. The forward lands on
-# guest loopback, which the firewall accepts like real dashboard access.
-# sshd can be sluggish under first-boot load, so retry the handshake.
-ok=0
-for attempt in 1 2 3 4 5; do
-  if [[ -n "$TUNNEL_PID" ]] && kill -0 "$TUNNEL_PID" 2>/dev/null; then kill "$TUNNEL_PID" 2>/dev/null || true; fi
-  setsid ssh -N -i "$SSH_KEY" \
-    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-    -o ExitOnForwardFailure=yes -o ServerAliveInterval=10 -o ConnectTimeout=15 \
-    -L "127.0.0.1:$HTTP_PORT:127.0.0.1:8484" -p "$SSH_PORT" admin@127.0.0.1 &
-  TUNNEL_PID=$!
-  sleep 8
-  if (echo > /dev/tcp/127.0.0.1/$HTTP_PORT) 2>/dev/null && kill -0 "$TUNNEL_PID" 2>/dev/null; then ok=1; break; fi
-  log "tunnel attempt $attempt failed; retrying"
-done
-[[ $ok -eq 1 ]] || die "SSH tunnel never established (see $WORKDIR/serial-boot.log)"
+# Guest reboot closes its SSH connection. Keep one owned forwarder.
+start_tunnel() {
+  local connected=0 attempt
+  for attempt in 1 2 3 4 5; do
+    if [[ -n "$TUNNEL_PID" ]] && kill -0 "$TUNNEL_PID" 2>/dev/null; then
+      kill "$TUNNEL_PID" 2>/dev/null || true
+      wait "$TUNNEL_PID" 2>/dev/null || true
+    fi
+    setsid ssh -N -i "$SSH_KEY" \
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+      -o ExitOnForwardFailure=yes -o ServerAliveInterval=10 -o ConnectTimeout=15 \
+      -L "127.0.0.1:$HTTP_PORT:127.0.0.1:8484" -p "$SSH_PORT" admin@127.0.0.1 &
+    TUNNEL_PID=$!
+    sleep 8
+    if (echo > /dev/tcp/127.0.0.1/$HTTP_PORT) 2>/dev/null && kill -0 "$TUNNEL_PID" 2>/dev/null; then connected=1; break; fi
+    log "tunnel attempt $attempt failed; retrying"
+  done
+  [[ "$connected" -eq 1 ]] || die "SSH tunnel never established after guest boot"
+}
+start_tunnel
 
 BASE="http://127.0.0.1:$HTTP_PORT"
 log "tunnel up: $BASE via guest loopback"
@@ -416,6 +469,12 @@ PANEL_TOKEN="$(ssh -T -i "$SSH_KEY" -p "$SSH_PORT" \
 unauth_status="$(curl -s -o /dev/null -w '%{http_code}' -m 15 "$BASE/api/v1/setup")"
 [[ "$unauth_status" == 401 ]] || die "anonymous setup request returned $unauth_status (want 401)"
 log "ok: anonymous setup denied"
+for mutation in "POST recovery/generate" "POST recovery/confirm" "POST recovery/restore/skip" "POST applications" "PUT system/storage" "POST bundles/apply"; do
+  read -r method endpoint <<< "$mutation"
+  unauth_status="$(curl -s -o /dev/null -w '%{http_code}' -m 15 -X "$method" "$BASE/api/v1/$endpoint")"
+  [[ "$unauth_status" == 401 ]] || die "anonymous mutation $endpoint returned $unauth_status (want 401)"
+done
+log "ok: anonymous administrator mutations denied"
 
 check() {  # check <name> <curl-args...> -- <grep-pattern>
   local name="$1"; shift
@@ -442,31 +501,52 @@ check "storage candidates (lsblk on daemon PATH)" "$BASE/api/v1/system/disks" --
 check "control-plane status" "$BASE/api/v1/status" -- 'instance_id'
 check "panel serves SPA" "$BASE/" -- '<div id="root">'
 
+guest_ssh() {
+  ssh -T -i "$SSH_KEY" -p "$SSH_PORT" -o BatchMode=yes \
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    admin@127.0.0.1 "$@" 2>/dev/null
+}
+record_memory() {
+  guest_ssh 'while read -r key value unit; do
+    case "$key" in MemTotal:|MemAvailable:|SwapTotal:|SwapFree:) printf "%s=%s\n" "${key%:}" "$value";; esac
+  done < /proc/meminfo' | python3 "$REPORT" memory "$REPORT_DIR" "$1"
+}
+record_memory "installed-before-browser"
+python3 "$REPORT" generation "$REPORT_DIR" "$(guest_ssh 'readlink -f /run/current-system')"
+log "verifying installed resource budgets"
+{ printf '%s\n' "$E2E_ADMIN_PASS"; cat scripts/e2e-resource-check.sh; } \
+  | guest_ssh "sudo -S -p '' bash -s" | tee "$REPORT_DIR/evidence/resources.txt"
+log "ok: installed PostgreSQL and worker resource budgets"
+
 if [[ "$INTERACTIVE" -eq 1 ]]; then
   printf 'E2E INTERACTIVE READY\n'
   IFS= read -r _ || true
-  if [[ $KEEP -eq 0 ]]; then
-    cleanup
-    QEMU_PID=""
-    log "workdir cleaned (disk removed); logs kept in $WORKDIR"
-  else
-    log "kept: $WORKDIR (disk + logs)"
-  fi
+  log "interactive session complete; cleanup runs on exit"
   log "E2E INTERACTIVE SESSION ENDED"
   exit 0
 fi
 
-# --- Recovery scenario: generate a phrase, confirm it survived the
-# install (kit written), and watch the setup checklist flip recovery_key.
-# The disposable panel token is required even through the loopback tunnel.
-RECOVERY_FP="$(curl -sf -m 15 -H "Authorization: Bearer $PANEL_TOKEN" -X POST "$BASE/api/v1/recovery/generate" | python3 -c 'import json,sys; print(json.load(sys.stdin)["fingerprint"])')" || true
-[[ -n "$RECOVERY_FP" ]] || die "FAILED: recovery generate (empty fingerprint)"
-log "ok: recovery generate (fingerprint received)"
-check "recovery confirm (saved_ack)" -X POST -H 'Content-Type: application/json' -d "{\"fingerprint\":\"$RECOVERY_FP\",\"saved_ack\":true}" "$BASE/api/v1/recovery/confirm" -- '"confirmed":true'
-if curl -sf -m 15 -H "Authorization: Bearer $PANEL_TOKEN" "$BASE/api/v1/setup" | python3 -c 'import json,sys; checks = json.load(sys.stdin)["checks"]; sys.exit(0 if any(c["id"] == "recovery_key" and c["status"] == "ok" for c in checks) else 1)'; then
-  log "ok: setup checklist flips recovery_key"
-else
-  die "FAILED: setup checklist flips recovery_key (recovery_key not ok after confirm)"
+# Browser actions must reach the installed daemon; simulated UI tests do
+# not verify this contract. Never pass the token in argv or save traces.
+log "installed browser journey"
+BROWSER_MODE="standard"
+[[ "$RECOVERY" -eq 0 ]] || BROWSER_MODE="read-only"
+if [[ -z "${PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH:-}" ]] && command -v chromium >/dev/null 2>&1; then
+  export PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
+  PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH="$(command -v chromium)"
+fi
+export E2E_SSH_KEY="$SSH_KEY" E2E_SSH_PORT="$SSH_PORT"
+printf '%s' "$PANEL_TOKEN" | node web/e2e/installed.mjs "$BASE" "$REPORT_DIR/evidence" "$BROWSER_MODE" \
+  || die "installed browser journey failed (see browser.json)"
+log "ok: installed browser journey"
+record_memory "installed-after-browser"
+if [[ "$RECOVERY" -eq 0 && "$DATA_DISKS" -ge 1 ]]; then
+  log "installed storage migration and missing-filesystem campaign"
+  BASE="$BASE" PANEL_TOKEN="$PANEL_TOKEN" SSH_KEY="$SSH_KEY" SSH_PORT="$SSH_PORT" \
+    E2E_ADMIN_PASS="$E2E_ADMIN_PASS" bash scripts/e2e-storage-campaign.sh \
+    | tee "$REPORT_DIR/evidence/storage.txt"
+  start_tunnel
+  log "ok: storage migration, fail-closed behavior, and recovery"
 fi
 
 CAMPAIGN="$ROOT/scripts/e2e-recovery-campaign.sh"
@@ -509,7 +589,7 @@ if [[ $RECOVERY -eq 1 ]]; then
 
   # Reinstall from the SAME ISO (the rebuild-on-HEAD marker still holds).
   log "recovery campaign: phase 3 reinstall (install)"
-  "$QEMU" -enable-kvm -cpu host -m "$MEM_MB" -smp 4 \
+  "$QEMU" -enable-kvm -cpu host -m "$MEM_MB" -smp "$CPUS" \
     -cdrom "$ISO_FILE" \
     -drive "file=$DISK,format=qcow2,if=none,id=system" \
     -device "virtio-blk-pci,drive=system,serial=omahab-system" \
@@ -614,7 +694,7 @@ PYEOF
   # --- Phase 4: boot the fresh machine, push the repository back, and
   # run the real restore + interrupt + rollback proofs.
   log "recovery campaign: phase 4 booting fresh system"
-  "$QEMU" -enable-kvm -cpu host -m "$MEM_MB" -smp 4 \
+  "$QEMU" -enable-kvm -cpu host -m "$MEM_MB" -smp "$CPUS" \
     -drive "file=$DISK,format=qcow2,if=none,id=system" \
     -device "virtio-blk-pci,drive=system,serial=omahab-system" \
     "${DATA_ARGS[@]}" "${FIRMWARE_ARGS[@]}" \
@@ -632,19 +712,7 @@ PYEOF
     sleep 2
   done
   [[ $ok -eq 1 ]] || die "fresh system sshd never came up (see $WORKDIR/serial-fresh.log)"
-  ok=0
-  for attempt in 1 2 3 4 5; do
-    if [[ -n "$TUNNEL_PID" ]] && kill -0 "$TUNNEL_PID" 2>/dev/null; then kill "$TUNNEL_PID" 2>/dev/null || true; fi
-    setsid ssh -N -i "$SSH_KEY" \
-      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-      -o ExitOnForwardFailure=yes -o ServerAliveInterval=10 -o ConnectTimeout=15 \
-      -L "127.0.0.1:$HTTP_PORT:127.0.0.1:8484" -p "$SSH_PORT" admin@127.0.0.1 &
-    TUNNEL_PID=$!
-    sleep 8
-    if (echo > /dev/tcp/127.0.0.1/$HTTP_PORT) 2>/dev/null && kill -0 "$TUNNEL_PID" 2>/dev/null; then ok=1; break; fi
-    log "tunnel attempt $attempt failed; retrying"
-  done
-  [[ $ok -eq 1 ]] || die "SSH tunnel never established on the fresh boot (see $WORKDIR/serial-fresh.log)"
+  start_tunnel
   ok=0
   for _ in $(seq 1 "$BOOT_TIMEOUT"); do
     if curl -sf -m 5 "$BASE/up" | grep -q '"status":"up"'; then ok=1; break; fi
@@ -668,27 +736,34 @@ PYEOF
 
   log "recovery campaign: restore phase"
   "$CAMPAIGN" restore "$BASE" "$PANEL_TOKEN" "$SSH_PORT" "$SSH_KEY" "$WORKDIR"
+  log "ok: recovery full restore"
   log "recovery campaign: selected subset phase"
   "$CAMPAIGN" subset "$BASE" "$PANEL_TOKEN" "$SSH_PORT" "$SSH_KEY" "$WORKDIR"
+  log "ok: recovery selected subset"
   log "recovery campaign: interruption phase"
   "$CAMPAIGN" interrupt "$BASE" "$PANEL_TOKEN" "$SSH_PORT" "$SSH_KEY" "$WORKDIR"
+  log "ok: recovery interrupt and resume"
   log "recovery campaign: activation rollback phase"
   "$CAMPAIGN" rollback "$BASE" "$PANEL_TOKEN" "$SSH_PORT" "$SSH_KEY" "$WORKDIR"
+  log "ok: recovery activation rollback"
   log "recovery campaign: all phases passed"
 else
-  check "restore skip (start new server)" -X POST "$BASE/api/v1/recovery/restore/skip" -- ''
-  if curl -sf -m 15 -H "Authorization: Bearer $PANEL_TOKEN" "$BASE/api/v1/setup" | python3 -c 'import json,sys; checks = json.load(sys.stdin)["checks"]; sys.exit(0 if any(c["id"] == "restore" and c["status"] == "skipped" for c in checks) else 1)'; then
-    log "ok: setup checklist records restore skipped"
-  else
-    die "FAILED: setup checklist records restore skipped"
-  fi
+  log "verifying setup persistence across daemon restart"
+  printf '%s\n' "$E2E_ADMIN_PASS" | guest_ssh "sudo -S -p '' systemctl restart omahabd"
+  ok=0
+  for _ in $(seq 1 60); do
+    if setup_json="$(curl -sf -m 5 -H "Authorization: Bearer $PANEL_TOKEN" "$BASE/api/v1/setup")"; then
+      if printf '%s' "$setup_json" | python3 -c 'import json,sys; checks={c["id"]:c["status"] for c in json.load(sys.stdin)["checks"]}; sys.exit(0 if checks.get("restore") == "skipped" and checks.get("recovery_key") == "ok" else 1)'; then ok=1; break; fi
+    fi
+    sleep 1
+  done
+  [[ "$ok" -eq 1 ]] || die "setup choices did not survive daemon restart"
+  log "ok: setup choices persist across daemon restart"
+  { printf '%s\n' "$E2E_ADMIN_PASS"; cat scripts/e2e-resource-check.sh; } \
+    | guest_ssh "sudo -S -p '' bash -s" | tee "$REPORT_DIR/evidence/resources-final.txt"
+  log "ok: final installed resource budgets and no failed services"
 fi
+record_memory "campaign-complete"
+python3 "$REPORT" generation "$REPORT_DIR" "$(guest_ssh 'readlink -f /run/current-system')"
 log "phase 2: all probes passed"
-if [[ $KEEP -eq 0 ]]; then
-  cleanup
-  QEMU_PID=""
-  log "workdir cleaned (disk removed); logs kept in $WORKDIR"
-else
-  log "kept: $WORKDIR (disk + logs)"
-fi
-log "E2E PASS"
+log "cleanup runs on exit; logs and evidence remain in $WORKDIR"

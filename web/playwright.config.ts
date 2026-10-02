@@ -7,12 +7,12 @@ const artifactRoot = resolve(webRoot, "../dist/playwright");
 const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH?.trim() || undefined;
 
 export default defineConfig({
-  testDir: "./e2e",
+  testDir: "./ui-tests",
   outputDir: resolve(artifactRoot, "results"),
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
-  workers: process.env.CI ? 1 : undefined,
+  workers: 1,
   reporter: [
     ["list"],
     ["html", { outputFolder: resolve(artifactRoot, "report"), open: "never" }],

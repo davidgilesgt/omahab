@@ -9,11 +9,11 @@ fail=0
 pass() { echo "PASS: $*"; }
 fail_check() { echo "FAIL: $*" >&2; fail=1; }
 
-bash -n install.sh scripts/build.sh scripts/check.sh scripts/install-disk.sh scripts/e2e-iso-install.sh scripts/e2e-recovery-campaign.sh scripts/check-secureboot.sh scripts/test-install-server.sh && pass "bash syntax" || fail_check "bash syntax"
+bash -n install.sh scripts/build.sh scripts/check.sh scripts/install-disk.sh scripts/e2e-iso-install.sh scripts/e2e-recovery-campaign.sh scripts/e2e-resource-check.sh scripts/e2e-storage-campaign.sh scripts/check-secureboot.sh scripts/test-install-server.sh && pass "bash syntax" || fail_check "bash syntax"
 # Shell entrypoints are linted with ShellCheck instead of a homegrown
 # variable detector: real shell diagnostics over source-text heuristics.
 if command -v shellcheck >/dev/null 2>&1; then
-  shellcheck -S warning install.sh scripts/build.sh scripts/check.sh scripts/install-disk.sh scripts/e2e-iso-install.sh scripts/e2e-recovery-campaign.sh scripts/check-secureboot.sh scripts/test-install-server.sh && pass "shellcheck" || fail_check "shellcheck"
+  shellcheck -S warning install.sh scripts/build.sh scripts/check.sh scripts/install-disk.sh scripts/e2e-iso-install.sh scripts/e2e-recovery-campaign.sh scripts/e2e-resource-check.sh scripts/e2e-storage-campaign.sh scripts/check-secureboot.sh scripts/test-install-server.sh && pass "shellcheck" || fail_check "shellcheck"
 else
   fail_check "shellcheck not found (nix develop provides it)"
 fi
@@ -37,7 +37,7 @@ if command -v nix >/dev/null 2>&1; then
     storage_scripts="$ROOT/dist/check/storage-scripts"
     mkdir -p "$storage_scripts"
     if nix eval --json .#nixosConfigurations.omahab-installed.config.systemd.services \
-      --apply 'services: builtins.map (name: { inherit name; script = builtins.readFile services.${name}.serviceConfig.ExecStart; }) (builtins.filter (name: builtins.match "omahab-storage-.*" name != null) (builtins.attrNames services))' \
+      --apply 'services: builtins.map (name: { inherit name; script = builtins.readFile services.${name}.serviceConfig.ExecStart; }) (builtins.filter (name: builtins.match "omahab-storage-[^@]+" name != null) (builtins.attrNames services))' \
       > "$storage_scripts/scripts.json" && jq -e 'length > 0' "$storage_scripts/scripts.json" >/dev/null; then
       storage_shell_ok=1
       while IFS= read -r unit; do

@@ -119,7 +119,11 @@ func writeStorageJournal(stateDir string, j storageJournal) error {
 	if err != nil {
 		return err
 	}
-	return syncWriteFile(operationJournalPath(stateDir, "storage", j.Operation.ID), append(raw, '\n'), 0o600)
+	path := operationJournalPath(stateDir, "storage", j.Operation.ID)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	return syncWriteFile(path, append(raw, '\n'), 0o600)
 }
 
 func loadStorageJournal(stateDir, id string) (storageJournal, error) {
@@ -156,6 +160,16 @@ func (b *Backend) GetOperation(ctx context.Context, id string) (Operation, error
 				// daemon restart.
 				_ = b.reloadMergedCatalog(ctx)
 			}
+		}
+	}
+	// Storage journals converge the same way: the privileged executor may
+	// have died before its final journal write, leaving the outcome marker
+	// as the only completion record.
+	if op.Kind == "storage" && (op.Status == OpRunning || op.Status == "rolling_back") {
+		if done, status, detail := readStorageOutcome(b.cfg.StateDir, op.ID); done {
+			op.Status = status
+			op.Error = detail
+			_ = writeOperationJournal(b.cfg.StateDir, op)
 		}
 	}
 	return op, nil
@@ -254,7 +268,9 @@ func (b *Backend) resumeStorageOperation(ctx context.Context, id string) (Operat
 	if err := writeStorageJournal(b.cfg.StateDir, j); err != nil {
 		return Operation{}, err
 	}
-	go b.runStorageMigration(id)
+	if err := b.startStorageExecutor(id, "migrate"); err != nil {
+		return Operation{}, translateError(err)
+	}
 	return j.Operation, nil
 }
 
@@ -266,48 +282,12 @@ func (b *Backend) rollbackStorageOperation(ctx context.Context, id string) (Oper
 	if !j.Operation.CanRollback {
 		return Operation{}, fmt.Errorf("%w: operation cannot roll back from stage %q", apitypes.ErrConflict, j.Operation.Stage)
 	}
-	go b.runStorageRollback(id)
 	j.Operation.Status = "rolling_back"
 	_ = writeStorageJournal(b.cfg.StateDir, j)
+	if err := b.startStorageExecutor(id, "rollback"); err != nil {
+		return Operation{}, translateError(err)
+	}
 	return j.Operation, nil
-}
-
-// runStorageRollback restores the previous mapping and prior unit state after
-// a failed migration. Old data was kept untouched, so rollback re-persists
-// the old file, re-binds, and resumes apps.
-func (b *Backend) runStorageRollback(id string) {
-	_ = withMaintenanceLock(func() error {
-		j, err := loadStorageJournal(b.cfg.StateDir, id)
-		if err != nil {
-			return err
-		}
-		ctx := context.Background()
-		// Restore the pre-migration active set; the failed targets stay
-		// proposed so the intent survives the reverted activation.
-		prev := storageFile{Version: storageFileVersion, Placements: j.Previous, Proposals: rollbackProposals(j)}
-		if err := writeStorageFile(storageJSONPath(b.cfg.StateDir), prev); err != nil {
-			return failStorageOp(b.cfg.StateDir, &j, err.Error())
-		}
-		known, _ := b.knownVolumes(ctx)
-		for _, p := range j.Previous {
-			if p.FSUUID == nil {
-				continue
-			}
-			if cp := known[p.Volume]; cp != "" {
-				_ = resumeBindMount(known, p)
-			}
-			_ = restartStorageUnit(p.Volume)
-		}
-		if err := resumeStorageApps(b, ctx, j); err != nil {
-			return failStorageOp(b.cfg.StateDir, &j, "rollback resume: "+err.Error())
-		}
-		j.Operation.Status = OpRolledBak
-		j.Operation.Stage = OpRolledBak
-		j.Operation.CanResume = false
-		j.Operation.CanRollback = false
-		_ = writeStorageJournal(b.cfg.StateDir, j)
-		return nil
-	})
 }
 
 func resumeBindMount(known map[string]string, p StoragePlacement) error {

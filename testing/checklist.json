@@ -2,6 +2,53 @@
   "version": 1,
   "cases": [
     {
+      "id": "life.iso.local-evidence",
+      "area": "lifecycle",
+      "title": "Prove local setup on a fresh installed ISO with repeatable evidence",
+      "covers": [
+        "manual:iso-local-evidence"
+      ],
+      "sources": [
+        "scripts/e2e-iso-install.sh",
+        "scripts/e2e-report.py",
+        "scripts/e2e-resource-check.sh",
+        "web/e2e/installed.mjs"
+      ],
+      "requires": [
+        "vm-campaign"
+      ],
+      "steps": [
+        "Run the standard ISO harness with 4096 MiB RAM and two virtual CPUs.",
+        "Observe anonymous read and mutation denial, invalid browser login, and valid installed-token login.",
+        "Choose Start new instead, reject incorrect recovery confirmation, then confirm through the real browser.",
+        "Reload the browser and restart omahabd to verify persisted setup choices.",
+        "Restart Caddy through the Applications page; verify a changed live PID and the application health action.",
+        "Enroll a device, deny cross-scope credentials, revoke it, and verify retained credentials fail.",
+        "Read the live PostgreSQL settings and installed worker generators without disabling applications.",
+        "Verify evidence/SHA256SUMS from the run artifact directory.",
+        "Repeat using report.json repeat_command on a fresh guest disk.",
+        "Force insufficient disk capacity and verify a FAIL report rather than a missing or passing artifact."
+      ],
+      "expected": [
+        "Browser requests reach the installed daemon without route mocks.",
+        "Unauthorized mutations cannot change recovery state.",
+        "Recovery acknowledgement and the correct code are required before confirmation.",
+        "Restore skipped and recovery confirmed remain persisted after reload and daemon restart.",
+        "Caddy has a new live PID and healthy rendered state; administrator and device credentials are not interchangeable.",
+        "Revocation denies the previously working device credential.",
+        "Desktop and narrow-screen screenshots contain no tokens or recovery phrases.",
+        "The artifact identifies source content, ISO hash, effective settings, checks, memory observations, and repeat procedure.",
+        "Each run has separate evidence; checksums verify its contents.",
+        "Failure and interruption never produce PASS."
+      ],
+      "evidence_types": [
+        "BROWSER",
+        "LIVE_API",
+        "LIVE_CLI",
+        "INTEGRATION"
+      ]
+    },
+    {
       "id": "setup.startup.unavailable",
       "area": "setup",
       "title": "Show server unavailable state",
@@ -5378,28 +5425,37 @@
       ],
       "sources": [
         "internal/controlplane/storage.go",
+        "internal/controlplane/storage_executor.go",
+        "internal/controlplane/operations.go",
+        "nix/module.nix",
         "nix/storage.nix",
+        "scripts/e2e-storage-campaign.sh",
+        "scripts/e2e-iso-install.sh",
         "nix/app-data.nix"
       ],
       "requires": [
-        "enrolled"
+        "vm-campaign"
       ],
       "steps": [
-        "Attach one disposable data disk.",
-        "Place a Syncthing volume on its filesystem UUID through the Storage page.",
-        "Write a file through the canonical volume path.",
-        "Restart the storage unit.",
-        "Restart the guest.",
-        "Read the file through the canonical volume path."
+        "Run the standard ISO harness with its default scratch disk.",
+        "Write a Syncthing sentinel and record its SHA256 and owner.",
+        "Reject migration without confirmation and verify unchanged source data.",
+        "Complete a real server-config and server-sync safety backup.",
+        "Select the scratch filesystem UUID through the Storage API, or the Storage page in a manual campaign.",
+        "Migrate, restart the storage and Syncthing units, then reboot the guest.",
+        "Compare the selected UUID, sentinel SHA256, owner, and active service after each transition."
       ],
       "expected": [
-        "The filesystem mounts below /mnt/omahab-disks using its UUID.",
-        "The canonical path is a bind mount onto the selected disk.",
-        "The file persists after the unit restart and guest restart.",
-        "The storage unit fails when the selected disk is unavailable."
+        "Unconfirmed migration returns 400 without changing the source mount or bytes.",
+        "The safety snapshot manifest proves both required scopes before migration.",
+        "The filesystem mounts below /mnt/omahab-disks using its UUID; the canonical path is a bind mount.",
+        "Confirmed migration returns 202 and executes in the constrained host-namespace unit, without weakening the daemon sandbox.",
+        "Operation handoffs are separate; resumed work does not replay its previous failure, and executor failure returns nonzero.",
+        "Data bytes, ownership, selected binding, and active Syncthing persist after unit restart and guest reboot."
       ],
       "evidence_types": [
         "BROWSER",
+        "LIVE_API",
         "LIVE_CLI",
         "INTEGRATION"
       ]
@@ -5412,19 +5468,24 @@
         "manual:life-missing-disk"
       ],
       "sources": [
-        "scripts/install-disk.sh",
-        "internal/diskinstall/disks.go"
+        "scripts/e2e-storage-campaign.sh",
+        "internal/controlplane/storage.go",
+        "nix/storage.nix"
       ],
       "requires": [
-        "enrolled"
+        "vm-campaign"
       ],
       "steps": [
-        "Prepare the Missing storage scenario on a disposable guest.",
-        "Execute the supported operation and verify the observable result."
+        "Migrate Syncthing to the harness scratch filesystem.",
+        "Stop Syncthing and its storage unit before unmounting both bind and source mounts.",
+        "Make the selected UUID unavailable by changing the unmounted scratch filesystem UUID.",
+        "Request a real Syncthing start and verify dependency failure.",
+        "Restore the original UUID, clear failed units, and start Syncthing again."
       ],
       "expected": [
-        "The Missing storage behaves as specified.",
-        "Failures are reported with recovery steps."
+        "The selected UUID disappears; Syncthing cannot start and the canonical path remains unmounted.",
+        "Restoring the UUID starts Syncthing on the selected filesystem with unchanged sentinel bytes.",
+        "The automated case tests missing filesystem identity, not physical hot-unplug."
       ],
       "evidence_types": [
         "BROWSER",
@@ -5610,9 +5671,9 @@
         "vm-campaign"
       ],
       "steps": [
-        "Run scripts/e2e-iso-install.sh --recovery with E2E_MEM_MB=10240 on a host with at least 12288 MiB available RAM.",
+        "Run scripts/e2e-iso-install.sh --recovery with its default 4096 MiB guest and at least 6144 MiB available host RAM.",
         "Follow the campaign phases: capture, fresh-disk reinstall, full restore, subset, interrupt/resume, activation rollback.",
-        "Record the phase log lines and the restored/excluded sentinel checks."
+        "Verify the run artifact checksums, accepted browser operation ID, saved snapshot manifest scopes, and restored/excluded sentinel checks."
       ],
       "expected": [
         "Capture generates and confirms the recovery phrase, configures a local restic repository, installs caddy, adds and activates a custom bundle, and completes a scoped capture with the excluded .cache sentinel left out.",
@@ -5620,7 +5681,8 @@
         "The full restore returns the app sentinel with exact bytes, restores server-sync and the custom bundle, and the excluded and post-capture content stays absent.",
         "The subset phase restores only the selected app scopes; the unselected captured server-sync scope keeps its changed live bytes.",
         "The interruption phase SIGKILLs the omahab-restore MainPID at a persisted stage (a missed window fails, never passes), proves journal and staging survived, and resumes to completion.",
-        "The rollback phase poisons a committed activation script, requires the terminal rolled_back outcome with the old generation restored and panel plus custom service healthy.",
+        "The rollback phase poisons a committed activation script, requires terminal rolled_back with the old generation restored, and proves panel plus custom service health on the flake-only guest.",
+        "Normal apply fails immediately on failed or rolled_back; rollback fails immediately on completed or failed. API restart gaps are not parsed as JSON.",
         "Never record this case passed without the VM campaign actually running."
       ],
       "evidence_types": [
@@ -7235,12 +7297,12 @@
       "steps": [
         "Read the tuning file and the host memory total.",
         "Query the live shared buffer setting.",
-        "Reboot and read both again."
+        "Regenerate unchanged tuning and verify the running database remains available."
       ],
       "expected": [
-        "Shared buffers match one quarter of memory, clamped between 128 MB and 8 GB.",
+        "Shared buffers match one eighth of memory, clamped between 128 MB and 2 GB; maintenance memory uses one sixty-fourth, clamped 64-256 MB; per-sort work memory is 4 MB.",
         "The tuning unit runs before PostgreSQL starts.",
-        "A reboot with the same memory does not restart PostgreSQL."
+        "Regenerating unchanged tuning does not restart PostgreSQL."
       ],
       "evidence_types": [
         "LIVE_CLI"
@@ -7276,7 +7338,7 @@
     {
       "id": "resources.worker.scaling",
       "area": "household",
-      "title": "Scale worker counts to the CPU count",
+      "title": "Scale worker counts to CPU and RAM budgets",
       "covers": [
         "manual:worker-scaling"
       ],
@@ -7284,6 +7346,8 @@
         "bundles/immich/module.nix",
         "bundles/karakeep/module.nix",
         "bundles/litellm/module.nix",
+        "bundles/paperless-ngx/module.nix",
+        "bundles/woodpecker/module.nix",
         "nix/bundle-lib.nix"
       ],
       "requires": [
@@ -7291,11 +7355,11 @@
       ],
       "steps": [
         "Read the rendered worker environment for each scaled unit.",
-        "Compare the values with the host CPU count.",
+        "Compare the values with the host CPU count and MemTotal; repeat on low-memory and larger guests.",
         "Reboot and read them again."
       ],
       "expected": [
-        "Worker counts follow the documented clamps for the CPU count.",
+        "CPU-derived worker counts and Paperless OCR threads also respect clamp(floor(MemTotal MiB / 4096), 1, 4).",
         "Values recompute at boot without unit failures."
       ],
       "evidence_types": [
@@ -8427,12 +8491,12 @@
       "steps": [
         "Add a custom bundle that builds but whose health_check never answers.",
         "Run omahab bundle apply.",
-        "Watch the switch, the health gate, and the outcome.",
+        "Watch the switch, the panel health gate, the service restart, and the outcome from the installed systemd unit.",
         "Confirm the previous generation is serving again afterwards.",
         "Poison a committed module with a valid NixOS activation snippet that exits nonzero during activation, then apply again."
       ],
       "expected": [
-        "The switch completes and the panel /up gate passes.",
+        "The switch completes, the unit finds curl and coreutils, the panel /up gate passes, and the store-path omahabd restart succeeds.",
         "The bundle health probe fails, the apply reports unhealthy, and the previous generation is restored.",
         "The activation-error path also terminates as rolled_back with the old generation serving again and the custom service still healthy.",
         "The journal records completion, failure, or successful rollback; failed CLI applies keep a nonzero exit code including with --json.",

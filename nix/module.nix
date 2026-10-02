@@ -114,6 +114,17 @@ let
     ${pkgs.coreutils}/bin/install -d -m 0750 \
       -o omahab-builder -g omahab-builder /run/omahab-builder
   '';
+  # Bare profile rollback must not evaluate classic NIX_PATH on this
+  # flake-only host. Skip nixos-rebuild-ng's re-exec only for rollback;
+  # forward rebuilds retain their --flake evaluation and version check.
+  rollbackSafeNixosRebuild = pkgs.writeShellScriptBin "nixos-rebuild" ''
+    for arg in "$@"; do
+      if [ "$arg" = "--rollback" ]; then
+        exec ${pkgs.nixos-rebuild}/bin/nixos-rebuild --no-reexec "$@"
+      fi
+    done
+    exec ${pkgs.nixos-rebuild}/bin/nixos-rebuild "$@"
+  '';
 
   hardenBase = {
     NoNewPrivileges = true;
@@ -575,6 +586,67 @@ in
       };
     };
 
+    # Data movement needs host-visible mounts and rsync ownership/xattrs.
+    # Keep those privileges in a staged oneshot, not in the daemon sandbox.
+    systemd.services."omahab-storage-migrate@" = {
+      description = "Omahab storage migration (mount/copy/bind)";
+      documentation = [ "https://github.com/davidgilesgt/omahab" ];
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
+      unitConfig = {
+        RequiresMountsFor = [ dataDir ];
+        ConditionPathExists = "/run/omahab/storage-migrate/%i";
+        # Never started at boot: only on demand from the panel/CLI.
+      };
+      path = [
+        pkgs.util-linux
+        pkgs.rsync
+        pkgs.systemd
+        pkgs.coreutils
+        pkgs.gnugrep
+        pkgs.git
+      ];
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = "${cfg.package}/bin/omahab storage migrate --apply-staged --operation %i";
+        User = "root";
+        Group = "root";
+        # Filesystem sandbox options would hide these mounts from host units.
+        CapabilityBoundingSet = "CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_FSETID CAP_SETGID CAP_SETUID CAP_SYS_ADMIN";
+        SystemCallFilter = [
+          "@system-service"
+          "@mount"
+          "@chown"
+          "setxattr"
+          "fsetxattr"
+          "lsetxattr"
+          "getxattr"
+          "lgetxattr"
+          "fgetxattr"
+          "listxattr"
+          "llistxattr"
+          "flistxattr"
+          "removexattr"
+          "lremovexattr"
+          "fremovexattr"
+        ];
+        SystemCallArchitectures = "native";
+        RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" ];
+        RestrictRealtime = true;
+        LockPersonality = true;
+        RestrictSUIDSGID = true;
+        MemoryDenyWriteExecute = false;
+        NoNewPrivileges = false;
+        UMask = "0022";
+      };
+      environment = {
+        OMAHAB_STATE_DIR = stateDir;
+        OMAHAB_DATA_DIR = dataDir;
+        OMAHAB_CATALOG = "${nativeCatalog}";
+        OMAHAB_NATIVE_LAYOUT = "${nativeLayoutFile}";
+      };
+    };
+
     # ------------------------------------------------------------------
     # Custom bundle apply (DESIGN §6.1): the panel/API "Apply bundles"
     # action stages an operation journal plus a tmpfs handoff and triggers
@@ -598,12 +670,20 @@ in
         ConditionPathExists = "/run/omahab/bundle-apply";
         # Never started at boot: only on demand from the panel/CLI.
       };
-      # git reads the bundles repo at HEAD; nixos-rebuild/nix build+switch.
-      path = [ pkgs.git pkgs.nixos-rebuild config.nix.package pkgs.systemd ];
+      # Include the panel health probe and rebuild activation dependencies.
+      path = [
+        pkgs.git
+        rollbackSafeNixosRebuild
+        config.nix.package
+        pkgs.systemd
+        pkgs.curl
+        pkgs.coreutils
+      ];
       serviceConfig = {
         Type = "oneshot";
         ExecStart = "${cfg.package}/bin/omahab bundle apply --apply-staged";
-        ExecStartPost = "/usr/bin/systemctl restart omahabd.service";
+        # NixOS has no /usr/bin/systemctl.
+        ExecStartPost = "${pkgs.systemd}/bin/systemctl restart omahabd.service";
         User = "root";
         Group = "root";
         ReadWritePaths = [
@@ -1154,12 +1234,17 @@ in
       util-linux
       devpod
       tmux
-      nixos-rebuild
+      # Interactive upgrades use the same profile rollback policy.
+      rollbackSafeNixosRebuild
       curl
     ];
     # Installed-system Nix features for `omahab system upgrade` (single
     # mechanism; no command flags or env overrides in cmd/omahab/system.go).
     nix.settings.experimental-features = [ "nix-command" "flakes" ];
+    # Updates and bundle activation share RAM with running applications.
+    # Serialize derivations and bound per-build parallelism on small hosts.
+    nix.settings.max-jobs = mkDefault 1;
+    nix.settings.cores = mkDefault 2;
     # home-assistant-cli: omahabd validates Home Assistant live via `hass-cli state list` during connect (DESIGN §17).
     systemd.services.omahabd.path = [ omahabOncePkg pkgs.tailscale pkgs.docker pkgs.systemd pkgs.restic config.services.postgresql.finalPackage pkgs.nftables pkgs.util-linux pkgs.rsync pkgs.jq pkgs.home-assistant-cli pkgs.devpod pkgs.tmux pkgs.git pkgs.gnutar ];
   };

@@ -39,6 +39,7 @@ let
     value = {
       description = "Prepare Omahab storage volume ${v.volume} (${v.canonical})";
       wantedBy = [ "multi-user.target" ];
+      path = [ pkgs.util-linux ];
       before = [ "multi-user.target" ] ++ lib.optional (v.volume == "postgresql") "postgresql.service";
       unitConfig = {
         RequiresMountsFor = [ dataDir ];

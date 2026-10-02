@@ -22,10 +22,8 @@ in
     };
     systemd.services."paperless-secret-key" = gate "paperless-ngx";
     # Runtime-derived workers (see resourceEnvScript):
-    # celery concurrency = clamp(nproc-1, 1, 4) — leave one core for the
-    # web UI and OCR; paperless derives THREADS_PER_WORKER itself as
-    # floor(cores/workers), so only the worker count is raised. Web
-    # workers = clamp(nproc/4, 1, 4) (granian --workers, default 1).
+    # CPU formulas leave room for the web UI and OCR, then apply the
+    # shared RAM cap. Cap OCR threads too, not only worker processes.
     systemd.services.paperless-web = mkMerge [
       (gate "paperless-ngx")
       {
@@ -33,11 +31,11 @@ in
           ExecStartPre = [
             "+${
               resourceEnvScript "paperless-web" [
-                "W=$(( NPROC / 4 )); [ $W -lt 1 ] && W=1; [ $W -gt 4 ] && W=4 || true; echo \"GRANIAN_WORKERS=$W\""
+                "echo \"GRANIAN_WORKERS=$(worker_count $(( NPROC / 4 )))\""
               ]
             }"
           ];
-          EnvironmentFile = [ "/run/omahab-resenv/paperless-web.env" ];
+          EnvironmentFile = [ "-/run/omahab-resenv/paperless-web.env" ];
           OOMScoreAdjust = 250;
         };
       }
@@ -51,11 +49,13 @@ in
           ExecStartPre = [
             "+${
               resourceEnvScript "paperless-task-queue" [
-                "W=$(( NPROC > 1 ? NPROC - 1 : 1 )); [ $W -gt 4 ] && W=4 || true; echo \"PAPERLESS_TASK_WORKERS=$W\""
+                "W=$(worker_count $(( NPROC > 1 ? NPROC - 1 : 1 )))"
+                "echo \"PAPERLESS_TASK_WORKERS=$W\""
+                "echo \"PAPERLESS_THREADS_PER_WORKER=$(worker_count $(( NPROC / W )))\""
               ]
             }"
           ];
-          EnvironmentFile = [ "/run/omahab-resenv/paperless-task-queue.env" ];
+          EnvironmentFile = [ "-/run/omahab-resenv/paperless-task-queue.env" ];
           # Kernel OOM killer prefers bursty workers over the DB.
           OOMScoreAdjust = 500;
         };

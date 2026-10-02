@@ -35,8 +35,10 @@
 
 ## VM testing — E2E ISO harness is the default
 - When asked to test in a VM, run `scripts/e2e-iso-install.sh`: builds the ISO, installs it onto a fresh VM disk, boots the installed system, probes the setup flow. Never substitute `nix run .#vm` or the NixOS unit tests — those skip the ISO/install path.
-- Freshness is mandatory: the VM disk is always recreated, and the ISO is rebuilt whenever HEAD moved since the last run (marker in `dist/e2e/`; the script enforces this even with `--skip-build`). When new commits land, re-run the harness from scratch — never reuse a booted VM or a stale ISO across commits, and never ask whether to recreate.
+- Freshness is mandatory: the VM disk is always recreated, and the ISO is rebuilt whenever HEAD or source content changed (marker in `dist/e2e/`; the script enforces this even with `--skip-build`). Never reuse a booted VM or a stale ISO across source changes.
 - Harness state (disk, logs, markers) lives under `dist/e2e/`; `--keep` preserves the disk for debugging, default cleans it.
+- Default local setup/recovery allocation: 4096 MiB RAM and two CPUs. Full application campaigns keep the larger capacity gate in `testing/skills/appliance-testing.md`.
+- Each harness run writes a separate `runs/<run-id>/evidence/` artifact. Verify its `SHA256SUMS`; use `report.json` to repeat it. Source changes during execution invalidate the result.
 
 ## Testing checklist
 - Add checklist cases when adding a feature or installed application.
