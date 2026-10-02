@@ -134,9 +134,13 @@ rc_restore_stage() {
 }
 
 # rc_restore_failure <op-id> — echo the journaled error when the
-# operation terminally failed; empty otherwise.
+# operation terminally failed; empty otherwise. An unreachable panel
+# (the restore unit stops omahabd) is not a failure: return empty.
 rc_restore_failure() {
-  rc_api GET "/api/v1/recovery/restore/$1" | python3 -c 'import json,sys; op=json.load(sys.stdin); print(op.get("error","") if op.get("status")=="failed" else "")'
+  local body
+  body="$(rc_api GET "/api/v1/recovery/restore/$1" 2>/dev/null || true)"
+  [[ -n "$body" ]] || return 0
+  printf '%s' "$body" | python3 -c 'import json,sys; op=json.load(sys.stdin); print(op.get("error","") if op.get("status")=="failed" else "")' 2>/dev/null || true
 }
 
 # rc_restore_diagnose <op-id> — dump unit state, unit journal, and the
