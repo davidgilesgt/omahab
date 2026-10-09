@@ -7111,19 +7111,27 @@
         "bundles/jellyfin/bundle.json",
         "bundles/jellyfin/module.nix",
         "internal/controlplane/jellyfin.go",
-        "internal/api/server.go"
+        "internal/api/server.go",
+        "bundles/jellyfin/sso-plugin.nix",
+        "bundles/jellyfin/sso-deps.json",
+        "bundles/jellyfin/SSO.md"
       ],
       "requires": [
         "enrolled"
       ],
       "steps": [
         "Complete fresh startup via GET /Startup/User (initializes), POST /Startup/User admin, authenticate, POST /Startup/Complete, then library convergence.",
-        "Reconcile, restart jellyfin.service, reboot the guest, and compare the retained sso-secret.key hash privately before and after."
+        "Reconcile, restart jellyfin.service, reboot the guest, and compare the retained sso-secret.key hash privately before and after.",
+        "Check the loaded SSO plugin version and complete Pocket ID sign-in through Caddy.",
+        "Add one small synthetic media file, scan the library, and play it through the signed-in browser.",
+        "Restart Jellyfin and sign in again with the same Pocket ID account."
       ],
       "expected": [
         "Fresh startup completes only after stored secret and successful authentication; the startup wizard completes even while the media server answers 503 during core startup.",
         "The secret-key hash is unchanged across restart and reboot.",
-        "The Media library persists; previously configured servers with unknown passwords warn and skip without failing setup."
+        "The Media library persists; previously configured servers with unknown passwords warn and skip without failing setup.",
+        "The plugin loads without missing assemblies; Pocket ID sign-in reaches the intended Jellyfin account.",
+        "The small media file plays; restart preserves the library and account identity."
       ],
       "evidence_types": [
         "BROWSER",

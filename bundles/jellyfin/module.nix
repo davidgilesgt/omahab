@@ -4,7 +4,7 @@
 # nix/app-data.nix (state ${dataDir}/apps/jellyfin, library/ beneath).
 #
 # Flowfin Community SSO for Jellyfin, stable 4.3.0 (Jellyfin 10.11 ABI).
-# Flat zip (meta.json + DLLs at top level), symlinked read-only into the
+# Flat payload (meta.json + DLLs at top level), copied into the
 # plugins dir below. Provider config is omahabd-rendered config-as-code,
 # never Nix secrets.
 {
@@ -18,11 +18,7 @@ with lib;
 let
   omahab = import ../../nix/bundle-lib.nix { inherit config lib pkgs; };
   inherit (omahab) dataDir gate;
-  jellyfinSSOPlugin = pkgs.fetchzip {
-    url = "https://github.com/Flowfin/jellyfin-plugin-sso/releases/download/4.3.0-stable/community-sso-for-jellyfin_4.3.0.0.zip";
-    hash = "sha256-MA4A1+TCMOBErdF5prsI0EaaiQvsB3Y8PYOEoHQt8LI=";
-    stripRoot = false;
-  };
+  jellyfinSSOPlugin = pkgs.callPackage ./sso-plugin.nix { };
 in
 {
   config = mkIf config.services.omahab.enable {

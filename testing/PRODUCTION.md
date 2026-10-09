@@ -26,6 +26,11 @@ An ISO build or a responding panel cannot establish this result.
 - Initial LAN setup uses HTTP.
   Backup credentials require the SSH alternative when the LAN is not trusted.
   See the first-boot procedure in `README.md`.
+- Fresh ISO installation on `b213f7c` failed while fetching the pinned Jellyfin SSO plugin.
+  The release download and repository API returned HTTP 404.
+  The ISO booted, but the installed system was not produced.
+  Sanitized evidence is under `dist/production-review/setup/runs/20261009T053629-203739/evidence/`.
+  Pocket ID SSO must remain available when repairing this dependency.
 
 These findings are source review and saved evidence, not a new production test pass.
 
@@ -83,6 +88,9 @@ Record these failure modes before extending isolated tests or implementation cod
 - The rebuilt ISO cannot boot or unpack its store during installation.
 - A release check creates root build links that make the repository gate fail.
 - A release runner lacks a required development tool.
+- A pinned plugin download disappears while an old cached build still passes.
+- A replacement SSO plugin cannot load in the pinned Jellyfin version.
+- A replacement SSO plugin reads a different provider document or changes account identity.
 
 Use disposable guest storage for destructive cases.
 Record input hashes, application records, source identity, procedure, results, and recovery evidence.
