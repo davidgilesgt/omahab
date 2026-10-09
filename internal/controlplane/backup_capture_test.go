@@ -73,6 +73,26 @@ func TestResolveScopesRejectsUnknown(t *testing.T) {
 	}
 }
 
+func TestDefaultBackupScopesRejectUnavailableInventory(t *testing.T) {
+	b := captureTestBackend(t, t.TempDir())
+	if err := b.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.resolveBackupScopes(context.Background(), nil); err == nil {
+		t.Fatal("default backup accepted an unavailable application inventory")
+	}
+}
+
+func TestBackupPlanRejectsUnavailableInventory(t *testing.T) {
+	b := captureTestBackend(t, t.TempDir())
+	if err := b.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.planBackupCapture(context.Background(), []string{"app:immich"}); err == nil {
+		t.Fatal("backup plan treated unavailable application inventory as an uninstalled application")
+	}
+}
+
 func TestPlanOmitsNotInstalled(t *testing.T) {
 	b := captureTestBackend(t, t.TempDir())
 	plan, err := b.planBackupCapture(context.Background(), []string{"app:syncthing"})

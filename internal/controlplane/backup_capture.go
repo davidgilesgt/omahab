@@ -67,15 +67,16 @@ func (b *Backend) allBackupScopes(ctx context.Context) ([]string, error) {
 	scopes := []string{backups.ScopeServerConfig}
 	if b.apps != nil {
 		list, err := b.apps.List(ctx)
-		if err == nil {
-			installed := map[string]bool{}
-			for _, st := range list {
-				installed[st.BundleID] = true
-			}
-			for _, bd := range b.apps.CatalogBundles() {
-				if installed[bd.ID] {
-					scopes = append(scopes, backups.AppScope(bd.ID))
-				}
+		if err != nil {
+			return nil, fmt.Errorf("list applications for backup scopes: %w", err)
+		}
+		installed := map[string]bool{}
+		for _, st := range list {
+			installed[st.BundleID] = true
+		}
+		for _, bd := range b.apps.CatalogBundles() {
+			if installed[bd.ID] {
+				scopes = append(scopes, backups.AppScope(bd.ID))
 			}
 		}
 	}
@@ -167,10 +168,12 @@ func (b *Backend) planBackupCapture(ctx context.Context, scopes []string) (*capt
 	}
 	installed := map[string][]apps.Status{}
 	if b.apps != nil {
-		if list, err := b.apps.List(ctx); err == nil {
-			for _, st := range list {
-				installed[st.BundleID] = append(installed[st.BundleID], st)
-			}
+		list, err := b.apps.List(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("list applications for backup capture: %w", err)
+		}
+		for _, st := range list {
+			installed[st.BundleID] = append(installed[st.BundleID], st)
 		}
 	}
 	// Server-config always carries the inseparable PocketID identity
