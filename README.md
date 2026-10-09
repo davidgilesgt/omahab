@@ -40,6 +40,9 @@ One image fits anything from the reference 4-vCPU/19 GiB box to a much larger Pr
 
 ### Local E2E testing
 
+See [production acceptance](testing/PRODUCTION.md) before moving household data onto the server.
+This document records release gaps, required recovery evidence, and hardware checks.
+
 ```sh
 node scripts/test-checklist.mjs new
 nix develop --command bash scripts/e2e-iso-install.sh

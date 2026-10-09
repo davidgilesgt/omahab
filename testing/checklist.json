@@ -5500,19 +5500,24 @@
         "manual:life-full-disk"
       ],
       "sources": [
-        "scripts/install-disk.sh",
-        "internal/diskinstall/disks.go"
+        "internal/controlplane/backup_capture.go",
+        "nix/storage.nix",
+        "scripts/e2e-storage-campaign.sh"
       ],
       "requires": [
         "enrolled"
       ],
       "steps": [
-        "Prepare the Full storage scenario on a disposable guest.",
-        "Execute the supported operation and verify the observable result."
+        "Record filesystem identity, free bytes, service states, and sentinel hashes on a disposable installed guest.",
+        "Fill only an isolated guest scratch filesystem used for application data until writes fail with ENOSPC.",
+        "Attempt an application write and a product backup; record terminal results and service states.",
+        "Remove only the test filler, retry the operations, and compare original sentinel hashes."
       ],
       "expected": [
-        "The Full storage behaves as specified.",
-        "Failures are reported with recovery steps."
+        "The failed write and backup cannot be reported as successful.",
+        "Existing data remains unchanged; application writers resume or a specific resume failure is reported.",
+        "Operations succeed after space is available without reinstalling the server.",
+        "Evidence records the exact filesystem, failure, recovery procedure, and before/after hashes."
       ],
       "evidence_types": [
         "BROWSER",
@@ -5527,19 +5532,24 @@
         "manual:life-backup"
       ],
       "sources": [
-        "scripts/install-disk.sh",
-        "internal/diskinstall/disks.go"
+        "internal/controlplane/backup_capture.go",
+        "internal/controlplane/backup_capture_manifest.go",
+        "scripts/e2e-recovery-campaign.sh"
       ],
       "requires": [
         "enrolled"
       ],
       "steps": [
-        "Prepare the Backup inclusion scenario on a disposable guest.",
-        "Execute the supported operation and verify the observable result."
+        "Create unique files and application records through each configured application; record hashes and record identifiers.",
+        "Create a backup through Omahab with the default scopes.",
+        "Inspect the saved snapshot manifest and compare included scopes with the configured application inventory.",
+        "Restore onto a fresh ISO-installed guest and read the records through their applications."
       ],
       "expected": [
-        "The Backup inclusion behaves as specified.",
-        "Failures are reported with recovery steps."
+        "Every configured application with persistent data has a captured scope or an explicit documented omission.",
+        "Database records and file hashes match after recovery.",
+        "Server configuration and Pocket ID identity are captured together.",
+        "A missing required scope fails the case even when the backup operation reports success."
       ],
       "evidence_types": [
         "BROWSER",
@@ -5554,19 +5564,22 @@
         "manual:life-verify"
       ],
       "sources": [
-        "scripts/install-disk.sh",
-        "internal/diskinstall/disks.go"
+        "internal/controlplane/backups_ops.go",
+        "internal/backups/recovery_apply.go"
       ],
       "requires": [
         "enrolled"
       ],
       "steps": [
-        "Prepare the Snapshot verification scenario on a disposable guest.",
-        "Execute the supported operation and verify the observable result."
+        "Create a product backup containing a file with a recorded SHA-256 hash.",
+        "Run product verification and restore the file through the supported product path.",
+        "Compare restored bytes with the recorded hash.",
+        "Make a disposable repository copy incomplete and repeat verification against that copy."
       ],
       "expected": [
-        "The Snapshot verification behaves as specified.",
-        "Failures are reported with recovery steps."
+        "A valid snapshot verifies and restores the original bytes.",
+        "Missing repository data produces a failed verification without marking that snapshot verified.",
+        "Evidence identifies the snapshot and records both verification outcomes; production repositories remain untouched."
       ],
       "evidence_types": [
         "BROWSER",
@@ -5581,19 +5594,23 @@
         "manual:life-app-restore"
       ],
       "sources": [
-        "scripts/install-disk.sh",
-        "internal/diskinstall/disks.go"
+        "internal/controlplane/recovery_restore.go",
+        "internal/controlplane/recovery_offline.go",
+        "scripts/e2e-recovery-campaign.sh"
       ],
       "requires": [
         "enrolled"
       ],
       "steps": [
-        "Prepare the Application restore scenario on a disposable guest.",
-        "Execute the supported operation and verify the observable result."
+        "Capture two configured application scopes containing distinct files and database records.",
+        "Change both applications after capture and record the new state.",
+        "Restore only one application through the supported recovery flow.",
+        "Open both applications and compare records, files, ownership, and permissions."
       ],
       "expected": [
-        "The Application restore behaves as specified.",
-        "Failures are reported with recovery steps."
+        "The selected application returns to captured records and bytes.",
+        "The unselected application retains its later records and bytes.",
+        "Both applications remain usable after a service restart and guest reboot."
       ],
       "evidence_types": [
         "BROWSER",
@@ -5635,19 +5652,23 @@
         "manual:life-identity-restore"
       ],
       "sources": [
-        "scripts/install-disk.sh",
-        "internal/diskinstall/disks.go"
+        "internal/controlplane/recovery_restore.go",
+        "internal/controlplane/recovery_offline.go",
+        "bundles/pocket-id/module.nix"
       ],
       "requires": [
         "enrolled"
       ],
       "steps": [
-        "Prepare the Identity restore scenario on a disposable guest.",
-        "Execute the supported operation and verify the observable result."
+        "Create a disposable household identity and passkey through Pocket ID; verify application sign-in.",
+        "Capture server configuration and identity state through the product backup flow.",
+        "Restore onto a fresh ISO-installed guest using the exported repository.",
+        "Sign in with the same passkey and open an application using its normal OIDC flow."
       ],
       "expected": [
-        "The Identity restore behaves as specified.",
-        "Failures are reported with recovery steps."
+        "The existing identity and passkey work without creating a replacement account.",
+        "OIDC returns the original identity and existing application data.",
+        "Identity failure fails recovery acceptance even when the panel responds."
       ],
       "evidence_types": [
         "BROWSER",
@@ -5731,8 +5752,8 @@
         "manual:life-upgrade"
       ],
       "sources": [
-        "scripts/install-disk.sh",
-        "internal/diskinstall/disks.go"
+        "cmd/omahab/system.go",
+        "testing/skills/appliance-testing.md"
       ],
       "requires": [
         "enrolled"
@@ -5759,8 +5780,8 @@
         "manual:life-rollback"
       ],
       "sources": [
-        "scripts/install-disk.sh",
-        "internal/diskinstall/disks.go"
+        "cmd/omahab/system.go",
+        "testing/skills/appliance-testing.md"
       ],
       "requires": [
         "enrolled"
@@ -8600,6 +8621,30 @@
       "evidence_types": [
         "LIVE_API",
         "LIVE_CLI"
+      ]
+    },
+    {
+      "id": "backups.inventory-failure",
+      "area": "backups",
+      "title": "Reject backup planning when application inventory is unavailable",
+      "covers": [
+        "manual:backup-inventory-failure"
+      ],
+      "sources": [
+        "internal/controlplane/backup_capture.go",
+        "internal/controlplane/backup_capture_test.go"
+      ],
+      "requires": [],
+      "steps": [
+        "Run the isolated backup tests with an unavailable application database.",
+        "Check default scope resolution and explicit application backup planning."
+      ],
+      "expected": [
+        "Both paths return an error before capture starts.",
+        "An inventory query failure cannot be treated as an empty inventory or an uninstalled application."
+      ],
+      "evidence_types": [
+        "UNIT"
       ]
     }
   ]

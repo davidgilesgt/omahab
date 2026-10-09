@@ -26,6 +26,10 @@ exclusive operations, backup, restore, and recovery.
 
 ## Capacity gate
 
+- Use `testing/PRODUCTION.md` for household production acceptance.
+- A passing setup campaign does not establish application recovery or production acceptance.
+- Lifecycle storage, backup, and identity cases require the measurable results in `testing/checklist.json`.
+
 - Recheck KVM access, free storage, available RAM, required commands
   (Nix, Python 3, Node, Chromium, curl, SSH, ssh-keygen, QEMU, qemu-img), and ports.
 - Full application runs use `E2E_MEM_MB=10240` and require at least
