@@ -5699,7 +5699,8 @@
       "steps": [
         "Run scripts/e2e-iso-install.sh --recovery with its default 4096 MiB guest and at least 6144 MiB available host RAM.",
         "Follow the campaign phases: capture, fresh-disk reinstall, full restore, subset, interrupt/resume, activation rollback.",
-        "Verify the run artifact checksums, accepted browser operation ID, saved snapshot manifest scopes, and restored/excluded sentinel checks."
+        "Verify the run artifact checksums, accepted browser operation ID, saved snapshot manifest scopes, and restored/excluded sentinel checks.",
+        "Prepare and parse the activation-failure fixture without relying on global Git identity; commit only its two module files."
       ],
       "expected": [
         "Capture generates and confirms the recovery phrase, configures a local restic repository, installs caddy, adds and activates a custom bundle, and completes a scoped capture with the excluded .cache sentinel left out.",
@@ -5707,6 +5708,7 @@
         "The full restore returns the app sentinel with exact bytes, restores server-sync and the custom bundle, and the excluded and post-capture content stays absent.",
         "The subset phase restores only the selected app scopes; the unselected captured server-sync scope keeps its changed live bytes.",
         "The interruption phase SIGKILLs the omahab-restore MainPID at a persisted stage (a missed window fails, never passes), proves journal and staging survived, and resumes to completion.",
+        "The rollback fixture uses an explicit test Git identity and valid Nix; a fixture preparation failure cannot establish production rollback behavior.",
         "The rollback phase poisons a committed activation script, requires terminal rolled_back with the old generation restored, and proves panel plus custom service health on the flake-only guest.",
         "Normal apply fails immediately on failed or rolled_back; rollback fails immediately on completed or failed. API restart gaps are not parsed as JSON.",
         "Never record this case passed without the VM campaign actually running."

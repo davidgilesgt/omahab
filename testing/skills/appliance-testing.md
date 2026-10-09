@@ -93,6 +93,9 @@ exclusive operations, backup, restore, and recovery.
 - The rollback phase commits a deliberately failing activation snippet
   and requires the terminal `rolled_back` outcome with the previous
   generation serving again.
+- Fixture preparation supplies its own Git identity and parses the Nix module before committing.
+  A preparation failure does not prove a product rollback failure.
+- Empty API responses during restore restarts produce pending poll results, not JSON tracebacks.
 - The recovery phrase and repository password live only in the
   owner-only `recovery-secrets/` workdir directory. Never print them,
   put them in evidence files, or capture them in browser sessions.

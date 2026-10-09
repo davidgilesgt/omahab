@@ -125,12 +125,18 @@ rc_wait_until() {
 
 # rc_restore_status <op-id> — echo the persisted operation status.
 rc_restore_status() {
-  rc_api GET "/api/v1/recovery/restore/$1" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])'
+  local body
+  body="$(rc_api GET "/api/v1/recovery/restore/$1" 2>/dev/null || true)"
+  [[ -n "$body" ]] || return 0
+  printf '%s' "$body" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])'
 }
 
 # rc_restore_stage <op-id> — echo the persisted operation stage.
 rc_restore_stage() {
-  rc_api GET "/api/v1/recovery/restore/$1" | python3 -c 'import json,sys; print(json.load(sys.stdin)["stage"])'
+  local body
+  body="$(rc_api GET "/api/v1/recovery/restore/$1" 2>/dev/null || true)"
+  [[ -n "$body" ]] || return 0
+  printf '%s' "$body" | python3 -c 'import json,sys; print(json.load(sys.stdin)["stage"])'
 }
 
 # rc_restore_failure <op-id> — echo the journaled error when the
@@ -659,7 +665,7 @@ cat > /var/lib/omahab/bundles/$RC_BUNDLE_ID/module.nix <<'NIXEOF'
   '';
 }
 NIXEOF
-cd /var/lib/omahab/bundles && git add -A && git commit -m 'e2e: poison fixture activation for rollback proof' >/dev/null" \
+cd /var/lib/omahab/bundles && nix-instantiate --parse $RC_BUNDLE_ID/module.nix >/dev/null && git add -- $RC_BUNDLE_ID/module.nix $RC_BUNDLE_ID/module-clean.nix && git -c user.name='Omahab E2E' -c user.email=e2e@localhost commit -m 'e2e: poison fixture activation for rollback proof' >/dev/null" \
     || rc_die "could not poison the fixture module"
   rc_log "fixture module poisoned with a failing activation script (committed)"
 

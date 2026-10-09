@@ -31,6 +31,12 @@ An ISO build or a responding panel cannot establish this result.
   The ISO booted, but the installed system was not produced.
   Sanitized evidence is under `dist/production-review/setup/runs/20261009T053629-203739/evidence/`.
   Pocket ID SSO must remain available when repairing this dependency.
+- Fresh setup on `ef4f268` passed with a 4096 MiB guest and two CPUs.
+  Its recovery run passed full restore, selected-scope restore, and interruption/resume.
+  Rollback did not execute because the failure fixture could not be committed.
+  An isolated reproduction confirmed the missing Git identity in fixture preparation.
+  This is a harness failure, not evidence of a product rollback failure.
+  Evidence is under `dist/production-review/final-setup/runs/`.
 
 These findings are source review and saved evidence, not a new production test pass.
 
@@ -91,6 +97,9 @@ Record these failure modes before extending isolated tests or implementation cod
 - A pinned plugin download disappears while an old cached build still passes.
 - A replacement SSO plugin cannot load in the pinned Jellyfin version.
 - A replacement SSO plugin reads a different provider document or changes account identity.
+- Recovery fixture preparation depends on an absent global Git identity.
+- A generated activation-failure fixture is not valid Nix.
+- An expected API restart produces an empty response during restore polling.
 
 Use disposable guest storage for destructive cases.
 Record input hashes, application records, source identity, procedure, results, and recovery evidence.
