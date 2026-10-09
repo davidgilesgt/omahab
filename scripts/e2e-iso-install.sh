@@ -27,6 +27,7 @@
 # Requirements: nix, /dev/kvm, python3, node, Chromium, curl. QEMU resolves
 # from PATH or the nix store. All local state lives under dist/.
 set -euo pipefail
+umask 077
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -170,6 +171,7 @@ log "qemu: $QEMU"
 
 SOURCE_ID="$(python3 "$REPORT" identity)"
 mkdir -p "$WORKDIR"
+chmod 700 "$WORKDIR"
 REPORT_DIR="$WORKDIR/runs/$(date -u +%Y%m%dT%H%M%S)-$$"
 REPEAT_ARGS=(bash scripts/e2e-iso-install.sh --workdir "${WORKDIR#"$ROOT"/}" --firmware "$FIRMWARE" --data-disks "$DATA_DISKS")
 [[ "$RECOVERY" -eq 0 ]] || REPEAT_ARGS+=(--recovery)
@@ -360,32 +362,32 @@ def read_until(pat, timeout_s, send_nl=True):
             out = clean[:m.start()]
             buf = b""
             return out
-    raise SystemExit(f"serial: timeout waiting for {pat.pattern!r}\n--- tail ---\n" + ESC.sub(b"", buf[-4000:]).decode("utf-8", "replace"))
+    raise SystemExit("serial: timeout; inspect the private serial log")
 
-def run(cmd, timeout_s, expect_exit=None):
+def run(cmd, timeout_s, expect_exit=None, label="guest command"):
     global buf
     buf = b""
     s.sendall(cmd.encode() + b"\n")
-    out = read_until(PROMPT, timeout_s, send_nl=False).decode("utf-8", "replace")
-    print(f"$ {cmd}\n{out[-1500:]}")
+    read_until(PROMPT, timeout_s, send_nl=False)
     if expect_exit is not None:
         s.sendall(b"echo E2E_EXIT:$?\n")
         echo = read_until(PROMPT, 30, send_nl=False).decode("utf-8", "replace")
         m = re.search(r"E2E_EXIT:(\d+)", echo)
         code = int(m.group(1)) if m else -1
         if code != expect_exit:
-            raise SystemExit(f"command {cmd!r} exited {code}, want {expect_exit}\n{echo[-2000:]}")
+            raise SystemExit(f"serial: {label} exited {code}, want {expect_exit}; inspect the private serial log")
+    print(f"serial: {label} completed")
 
 read_until(PROMPT, 600)  # autologin root on ttyS0, no password
-run("lsblk -dn -o NAME,TYPE | grep -q vda", 30, expect_exit=0)
-run(f"umask 077; mkpasswd --method=yescrypt '{admin_pass}' > /run/pwhash && chmod 600 /run/pwhash", 30, expect_exit=0)
-run(f"umask 077; printf '%s\\n' '{ssh_pub}' > /run/e2e-authorized-keys && chmod 600 /run/e2e-authorized-keys", 30, expect_exit=0)
+run("lsblk -dn -o NAME,TYPE | grep -q vda", 30, expect_exit=0, label="system disk check")
+run(f"umask 077; mkpasswd --method=yescrypt '{admin_pass}' > /run/pwhash && chmod 600 /run/pwhash", 30, expect_exit=0, label="administrator password setup")
+run(f"umask 077; printf '%s\\n' '{ssh_pub}' > /run/e2e-authorized-keys && chmod 600 /run/e2e-authorized-keys", 30, expect_exit=0, label="SSH key setup")
 install_cmd = (
     f"OMAHAB_EXTRA_SUBSTITUTERS={cache_url} "
     f"OMAHAB_EXTRA_TRUSTED_KEYS='{cache_pub}' "
     "${OMAHAB_INSTALL_DISK:-omahab-install-disk} --disk /dev/vda --hostname e2e --username admin --password-hash-file /run/pwhash --authorized-keys-file /run/e2e-authorized-keys --yes"
 )
-run(install_cmd, timeout, expect_exit=0)
+run(install_cmd, timeout, expect_exit=0, label="ISO installation")
 s.sendall(b"poweroff\n")
 print("install complete, guest powering off")
 PYEOF
@@ -652,32 +654,32 @@ def read_until(pat, timeout_s, send_nl=True):
             out = clean[:m.start()]
             buf = b""
             return out
-    raise SystemExit(f"serial: timeout waiting for {pat.pattern!r}\n--- tail ---\n" + ESC.sub(b"", buf[-4000:]).decode("utf-8", "replace"))
+    raise SystemExit("serial: timeout; inspect the private serial log")
 
-def run(cmd, timeout_s, expect_exit=None):
+def run(cmd, timeout_s, expect_exit=None, label="guest command"):
     global buf
     buf = b""
     s.sendall(cmd.encode() + b"\n")
-    out = read_until(PROMPT, timeout_s, send_nl=False).decode("utf-8", "replace")
-    print(f"$ {cmd}\n{out[-1500:]}")
+    read_until(PROMPT, timeout_s, send_nl=False)
     if expect_exit is not None:
         s.sendall(b"echo E2E_EXIT:$?\n")
         echo = read_until(PROMPT, 30, send_nl=False).decode("utf-8", "replace")
         m = re.search(r"E2E_EXIT:(\d+)", echo)
         code = int(m.group(1)) if m else -1
         if code != expect_exit:
-            raise SystemExit(f"command {cmd!r} exited {code}, want {expect_exit}\n{echo[-2000:]}")
+            raise SystemExit(f"serial: {label} exited {code}, want {expect_exit}; inspect the private serial log")
+    print(f"serial: {label} completed")
 
 read_until(PROMPT, 600)
-run("lsblk -dn -o NAME,TYPE | grep -q vda", 30, expect_exit=0)
-run(f"umask 077; mkpasswd --method=yescrypt '{admin_pass}' > /run/pwhash && chmod 600 /run/pwhash", 30, expect_exit=0)
-run(f"umask 077; printf '%s\\n' '{ssh_pub}' > /run/e2e-authorized-keys && chmod 600 /run/e2e-authorized-keys", 30, expect_exit=0)
+run("lsblk -dn -o NAME,TYPE | grep -q vda", 30, expect_exit=0, label="system disk check")
+run(f"umask 077; mkpasswd --method=yescrypt '{admin_pass}' > /run/pwhash && chmod 600 /run/pwhash", 30, expect_exit=0, label="administrator password setup")
+run(f"umask 077; printf '%s\\n' '{ssh_pub}' > /run/e2e-authorized-keys && chmod 600 /run/e2e-authorized-keys", 30, expect_exit=0, label="SSH key setup")
 install_cmd = (
     f"OMAHAB_EXTRA_SUBSTITUTERS={cache_url} "
     f"OMAHAB_EXTRA_TRUSTED_KEYS='{cache_pub}' "
     "${OMAHAB_INSTALL_DISK:-omahab-install-disk} --disk /dev/vda --hostname e2e --username admin --password-hash-file /run/pwhash --authorized-keys-file /run/e2e-authorized-keys --yes"
 )
-run(install_cmd, timeout, expect_exit=0)
+run(install_cmd, timeout, expect_exit=0, label="ISO reinstallation")
 s.sendall(b"poweroff\n")
 print("reinstall complete, guest powering off")
 PYEOF

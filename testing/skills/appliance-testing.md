@@ -21,6 +21,8 @@ exclusive operations, backup, restore, and recovery.
 - Verify `SHA256SUMS` there. Read `report.json` for source, ISO, settings,
   checks, memory observations, and repeat command.
 - Keep serial logs and recovery-secrets out of distributed evidence.
+- Serial command echoes and timeout tails can contain disposable credentials.
+  Keep them in the private serial log, not terminal output or distributed evidence.
 - Standard mode uses the installed browser journey, not simulated routes.
 - Interactive mode does not claim an automatic campaign PASS.
 

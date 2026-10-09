@@ -29,7 +29,8 @@
         "Verify evidence/SHA256SUMS from the run artifact directory.",
         "Repeat using report.json repeat_command on a fresh guest disk.",
         "Force insufficient disk capacity and verify a FAIL report rather than a missing or passing artifact.",
-        "Record ISO size_bytes and hash from report.json; verify the newly compressed ISO installs and boots through the real harness."
+        "Record ISO size_bytes and hash from report.json; verify the newly compressed ISO installs and boots through the real harness.",
+        "Check successful installation and failed-command output for credential disclosure; check private log permissions."
       ],
       "expected": [
         "Browser requests reach the installed daemon without route mocks.",
@@ -42,7 +43,8 @@
         "The artifact identifies source content, ISO hash, effective settings, checks, memory observations, and repeat procedure.",
         "Each run has separate evidence; checksums verify its contents.",
         "Failure and interruption never produce PASS.",
-        "The ISO size is recorded in bytes and matches the tested file; compression changes preserve successful installation and boot."
+        "The ISO size is recorded in bytes and matches the tested file; compression changes preserve successful installation and boot.",
+        "Terminal output contains fixed command labels and exit codes, without password commands or raw serial tails; the workdir is owner-only."
       ],
       "evidence_types": [
         "BROWSER",
