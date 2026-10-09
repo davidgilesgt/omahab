@@ -72,6 +72,10 @@ in
   # Boot both BIOS and UEFI for the live ISO.
   isoImage.makeEfiBootable = true;
   isoImage.makeUsbBootable = true;
+  # Level 19 spends many minutes compressing the full application closure
+  # on a two-core laptop build. Keep the same store contents and format,
+  # with a larger image in exchange for faster fresh ISO campaigns.
+  isoImage.squashfsCompression = "zstd -Xcompression-level 6";
   # Serial console: headless installs over IPMI SOL and scripted installs
   # (scripts/e2e-iso-install.sh drives the installer over ttyS0) go silent
   # after the bootloader without this. ttyS0 first keeps video preferred.

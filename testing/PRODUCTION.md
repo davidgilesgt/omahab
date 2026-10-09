@@ -79,6 +79,10 @@ Record these failure modes before extending isolated tests or implementation cod
 - The daemon responds while an essential application has failed.
 - The server fails completely and cannot send its own notification.
 - WAN, DNS, or an external identity provider is unavailable.
+- Lower ISO compression increases the image size beyond available storage.
+- The rebuilt ISO cannot boot or unpack its store during installation.
+- A release check creates root build links that make the repository gate fail.
+- A release runner lacks a required development tool.
 
 Use disposable guest storage for destructive cases.
 Record input hashes, application records, source identity, procedure, results, and recovery evidence.
@@ -94,6 +98,10 @@ Test optional integrations separately before enabling them for household use.
 Keep household DNS optional until its loss cannot prevent recovery access.
 Defer sqlc migration and UI event-stream changes until the recovery gate passes.
 Avoid new orchestration services unless a measured requirement needs them.
+Use Zstd level 6 for ISO compression.
+The measured level-19 build used two CPU cores for more than 15 minutes during compression alone.
+This setting trades image size for shorter laptop builds.
+Record the new ISO size and verify the real installation path after changing compression.
 
 ## Hardware operations
 
@@ -111,5 +119,7 @@ Use a suitable KVM runner with the documented memory and storage limits.
 Tie evidence to the release source hash and tested ISO hash.
 Publish only sanitized evidence.
 Fail artifact collection when the ISO or manifest is missing.
-Build the installed closure in release checks as well as branch CI.
+Release checks build the installed closure as well as branch CI.
+Check builds use `--no-link` to avoid root build artifacts.
+Both workflows run the repository gate through `nix develop`.
 Do not treat a successful build as completion of these runtime gates.

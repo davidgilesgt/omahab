@@ -12,7 +12,8 @@
         "scripts/e2e-iso-install.sh",
         "scripts/e2e-report.py",
         "scripts/e2e-resource-check.sh",
-        "web/e2e/installed.mjs"
+        "web/e2e/installed.mjs",
+        "nix/installer.nix"
       ],
       "requires": [
         "vm-campaign"
@@ -27,7 +28,8 @@
         "Read the live PostgreSQL settings and installed worker generators without disabling applications.",
         "Verify evidence/SHA256SUMS from the run artifact directory.",
         "Repeat using report.json repeat_command on a fresh guest disk.",
-        "Force insufficient disk capacity and verify a FAIL report rather than a missing or passing artifact."
+        "Force insufficient disk capacity and verify a FAIL report rather than a missing or passing artifact.",
+        "Record ISO size_bytes and hash from report.json; verify the newly compressed ISO installs and boots through the real harness."
       ],
       "expected": [
         "Browser requests reach the installed daemon without route mocks.",
@@ -39,7 +41,8 @@
         "Desktop and narrow-screen screenshots contain no tokens or recovery phrases.",
         "The artifact identifies source content, ISO hash, effective settings, checks, memory observations, and repeat procedure.",
         "Each run has separate evidence; checksums verify its contents.",
-        "Failure and interruption never produce PASS."
+        "Failure and interruption never produce PASS.",
+        "The ISO size is recorded in bytes and matches the tested file; compression changes preserve successful installation and boot."
       ],
       "evidence_types": [
         "BROWSER",

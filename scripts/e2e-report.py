@@ -81,7 +81,8 @@ def main():
     report = json.loads(report_path.read_text())
     if command == "iso":
         iso = Path(sys.argv[3]).resolve()
-        report["iso"] = {"store_path": str(iso), "sha256": digest(iso)}
+        report["iso"] = {"store_path": str(iso), "sha256": digest(iso),
+                         "size_bytes": iso.stat().st_size}
     elif command == "check":
         report["checks"].append({"name": sys.argv[3], "status": "PASS", "at": now()})
     elif command == "generation":
